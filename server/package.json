@@ -1,0 +1,70 @@
+{
+  "name": "cove-server",
+  "version": "0.1.0",
+  "description": "Cove - 即时通讯服务器",
+  "author": "Cove",
+  "private": true,
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "electron:compile": "tsc -p electron/tsconfig.json",
+    "electron:dev": "npm run electron:compile && electron .",
+    "rebuild:native": "cd ../node_modules/better-sqlite3 && npx prebuild-install -r electron -t 29.4.6 --arch x64 --platform win32",
+    "build:electron": "npm run build && npm run electron:compile && npm run rebuild:native && electron-builder"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.10.0",
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "mediasoup": "^3.20.0",
+    "socket.io": "^4.7.4"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.11.5",
+    "electron": "29.4.6",
+    "electron-builder": "^24.9.1",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3"
+  },
+  "build": {
+    "appId": "com.cove.server",
+    "productName": "Cove Server",
+    "directories": {
+      "output": "dist-app"
+    },
+    "files": [
+      "dist-electron/**/*",
+      "dist/**/*",
+      "node_modules/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/better-sqlite3/**/*",
+      "node_modules/mediasoup/**/*"
+    ],
+    "extraResources": [
+      { "from": "build/vc_redist.x64.exe", "to": "vc_redist.x64.exe" }
+    ],
+    "npmRebuild": false,
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": true,
+      "allowToChangeInstallationDirectory": true,
+      "include": "build/installer.nsh",
+      "deleteAppDataOnUninstall": false
+    },
+    "mac": {
+      "target": "dmg"
+    },
+    "linux": {
+      "target": "AppImage"
+    }
+  }
+}

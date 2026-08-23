@@ -1,0 +1,27 @@
+{
+  "name": "cove",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "server",
+    "client"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,client -c cyan,green \"npm run dev -w server\" \"npm run dev -w client\"",
+    "dev:server": "npm run electron:dev -w server",
+    "dev:client": "concurrently -n vite,electron -c green,yellow \"npm run dev -w client\" \"npm run electron:dev -w client\"",
+    "dev:app": "concurrently -n server,vite,electron -c cyan,green,yellow \"npm run dev -w server\" \"npm run dev -w client\" \"npm run electron:dev -w client\"",
+    "build:server": "npm run build:electron -w server",
+    "build:client": "npm run build:electron -w client"
+  },
+  "dependencies": {
+    "7zip-bin": "^5.2.0"
+  },
+  "devDependencies": {
+    "app-builder-bin": "^4.2.0",
+    "concurrently": "^8.2.2",
+    "electron": "29.4.6",
+    "electron-builder": "24.9.1",
+    "@electron/rebuild": "^3.6.0"
+  }
+}

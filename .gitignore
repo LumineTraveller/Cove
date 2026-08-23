@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build and packaging outputs
+**/dist/
+**/dist-electron/
+**/dist-app*/
+*.blockmap
+
+# Runtime and temporary data
+tmp/
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# Local environment / editor state
+.env
+.env.*
+!.env.example
+.claude/settings.local.json
+.DS_Store
+Thumbs.db
+
+# Downloaded redistributable; installer script remains tracked
+server/build/vc_redist.x64.exe
