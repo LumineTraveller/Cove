@@ -52,6 +52,7 @@ db.exec(`
     name TEXT NOT NULL,
     filename TEXT NOT NULL,
     uploader TEXT NOT NULL,
+    uploaderId TEXT,
     createdAt INTEGER NOT NULL
   );
   CREATE TABLE IF NOT EXISTS room_mutes (
@@ -70,6 +71,9 @@ if (!roomColumns.some(column => column.name === 'ownerId'))
   db.exec('ALTER TABLE rooms ADD COLUMN ownerId TEXT');
 if (!roomColumns.some(column => column.name === 'ownerName'))
   db.exec('ALTER TABLE rooms ADD COLUMN ownerName TEXT');
+const soundpackColumns = db.prepare('PRAGMA table_info(soundpacks)').all() as { name: string }[];
+if (!soundpackColumns.some(column => column.name === 'uploaderId'))
+  db.exec('ALTER TABLE soundpacks ADD COLUMN uploaderId TEXT');
 
 // ownerId 是本地持久身份凭据，不通过 API 或 Socket 广播给其他客户端。
 const stmtGetRooms       = db.prepare('SELECT id, name, createdAt, ownerName FROM rooms ORDER BY createdAt ASC');
@@ -87,7 +91,9 @@ const stmtIsRoomMuted    = db.prepare('SELECT 1 FROM room_mutes WHERE roomId = ?
 const stmtMuteMember     = db.prepare('INSERT OR REPLACE INTO room_mutes (roomId, clientId, username, createdAt) VALUES (?, ?, ?, ?)');
 const stmtUnmuteMember   = db.prepare('DELETE FROM room_mutes WHERE roomId = ? AND clientId = ?');
 const stmtGetSoundpacks  = db.prepare('SELECT * FROM soundpacks ORDER BY createdAt DESC');
-const stmtInsertSoundpack = db.prepare('INSERT INTO soundpacks (id, name, filename, uploader, createdAt) VALUES (?, ?, ?, ?, ?)');
+const stmtGetSoundpack   = db.prepare('SELECT * FROM soundpacks WHERE id = ?');
+const stmtInsertSoundpack = db.prepare('INSERT INTO soundpacks (id, name, filename, uploader, uploaderId, createdAt) VALUES (?, ?, ?, ?, ?, ?)');
+const stmtDeleteSoundpack = db.prepare('DELETE FROM soundpacks WHERE id = ?');
 const deleteRoomData = db.transaction((roomId: string) => {
   stmtDeleteRoomMessages.run(roomId);
   stmtDeleteRoomMutes.run(roomId);
@@ -97,7 +103,8 @@ const deleteRoomData = db.transaction((roomId: string) => {
 interface Room      { id: string; name: string; createdAt: number; ownerName: string | null }
 interface PrivateRoom extends Room { ownerId: string | null }
 interface Message   { id: string; roomId: string; author: string; content: string; timestamp: number }
-interface Soundpack { id: string; name: string; filename: string; uploader: string; createdAt: number }
+interface SoundpackRecord { id: string; name: string; filename: string; uploader: string; uploaderId: string | null; createdAt: number }
+interface PublicSoundpack { id: string; name: string; filename: string; uploader: string; createdAt: number; canDelete: boolean }
 interface RoomMember {
   socketId: string;
   username: string;
@@ -116,6 +123,28 @@ const userClientIds = new Map<string, string>(); // socketId → 持久客户端
 const voiceRooms  = new Map<string, Set<string>>(); // roomId → Set<socketId>
 const roomMembers = new Map<string, Set<string>>();  // roomId → Set<socketId>
 
+function toPublicSoundpack(pack: SoundpackRecord, requesterSocketId?: string): PublicSoundpack {
+  const requesterClientId = requesterSocketId ? userClientIds.get(requesterSocketId) : undefined;
+  const requesterName = requesterSocketId ? userNames.get(requesterSocketId) : undefined;
+  const canDelete = !!requesterClientId && (
+    pack.uploaderId ? pack.uploaderId === requesterClientId : pack.uploader === requesterName
+  );
+  return {
+    id: pack.id,
+    name: pack.name,
+    filename: pack.filename,
+    uploader: pack.uploader,
+    createdAt: pack.createdAt,
+    canDelete,
+  };
+}
+
+function broadcastSoundpackAdded(pack: SoundpackRecord) {
+  for (const targetSocket of io.sockets.sockets.values()) {
+    targetSocket.emit('soundpack:added', toPublicSoundpack(pack, targetSocket.id));
+  }
+}
+
 // ── 语音包静态文件（必须在 catch-all 之前）────────────────────────────────────
 app.use('/sounds', express.static(SOUNDS_DIR));
 
@@ -133,8 +162,10 @@ if (fs.existsSync(distPath)) {
 
 // ── 语音包 REST ───────────────────────────────────────────────────────────────
 
-app.get('/api/soundpacks', (_req, res) => {
-  res.json(stmtGetSoundpacks.all());
+app.get('/api/soundpacks', (req, res) => {
+  const requesterSocketId = typeof req.query.socketId === 'string' ? req.query.socketId : undefined;
+  const packs = stmtGetSoundpacks.all() as SoundpackRecord[];
+  res.json(packs.map(pack => toPublicSoundpack(pack, requesterSocketId)));
 });
 
 app.post('/api/soundpacks', (req, res) => {
@@ -146,6 +177,11 @@ app.post('/api/soundpacks', (req, res) => {
   }
   if (!mimeType.startsWith('audio/')) {
     res.status(400).json({ error: '只允许上传音频文件' }); return;
+  }
+  const uploaderId = socketId ? userClientIds.get(socketId) : undefined;
+  const uploader = socketId ? userNames.get(socketId) : undefined;
+  if (!socketId || !uploaderId || !uploader) {
+    res.status(401).json({ error: '请先连接并注册用户' }); return;
   }
   // base64 → Buffer，限制 8MB
   const buf = Buffer.from(data, 'base64');
@@ -160,11 +196,10 @@ app.post('/api/soundpacks', (req, res) => {
   } catch {
     res.status(500).json({ error: '文件保存失败' }); return;
   }
-  const uploader = (socketId ? userNames.get(socketId) : undefined) ?? 'Unknown';
-  const sp: Soundpack = { id, name: name.trim(), filename, uploader, createdAt: Date.now() };
-  stmtInsertSoundpack.run(sp.id, sp.name, sp.filename, sp.uploader, sp.createdAt);
-  io.emit('soundpack:added', sp); // 实时通知所有在线客户端
-  res.json(sp);
+  const sp: SoundpackRecord = { id, name: name.trim(), filename, uploader, uploaderId, createdAt: Date.now() };
+  stmtInsertSoundpack.run(sp.id, sp.name, sp.filename, sp.uploader, sp.uploaderId, sp.createdAt);
+  broadcastSoundpackAdded(sp);
+  res.json(toPublicSoundpack(sp, socketId));
 });
 
 // ── 房间 REST ─────────────────────────────────────────────────────────────────
@@ -718,11 +753,37 @@ io.on('connection', socket => {
   // ── 语音包 ────────────────────────────────────────────────────────────────
 
   socket.on('soundpack:play', ({ soundId, roomId }: { soundId: string; roomId: string }) => {
+    if (!stmtGetSoundpack.get(soundId) || !roomMembers.get(roomId)?.has(socket.id)) return;
     // 只广播给同房间其他人，发送者自己已在客户端直接播放
     socket.to(roomId).emit('soundpack:play', {
       soundId,
       playedBy: userNames.get(socket.id) ?? socket.id,
     });
+  });
+
+  socket.on('soundpack:delete', (
+    { soundId }: { soundId?: string },
+    cb?: (result: { ok: boolean; error?: string }) => void,
+  ) => {
+    const pack = soundId ? stmtGetSoundpack.get(soundId) as SoundpackRecord | undefined : undefined;
+    const actorClientId = userClientIds.get(socket.id);
+    const actorName = userNames.get(socket.id);
+    if (!pack) { cb?.({ ok: false, error: '语音包不存在或已被删除' }); return; }
+    const ownsPack = !!actorClientId && (
+      pack.uploaderId ? pack.uploaderId === actorClientId : pack.uploader === actorName
+    );
+    if (!ownsPack) { cb?.({ ok: false, error: '只能删除自己上传的语音包' }); return; }
+
+    stmtDeleteSoundpack.run(pack.id);
+    const safeFilename = path.basename(pack.filename);
+    try {
+      const soundPath = path.join(SOUNDS_DIR, safeFilename);
+      if (fs.existsSync(soundPath)) fs.unlinkSync(soundPath);
+    } catch (error) {
+      console.warn(`[soundpack] 删除文件失败 ${safeFilename}:`, error);
+    }
+    io.emit('soundpack:deleted', { soundId: pack.id });
+    cb?.({ ok: true });
   });
 
   // ── Disconnect ────────────────────────────────────────────────────────────
