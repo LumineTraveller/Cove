@@ -16,14 +16,25 @@ export interface Message {
 export interface VoiceMember {
   socketId: string;
   username: string;
+  avatarUrl?: string | null;
   isMuted?: boolean;
 }
 
 export interface RoomMember {
   socketId: string;
   username: string;
+  avatarUrl?: string | null;
   isOwner: boolean;
   isMuted: boolean;
+}
+
+export interface UserProfile {
+  username: string;
+  avatarUrl: string | null;
+}
+
+export interface OnlineUser extends UserProfile {
+  socketId: string;
 }
 
 export interface RoomState {

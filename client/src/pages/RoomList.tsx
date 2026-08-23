@@ -1,47 +1,60 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { Crown, Hash, LoaderCircle, MessageCircle, Plus, Server, Settings, Users, Wifi, WifiOff, X } from 'lucide-react';
+import { Avatar } from '../components/Avatar';
+import { ProfileModal } from '../components/ProfileModal';
 import { socket, normalizeURL } from '../socket';
-import { Room } from '../types';
+import type { OnlineUser, Room, UserProfile } from '../types';
 
-interface Props { username: string; onReset: () => void; connected: boolean | null; serverURL: string }
+interface Props {
+  profile: UserProfile;
+  onProfileChange: (profile: UserProfile) => void;
+  onReset: () => void;
+  connected: boolean | null;
+  sessionReady: boolean;
+  serverURL: string;
+}
 
-export default function RoomList({ username, onReset, connected, serverURL }: Props) {
+export default function RoomList({ profile, onProfileChange, onReset, connected, sessionReady, serverURL }: Props) {
   const navigate = useNavigate();
   const [rooms, setRooms] = useState<Room[]>([]);
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
   const [loading, setLoading] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
+  const [showProfile, setShowProfile] = useState(false);
   const [draftUrl, setDraftUrl] = useState(localStorage.getItem('cove_server_url') ?? serverURL);
-  const [onlineUsers, setOnlineUsers] = useState<string[]>([]);
+  const [onlineUsers, setOnlineUsers] = useState<OnlineUser[]>([]);
   const [roomMembersMap, setRoomMembersMap] = useState<Record<string, string[]>>({});
 
   useEffect(() => {
-    fetch(`${serverURL}/api/rooms`)
-      .then(r => r.json())
-      .then((data: Room[]) => { setRooms(data); setLoading(false); })
-      .catch(() => setLoading(false));
-
-    socket.on('rooms:updated',       (updated: Room[]) => setRooms(updated));
-    socket.on('users:online',        (users: string[]) => setOnlineUsers(users));
-    socket.on('room:members:global', ({ roomId, members }: { roomId: string; members: string[] }) =>
-      setRoomMembersMap(prev => ({ ...prev, [roomId]: members }))
-    );
+    const onRooms = (updated: Room[]) => setRooms(updated);
+    const onUsers = (users: OnlineUser[]) => setOnlineUsers(users);
+    const onMembers = ({ roomId, members }: { roomId: string; members: string[] }) => setRoomMembersMap(previous => ({ ...previous, [roomId]: members }));
+    socket.on('rooms:updated', onRooms);
+    socket.on('users:online', onUsers);
+    socket.on('room:members:global', onMembers);
     return () => {
-      socket.off('rooms:updated');
-      socket.off('users:online');
-      socket.off('room:members:global');
+      socket.off('rooms:updated', onRooms);
+      socket.off('users:online', onUsers);
+      socket.off('room:members:global', onMembers);
     };
   }, []);
 
+  useEffect(() => {
+    if (!sessionReady) return;
+    setLoading(true);
+    fetch(`${serverURL}/api/rooms`)
+      .then(response => response.json())
+      .then((data: Room[]) => setRooms(data))
+      .finally(() => setLoading(false));
+  }, [serverURL, sessionReady]);
+
   const createRoom = async () => {
-    if (!newName.trim()) return;
+    if (!newName.trim() || !sessionReady) return;
     try {
       const result = await new Promise<{ room?: Room; error?: string }>((resolve, reject) => {
-        socket.timeout(5_000).emit('room:create', { name: newName.trim() }, (error: Error | null, response: { room?: Room; error?: string }) => {
-          if (error) reject(error);
-          else resolve(response);
-        });
+        socket.timeout(5_000).emit('room:create', { name: newName.trim() }, (error: Error | null, response: { room?: Room; error?: string }) => error ? reject(error) : resolve(response));
       });
       if (!result.room) throw new Error(result.error ?? '创建失败');
       setNewName('');
@@ -53,185 +66,96 @@ export default function RoomList({ username, onReset, connected, serverURL }: Pr
   };
 
   const saveSettings = () => {
+    if (!draftUrl.trim()) return;
     localStorage.setItem('cove_server_url', normalizeURL(draftUrl));
     window.location.reload();
   };
 
-  const avatarLetter = username[0]?.toUpperCase() ?? '?';
-
   return (
-    <div className="h-full flex bg-gradient-to-br from-zinc-950 via-black to-zinc-900 overflow-hidden">
-
-      {/* ── Sidebar ── */}
-      <aside className="w-72 flex-shrink-0 flex flex-col bg-white/[0.06] backdrop-blur-2xl border-r border-white/[0.08]">
-
-        {/* Header */}
-        <div className="h-16 px-5 flex items-center justify-between border-b border-white/[0.08] flex-shrink-0">
-          <span className="font-bold text-xl text-white tracking-tight">Cove</span>
-          <span className={`w-3 h-3 rounded-full flex-shrink-0 ${
-            connected === true  ? 'bg-green-400' :
-            connected === false ? 'bg-red-400' :
-            'bg-white/20 animate-pulse'
-          }`} />
+    <div className="flex h-full overflow-hidden bg-gradient-to-br from-zinc-950 via-black to-zinc-900">
+      <aside className="flex w-72 flex-shrink-0 flex-col border-r border-white/[0.08] bg-white/[0.055] backdrop-blur-2xl">
+        <div className="flex h-16 flex-shrink-0 items-center justify-between border-b border-white/[0.08] px-5">
+          <span className="text-xl font-bold tracking-tight text-white">Cove</span>
+          <div className="flex items-center gap-1.5">
+            <span className={`rounded-lg p-1.5 ${connected === true ? 'text-emerald-300' : connected === false ? 'text-red-300' : 'text-white/30'}`} title={connected === true ? '服务器已连接' : connected === false ? '服务器连接中断' : '正在连接服务器'}>{connected === false ? <WifiOff size={16} /> : connected === true ? <Wifi size={16} /> : <LoaderCircle size={16} className="animate-spin" />}</span>
+            <button onClick={() => setShowSettings(true)} className="rounded-xl p-2 text-white/35 transition hover:bg-white/10 hover:text-white focus:outline-none focus:ring-2 focus:ring-cyan-300/50" aria-label="服务器设置" title="服务器设置"><Settings size={19} /></button>
+          </div>
         </div>
 
-        {/* Channel list */}
-        <div className="flex-1 overflow-y-auto py-4 px-3">
-          <div className="flex items-center justify-between px-2 mb-2">
-            <span className="text-white/30 text-sm font-semibold uppercase tracking-wider">频道</span>
-            <button
-              className="text-white/30 hover:text-white/80 w-7 h-7 flex items-center justify-center rounded-lg hover:bg-white/10 transition-colors text-xl leading-none disabled:opacity-20"
-              onClick={() => setCreating(true)}
-              disabled={connected === false}
-              title="新建频道"
-            >+</button>
+        <div className="flex-1 overflow-y-auto px-3 py-4">
+          <div className="mb-2 flex items-center justify-between px-2">
+            <span className="text-sm font-semibold uppercase tracking-wider text-white/40">频道</span>
+            <button className="flex h-8 w-8 items-center justify-center rounded-lg text-white/40 transition hover:bg-white/10 hover:text-white focus:outline-none focus:ring-2 focus:ring-cyan-300/50 disabled:opacity-20" onClick={() => setCreating(true)} disabled={!sessionReady} aria-label="新建频道" title="新建频道"><Plus size={18} /></button>
           </div>
-
           {loading ? (
-            <p className="px-2 py-2 text-white/30 text-base">加载中…</p>
+            <div className="flex items-center gap-2 px-2 py-3 text-sm text-white/35"><LoaderCircle size={16} className="animate-spin" /> 加载频道</div>
           ) : rooms.length === 0 ? (
-            <p className="px-2 py-2 text-white/30 text-base">还没有频道</p>
+            <p className="px-2 py-3 text-sm text-white/35">还没有频道</p>
           ) : (
-            <div className="flex flex-col gap-0.5">
+            <div className="flex flex-col gap-1">
               {rooms.map(room => (
-                <button
-                  key={room.id}
-                  className="w-full text-left flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-white/50 hover:text-white hover:bg-white/10 active:bg-white/15 transition-colors group"
-                  onClick={() => navigate(`/room/${room.id}`)}
-                >
-                  <span className="text-white/25 group-hover:text-white/50 transition-colors font-medium text-lg">#</span>
-                  <span className="flex-1 text-base truncate font-medium">{room.name}</span>
-                  {room.ownerName && (
-                    <span className="text-amber-300/70 text-sm flex-shrink-0" title={`房主：${room.ownerName}`}>♛</span>
-                  )}
-                  {(roomMembersMap[room.id]?.length ?? 0) > 0 && (
-                    <span className="text-sm text-white/40 bg-white/10 px-2 py-0.5 rounded-full flex-shrink-0">
-                      {roomMembersMap[room.id].length}
-                    </span>
-                  )}
+                <button key={room.id} className="group flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-white/55 transition hover:bg-white/10 hover:text-white focus:outline-none focus:ring-2 focus:ring-cyan-300/40" onClick={() => navigate(`/room/${room.id}`)}>
+                  <Hash size={17} className="flex-shrink-0 text-white/25 transition group-hover:text-white/55" />
+                  <span className="flex-1 truncate text-base font-medium">{room.name}</span>
+                  {room.ownerName && <Crown size={15} className="flex-shrink-0 text-amber-300/70" aria-label={`房主：${room.ownerName}`} />}
+                  {(roomMembersMap[room.id]?.length ?? 0) > 0 && <span className="flex-shrink-0 rounded-full bg-white/10 px-2 py-0.5 text-xs text-white/45">{roomMembersMap[room.id].length}</span>}
                 </button>
               ))}
             </div>
           )}
         </div>
 
-        {/* Online users */}
-        <div className="border-t border-white/[0.08] py-4 px-3 flex-shrink-0 max-h-52 overflow-y-auto">
-          <p className="px-2 mb-2.5 text-white/30 text-sm font-semibold uppercase tracking-wider">
-            在线 — {onlineUsers.length}
-          </p>
-          {onlineUsers.map((name, i) => (
-            <div key={`${name}-${i}`} className="flex items-center gap-3 px-2 py-2 rounded-xl hover:bg-white/[0.06] transition-colors">
-              <span className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${name === username ? 'bg-white/60' : 'bg-green-400'}`} />
-              <span className={`text-base truncate ${name === username ? 'text-white font-medium' : 'text-white/55'}`}>
-                {name === username ? `${name}（你）` : name}
-              </span>
-            </div>
-          ))}
+        <div className="max-h-56 flex-shrink-0 overflow-y-auto border-t border-white/[0.08] px-3 py-4">
+          <p className="mb-2.5 flex items-center gap-2 px-2 text-sm font-semibold uppercase tracking-wider text-white/40"><Users size={15} /> 在线 · {onlineUsers.length}</p>
+          {onlineUsers.map(user => {
+            const isSelf = user.socketId === socket.id;
+            return (
+              <div key={user.socketId} className="flex items-center gap-3 rounded-xl px-2 py-2 transition hover:bg-white/[0.06]">
+                <div className="relative"><Avatar username={user.username} avatarUrl={user.avatarUrl} size="sm" /><span className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-zinc-900 bg-emerald-400" /></div>
+                <span className={`truncate text-sm ${isSelf ? 'font-medium text-white' : 'text-white/60'}`}>{isSelf ? `${user.username}（你）` : user.username}</span>
+              </div>
+            );
+          })}
         </div>
 
-        {/* User footer */}
-        <div className="flex-shrink-0 border-t border-white/[0.08] p-3.5 flex items-center gap-3">
-          <div className="w-9 h-9 rounded-full bg-white/15 backdrop-blur-sm flex items-center justify-center text-base font-bold text-white flex-shrink-0 border border-white/20">
-            {avatarLetter}
-          </div>
-          <span className="flex-1 text-base text-white truncate font-medium">{username}</span>
-          <button
-            className="text-white/30 hover:text-white/80 transition-colors p-2 rounded-xl hover:bg-white/10"
-            onClick={() => setShowSettings(true)}
-            title="设置"
-          >
-            <svg className="w-5 h-5" viewBox="0 0 20 20" fill="currentColor">
-              <path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" />
-            </svg>
-          </button>
-        </div>
+        <button className="flex flex-shrink-0 items-center gap-3 border-t border-white/[0.08] p-3.5 text-left transition hover:bg-white/[0.06] focus:outline-none focus:ring-2 focus:ring-inset focus:ring-cyan-300/40" onClick={() => setShowProfile(true)} aria-label="打开个人名片">
+          <Avatar username={profile.username} avatarUrl={profile.avatarUrl} size="md" />
+          <span className="min-w-0 flex-1"><span className="block truncate text-base font-medium text-white">{profile.username}</span><span className="block text-xs text-white/35">查看和编辑个人名片</span></span>
+          <Settings size={18} className="text-white/35" />
+        </button>
       </aside>
 
-      {/* ── Main ── */}
-      <main className="flex-1 flex flex-col items-center justify-center select-none">
-        <div className="text-center space-y-4">
-          <div className="w-20 h-20 rounded-3xl bg-white/[0.06] backdrop-blur-xl border border-white/10 flex items-center justify-center mx-auto">
-            <span className="text-4xl">💬</span>
-          </div>
-          <div>
-            <p className="text-white text-xl font-semibold">选择一个频道</p>
-            <p className="text-white/40 text-base mt-1.5">从左侧选择频道开始聊天</p>
-          </div>
-          <button
-            className="text-white/30 hover:text-white/70 text-base transition-colors disabled:opacity-20"
-            onClick={() => setCreating(true)}
-            disabled={connected === false}
-          >+ 创建第一个频道</button>
+      <main className="flex flex-1 select-none flex-col items-center justify-center">
+        <div className="space-y-4 text-center">
+          <div className="mx-auto flex h-20 w-20 items-center justify-center rounded-3xl border border-white/10 bg-white/[0.06] text-cyan-100/70 backdrop-blur-xl"><MessageCircle size={36} /></div>
+          <div><p className="text-xl font-semibold text-white">选择一个频道</p><p className="mt-1.5 text-base text-white/40">从左侧选择频道开始聊天或共享屏幕</p></div>
+          <button className="inline-flex items-center gap-2 rounded-xl px-3 py-2 text-base text-white/40 transition hover:bg-white/10 hover:text-white disabled:opacity-20" onClick={() => setCreating(true)} disabled={!sessionReady}><Plus size={17} /> 创建第一个频道</button>
         </div>
       </main>
 
-      {/* ── New room modal ── */}
       {creating && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-md flex items-center justify-center z-50" onClick={() => setCreating(false)}>
-          <div className="bg-white/[0.08] backdrop-blur-2xl border border-white/15 rounded-3xl p-7 w-80 flex flex-col gap-5 shadow-2xl" onClick={e => e.stopPropagation()}>
-            <div>
-              <h2 className="text-white font-bold text-xl">创建频道</h2>
-              <p className="text-white/40 text-sm mt-1">频道创建后所有人都能看到</p>
-            </div>
-            <div>
-              <label className="text-white/50 text-sm mb-2 block font-medium">频道名称</label>
-              <div className="flex items-center bg-white/[0.07] border border-white/10 rounded-xl px-3 focus-within:border-white/25 focus-within:bg-white/10 transition-all">
-                <span className="text-white/25 text-lg mr-1">#</span>
-                <input
-                  className="flex-1 bg-transparent py-3 text-white text-base placeholder-white/20 outline-none"
-                  placeholder="general"
-                  value={newName}
-                  onChange={e => setNewName(e.target.value)}
-                  onKeyDown={e => e.key === 'Enter' && createRoom()}
-                  autoFocus
-                />
-              </div>
-            </div>
-            <div className="flex gap-2.5">
-              <button
-                className="flex-1 bg-white/10 hover:bg-white/15 text-white/70 text-base rounded-xl py-3 transition-colors font-medium"
-                onClick={() => { setCreating(false); setNewName(''); }}
-              >取消</button>
-              <button
-                className="flex-1 bg-white hover:bg-zinc-100 text-zinc-900 text-base font-semibold rounded-xl py-3 transition-colors disabled:opacity-20"
-                disabled={!newName.trim()}
-                onClick={createRoom}
-              >创建</button>
-            </div>
-          </div>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-md" onMouseDown={() => setCreating(false)}>
+          <section className="flex w-full max-w-sm flex-col gap-5 rounded-3xl border border-white/15 bg-zinc-900/95 p-7 shadow-2xl" onMouseDown={event => event.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="create-title">
+            <div className="flex items-start justify-between"><div><h2 id="create-title" className="text-xl font-bold text-white">创建频道</h2><p className="mt-1 text-sm text-white/40">创建者会成为房主</p></div><button onClick={() => setCreating(false)} className="rounded-lg p-2 text-white/35 hover:bg-white/10 hover:text-white" aria-label="关闭"><X size={18} /></button></div>
+            <div><label className="mb-2 block text-sm font-medium text-white/55" htmlFor="room-name">频道名称</label><div className="flex items-center rounded-xl border border-white/10 bg-white/[0.07] px-3 focus-within:border-cyan-300/45"><Hash size={18} className="mr-2 text-white/30" /><input id="room-name" className="flex-1 bg-transparent py-3 text-base text-white outline-none placeholder:text-white/20" placeholder="general" value={newName} onChange={event => setNewName(event.target.value)} onKeyDown={event => event.key === 'Enter' && createRoom()} autoFocus /></div></div>
+            <div className="flex gap-2.5"><button className="flex-1 rounded-xl bg-white/10 py-3 font-medium text-white/70 transition hover:bg-white/15" onClick={() => { setCreating(false); setNewName(''); }}>取消</button><button className="flex-1 rounded-xl bg-white py-3 font-semibold text-zinc-900 transition hover:bg-cyan-100 disabled:opacity-25" disabled={!newName.trim() || !sessionReady} onClick={createRoom}>创建</button></div>
+          </section>
         </div>
       )}
 
-      {/* ── Settings modal ── */}
       {showSettings && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-md flex items-center justify-center z-50" onClick={() => setShowSettings(false)}>
-          <div className="bg-white/[0.08] backdrop-blur-2xl border border-white/15 rounded-3xl p-7 w-80 flex flex-col gap-5 shadow-2xl" onClick={e => e.stopPropagation()}>
-            <h2 className="text-white font-bold text-xl">设置</h2>
-            <div>
-              <label className="text-white/50 text-sm mb-2 block font-medium">服务器地址</label>
-              <input
-                className="w-full bg-white/[0.07] border border-white/10 rounded-xl px-4 py-3 text-white text-base placeholder-white/20 outline-none focus:border-white/25 focus:bg-white/10 transition-all font-mono"
-                value={draftUrl}
-                onChange={e => setDraftUrl(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && saveSettings()}
-                autoFocus
-              />
-              <p className="text-white/25 text-sm mt-1.5">当前连接：{serverURL}</p>
-            </div>
-            <button
-              className="w-full bg-white hover:bg-zinc-100 text-zinc-900 text-base font-semibold py-3 rounded-xl transition-colors"
-              onClick={saveSettings}
-            >保存并重连</button>
-            <div className="border-t border-white/[0.08] pt-4">
-              <button
-                className="w-full text-red-400 hover:text-red-300 hover:bg-red-500/10 text-base py-2.5 rounded-xl transition-colors font-medium"
-                onClick={onReset}
-              >退出登录</button>
-            </div>
-          </div>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-md" onMouseDown={() => setShowSettings(false)}>
+          <section className="w-full max-w-md rounded-3xl border border-white/15 bg-zinc-900/95 p-7 shadow-2xl" onMouseDown={event => event.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="settings-title">
+            <div className="flex items-center justify-between"><h2 id="settings-title" className="text-xl font-bold text-white">服务器设置</h2><button onClick={() => setShowSettings(false)} className="rounded-lg p-2 text-white/35 hover:bg-white/10 hover:text-white" aria-label="关闭"><X size={18} /></button></div>
+            <label className="mb-2 mt-5 block text-sm font-medium text-white/55" htmlFor="settings-server">服务器地址</label>
+            <div className="flex items-center gap-3 rounded-xl border border-white/10 bg-white/[0.07] px-4 focus-within:border-cyan-300/45"><Server size={18} className="text-white/30" /><input id="settings-server" className="min-w-0 flex-1 bg-transparent py-3 font-mono text-sm text-white outline-none" value={draftUrl} onChange={event => setDraftUrl(event.target.value)} onKeyDown={event => event.key === 'Enter' && saveSettings()} autoFocus /></div>
+            <p className="mt-2 text-xs text-white/35">保存后客户端会重启连接。服务器地址不会被隐藏。</p>
+            <button className="mt-5 w-full rounded-xl bg-white py-3 font-semibold text-zinc-900 transition hover:bg-cyan-100 disabled:opacity-25" disabled={!draftUrl.trim()} onClick={saveSettings}>保存并重连</button>
+          </section>
         </div>
       )}
+
+      {showProfile && <ProfileModal profile={profile} serverURL={serverURL} onSave={onProfileChange} onClose={() => setShowProfile(false)} onOpenServerSettings={() => { setShowProfile(false); setShowSettings(true); }} onReset={onReset} />}
     </div>
   );
 }

@@ -101,6 +101,7 @@ interface Soundpack { id: string; name: string; filename: string; uploader: stri
 interface RoomMember {
   socketId: string;
   username: string;
+  avatarUrl: string | null;
   isOwner: boolean;
   isMuted: boolean;
 }
@@ -110,6 +111,7 @@ const SOUNDS_DIR = path.join(dataDir, 'sounds');
 fs.mkdirSync(SOUNDS_DIR, { recursive: true });
 
 const userNames   = new Map<string, string>();
+const userAvatars = new Map<string, string | null>();
 const userClientIds = new Map<string, string>(); // socketId → 持久客户端身份（不广播）
 const voiceRooms  = new Map<string, Set<string>>(); // roomId → Set<socketId>
 const roomMembers = new Map<string, Set<string>>();  // roomId → Set<socketId>
@@ -201,6 +203,7 @@ function broadcastVoiceList(roomId: string) {
   const list = [...members].map(id => ({
     socketId: id,
     username: userNames.get(id) ?? id,
+    avatarUrl: userAvatars.get(id) ?? null,
     isMuted: isSocketMuted(roomId, id),
   }));
   io.to(roomId).emit('voice:members-updated', list);
@@ -223,6 +226,7 @@ function broadcastRoomMembers(roomId: string) {
     return {
       socketId: id,
       username: userNames.get(id) ?? id,
+      avatarUrl: userAvatars.get(id) ?? null,
       isOwner: !!clientId && clientId === room.ownerId,
       isMuted: !!clientId && isClientMuted(roomId, clientId),
     };
@@ -277,25 +281,64 @@ io.on('connection', socket => {
   createPeer(socket.id);
 
   function broadcastOnlineUsers() {
-    io.emit('users:online', [...userNames.values()]);
+    io.emit('users:online', [...userNames.entries()].map(([socketId, username]) => ({
+      socketId,
+      username,
+      avatarUrl: userAvatars.get(socketId) ?? null,
+    })));
   }
 
-  socket.on('user:register', (registration: string | { username?: string; clientId?: string }) => {
+  const sanitizeAvatarUrl = (value: unknown): string | null => {
+    if (value == null || value === '') return null;
+    if (typeof value !== 'string' || value.length > 240 * 1024) return null;
+    return /^data:image\/(?:png|jpeg|webp);base64,/i.test(value) ? value : null;
+  };
+
+  const refreshProfileViews = () => {
+    broadcastOnlineUsers();
+    for (const [roomId, members] of roomMembers) {
+      if (!members.has(socket.id)) continue;
+      broadcastRoomMembers(roomId);
+      broadcastVoiceList(roomId);
+    }
+  };
+
+  socket.on('user:register', (
+    registration: string | { username?: string; clientId?: string; avatarUrl?: unknown },
+    cb?: (result: { ok: boolean; error?: string }) => void,
+  ) => {
     const username = (typeof registration === 'string' ? registration : registration?.username)?.trim();
     const suppliedClientId = typeof registration === 'string' ? '' : registration?.clientId?.trim();
-    if (!username) return;
+    if (!username) { cb?.({ ok: false, error: '用户名不能为空' }); return; }
 
     // 旧客户端没有 clientId 时仍可聊天，但它的身份只在本次连接内有效。
     const clientId = suppliedClientId && suppliedClientId.length >= 16 && suppliedClientId.length <= 128
       ? suppliedClientId
       : `socket:${socket.id}`;
     userNames.set(socket.id, username.slice(0, 64));
+    userAvatars.set(socket.id, sanitizeAvatarUrl(typeof registration === 'string' ? null : registration.avatarUrl));
     userClientIds.set(socket.id, clientId);
 
     // 同一设备更改用户名后，同步更新它所拥有房间的公开房主名。
     const updated = stmtUpdateOwnerName.run(username.slice(0, 64), clientId, username.slice(0, 64));
     if (updated.changes > 0) io.emit('rooms:updated', stmtGetRooms.all());
-    broadcastOnlineUsers();
+    refreshProfileViews();
+    cb?.({ ok: true });
+  });
+
+  socket.on('user:update-profile', (
+    update: { username?: string; avatarUrl?: unknown },
+    cb?: (result: { ok: boolean; error?: string }) => void,
+  ) => {
+    const username = update?.username?.trim().slice(0, 64);
+    const clientId = userClientIds.get(socket.id);
+    if (!username || !clientId) { cb?.({ ok: false, error: '用户尚未注册' }); return; }
+    userNames.set(socket.id, username);
+    userAvatars.set(socket.id, sanitizeAvatarUrl(update.avatarUrl));
+    const updated = stmtUpdateOwnerName.run(username, clientId, username);
+    if (updated.changes > 0) io.emit('rooms:updated', stmtGetRooms.all());
+    refreshProfileViews();
+    cb?.({ ok: true });
   });
 
   socket.on('room:create', (
@@ -318,11 +361,11 @@ io.on('connection', socket => {
     cb?.({ room });
   });
 
-  socket.on('room:join', (roomId: string) => {
+  socket.on('room:join', (roomId: string, cb?: (result: { ok: boolean; error?: string }) => void) => {
     let room = stmtGetRoomPrivate.get(roomId) as PrivateRoom | undefined;
     const clientId = userClientIds.get(socket.id);
     const username = userNames.get(socket.id);
-    if (!room || !clientId || !username) return;
+    if (!room || !clientId || !username) { cb?.({ ok: false, error: '房间不存在或用户尚未注册' }); return; }
 
     // 升级前的旧房间没有 ownerId：服务端只允许首次进入者原子认领一次。
     if (!room.ownerId) {
@@ -340,6 +383,7 @@ io.on('connection', socket => {
     // Track room for mediasoup
     const peer = peers.get(socket.id);
     if (peer) peer.roomId = roomId;
+    cb?.({ ok: true });
   });
 
   socket.on('room:leave', (roomId: string) => {
@@ -438,12 +482,13 @@ io.on('connection', socket => {
     const existing = [...members];
 
     socket.emit('voice:existing-members', existing.map(id => ({
-      socketId: id, username: userNames.get(id) ?? id,
+      socketId: id, username: userNames.get(id) ?? id, avatarUrl: userAvatars.get(id) ?? null,
     })));
 
     existing.forEach(mid =>
       io.to(mid).emit('voice:user-joined', {
         socketId: socket.id, username: userNames.get(socket.id) ?? socket.id,
+        avatarUrl: userAvatars.get(socket.id) ?? null,
       })
     );
 
@@ -502,14 +547,14 @@ io.on('connection', socket => {
       transport.on('icestatechange', (state) => {
         console.log(`[ms-server] ${role}通道 ICE: ${state}  (${socket.id.slice(0,6)})`);
         if (state === 'disconnected' || state === 'closed')
-          console.warn(`[ms-server] ⚠ ${role}通道 ICE ${state} → 客户端连不上服务器（检查 frp 端口/公网IP）`);
+          console.warn(`[ms-server] [WARN] ${role}通道 ICE ${state} - 客户端连不上服务器（检查 frp 端口/公网IP）`);
       });
       transport.on('dtlsstatechange', (state) => {
         console.log(`[ms-server] ${role}通道 DTLS: ${state}  (${socket.id.slice(0,6)})`);
         if (state === 'connected')
-          console.log(`[ms-server] ✓ ${role}通道握手成功，媒体可流通`);
+          console.log(`[ms-server] [OK] ${role}通道握手成功，媒体可流通`);
         if (state === 'failed')
-          console.error(`[ms-server] ✗ ${role}通道 DTLS 握手失败`);
+          console.error(`[ms-server] [ERROR] ${role}通道 DTLS 握手失败`);
         if (state === 'closed') {
           transport.close();
           // 通道关闭时清空引用，确保重新加入语音时能正确重建收发通道
@@ -522,7 +567,7 @@ io.on('connection', socket => {
         console.log(`[ms-server] ${role}通道 选用协议: ${tuple?.protocol?.toUpperCase()} ` +
           `(本地 ${tuple?.localAddress}:${tuple?.localPort} ← 远端 ${tuple?.remoteIp}:${tuple?.remotePort})`);
         if (tuple?.protocol === 'tcp')
-          console.warn('[ms-server] ⚠ 走的是 TCP（说明 UDP 没通，frp 可能只转发了 TCP；能用但延迟偏高）');
+          console.warn('[ms-server] [WARN] 走的是 TCP（说明 UDP 没通，frp 可能只转发了 TCP；能用但延迟偏高）');
       });
 
       cb({
@@ -689,6 +734,7 @@ io.on('connection', socket => {
       if (members.delete(socket.id)) broadcastRoomMembers(roomId);
     });
     userNames.delete(socket.id);
+    userAvatars.delete(socket.id);
     userClientIds.delete(socket.id);
     broadcastOnlineUsers();
     removePeer(socket.id);

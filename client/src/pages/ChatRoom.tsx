@@ -1,11 +1,23 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import {
+  Activity, ArrowLeft, Crown, Ellipsis, Hash, Maximize2, Menu, MessageCircle,
+  Mic, MicOff, Minimize2, MonitorUp, PanelRightClose, PanelRightOpen, PhoneOff,
+  Send, Trash2, Volume2, VolumeX, X,
+} from 'lucide-react';
 import { socket } from '../socket';
 import { useWebRTC, SCREEN_PRESETS, ScreenPreset, Fps, ScreenContentMode } from '../hooks/useWebRTC';
+import { Avatar } from '../components/Avatar';
+import { ProfileModal } from '../components/ProfileModal';
 import { SoundPackPanel } from '../components/SoundPackPanel';
-import { Room, Message, RoomMember, RoomState } from '../types';
+import { Room, Message, RoomMember, RoomState, UserProfile } from '../types';
 
-interface Props { username: string; serverURL: string }
+interface Props {
+  profile: UserProfile;
+  onProfileChange: (profile: UserProfile) => void;
+  serverURL: string;
+  sessionReady: boolean;
+}
 
 function LocalScreenVideo({ stream }: { stream: MediaStream }) {
   const ref = useRef<HTMLVideoElement>(null);
@@ -75,7 +87,7 @@ function ScreenSettingsModal({ preset, fps, mode, audio, onPreset, onFps, onMode
           <p className="text-white/40 text-sm font-medium mb-2.5">系统音频</p>
           <button onClick={onAudio}
             className={`w-full py-2.5 rounded-xl text-sm font-semibold transition-colors ${audio ? 'bg-white text-zinc-900' : 'bg-white/10 hover:bg-white/15 text-white/60'}`}>
-            {audio ? '🔊 包含系统音频' : '🔇 不包含音频'}
+            <span className="inline-flex items-center justify-center gap-2">{audio ? <Volume2 size={17} /> : <VolumeX size={17} />}{audio ? '包含系统音频' : '不包含音频'}</span>
           </button>
         </div>
         <div className="flex gap-2.5">
@@ -91,9 +103,10 @@ function formatTime(ts: number) {
   return new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
 }
 
-export default function ChatRoom({ username, serverURL }: Props) {
+export default function ChatRoom({ profile, onProfileChange, serverURL, sessionReady }: Props) {
   const { roomId } = useParams<{ roomId: string }>();
   const navigate = useNavigate();
+  const username = profile.username;
 
   const [room, setRoom]               = useState<Room | null>(null);
   const [messages, setMessages]       = useState<Message[]>([]);
@@ -102,6 +115,11 @@ export default function ChatRoom({ username, serverURL }: Props) {
   const [isOwner, setIsOwner]         = useState(false);
   const [moderatingId, setModeratingId] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [chatDrawerOpen, setChatDrawerOpen] = useState(true);
+  const [showRoomMenu, setShowRoomMenu] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [showProfile, setShowProfile] = useState(false);
+  const [roomSynced, setRoomSynced] = useState(false);
   const messagesEndRef                = useRef<HTMLDivElement>(null);
   const screenContainerRef            = useRef<HTMLDivElement>(null);
 
@@ -126,13 +144,14 @@ export default function ChatRoom({ username, serverURL }: Props) {
   }, [roomId, navigate, serverURL]);
 
   useEffect(() => {
-    if (!roomId) return;
+    if (!roomId || !sessionReady) { setRoomSynced(false); return; }
     const joinRoom = () => socket.emit('room:join', roomId);
     const onNew = (msg: Message) => setMessages(prev => [...prev, msg]);
     const onState = (state: RoomState) => {
       if (state.roomId !== roomId) return;
       setRoomMembers(state.members);
       setIsOwner(state.isOwner);
+      setRoomSynced(true);
       setRoom(current => current ? { ...current, ownerName: state.ownerName } : current);
     };
     const onDeleted = ({ roomId: deletedRoomId }: { roomId: string }) => {
@@ -140,21 +159,19 @@ export default function ChatRoom({ username, serverURL }: Props) {
       rtc.leaveVoice();
       navigate('/', { replace: true });
     };
-    socket.on('connect', joinRoom);
     socket.on('message:new', onNew);
     socket.on('room:state', onState);
     socket.on('room:deleted', onDeleted);
     joinRoom();
     return () => {
       socket.emit('room:leave', roomId);
-      socket.off('connect', joinRoom);
       socket.off('message:new', onNew);
       socket.off('room:state', onState);
       socket.off('room:deleted', onDeleted);
       rtc.leaveVoice();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roomId]);
+  }, [roomId, sessionReady]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -190,7 +207,6 @@ export default function ChatRoom({ username, serverURL }: Props) {
 
   const deleteRoom = useCallback(async () => {
     if (!roomId || !isOwner || !room) return;
-    if (!window.confirm(`确定删除房间 #${room.name} 吗？\n聊天记录和禁言设置也会被永久删除。`)) return;
     try {
       const result = await new Promise<{ ok: boolean; error?: string }>((resolve, reject) => {
         socket.timeout(5_000).emit('room:delete', { roomId }, (error: Error | null, response: { ok: boolean; error?: string }) => {
@@ -224,8 +240,6 @@ export default function ChatRoom({ username, serverURL }: Props) {
   );
 
   const hasScreen    = !!rtc.localScreen || !!rtc.remoteScreen;
-  const avatarLetter = (n: string) => n[0]?.toUpperCase() ?? '?';
-
   return (
     <div className="h-full flex bg-gradient-to-br from-zinc-950 via-black to-zinc-900 overflow-hidden">
 
@@ -240,6 +254,19 @@ export default function ChatRoom({ username, serverURL }: Props) {
         />
       )}
 
+      {confirmDelete && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/65 p-4 backdrop-blur-md" onMouseDown={() => setConfirmDelete(false)}>
+          <section className="w-full max-w-sm rounded-3xl border border-red-400/20 bg-zinc-900/95 p-7 shadow-2xl" onMouseDown={event => event.stopPropagation()} role="alertdialog" aria-modal="true" aria-labelledby="delete-room-title">
+            <div className="flex items-start justify-between"><div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-red-500/15 text-red-300"><Trash2 size={21} /></div><button onClick={() => setConfirmDelete(false)} className="rounded-xl p-2 text-white/35 hover:bg-white/10 hover:text-white" aria-label="关闭"><X size={18} /></button></div>
+            <h2 id="delete-room-title" className="mt-5 text-xl font-bold text-white">删除 #{room.name}？</h2>
+            <p className="mt-2 text-sm leading-relaxed text-white/45">聊天记录、房间成员状态和语音禁言设置都会永久删除。此操作无法撤销。</p>
+            <div className="mt-6 flex gap-2.5"><button onClick={() => setConfirmDelete(false)} className="flex-1 rounded-xl bg-white/10 py-3 font-medium text-white/70 transition hover:bg-white/15">取消</button><button onClick={() => { setConfirmDelete(false); deleteRoom(); }} className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl bg-red-500 py-3 font-semibold text-white transition hover:bg-red-400"><Trash2 size={17} />确认删除</button></div>
+          </section>
+        </div>
+      )}
+
+      {showProfile && <ProfileModal profile={profile} serverURL={serverURL} onSave={onProfileChange} onClose={() => setShowProfile(false)} />}
+
       {/* ── Collapsible Sidebar ── */}
       <aside
         className="flex-shrink-0 flex flex-col bg-white/[0.06] backdrop-blur-2xl border-r border-white/[0.08] overflow-hidden transition-[width] duration-200"
@@ -252,19 +279,17 @@ export default function ChatRoom({ username, serverURL }: Props) {
             <button
               onClick={() => navigate('/')}
               className="text-white/30 hover:text-white/80 transition-colors p-2 rounded-xl hover:bg-white/10"
+              aria-label="返回频道列表"
             >
-              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
-              </svg>
+              <ArrowLeft size={20} />
             </button>
-            <span className="text-white/30 text-lg">#</span>
+            <Hash size={18} className="text-white/30" />
             <span className="font-semibold text-white text-base truncate flex-1">{room.name}</span>
             {isOwner && (
-              <button
-                onClick={deleteRoom}
-                className="text-red-400/60 hover:text-red-300 hover:bg-red-500/10 px-2 py-1.5 rounded-lg text-sm font-medium transition-colors"
-                title="删除房间"
-              >删除</button>
+              <div className="relative">
+                <button onClick={() => setShowRoomMenu(open => !open)} className="rounded-lg p-2 text-white/35 transition hover:bg-white/10 hover:text-white" aria-label="房间操作" title="房间操作"><Ellipsis size={18} /></button>
+                {showRoomMenu && <div className="absolute right-0 top-10 z-20 w-40 rounded-xl border border-white/10 bg-zinc-900 p-1.5 shadow-xl"><button onClick={() => { setShowRoomMenu(false); setConfirmDelete(true); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-red-300 transition hover:bg-red-500/10"><Trash2 size={16} /> 删除房间</button></div>}
+              </div>
             )}
           </div>
 
@@ -280,15 +305,11 @@ export default function ChatRoom({ username, serverURL }: Props) {
                   const speaking = level > 0.08 && !m.isMuted && !(isSelf && rtc.isMuted);
                   return (
                     <div key={m.socketId} className="flex items-center gap-2.5 px-1">
-                      <div className={`w-8 h-8 rounded-full border flex items-center justify-center text-sm font-bold text-white flex-shrink-0 transition-all ${
-                        speaking ? 'bg-green-500/30 border-green-400/60 ring-2 ring-green-400/40' : 'bg-white/10 border-white/15'
-                      }`}>
-                        {avatarLetter(m.username)}
-                      </div>
+                      <Avatar username={m.username} avatarUrl={m.avatarUrl} size="sm" className={speaking ? 'border-green-400/60 ring-2 ring-green-400/40' : ''} />
                       <div className="flex-1 min-w-0">
                         <span className="text-base text-white/70 truncate font-medium block leading-tight">
                           {m.username}
-                          {(m.isMuted || (isSelf && rtc.isMuted)) && <span className="text-white/30 ml-1 text-sm">🔇</span>}
+                          {(m.isMuted || (isSelf && rtc.isMuted)) && <MicOff size={13} className="ml-1 inline text-white/35" aria-label="已静音" />}
                         </span>
                         {/* 实时音量条 */}
                         <div className="h-1 mt-1 rounded-full bg-white/10 overflow-hidden">
@@ -315,33 +336,27 @@ export default function ChatRoom({ username, serverURL }: Props) {
                 const isSelf = member.socketId === socket.id;
                 return (
                 <div key={member.socketId} className="group flex items-center gap-3 px-2 py-2 rounded-xl hover:bg-white/[0.06] transition-colors">
-                  <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold flex-shrink-0 border ${
-                    isSelf
-                      ? 'bg-white/20 text-white border-white/30'
-                      : 'bg-white/[0.06] text-white/60 border-white/10'
-                  }`}>
-                    {avatarLetter(member.username)}
-                  </div>
+                  <Avatar username={member.username} avatarUrl={member.avatarUrl} size="sm" className={isSelf ? 'border-white/30' : ''} />
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-1.5">
                       <span className={`text-base truncate font-medium ${isSelf ? 'text-white' : 'text-white/55'}`}>
                         {isSelf ? `${member.username}（你）` : member.username}
                       </span>
-                      {member.isOwner && <span className="text-amber-300 text-sm flex-shrink-0" title="房主">♛</span>}
-                      {member.isMuted && <span className="text-red-300/70 text-xs flex-shrink-0" title="已被房主禁言">🔇</span>}
+                      {member.isOwner && <Crown size={14} className="flex-shrink-0 text-amber-300" aria-label="房主" />}
+                      {member.isMuted && <MicOff size={13} className="flex-shrink-0 text-red-300/70" aria-label="已被房主语音禁言" />}
                     </div>
                     {member.isOwner && <p className="text-amber-300/50 text-xs mt-0.5">房主</p>}
                   </div>
                   {isOwner && !member.isOwner && !isSelf && (
                     <button
                       onClick={() => setMemberMuted(member)}
-                      disabled={moderatingId === member.socketId}
+                      disabled={moderatingId === member.socketId || !sessionReady || !roomSynced}
                       className={`flex-shrink-0 px-2 py-1.5 rounded-lg text-xs font-medium transition-colors disabled:opacity-40 ${
                         member.isMuted
                           ? 'bg-green-500/10 text-green-300 hover:bg-green-500/20'
                           : 'bg-red-500/10 text-red-300 hover:bg-red-500/20'
                       }`}
-                    >{member.isMuted ? '解除' : '禁言'}</button>
+                    >{member.isMuted ? '解除语音禁言' : '语音禁言'}</button>
                   )}
                 </div>
               )})}
@@ -349,109 +364,40 @@ export default function ChatRoom({ username, serverURL }: Props) {
           </div>
 
           {/* ── Sound Pack Panel ── */}
-          <SoundPackPanel socket={socket} roomId={roomId!} serverURL={serverURL} />
-
-          {/* ── Bottom voice bar ── */}
-          <div className="flex-shrink-0 border-t border-white/[0.08] p-3">
-            {!rtc.inVoice ? (
-              <button
-                onClick={rtc.joinVoice}
-                className="w-full bg-white/10 hover:bg-white/15 text-white text-base font-semibold py-3 rounded-xl transition-colors border border-white/10"
-              >
-                {rtc.isForceMuted ? '🔇 加入语音（房主已禁言）' : '🎤 加入语音'}
-              </button>
-            ) : (
-              <div className="flex flex-col gap-2">
-              {/* 调试信息开关 */}
-              <button
-                onClick={rtc.toggleStats}
-                className={`w-full flex items-center justify-center gap-2 py-2 rounded-xl text-sm font-medium transition-colors ${
-                  rtc.statsEnabled
-                    ? 'bg-sky-500/20 text-sky-300 border border-sky-500/25'
-                    : 'bg-white/[0.06] text-white/50 hover:bg-white/10 border border-white/10'
-                }`}
-              >
-                <span>📊</span>
-                <span>{rtc.statsEnabled ? '调试信息：开' : '调试信息：关'}</span>
-                {rtc.statsEnabled && (
-                  <span className="font-mono text-xs text-white/40">
-                    {rtc.stats.fps ?? '—'}fps · {rtc.stats.rtt ?? '—'}ms · {rtc.stats.loss ?? '—'}% · {rtc.stats.protocol ?? '—'}
-                  </span>
-                )}
-              </button>
-              <div className="flex gap-2">
-                {/* Mic */}
-                <button
-                  onClick={rtc.toggleMute}
-                  disabled={rtc.isForceMuted}
-                  title={rtc.isForceMuted ? '你已被房主禁言' : (rtc.isMuted ? '取消静音' : '静音')}
-                  className={`flex-1 flex flex-col items-center justify-center gap-1 py-2.5 rounded-xl text-sm font-medium transition-colors ${
-                    rtc.isForceMuted
-                      ? 'bg-red-500/15 text-red-300/70 border border-red-500/20 cursor-not-allowed'
-                      : rtc.isMuted
-                      ? 'bg-red-500/20 text-red-400 border border-red-500/20'
-                      : 'bg-white/10 text-white/70 hover:bg-white/15 border border-white/10'
-                  }`}
-                >
-                  <span className="text-lg">{rtc.isMuted ? '🔇' : '🎤'}</span>
-                  <span>{rtc.isForceMuted ? '房主禁言' : (rtc.isMuted ? '已静音' : '麦克风')}</span>
-                </button>
-                {/* Screen share */}
-                <button
-                  onClick={!rtc.isSharing ? () => setShowScreenModal(true) : rtc.stopScreenShare}
-                  title={rtc.isSharing ? '停止共享' : '共享屏幕'}
-                  className={`flex-1 flex flex-col items-center justify-center gap-1 py-2.5 rounded-xl text-sm font-medium transition-colors ${
-                    rtc.isSharing
-                      ? 'bg-amber-500/20 text-amber-400 border border-amber-500/20'
-                      : 'bg-white/10 text-white/70 hover:bg-white/15 border border-white/10'
-                  }`}
-                >
-                  <span className="text-lg">📺</span>
-                  <span>{rtc.isSharing ? '停止共享' : '共享屏幕'}</span>
-                </button>
-                {/* Leave */}
-                <button
-                  onClick={rtc.leaveVoice}
-                  title="离开语音"
-                  className="flex-1 flex flex-col items-center justify-center gap-1 py-2.5 rounded-xl text-sm font-medium bg-white/10 text-white/50 hover:bg-red-500/20 hover:text-red-400 border border-white/10 hover:border-red-500/20 transition-colors"
-                >
-                  <span className="text-lg">📵</span>
-                  <span>离开</span>
-                </button>
-              </div>
-              </div>
-            )}
-          </div>
+          <SoundPackPanel socket={socket} roomId={roomId!} serverURL={serverURL} disabled={!sessionReady || !roomSynced} />
 
         </div>
       </aside>
 
       {/* ── Main area ── */}
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="relative flex min-w-0 flex-1 flex-col">
 
         {/* Header */}
         <header className="h-16 flex-shrink-0 flex items-center gap-3 px-5 bg-white/[0.04] backdrop-blur-xl border-b border-white/[0.08]">
           <button
             onClick={() => setSidebarOpen(o => !o)}
             className="text-white/30 hover:text-white/80 transition-colors p-2 rounded-xl hover:bg-white/10 flex-shrink-0"
+            aria-label={sidebarOpen ? '收起成员栏' : '展开成员栏'}
           >
-            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h16" />
-            </svg>
+            <Menu size={20} />
           </button>
-          <span className="text-white/30 text-xl">#</span>
+          <Hash size={19} className="text-white/30" />
           <span className="font-semibold text-white text-lg">{room.name}</span>
-          {!sidebarOpen && (
-            <button
-              onClick={() => navigate('/')}
-              className="ml-auto text-white/30 hover:text-white/70 text-base transition-colors flex items-center gap-1.5 font-medium"
-            >
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
-              </svg>
-              返回
-            </button>
-          )}
+          <div className="ml-auto flex items-center gap-2">
+            {!rtc.inVoice ? (
+              <button onClick={rtc.joinVoice} disabled={!sessionReady || !roomSynced} className="inline-flex items-center gap-2 rounded-xl bg-white px-3.5 py-2 text-sm font-semibold text-zinc-900 transition hover:bg-cyan-100 disabled:cursor-not-allowed disabled:opacity-30">{rtc.isForceMuted ? <MicOff size={17} /> : <Mic size={17} />}{rtc.isForceMuted ? '加入语音（已被禁言）' : '加入语音'}</button>
+            ) : (
+              <div className="flex items-center gap-1.5 rounded-2xl border border-white/10 bg-black/20 p-1.5">
+                <button onClick={rtc.toggleStats} className={`rounded-xl p-2 transition ${rtc.statsEnabled ? 'bg-sky-500/20 text-sky-300' : 'text-white/45 hover:bg-white/10 hover:text-white'}`} aria-label={rtc.statsEnabled ? '关闭媒体统计' : '打开媒体统计'} title="媒体统计"><Activity size={18} /></button>
+                <button onClick={rtc.toggleMute} disabled={rtc.isForceMuted || !sessionReady} className={`rounded-xl p-2 transition disabled:cursor-not-allowed ${rtc.isForceMuted || rtc.isMuted ? 'bg-red-500/20 text-red-300' : 'text-white/60 hover:bg-white/10 hover:text-white'}`} aria-label={rtc.isForceMuted ? '已被房主语音禁言' : rtc.isMuted ? '取消静音' : '静音'} title={rtc.isForceMuted ? '已被房主语音禁言' : rtc.isMuted ? '取消静音' : '静音'}>{rtc.isMuted || rtc.isForceMuted ? <MicOff size={18} /> : <Mic size={18} />}</button>
+                <button onClick={!rtc.isSharing ? () => setShowScreenModal(true) : rtc.stopScreenShare} disabled={!sessionReady} className={`rounded-xl p-2 transition ${rtc.isSharing ? 'bg-amber-500/20 text-amber-300' : 'text-white/60 hover:bg-white/10 hover:text-white'}`} aria-label={rtc.isSharing ? '停止屏幕共享' : '开始屏幕共享'} title={rtc.isSharing ? '停止屏幕共享' : '开始屏幕共享'}><MonitorUp size={18} /></button>
+                <button onClick={rtc.leaveVoice} className="rounded-xl p-2 text-white/45 transition hover:bg-red-500/20 hover:text-red-300" aria-label="离开语音" title="离开语音"><PhoneOff size={18} /></button>
+              </div>
+            )}
+            {hasScreen && <button onClick={() => setChatDrawerOpen(open => !open)} className="rounded-xl p-2 text-white/45 transition hover:bg-white/10 hover:text-white" aria-label={chatDrawerOpen ? '收起聊天栏' : '展开聊天栏'} title={chatDrawerOpen ? '收起聊天栏' : '展开聊天栏'}>{chatDrawerOpen ? <PanelRightClose size={19} /> : <PanelRightOpen size={19} />}</button>}
+            <button onClick={() => setShowProfile(true)} className="rounded-full focus:outline-none focus:ring-2 focus:ring-cyan-300/50" aria-label="打开个人名片" title="个人名片"><Avatar username={profile.username} avatarUrl={profile.avatarUrl} size="sm" /></button>
+            {!sidebarOpen && <button onClick={() => navigate('/')} className="rounded-xl p-2 text-white/40 transition hover:bg-white/10 hover:text-white" aria-label="返回频道列表" title="返回频道列表"><ArrowLeft size={19} /></button>}
+          </div>
         </header>
 
         {/* Screen share */}
@@ -459,8 +405,7 @@ export default function ChatRoom({ username, serverURL }: Props) {
           <div
             className={screenMaximized
               ? 'fixed inset-0 z-[100] bg-black'
-              : 'flex-shrink-0 bg-black border-b border-white/[0.08]'}
-            style={screenMaximized ? undefined : { height: '45vh' }}
+              : 'min-h-0 flex-1 bg-black'}
           >
             <div ref={screenContainerRef} className="h-full relative">
               {rtc.remoteScreen ? (
@@ -497,17 +442,17 @@ export default function ChatRoom({ username, serverURL }: Props) {
 
               <button
                 onClick={toggleFullscreen}
-                className="absolute top-3 right-3 bg-black/50 hover:bg-black/70 backdrop-blur-md text-white text-sm px-3 py-1.5 rounded-xl transition-colors font-medium border border-white/10 z-10"
-              >{screenMaximized ? '⛗ 退出全屏' : '⛶ 全屏'}</button>
+                className="absolute top-3 right-3 inline-flex items-center gap-2 bg-black/50 hover:bg-black/70 backdrop-blur-md text-white text-sm px-3 py-1.5 rounded-xl transition-colors font-medium border border-white/10 z-10"
+              >{screenMaximized ? <Minimize2 size={16} /> : <Maximize2 size={16} />}{screenMaximized ? '退出全屏' : '全屏'}</button>
             </div>
           </div>
         )}
 
         {/* Messages */}
-        <div className="flex-1 overflow-y-auto min-h-0 px-6 py-5 space-y-0.5">
+        <div className={hasScreen ? (chatDrawerOpen ? 'absolute bottom-20 right-0 top-16 z-10 w-96 overflow-y-auto border-l border-white/10 bg-zinc-950/90 px-5 py-4 shadow-2xl backdrop-blur-xl space-y-0.5' : 'hidden') : 'flex-1 overflow-y-auto min-h-0 px-6 py-5 space-y-0.5'}>
           {messages.length === 0 && (
             <div className="flex flex-col items-center justify-center h-full gap-3">
-              <span className="text-5xl">👋</span>
+              <MessageCircle size={42} className="text-white/20" />
               <p className="text-white/40 text-lg">这是 <span className="text-white/70 font-semibold">#{room.name}</span> 的起始位置</p>
             </div>
           )}
@@ -520,13 +465,7 @@ export default function ChatRoom({ username, serverURL }: Props) {
             return (
               <div key={msg.id} className={`flex items-end gap-3 ${isMe ? 'flex-row-reverse' : ''} ${grouped ? 'mt-1' : 'mt-5'}`}>
                 {!grouped ? (
-                  <div className={`w-9 h-9 rounded-full flex-shrink-0 flex items-center justify-center text-sm font-bold mb-0.5 border ${
-                    isMe
-                      ? 'bg-white/20 text-white border-white/25'
-                      : 'bg-white/[0.07] text-white/70 border-white/10'
-                  }`}>
-                    {avatarLetter(msg.author)}
-                  </div>
+                  isMe ? <Avatar username={profile.username} avatarUrl={profile.avatarUrl} size="sm" className="mb-0.5" /> : <Avatar username={msg.author} size="sm" className="mb-0.5" />
                 ) : (
                   <div className="w-9 flex-shrink-0" />
                 )}
@@ -553,7 +492,7 @@ export default function ChatRoom({ username, serverURL }: Props) {
         </div>
 
         {/* Input */}
-        <div className="flex-shrink-0 px-5 py-4 border-t border-white/[0.08]">
+        <div className={hasScreen ? (chatDrawerOpen ? 'absolute bottom-0 right-0 z-10 w-96 border-l border-t border-white/10 bg-zinc-950/95 px-4 py-3 backdrop-blur-xl' : 'hidden') : 'flex-shrink-0 px-5 py-4 border-t border-white/[0.08]'}>
           <div className="flex items-center gap-3 bg-white/[0.07] backdrop-blur-xl border border-white/10 rounded-2xl px-5 py-3.5 focus-within:border-white/20 focus-within:bg-white/10 transition-all">
             <input
               className="flex-1 bg-transparent text-white text-base placeholder-white/25 outline-none"
@@ -566,10 +505,9 @@ export default function ChatRoom({ username, serverURL }: Props) {
               className="text-white/25 hover:text-white/70 transition-colors disabled:opacity-20 flex-shrink-0"
               disabled={!input.trim()}
               onClick={sendMessage}
+              aria-label="发送消息"
             >
-              <svg className="w-5 h-5" viewBox="0 0 20 20" fill="currentColor">
-                <path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z" />
-              </svg>
+              <Send size={19} />
             </button>
           </div>
         </div>

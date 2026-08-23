@@ -278,9 +278,9 @@ export function useWebRTC(socket: Socket, roomId: string) {
 
       st.on('connectionstatechange', (state) => {
         console.log(`%c[ms-client] 发送通道(send): ${state}`, 'color:#3b82f6;font-weight:bold');
-        if (state === 'connected')    console.log('%c[ms-client] ✓ 发送通道已连通，麦克风/屏幕可以上行', 'color:#22c55e');
-        if (state === 'failed')       console.error('[ms-client] ✗ 发送通道连接失败 → 连接层问题，检查 frp 端口/公网IP 配置');
-        if (state === 'disconnected') console.warn('[ms-client] ⚠ 发送通道断开（网络抖动？）');
+        if (state === 'connected')    console.log('%c[ms-client] [OK] 发送通道已连通，麦克风/屏幕可以上行', 'color:#22c55e');
+        if (state === 'failed')       console.error('[ms-client] [ERROR] 发送通道连接失败 - 连接层问题，检查 frp 端口/公网IP 配置');
+        if (state === 'disconnected') console.warn('[ms-client] [WARN] 发送通道断开（网络抖动？）');
       });
 
       sendTransport.current = st;
@@ -296,9 +296,9 @@ export function useWebRTC(socket: Socket, roomId: string) {
 
       rt.on('connectionstatechange', (state) => {
         console.log(`%c[ms-client] 接收通道(recv): ${state}`, 'color:#a855f7;font-weight:bold');
-        if (state === 'connected')    console.log('%c[ms-client] ✓ 接收通道已连通，可以收到别人的音视频', 'color:#22c55e');
-        if (state === 'failed')       console.error('[ms-client] ✗ 接收通道连接失败 → 连接层问题，检查 frp 端口/公网IP 配置');
-        if (state === 'disconnected') console.warn('[ms-client] ⚠ 接收通道断开（网络抖动？）');
+        if (state === 'connected')    console.log('%c[ms-client] [OK] 接收通道已连通，可以收到别人的音视频', 'color:#22c55e');
+        if (state === 'failed')       console.error('[ms-client] [ERROR] 接收通道连接失败 - 连接层问题，检查 frp 端口/公网IP 配置');
+        if (state === 'disconnected') console.warn('[ms-client] [WARN] 接收通道断开（网络抖动？）');
       });
 
       recvTransport.current = rt;
@@ -479,13 +479,13 @@ export function useWebRTC(socket: Socket, roomId: string) {
         new Promise<MediaStream>((_, rej) =>
           setTimeout(() => rej(new Error('getUserMedia 超时（10s）——很可能是麦克风权限被系统/应用挡住')), 10_000)),
       ]);
-      console.log('%c[joinVoice] ✓ 已获取麦克风', 'color:#22c55e');
+      console.log('%c[joinVoice] [OK] 已获取麦克风', 'color:#22c55e');
       localAudioRef.current = stream;
 
       console.log('[joinVoice] 初始化 mediasoup Device 和传输通道…');
       const ok = await setupDevice();
       if (!ok) { stream.getTracks().forEach(t => t.stop()); return; }
-      console.log('%c[joinVoice] ✓ Device 就绪，开始发布音频', 'color:#22c55e');
+      console.log('%c[joinVoice] [OK] Device 就绪，开始发布音频', 'color:#22c55e');
 
       // 发布音频（标记 type:mic 以区分系统音频）
       const producer = await sendTransport.current!.produce({
@@ -513,9 +513,9 @@ export function useWebRTC(socket: Socket, roomId: string) {
       for (const { producerId, peerId, kind, appData } of existing) {
         await consumeProducer(producerId, peerId, kind, appData);
       }
-      console.log('%c[joinVoice] ✓ 加入语音完成', 'color:#22c55e;font-weight:bold');
+      console.log('%c[joinVoice] [OK] 加入语音完成', 'color:#22c55e;font-weight:bold');
     } catch (e) {
-      console.error('[joinVoice] ✗ 失败:', e);
+      console.error('[joinVoice] [ERROR] 失败:', e);
       alert(`加入语音失败：\n${e instanceof Error ? e.message : String(e)}\n\n请检查麦克风权限（Windows 设置 → 隐私 → 麦克风 → 允许桌面应用访问）。`);
     }
   }, [socket, roomId, inVoice, setupDevice, consumeProducer]);
