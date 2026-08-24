@@ -30,6 +30,12 @@ export let webRtcServer: T.WebRtcServer;
 const CODECS = [
   { kind: 'audio', mimeType: 'audio/opus',  clockRate: 48000, channels: 2 },
   {
+    // 屏幕共享优先选择 VP9；同画质下比 VP8 更省码率。客户端不支持时会
+    // 自动回退到后面的 VP8 / H.264，避免牺牲旧设备兼容性。
+    kind: 'video', mimeType: 'video/VP9', clockRate: 90000,
+    parameters: { 'profile-id': 0 },
+  },
+  {
     kind: 'video', mimeType: 'video/VP8', clockRate: 90000,
     parameters: { 'x-google-start-bitrate': 1000 },
   },

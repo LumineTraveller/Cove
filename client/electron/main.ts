@@ -51,10 +51,17 @@ function createWindow() {
   });
 
   // Electron 不允许渲染进程直接调用 getDisplayMedia，必须在主进程注册处理函数
-  session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
+  session.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
     desktopCapturer.getSources({ types: ['screen', 'window'] }).then(sources => {
       if (!sources.length) { callback({}); return; }
-      callback({ video: sources[0] });
+      // Chromium 的 audio:true 只表示“请求音频”；Electron 仍需在主进程显式
+      // 提供 Windows loopback 音源，否则返回的屏幕流永远只有视频轨。
+      callback({
+        video: sources[0],
+        ...(request.audioRequested && process.platform === 'win32'
+          ? { audio: 'loopback' as const }
+          : {}),
+      });
     }).catch(() => callback({}));
   });
 }

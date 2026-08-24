@@ -10,11 +10,13 @@ export interface Message {
   roomId: string;
   author: string;
   content: string;
+  type?: 'chat' | 'soundpack' | 'image';
   timestamp: number;
 }
 
 export interface VoiceMember {
   socketId: string;
+  userId: string;
   username: string;
   avatarUrl?: string | null;
   isMuted?: boolean;
@@ -22,6 +24,7 @@ export interface VoiceMember {
 
 export interface RoomMember {
   socketId: string;
+  userId: string;
   username: string;
   avatarUrl?: string | null;
   isOwner: boolean;

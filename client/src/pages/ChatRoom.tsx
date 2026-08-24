@@ -1,15 +1,17 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
-  Activity, ArrowLeft, Crown, Ellipsis, Hash, Maximize2, Menu, MessageCircle,
-  Mic, MicOff, Minimize2, MonitorUp, PanelRightClose, PanelRightOpen, PhoneOff,
+  Activity, ArrowLeft, Crown, Ellipsis, Eye, EyeOff, Gamepad2, Hash, Headphones, ImagePlus, LoaderCircle, Maximize2, Menu, MessageCircle,
+  Mic, MicOff, Minimize2, MonitorPlay, MonitorUp, PanelRightClose, PanelRightOpen, PhoneOff,
   Send, Trash2, Volume2, VolumeX, X,
 } from 'lucide-react';
 import { socket } from '../socket';
-import { useWebRTC, SCREEN_PRESETS, ScreenPreset, Fps, ScreenContentMode } from '../hooks/useWebRTC';
+import { useWebRTC, SCREEN_PRESETS, ScreenPreset, Fps } from '../hooks/useWebRTC';
 import { Avatar } from '../components/Avatar';
 import { ProfileModal } from '../components/ProfileModal';
+import { UserProfileModal } from '../components/UserProfileModal';
 import { SoundPackPanel } from '../components/SoundPackPanel';
+import { loadProfileRemarks, saveProfileRemark } from '../profileRemarks';
 import { Room, Message, RoomMember, RoomState, UserProfile } from '../types';
 
 interface Props {
@@ -37,29 +39,29 @@ function RemoteScreenVideo({ stream }: { stream: MediaStream }) {
 }
 
 interface ScreenModalProps {
-  preset: ScreenPreset; fps: Fps; mode: ScreenContentMode; audio: boolean;
+  preset: ScreenPreset; fps: Fps; audio: boolean; gameMode: boolean;
   onPreset: (p: ScreenPreset) => void; onFps: (f: Fps) => void;
-  onMode: (m: ScreenContentMode) => void; onAudio: () => void;
+  onAudio: () => void; onGameMode: () => void;
   onConfirm: () => void; onCancel: () => void;
 }
-function ScreenSettingsModal({ preset, fps, mode, audio, onPreset, onFps, onMode, onAudio, onConfirm, onCancel }: ScreenModalProps) {
+function ScreenSettingsModal({ preset, fps, audio, gameMode, onPreset, onFps, onAudio, onGameMode, onConfirm, onCancel }: ScreenModalProps) {
   return (
     <div className="fixed inset-0 bg-black/50 backdrop-blur-md flex items-center justify-center z-50" onClick={onCancel}>
-      <div className="bg-white/[0.08] backdrop-blur-2xl border border-white/15 rounded-3xl p-7 w-96 flex flex-col gap-5 shadow-2xl" onClick={e => e.stopPropagation()}>
+      <div className="max-h-[90vh] w-96 overflow-y-auto rounded-3xl border border-white/15 bg-white/[0.08] p-7 shadow-2xl backdrop-blur-2xl flex flex-col gap-5" onClick={e => e.stopPropagation()}>
         <h2 className="text-white font-bold text-xl">屏幕共享设置</h2>
+        <p className={`rounded-2xl border px-4 py-3 text-xs leading-relaxed ${gameMode ? 'border-amber-300/20 bg-amber-300/[0.07] text-amber-100/75' : 'border-cyan-300/10 bg-cyan-300/[0.05] text-cyan-100/65'}`}>
+          {gameMode
+            ? '游戏模式不会分析画面变化，会持续使用所选画质的 60 FPS 与最高码率。网络占用会明显增加。'
+            : 'Cove 会自动识别静止画面、普通操作和动态内容，并实时调整帧率与码率。下方帧率仅表示允许使用的最高值。'}
+        </p>
         <div>
-          <p className="text-white/40 text-sm font-medium mb-2.5">内容类型</p>
-          <div className="flex gap-2">
-            {([
-              ['detail', '文档 / 代码'],
-              ['motion', '视频 / 动态'],
-            ] as [ScreenContentMode, string][]).map(([value, label]) => (
-              <button key={value} onClick={() => onMode(value)}
-                className={`flex-1 py-2.5 rounded-xl text-sm font-semibold transition-colors ${mode === value ? 'bg-white text-zinc-900' : 'bg-white/10 hover:bg-white/15 text-white/60'}`}>
-                {label}
-              </button>
-            ))}
-          </div>
+          <p className="text-white/40 text-sm font-medium mb-2.5">传输模式</p>
+          <button onClick={onGameMode} aria-pressed={gameMode}
+            className={`flex w-full items-center gap-3 rounded-xl border px-4 py-3 text-left transition-colors ${gameMode ? 'border-amber-300/35 bg-amber-300/15 text-amber-100' : 'border-white/10 bg-white/[0.06] text-white/60 hover:bg-white/10'}`}>
+            <span className={`flex h-9 w-9 items-center justify-center rounded-xl ${gameMode ? 'bg-amber-200 text-zinc-900' : 'bg-white/10 text-white/45'}`}><Gamepad2 size={19} /></span>
+            <span className="min-w-0 flex-1"><span className="block text-sm font-semibold">游戏模式</span><span className="mt-0.5 block text-xs opacity-60">固定最高帧率和码率，不检测画面动态</span></span>
+            <span className={`rounded-full px-2 py-1 text-xs font-semibold ${gameMode ? 'bg-amber-100/20' : 'bg-white/10'}`}>{gameMode ? '已开启' : '已关闭'}</span>
+          </button>
         </div>
         <div>
           <p className="text-white/40 text-sm font-medium mb-2.5">画质</p>
@@ -76,8 +78,8 @@ function ScreenSettingsModal({ preset, fps, mode, audio, onPreset, onFps, onMode
           <p className="text-white/40 text-sm font-medium mb-2.5">帧率</p>
           <div className="flex gap-2">
             {([30, 60] as Fps[]).map(f => (
-              <button key={f} onClick={() => onFps(f)}
-                className={`flex-1 py-2.5 rounded-xl text-sm font-semibold transition-colors ${fps === f ? 'bg-white text-zinc-900' : 'bg-white/10 hover:bg-white/15 text-white/60'}`}>
+              <button key={f} onClick={() => onFps(f)} disabled={gameMode}
+                className={`flex-1 py-2.5 rounded-xl text-sm font-semibold transition-colors disabled:cursor-not-allowed ${fps === f ? 'bg-white text-zinc-900' : 'bg-white/10 hover:bg-white/15 text-white/60'} ${gameMode && f === 30 ? 'opacity-30' : ''}`}>
                 {f} fps
               </button>
             ))}
@@ -89,6 +91,11 @@ function ScreenSettingsModal({ preset, fps, mode, audio, onPreset, onFps, onMode
             className={`w-full py-2.5 rounded-xl text-sm font-semibold transition-colors ${audio ? 'bg-white text-zinc-900' : 'bg-white/10 hover:bg-white/15 text-white/60'}`}>
             <span className="inline-flex items-center justify-center gap-2">{audio ? <Volume2 size={17} /> : <VolumeX size={17} />}{audio ? '包含系统音频' : '不包含音频'}</span>
           </button>
+          {audio && (
+            <p className="mt-2 text-xs leading-relaxed text-amber-200/70">
+              Windows 会采集这台电脑正在播放的全部声音，包括 Cove 通话。若对方听到自己的回声，请关闭系统音频。
+            </p>
+          )}
         </div>
         <div className="flex gap-2.5">
           <button onClick={onCancel} className="flex-1 py-3 rounded-xl text-base bg-white/10 hover:bg-white/15 text-white/70 font-medium transition-colors">取消</button>
@@ -101,6 +108,15 @@ function ScreenSettingsModal({ preset, fps, mode, audio, onPreset, onFps, onMode
 
 function formatTime(ts: number) {
   return new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => typeof reader.result === 'string' ? resolve(reader.result) : reject(new Error('图片读取失败'));
+    reader.onerror = () => reject(new Error('图片读取失败'));
+    reader.readAsDataURL(file);
+  });
 }
 
 export default function ChatRoom({ profile, onProfileChange, serverURL, sessionReady }: Props) {
@@ -119,15 +135,20 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
   const [showRoomMenu, setShowRoomMenu] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
+  const [viewingProfile, setViewingProfile] = useState<{ userId: string; socketId: string; username: string; avatarUrl?: string | null } | null>(null);
+  const [profileRemarks, setProfileRemarks] = useState(loadProfileRemarks);
   const [roomSynced, setRoomSynced] = useState(false);
+  const [imageUploading, setImageUploading] = useState(false);
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
   const messagesEndRef                = useRef<HTMLDivElement>(null);
   const screenContainerRef            = useRef<HTMLDivElement>(null);
+  const imageInputRef                 = useRef<HTMLInputElement>(null);
 
   const [showScreenModal, setShowScreenModal] = useState(false);
   const [pendingPreset, setPendingPreset]     = useState<ScreenPreset>('720p');
   const [pendingFps, setPendingFps]           = useState<Fps>(30);
-  const [pendingMode, setPendingMode]         = useState<ScreenContentMode>('detail');
   const [pendingAudio, setPendingAudio]       = useState(false);
+  const [pendingGameMode, setPendingGameMode] = useState(false);
   const [screenMaximized, setScreenMaximized] = useState(false);
 
   const rtc = useWebRTC(socket, roomId!);
@@ -183,6 +204,38 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
     setInput('');
   }, [input, roomId]);
 
+  const resolveImageUrl = useCallback((value: string) => {
+    if (/^https?:\/\//i.test(value) || value.startsWith('data:')) return value;
+    return `${serverURL.replace(/\/$/, '')}${value.startsWith('/') ? value : `/${value}`}`;
+  }, [serverURL]);
+
+  const sendImage = useCallback(async (file?: File) => {
+    if (!file || !roomId || !socket.id || imageUploading) return;
+    if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(file.type)) {
+      window.alert('仅支持 PNG、JPEG、WebP 或 GIF 图片。'); return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      window.alert('图片不能超过 5MB。'); return;
+    }
+    setImageUploading(true);
+    try {
+      const dataUrl = await readFileAsDataUrl(file);
+      const data = dataUrl.slice(dataUrl.indexOf(',') + 1);
+      const response = await fetch(`${serverURL.replace(/\/$/, '')}/api/rooms/${roomId}/images`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ data, mimeType: file.type, socketId: socket.id }),
+      });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error ?? `HTTP ${response.status}`);
+    } catch (cause) {
+      window.alert(`图片发送失败：${cause instanceof Error ? cause.message : String(cause)}`);
+    } finally {
+      setImageUploading(false);
+      if (imageInputRef.current) imageInputRef.current.value = '';
+    }
+  }, [imageUploading, roomId, serverURL]);
+
   const setMemberMuted = useCallback(async (member: RoomMember) => {
     if (!roomId || !isOwner || member.isOwner) return;
     setModeratingId(member.socketId);
@@ -235,6 +288,10 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
     return () => window.removeEventListener('keydown', onKey);
   }, [screenMaximized]);
 
+  useEffect(() => {
+    if (!rtc.localScreen && !rtc.remoteScreen) setScreenMaximized(false);
+  }, [rtc.localScreen, rtc.remoteScreen]);
+
   if (!room) return (
     <div className="h-full flex items-center justify-center bg-gradient-to-br from-zinc-950 via-black to-zinc-900 text-white/40">加载中…</div>
   );
@@ -245,12 +302,16 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
 
       {showScreenModal && (
         <ScreenSettingsModal
-          preset={pendingPreset} fps={pendingFps} mode={pendingMode} audio={pendingAudio}
+          preset={pendingPreset} fps={pendingFps} audio={pendingAudio} gameMode={pendingGameMode}
           onPreset={setPendingPreset} onFps={setPendingFps}
-          onMode={setPendingMode}
           onAudio={() => setPendingAudio(a => !a)}
+          onGameMode={() => setPendingGameMode(enabled => {
+            const next = !enabled;
+            if (next) setPendingFps(60);
+            return next;
+          })}
           onCancel={() => setShowScreenModal(false)}
-          onConfirm={() => { setShowScreenModal(false); rtc.startScreenShare(pendingPreset, pendingFps, pendingAudio, pendingMode); }}
+          onConfirm={() => { setShowScreenModal(false); rtc.startScreenShare(pendingPreset, pendingFps, pendingAudio, pendingGameMode); }}
         />
       )}
 
@@ -266,6 +327,22 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
       )}
 
       {showProfile && <ProfileModal profile={profile} serverURL={serverURL} onSave={onProfileChange} onClose={() => setShowProfile(false)} />}
+      {viewingProfile && (
+        <UserProfileModal
+          userId={viewingProfile.userId}
+          username={viewingProfile.username}
+          avatarUrl={viewingProfile.avatarUrl}
+          remark={profileRemarks[viewingProfile.userId]}
+          onSaveRemark={remark => setProfileRemarks(current => saveProfileRemark(current, viewingProfile.userId, remark))}
+          onClose={() => setViewingProfile(null)}
+        />
+      )}
+      {previewImage && (
+        <div className="fixed inset-0 z-[140] flex items-center justify-center bg-black/90 p-8 backdrop-blur-md" onMouseDown={() => setPreviewImage(null)} role="dialog" aria-modal="true" aria-label="图片预览">
+          <img src={previewImage} alt="聊天图片预览" className="max-h-full max-w-full rounded-2xl object-contain shadow-2xl" onMouseDown={event => event.stopPropagation()} />
+          <button onClick={() => setPreviewImage(null)} className="absolute right-6 top-6 rounded-xl bg-white/10 p-3 text-white/70 transition hover:bg-white/20 hover:text-white" aria-label="关闭图片预览"><X size={21} /></button>
+        </div>
+      )}
 
       {/* ── Collapsible Sidebar ── */}
       <aside
@@ -293,40 +370,7 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
             )}
           </div>
 
-          {/* Voice members (when in voice) */}
-          {rtc.inVoice && rtc.voiceMembers.length > 0 && (
-            <div className="px-4 pt-4 pb-2 border-b border-white/[0.08] flex-shrink-0">
-              <p className="text-white/30 text-sm font-semibold uppercase tracking-wider mb-3">语音中</p>
-              <div className="space-y-2">
-                {rtc.voiceMembers.map(m => {
-                  // 自己的音量用 localSocketId 对应的 key
-                  const isSelf = m.socketId === rtc.localSocketId || m.username === username;
-                  const level = rtc.speakingLevels[m.socketId] ?? (isSelf ? rtc.speakingLevels[rtc.localSocketId ?? ''] ?? 0 : 0);
-                  const speaking = level > 0.08 && !m.isMuted && !(isSelf && rtc.isMuted);
-                  return (
-                    <div key={m.socketId} className="flex items-center gap-2.5 px-1">
-                      <Avatar username={m.username} avatarUrl={m.avatarUrl} size="sm" className={speaking ? 'border-green-400/60 ring-2 ring-green-400/40' : ''} />
-                      <div className="flex-1 min-w-0">
-                        <span className="text-base text-white/70 truncate font-medium block leading-tight">
-                          {m.username}
-                          {(m.isMuted || (isSelf && rtc.isMuted)) && <MicOff size={13} className="ml-1 inline text-white/35" aria-label="已静音" />}
-                        </span>
-                        {/* 实时音量条 */}
-                        <div className="h-1 mt-1 rounded-full bg-white/10 overflow-hidden">
-                          <div
-                            className="h-full rounded-full bg-gradient-to-r from-green-400 to-emerald-300 transition-[width] duration-75"
-                            style={{ width: `${Math.round((m.isMuted || (isSelf && rtc.isMuted) ? 0 : level) * 100)}%` }}
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
-          {/* Room members */}
+          {/* 房间成员与语音状态合并：只有正在语音中的成员显示音量条。 */}
           <div className="flex-1 overflow-y-auto p-4">
             <p className="text-white/30 text-sm font-semibold uppercase tracking-wider mb-3">
               成员 — {roomMembers.length}
@@ -334,32 +378,79 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
             <div className="space-y-1">
               {roomMembers.map(member => {
                 const isSelf = member.socketId === socket.id;
+                const voiceMember = rtc.voiceMembers.find(voice => voice.socketId === member.socketId);
+                const inVoice = !!voiceMember;
+                const showVoiceState = rtc.inVoice && inVoice;
+                const voiceMuted = !!voiceMember?.isMuted;
+                const level = showVoiceState
+                  ? rtc.speakingLevels[member.socketId] ?? (isSelf ? rtc.speakingLevels[rtc.localSocketId ?? ''] ?? 0 : 0)
+                  : 0;
+                const speaking = showVoiceState && level > 0.08 && !voiceMuted && !(isSelf && rtc.isMuted);
                 return (
-                <div key={member.socketId} className="group flex items-center gap-3 px-2 py-2 rounded-xl hover:bg-white/[0.06] transition-colors">
-                  <Avatar username={member.username} avatarUrl={member.avatarUrl} size="sm" className={isSelf ? 'border-white/30' : ''} />
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-1.5">
-                      <span className={`text-base truncate font-medium ${isSelf ? 'text-white' : 'text-white/55'}`}>
-                        {isSelf ? `${member.username}（你）` : member.username}
-                      </span>
-                      {member.isOwner && <Crown size={14} className="flex-shrink-0 text-amber-300" aria-label="房主" />}
-                      {member.isMuted && <MicOff size={13} className="flex-shrink-0 text-red-300/70" aria-label="已被房主语音禁言" />}
+                  <div key={member.socketId} className="group flex items-start gap-2 rounded-xl px-2 py-2 transition-colors hover:bg-white/[0.06]">
+                    <div className="min-w-0 flex-1">
+                      <button
+                        onClick={() => isSelf ? setShowProfile(true) : setViewingProfile(member)}
+                        className="flex w-full min-w-0 items-center gap-3 rounded-xl text-left focus:outline-none focus:ring-2 focus:ring-cyan-300/35"
+                        title={isSelf ? '打开个人名片' : `查看 ${member.username} 的主页`}
+                      >
+                        <Avatar username={member.username} avatarUrl={member.avatarUrl} size="sm" className={speaking ? 'border-green-400/60 ring-2 ring-green-400/40' : isSelf ? 'border-white/30' : 'transition group-hover:border-cyan-200/30'} />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5">
+                            <span className={`min-w-0 flex-1 truncate text-base font-medium ${isSelf ? 'text-white' : 'text-white/55'}`}>
+                              {isSelf ? `${member.username}（你）` : (profileRemarks[member.userId] || member.username)}
+                            </span>
+                            {member.isOwner && <Crown size={14} className="flex-shrink-0 text-amber-300" aria-label="房主" />}
+                            {showVoiceState && voiceMuted && <MicOff size={13} className="flex-shrink-0 text-red-300/70" aria-label="麦克风已关闭" />}
+                            {showVoiceState && !isSelf && <span className="text-xs tabular-nums text-white/30">{Math.round((rtc.memberVolumes[member.socketId] ?? 1) * 100)}%</span>}
+                          </div>
+                          {profileRemarks[member.userId] && !isSelf && <p className="mt-0.5 truncate text-xs text-white/30">用户名：{member.username}</p>}
+                          {member.isOwner && <p className="mt-0.5 text-xs text-amber-300/50">房主</p>}
+                        </div>
+                      </button>
+
+                      {showVoiceState && (
+                        <div className="ml-11 mt-2">
+                          <div className="h-1 overflow-hidden rounded-full bg-white/10">
+                            <div
+                              className="h-full rounded-full bg-gradient-to-r from-green-400 to-emerald-300 transition-[width] duration-75"
+                              style={{ width: `${Math.round((voiceMuted || (isSelf && rtc.isMuted) ? 0 : level) * 100)}%` }}
+                            />
+                          </div>
+                          {!isSelf && rtc.inVoice && voiceMember && (
+                            <label className="mt-2 flex items-center gap-2" title={`调整你听到的 ${member.username} 音量`}>
+                              {(rtc.memberVolumes[member.socketId] ?? 1) === 0
+                                ? <VolumeX size={13} className="flex-shrink-0 text-white/35" />
+                                : <Volume2 size={13} className="flex-shrink-0 text-white/35" />}
+                              <input
+                                type="range"
+                                min="0"
+                                max="100"
+                                step="1"
+                                value={Math.round((rtc.memberVolumes[member.socketId] ?? 1) * 100)}
+                                onChange={event => rtc.setMemberVolume(member.socketId, voiceMember.userId, Number(event.target.value) / 100)}
+                                className="h-1 w-full cursor-pointer accent-cyan-300"
+                                aria-label={`${member.username} 的接收音量`}
+                              />
+                            </label>
+                          )}
+                        </div>
+                      )}
                     </div>
-                    {member.isOwner && <p className="text-amber-300/50 text-xs mt-0.5">房主</p>}
+                    {isOwner && !member.isOwner && !isSelf && (
+                      <button
+                        onClick={() => setMemberMuted(member)}
+                        disabled={moderatingId === member.socketId || !sessionReady || !roomSynced}
+                        className={`mt-0.5 flex-shrink-0 rounded-lg px-2 py-1.5 text-xs font-medium transition-colors disabled:opacity-40 ${
+                          member.isMuted
+                            ? 'bg-green-500/10 text-green-300 hover:bg-green-500/20'
+                            : 'bg-red-500/10 text-red-300 hover:bg-red-500/20'
+                        }`}
+                      >{member.isMuted ? '解除禁言' : '禁言'}</button>
+                    )}
                   </div>
-                  {isOwner && !member.isOwner && !isSelf && (
-                    <button
-                      onClick={() => setMemberMuted(member)}
-                      disabled={moderatingId === member.socketId || !sessionReady || !roomSynced}
-                      className={`flex-shrink-0 px-2 py-1.5 rounded-lg text-xs font-medium transition-colors disabled:opacity-40 ${
-                        member.isMuted
-                          ? 'bg-green-500/10 text-green-300 hover:bg-green-500/20'
-                          : 'bg-red-500/10 text-red-300 hover:bg-red-500/20'
-                      }`}
-                    >{member.isMuted ? '解除语音禁言' : '语音禁言'}</button>
-                  )}
-                </div>
-              )})}
+                );
+              })}
             </div>
           </div>
 
@@ -383,9 +474,12 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
           </button>
           <Hash size={19} className="text-white/30" />
           <span className="font-semibold text-white text-lg">{room.name}</span>
+          <div className="inline-flex items-center gap-1.5 rounded-full border border-cyan-300/15 bg-cyan-300/[0.07] px-2.5 py-1 text-xs font-semibold text-cyan-100/75" title="当前语音人数">
+            <Headphones size={14} /> {rtc.voiceMembers.length}
+          </div>
           <div className="ml-auto flex items-center gap-2">
             {!rtc.inVoice ? (
-              <button onClick={rtc.joinVoice} disabled={!sessionReady || !roomSynced} className="inline-flex items-center gap-2 rounded-xl bg-white px-3.5 py-2 text-sm font-semibold text-zinc-900 transition hover:bg-cyan-100 disabled:cursor-not-allowed disabled:opacity-30">{rtc.isForceMuted ? <MicOff size={17} /> : <Mic size={17} />}{rtc.isForceMuted ? '加入语音（已被禁言）' : '加入语音'}</button>
+              <button onClick={rtc.joinVoice} disabled={!sessionReady || !roomSynced || rtc.isJoining} className="inline-flex items-center gap-2 rounded-xl bg-white px-3.5 py-2 text-sm font-semibold text-zinc-900 transition hover:bg-cyan-100 disabled:cursor-not-allowed disabled:opacity-50">{rtc.isJoining ? <LoaderCircle size={17} className="animate-spin" /> : rtc.isForceMuted ? <MicOff size={17} /> : <Mic size={17} />}{rtc.isJoining ? '正在加入' : rtc.isForceMuted ? '加入语音（已被禁言）' : '加入语音'}</button>
             ) : (
               <div className="flex items-center gap-1.5 rounded-2xl border border-white/10 bg-black/20 p-1.5">
                 <button onClick={rtc.toggleStats} className={`rounded-xl p-2 transition ${rtc.statsEnabled ? 'bg-sky-500/20 text-sky-300' : 'text-white/45 hover:bg-white/10 hover:text-white'}`} aria-label={rtc.statsEnabled ? '关闭媒体统计' : '打开媒体统计'} title="媒体统计"><Activity size={18} /></button>
@@ -394,11 +488,44 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
                 <button onClick={rtc.leaveVoice} className="rounded-xl p-2 text-white/45 transition hover:bg-red-500/20 hover:text-red-300" aria-label="离开语音" title="离开语音"><PhoneOff size={18} /></button>
               </div>
             )}
+            {rtc.inVoice && rtc.availableScreens.length > 0 && !rtc.localScreen && (
+              <div className="inline-flex items-center gap-2 rounded-xl border border-cyan-300/15 bg-cyan-300/[0.07] px-3 py-2 text-sm font-semibold text-cyan-100/75" title="当前可观看的屏幕共享数量">
+                <MonitorPlay size={17} />{rtc.availableScreens.length} 个共享
+              </div>
+            )}
             {hasScreen && <button onClick={() => setChatDrawerOpen(open => !open)} className="rounded-xl p-2 text-white/45 transition hover:bg-white/10 hover:text-white" aria-label={chatDrawerOpen ? '收起聊天栏' : '展开聊天栏'} title={chatDrawerOpen ? '收起聊天栏' : '展开聊天栏'}>{chatDrawerOpen ? <PanelRightClose size={19} /> : <PanelRightOpen size={19} />}</button>}
             <button onClick={() => setShowProfile(true)} className="rounded-full focus:outline-none focus:ring-2 focus:ring-cyan-300/50" aria-label="打开个人名片" title="个人名片"><Avatar username={profile.username} avatarUrl={profile.avatarUrl} size="sm" /></button>
             {!sidebarOpen && <button onClick={() => navigate('/')} className="rounded-xl p-2 text-white/40 transition hover:bg-white/10 hover:text-white" aria-label="返回频道列表" title="返回频道列表"><ArrowLeft size={19} /></button>}
           </div>
         </header>
+
+        {rtc.inVoice && rtc.availableScreens.length > 0 && !rtc.localScreen && (
+          <div className="mx-5 mt-4 flex flex-shrink-0 items-center gap-4 rounded-2xl border border-cyan-300/25 bg-gradient-to-r from-cyan-300/15 via-sky-400/10 to-transparent px-4 py-3 shadow-[0_0_28px_rgba(34,211,238,0.08)]">
+            <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-cyan-200 text-zinc-900"><MonitorPlay size={22} /></div>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-semibold text-white">
+                {rtc.availableScreens.length === 1 ? '1 位成员正在共享屏幕' : `${rtc.availableScreens.length} 位成员正在共享屏幕`}
+              </p>
+              <p className="mt-0.5 text-xs text-cyan-50/50">选择要观看的成员；未选择的共享不会消耗本机视频流量</p>
+            </div>
+            <div className="flex max-w-[55%] flex-wrap justify-end gap-2">
+              {rtc.availableScreens.map(screen => {
+                const selected = rtc.watchingScreenPeerId === screen.socketId;
+                const sharer = rtc.voiceMembers.find(member => member.socketId === screen.socketId)?.username ?? '成员';
+                return (
+                  <button
+                    key={screen.videoProducerId}
+                    onClick={() => selected ? rtc.stopWatchingScreen() : rtc.watchScreen(screen.socketId)}
+                    className={`inline-flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-bold transition ${selected ? 'bg-red-500/15 text-red-100 hover:bg-red-500/25' : 'bg-cyan-100 text-zinc-900 hover:bg-white'}`}
+                    title={selected ? `停止观看 ${sharer} 的共享` : `观看 ${sharer} 的共享`}
+                  >
+                    {selected ? <EyeOff size={16} /> : <Eye size={16} />}{sharer}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* Screen share */}
         {hasScreen && (
@@ -419,17 +546,38 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
                 <>
                   <LocalScreenVideo stream={rtc.localScreen} />
                   <div className="absolute bottom-3 left-3 bg-white/10 backdrop-blur-md text-white text-sm px-3 py-1.5 rounded-xl font-medium border border-white/15">
-                    你正在共享
+                    你正在共享 · {rtc.screenViewerCount} 人观看 · {rtc.screenGameMode ? '游戏模式' : `自动${rtc.screenActivity === 'static' ? '静止' : rtc.screenActivity === 'motion' ? '动态' : '操作'}`}
                   </div>
                 </>
               ) : null}
+
+              {(rtc.remoteScreen || (rtc.localScreen && rtc.shareAudio)) && (
+                <label className="absolute bottom-3 right-3 flex items-center gap-2 rounded-xl border border-white/10 bg-black/65 px-3 py-2 text-xs text-white/70 backdrop-blur-md" title={rtc.remoteScreen ? '调节你听到的共享音量' : '调节对方听到的共享音量'}>
+                  {(rtc.remoteScreen ? rtc.screenReceiveVolume : rtc.screenShareVolume) === 0 ? <VolumeX size={15} /> : <Volume2 size={15} />}
+                  <span>{rtc.remoteScreen ? '共享音量' : '发送音量'}</span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    step="1"
+                    value={Math.round((rtc.remoteScreen ? rtc.screenReceiveVolume : rtc.screenShareVolume) * 100)}
+                    onChange={event => (rtc.remoteScreen ? rtc.setScreenReceiveVolume : rtc.setScreenShareVolume)(Number(event.target.value) / 100)}
+                    className="h-1 w-24 cursor-pointer accent-cyan-300"
+                    aria-label={rtc.remoteScreen ? '共享接收音量' : '共享发送音量'}
+                  />
+                  <span className="w-8 text-right tabular-nums">{Math.round((rtc.remoteScreen ? rtc.screenReceiveVolume : rtc.screenShareVolume) * 100)}%</span>
+                </label>
+              )}
 
               {/* 实时统计悬浮显示（开关在语音栏） */}
               {rtc.statsEnabled && (
                 <div className="absolute top-3 left-3 bg-black/70 backdrop-blur-md text-white text-xs px-3 py-2 rounded-xl border border-white/10 font-mono space-y-0.5 pointer-events-none">
                   <div>帧率 FPS：<span className="text-green-400">{rtc.stats.fps ?? '—'}</span></div>
                   <div>画面：<span className="text-cyan-300">{rtc.stats.width && rtc.stats.height ? `${rtc.stats.width}×${rtc.stats.height}` : '—'}</span></div>
+                  <div>编码：<span className="text-cyan-300">{rtc.stats.codec ?? '—'}</span></div>
                   <div>码率：<span className="text-cyan-300">{rtc.stats.bitrate != null ? `${rtc.stats.bitrate} kbps` : '—'}</span></div>
+                  {rtc.localScreen && <div>{rtc.screenGameMode ? '固定上限' : '自动上限'}：<span className="text-cyan-300">{rtc.screenTargetBitrate ? `${Math.round(rtc.screenTargetBitrate / 1000)} kbps` : '—'}</span></div>}
+                  {rtc.localScreen && <div>画面模式：<span className="text-cyan-300">{rtc.screenGameMode ? '游戏模式' : rtc.screenActivity === 'static' ? '自动 · 静止' : rtc.screenActivity === 'motion' ? '自动 · 动态' : '自动 · 普通操作'}</span></div>}
                   <div>可用带宽：<span className="text-cyan-300">{rtc.stats.availableBitrate != null ? `${rtc.stats.availableBitrate} kbps` : '—'}</span></div>
                   <div>延迟 RTT：<span className="text-amber-400">{rtc.stats.rtt != null ? `${rtc.stats.rtt} ms` : '—'}</span></div>
                   <div>抖动 Jitter：<span className="text-amber-400">{rtc.stats.jitter != null ? `${rtc.stats.jitter} ms` : '—'}</span></div>
@@ -449,7 +597,7 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
         )}
 
         {/* Messages */}
-        <div className={hasScreen ? (chatDrawerOpen ? 'absolute bottom-20 right-0 top-16 z-10 w-96 overflow-y-auto border-l border-white/10 bg-zinc-950/90 px-5 py-4 shadow-2xl backdrop-blur-xl space-y-0.5' : 'hidden') : 'flex-1 overflow-y-auto min-h-0 px-6 py-5 space-y-0.5'}>
+        <div className={hasScreen ? (chatDrawerOpen ? 'absolute bottom-20 right-0 top-16 z-10 w-96 overflow-y-auto border-l border-white/10 bg-zinc-950/90 px-5 py-4 shadow-2xl backdrop-blur-xl' : 'hidden') : 'flex-1 overflow-y-auto min-h-0 px-6 py-5'}>
           {messages.length === 0 && (
             <div className="flex flex-col items-center justify-center h-full gap-3">
               <MessageCircle size={42} className="text-white/20" />
@@ -457,9 +605,18 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
             </div>
           )}
           {messages.map((msg, idx) => {
+            if (msg.type === 'soundpack') {
+              return (
+                <div key={msg.id} className="my-5 flex items-center justify-center gap-2 py-1 text-sm text-white/35">
+                  <Volume2 size={14} className="text-cyan-200/55" />
+                  <span>{msg.content}</span>
+                  <span className="text-xs text-white/20">{formatTime(msg.timestamp)}</span>
+                </div>
+              );
+            }
             const isMe    = msg.author === username;
             const prevMsg = messages[idx - 1];
-            const grouped = prevMsg && prevMsg.author === msg.author &&
+            const grouped = prevMsg && prevMsg.type !== 'soundpack' && prevMsg.author === msg.author &&
               msg.timestamp - prevMsg.timestamp < 5 * 60 * 1000;
 
             return (
@@ -477,12 +634,16 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
                       <span className="text-sm text-white/25">{formatTime(msg.timestamp)}</span>
                     </div>
                   )}
-                  <div className={`px-4 py-2.5 rounded-2xl text-base leading-relaxed ${
+                  <div className={`rounded-2xl text-base leading-relaxed ${msg.type === 'image' ? 'overflow-hidden border border-white/10 bg-black/30 p-1' : 'px-4 py-2.5'} ${
                     isMe
-                      ? 'bg-white text-zinc-900 rounded-br-sm'
-                      : 'bg-white/10 backdrop-blur-sm text-white rounded-bl-sm border border-white/[0.08]'
+                      ? msg.type === 'image' ? 'rounded-br-sm' : 'bg-white text-zinc-900 rounded-br-sm'
+                      : msg.type === 'image' ? 'rounded-bl-sm' : 'bg-white/10 backdrop-blur-sm text-white rounded-bl-sm border border-white/[0.08]'
                   }`}>
-                    {msg.content}
+                    {msg.type === 'image' ? (
+                      <button onClick={() => setPreviewImage(resolveImageUrl(msg.content))} className="block max-w-full cursor-zoom-in" title="点击查看原图">
+                        <img src={resolveImageUrl(msg.content)} alt={`${msg.author} 发送的图片`} loading="lazy" className="max-h-80 max-w-full rounded-xl object-contain" />
+                      </button>
+                    ) : msg.content}
                   </div>
                 </div>
               </div>
@@ -494,6 +655,22 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
         {/* Input */}
         <div className={hasScreen ? (chatDrawerOpen ? 'absolute bottom-0 right-0 z-10 w-96 border-l border-t border-white/10 bg-zinc-950/95 px-4 py-3 backdrop-blur-xl' : 'hidden') : 'flex-shrink-0 px-5 py-4 border-t border-white/[0.08]'}>
           <div className="flex items-center gap-3 bg-white/[0.07] backdrop-blur-xl border border-white/10 rounded-2xl px-5 py-3.5 focus-within:border-white/20 focus-within:bg-white/10 transition-all">
+            <input
+              ref={imageInputRef}
+              type="file"
+              accept="image/png,image/jpeg,image/webp,image/gif"
+              className="hidden"
+              onChange={event => sendImage(event.target.files?.[0])}
+            />
+            <button
+              className="flex-shrink-0 text-white/30 transition-colors hover:text-cyan-200 disabled:cursor-not-allowed disabled:opacity-30"
+              disabled={imageUploading || !sessionReady || !roomSynced}
+              onClick={() => imageInputRef.current?.click()}
+              aria-label="发送图片"
+              title="发送图片（最大 5MB）"
+            >
+              {imageUploading ? <LoaderCircle size={19} className="animate-spin" /> : <ImagePlus size={19} />}
+            </button>
             <input
               className="flex-1 bg-transparent text-white text-base placeholder-white/25 outline-none"
               placeholder={`在 #${room.name} 发消息…`}

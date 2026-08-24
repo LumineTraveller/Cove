@@ -1,0 +1,18 @@
+export const colors = {
+  background: '#09090b',
+  surface: '#121216',
+  surfaceRaised: '#18181d',
+  border: 'rgba(255,255,255,0.08)',
+  borderStrong: 'rgba(255,255,255,0.14)',
+  text: '#f4f4f5',
+  textMuted: 'rgba(244,244,245,0.48)',
+  textFaint: 'rgba(244,244,245,0.28)',
+  cyan: '#67e8f9',
+  cyanSoft: 'rgba(34,211,238,0.12)',
+  green: '#6ee7b7',
+  greenSoft: 'rgba(52,211,153,0.12)',
+  amber: '#fde68a',
+  amberSoft: 'rgba(251,191,36,0.12)',
+  red: '#fca5a5',
+  redSoft: 'rgba(248,113,113,0.12)',
+};

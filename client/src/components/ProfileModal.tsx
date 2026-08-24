@@ -3,6 +3,7 @@ import { Camera, Check, LogOut, Server, Trash2, UserRound, X } from 'lucide-reac
 import { prepareAvatar } from '../profile';
 import type { UserProfile } from '../types';
 import { Avatar } from './Avatar';
+import packageInfo from '../../package.json';
 
 interface Props {
   profile: UserProfile;
@@ -40,13 +41,13 @@ export function ProfileModal({ profile, serverURL, onSave, onClose, onOpenServer
 
   return (
     <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/65 p-4 backdrop-blur-md" onMouseDown={onClose}>
-      <section className="w-full max-w-md overflow-hidden rounded-3xl border border-white/15 bg-zinc-900/95 shadow-2xl" onMouseDown={event => event.stopPropagation()} aria-modal="true" role="dialog" aria-labelledby="profile-title">
+      <section className="relative w-full max-w-md overflow-hidden rounded-3xl border border-white/15 bg-zinc-900/95 shadow-2xl" onMouseDown={event => event.stopPropagation()} aria-modal="true" role="dialog" aria-labelledby="profile-title">
         <div className="relative h-28 bg-gradient-to-br from-cyan-400/25 via-sky-500/10 to-violet-500/20">
           <button onClick={onClose} className="absolute right-4 top-4 rounded-xl bg-black/25 p-2 text-white/60 transition hover:bg-black/40 hover:text-white focus:outline-none focus:ring-2 focus:ring-cyan-300" aria-label="关闭个人名片">
             <X size={18} />
           </button>
         </div>
-        <div className="px-7 pb-7">
+        <div className="px-7 pb-10">
           <div className="-mt-12 flex items-end justify-between">
             <div className="relative">
               <Avatar username={username || profile.username} avatarUrl={avatarUrl} size="xl" className="border-4 border-zinc-900 shadow-xl" />
@@ -94,6 +95,9 @@ export function ProfileModal({ profile, serverURL, onSave, onClose, onOpenServer
             </button>
           )}
         </div>
+        <span className="pointer-events-none absolute bottom-3 right-5 select-none text-[11px] font-medium tracking-wide text-white/20">
+          Cove v{packageInfo.version}
+        </span>
       </section>
     </div>
   );

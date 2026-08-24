@@ -6,6 +6,7 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
+import { createHash, randomUUID } from 'crypto';
 import {
   initMediasoup, router, webRtcServer,
   peers, createPeer, removePeer, getRoomProducers,
@@ -44,6 +45,7 @@ db.exec(`
     roomId TEXT NOT NULL,
     author TEXT NOT NULL,
     content TEXT NOT NULL,
+    type TEXT NOT NULL DEFAULT 'chat',
     timestamp INTEGER NOT NULL,
     FOREIGN KEY (roomId) REFERENCES rooms(id)
   );
@@ -53,7 +55,8 @@ db.exec(`
     filename TEXT NOT NULL,
     uploader TEXT NOT NULL,
     uploaderId TEXT,
-    createdAt INTEGER NOT NULL
+    createdAt INTEGER NOT NULL,
+    sortOrder INTEGER NOT NULL DEFAULT 0
   );
   CREATE TABLE IF NOT EXISTS room_mutes (
     roomId TEXT NOT NULL,
@@ -71,9 +74,20 @@ if (!roomColumns.some(column => column.name === 'ownerId'))
   db.exec('ALTER TABLE rooms ADD COLUMN ownerId TEXT');
 if (!roomColumns.some(column => column.name === 'ownerName'))
   db.exec('ALTER TABLE rooms ADD COLUMN ownerName TEXT');
+const messageColumns = db.prepare('PRAGMA table_info(messages)').all() as { name: string }[];
+if (!messageColumns.some(column => column.name === 'type'))
+  db.exec("ALTER TABLE messages ADD COLUMN type TEXT NOT NULL DEFAULT 'chat'");
 const soundpackColumns = db.prepare('PRAGMA table_info(soundpacks)').all() as { name: string }[];
 if (!soundpackColumns.some(column => column.name === 'uploaderId'))
   db.exec('ALTER TABLE soundpacks ADD COLUMN uploaderId TEXT');
+if (!soundpackColumns.some(column => column.name === 'sortOrder')) {
+  db.exec('ALTER TABLE soundpacks ADD COLUMN sortOrder INTEGER NOT NULL DEFAULT 0');
+  const existing = db.prepare('SELECT id FROM soundpacks ORDER BY createdAt DESC').all() as { id: string }[];
+  const updateOrder = db.prepare('UPDATE soundpacks SET sortOrder = ? WHERE id = ?');
+  db.transaction((rows: { id: string }[]) => {
+    rows.forEach((row, index) => updateOrder.run(index, row.id));
+  })(existing);
+}
 
 // ownerId 是本地持久身份凭据，不通过 API 或 Socket 广播给其他客户端。
 const stmtGetRooms       = db.prepare('SELECT id, name, createdAt, ownerName FROM rooms ORDER BY createdAt ASC');
@@ -86,14 +100,20 @@ const stmtDeleteRoom     = db.prepare('DELETE FROM rooms WHERE id = ?');
 const stmtDeleteRoomMessages = db.prepare('DELETE FROM messages WHERE roomId = ?');
 const stmtDeleteRoomMutes = db.prepare('DELETE FROM room_mutes WHERE roomId = ?');
 const stmtGetMessages    = db.prepare('SELECT * FROM messages WHERE roomId = ? ORDER BY timestamp ASC');
-const stmtInsertMsg      = db.prepare('INSERT INTO messages (id, roomId, author, content, timestamp) VALUES (?, ?, ?, ?, ?)');
+const stmtInsertMsg      = db.prepare('INSERT INTO messages (id, roomId, author, content, type, timestamp) VALUES (?, ?, ?, ?, ?, ?)');
 const stmtIsRoomMuted    = db.prepare('SELECT 1 FROM room_mutes WHERE roomId = ? AND clientId = ?');
 const stmtMuteMember     = db.prepare('INSERT OR REPLACE INTO room_mutes (roomId, clientId, username, createdAt) VALUES (?, ?, ?, ?)');
 const stmtUnmuteMember   = db.prepare('DELETE FROM room_mutes WHERE roomId = ? AND clientId = ?');
-const stmtGetSoundpacks  = db.prepare('SELECT * FROM soundpacks ORDER BY createdAt DESC');
+const stmtGetSoundpacks  = db.prepare('SELECT * FROM soundpacks ORDER BY sortOrder ASC, createdAt DESC');
 const stmtGetSoundpack   = db.prepare('SELECT * FROM soundpacks WHERE id = ?');
-const stmtInsertSoundpack = db.prepare('INSERT INTO soundpacks (id, name, filename, uploader, uploaderId, createdAt) VALUES (?, ?, ?, ?, ?, ?)');
+const stmtGetNextSoundpackOrder = db.prepare('SELECT COALESCE(MIN(sortOrder), 0) - 1 AS sortOrder FROM soundpacks');
+const stmtInsertSoundpack = db.prepare('INSERT INTO soundpacks (id, name, filename, uploader, uploaderId, createdAt, sortOrder) VALUES (?, ?, ?, ?, ?, ?, ?)');
+const stmtUpdateSoundpackOrder = db.prepare('UPDATE soundpacks SET sortOrder = ? WHERE id = ?');
+const stmtRenameSoundpack = db.prepare('UPDATE soundpacks SET name = ? WHERE id = ?');
 const stmtDeleteSoundpack = db.prepare('DELETE FROM soundpacks WHERE id = ?');
+const reorderSoundpacks = db.transaction((orderedIds: string[]) => {
+  orderedIds.forEach((id, index) => stmtUpdateSoundpackOrder.run(index, id));
+});
 const deleteRoomData = db.transaction((roomId: string) => {
   stmtDeleteRoomMessages.run(roomId);
   stmtDeleteRoomMutes.run(roomId);
@@ -102,11 +122,12 @@ const deleteRoomData = db.transaction((roomId: string) => {
 
 interface Room      { id: string; name: string; createdAt: number; ownerName: string | null }
 interface PrivateRoom extends Room { ownerId: string | null }
-interface Message   { id: string; roomId: string; author: string; content: string; timestamp: number }
-interface SoundpackRecord { id: string; name: string; filename: string; uploader: string; uploaderId: string | null; createdAt: number }
-interface PublicSoundpack { id: string; name: string; filename: string; uploader: string; createdAt: number; canDelete: boolean }
+interface Message   { id: string; roomId: string; author: string; content: string; type: 'chat' | 'soundpack' | 'image'; timestamp: number }
+interface SoundpackRecord { id: string; name: string; filename: string; uploader: string; uploaderId: string | null; createdAt: number; sortOrder: number }
+interface PublicSoundpack { id: string; name: string; filename: string; uploader: string; createdAt: number; sortOrder: number; canDelete: boolean }
 interface RoomMember {
   socketId: string;
+  userId: string;
   username: string;
   avatarUrl: string | null;
   isOwner: boolean;
@@ -116,37 +137,64 @@ interface RoomMember {
 // ── 语音包文件目录 ─────────────────────────────────────────────────────────────
 const SOUNDS_DIR = path.join(dataDir, 'sounds');
 fs.mkdirSync(SOUNDS_DIR, { recursive: true });
+const CHAT_IMAGES_DIR = path.join(dataDir, 'chat-images');
+fs.mkdirSync(CHAT_IMAGES_DIR, { recursive: true });
 
 const userNames   = new Map<string, string>();
 const userAvatars = new Map<string, string | null>();
 const userClientIds = new Map<string, string>(); // socketId → 持久客户端身份（不广播）
 const voiceRooms  = new Map<string, Set<string>>(); // roomId → Set<socketId>
 const roomMembers = new Map<string, Set<string>>();  // roomId → Set<socketId>
+const selfMutedVoiceMembers = new Set<string>(); // 主动关闭麦克风的 socketId，仅在本次语音会话有效
 
-function toPublicSoundpack(pack: SoundpackRecord, requesterSocketId?: string): PublicSoundpack {
+function publicUserId(socketId: string): string {
+  const stableId = userClientIds.get(socketId) ?? `socket:${socketId}`;
+  // 房主凭据本身绝不能广播；只暴露不可逆摘要供客户端保存个人音量。
+  return createHash('sha256').update(stableId).digest('hex').slice(0, 24);
+}
+
+function isRoomOwner(roomId: string | undefined, socketId: string | undefined): boolean {
+  if (!roomId || !socketId || !roomMembers.get(roomId)?.has(socketId)) return false;
+  const room = stmtGetRoomPrivate.get(roomId) as PrivateRoom | undefined;
+  const clientId = userClientIds.get(socketId);
+  return !!room?.ownerId && !!clientId && room.ownerId === clientId;
+}
+
+function toPublicSoundpack(pack: SoundpackRecord, requesterSocketId?: string, roomId?: string): PublicSoundpack {
   const requesterClientId = requesterSocketId ? userClientIds.get(requesterSocketId) : undefined;
   const requesterName = requesterSocketId ? userNames.get(requesterSocketId) : undefined;
-  const canDelete = !!requesterClientId && (
+  const ownsPack = !!requesterClientId && (
     pack.uploaderId ? pack.uploaderId === requesterClientId : pack.uploader === requesterName
   );
+  const canDelete = ownsPack || isRoomOwner(roomId, requesterSocketId);
   return {
     id: pack.id,
     name: pack.name,
     filename: pack.filename,
     uploader: pack.uploader,
     createdAt: pack.createdAt,
+    sortOrder: pack.sortOrder,
     canDelete,
   };
 }
 
 function broadcastSoundpackAdded(pack: SoundpackRecord) {
   for (const targetSocket of io.sockets.sockets.values()) {
-    targetSocket.emit('soundpack:added', toPublicSoundpack(pack, targetSocket.id));
+    targetSocket.emit('soundpack:added', toPublicSoundpack(
+      pack,
+      targetSocket.id,
+      peers.get(targetSocket.id)?.roomId ?? undefined,
+    ));
   }
 }
 
 // ── 语音包静态文件（必须在 catch-all 之前）────────────────────────────────────
 app.use('/sounds', express.static(SOUNDS_DIR));
+app.use('/chat-images', express.static(CHAT_IMAGES_DIR, {
+  fallthrough: false,
+  maxAge: '7d',
+  immutable: true,
+}));
 
 // ── Static frontend ───────────────────────────────────────────────────────────
 
@@ -164,13 +212,14 @@ if (fs.existsSync(distPath)) {
 
 app.get('/api/soundpacks', (req, res) => {
   const requesterSocketId = typeof req.query.socketId === 'string' ? req.query.socketId : undefined;
+  const roomId = typeof req.query.roomId === 'string' ? req.query.roomId : undefined;
   const packs = stmtGetSoundpacks.all() as SoundpackRecord[];
-  res.json(packs.map(pack => toPublicSoundpack(pack, requesterSocketId)));
+  res.json(packs.map(pack => toPublicSoundpack(pack, requesterSocketId, roomId)));
 });
 
 app.post('/api/soundpacks', (req, res) => {
-  const { name, data, mimeType, socketId } = req.body as {
-    name?: string; data?: string; mimeType?: string; socketId?: string;
+  const { name, data, mimeType, socketId, roomId } = req.body as {
+    name?: string; data?: string; mimeType?: string; socketId?: string; roomId?: string;
   };
   if (!name?.trim() || !data || !mimeType) {
     res.status(400).json({ error: 'name, data, mimeType 均为必填' }); return;
@@ -196,10 +245,11 @@ app.post('/api/soundpacks', (req, res) => {
   } catch {
     res.status(500).json({ error: '文件保存失败' }); return;
   }
-  const sp: SoundpackRecord = { id, name: name.trim(), filename, uploader, uploaderId, createdAt: Date.now() };
-  stmtInsertSoundpack.run(sp.id, sp.name, sp.filename, sp.uploader, sp.uploaderId, sp.createdAt);
+  const nextOrder = (stmtGetNextSoundpackOrder.get() as { sortOrder: number }).sortOrder;
+  const sp: SoundpackRecord = { id, name: name.trim(), filename, uploader, uploaderId, createdAt: Date.now(), sortOrder: nextOrder };
+  stmtInsertSoundpack.run(sp.id, sp.name, sp.filename, sp.uploader, sp.uploaderId, sp.createdAt, sp.sortOrder);
   broadcastSoundpackAdded(sp);
-  res.json(toPublicSoundpack(sp, socketId));
+  res.json(toPublicSoundpack(sp, socketId, roomId));
 });
 
 // ── 房间 REST ─────────────────────────────────────────────────────────────────
@@ -231,25 +281,171 @@ app.get('/api/rooms/:id/messages', (req, res) => {
   res.json(stmtGetMessages.all(req.params.id));
 });
 
+const CHAT_IMAGE_TYPES = new Map([
+  ['image/png', 'png'],
+  ['image/jpeg', 'jpg'],
+  ['image/webp', 'webp'],
+  ['image/gif', 'gif'],
+]);
+
+function validChatImage(buffer: Buffer, mimeType: string): boolean {
+  if (mimeType === 'image/png') return buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  if (mimeType === 'image/jpeg') return buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+  if (mimeType === 'image/webp') return buffer.subarray(0, 4).toString() === 'RIFF' && buffer.subarray(8, 12).toString() === 'WEBP';
+  if (mimeType === 'image/gif') return ['GIF87a', 'GIF89a'].includes(buffer.subarray(0, 6).toString());
+  return false;
+}
+
+app.post('/api/rooms/:id/images', (req, res) => {
+  const roomId = req.params.id;
+  const { data, mimeType, socketId } = req.body as { data?: string; mimeType?: string; socketId?: string };
+  const extension = mimeType ? CHAT_IMAGE_TYPES.get(mimeType) : undefined;
+  if (!data || !mimeType || !extension) {
+    res.status(400).json({ error: '仅支持 PNG、JPEG、WebP 或 GIF 图片' }); return;
+  }
+  if (!socketId || !userClientIds.has(socketId) || !roomMembers.get(roomId)?.has(socketId)) {
+    res.status(403).json({ error: '请先进入该房间' }); return;
+  }
+  const buffer = Buffer.from(data, 'base64');
+  if (!buffer.length || buffer.length > 5 * 1024 * 1024) {
+    res.status(400).json({ error: '图片大小必须在 5MB 以内' }); return;
+  }
+  if (!validChatImage(buffer, mimeType)) {
+    res.status(400).json({ error: '图片内容与文件类型不匹配' }); return;
+  }
+
+  const filename = `${randomUUID()}.${extension}`;
+  const roomDirectory = path.join(CHAT_IMAGES_DIR, roomId);
+  try {
+    fs.mkdirSync(roomDirectory, { recursive: true });
+    fs.writeFileSync(path.join(roomDirectory, filename), buffer, { flag: 'wx' });
+  } catch {
+    res.status(500).json({ error: '图片保存失败' }); return;
+  }
+
+  const msg: Message = {
+    id: Math.random().toString(36).slice(2, 9),
+    roomId,
+    author: userNames.get(socketId) ?? 'Unknown',
+    content: `/chat-images/${roomId}/${filename}`,
+    type: 'image',
+    timestamp: Date.now(),
+  };
+  try {
+    stmtInsertMsg.run(msg.id, msg.roomId, msg.author, msg.content, msg.type, msg.timestamp);
+    io.to(roomId).emit('message:new', msg);
+    res.json(msg);
+  } catch {
+    fs.rmSync(path.join(roomDirectory, filename), { force: true });
+    res.status(500).json({ error: '图片消息保存失败' });
+  }
+});
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+type OnDemandMediaType = 'screen' | 'screen-audio';
+
+function onDemandMediaType(value: unknown): OnDemandMediaType | null {
+  return value === 'screen' || value === 'screen-audio' ? value : null;
+}
+
+function findProducerOwner(producerId: string) {
+  for (const [socketId, peer] of peers) {
+    const producer = peer.producers.get(producerId);
+    if (producer) return { socketId, peer, producer };
+  }
+  return null;
+}
+
+/**
+ * 屏幕流只在至少有一个真实 Consumer 时传输。服务端 Producer.pause() 负责
+ * 停止向观看者转发，同时通知发送端暂停本地 Producer，避免远程分享者仍把
+ * 无人观看的 RTP 经 FRP 发到服务器。
+ */
+function syncOnDemandProducer(producerId: string) {
+  const owner = findProducerOwner(producerId);
+  if (!owner) return;
+  const sourceType = onDemandMediaType((owner.producer.appData as Record<string, unknown>).type);
+  if (!sourceType) return;
+
+  let viewerCount = 0;
+  for (const peer of peers.values()) {
+    for (const consumer of peer.consumers.values()) {
+      if (!consumer.closed && consumer.producerId === producerId) viewerCount += 1;
+    }
+  }
+  const forceMuted = sourceType === 'screen-audio' && !!owner.peer.roomId &&
+    isSocketMuted(owner.peer.roomId, owner.socketId);
+  const active = viewerCount > 0 && !forceMuted;
+  if (active) owner.producer.resume().catch(() => {});
+  else owner.producer.pause().catch(() => {});
+
+  io.to(owner.socketId).emit('screen:demand', {
+    producerId,
+    sourceType,
+    active,
+    viewerCount,
+  });
+  if (sourceType === 'screen' && owner.peer.roomId) {
+    io.to(owner.peer.roomId).emit('screen:viewers', {
+      peerId: owner.socketId,
+      viewerCount,
+    });
+  }
+}
+
+function closePeerConsumer(socketId: string, consumerId: string) {
+  const peer = peers.get(socketId);
+  const consumer = peer?.consumers.get(consumerId);
+  if (!peer || !consumer) return;
+  const producerId = consumer.producerId;
+  consumer.close();
+  peer.consumers.delete(consumerId);
+  syncOnDemandProducer(producerId);
+}
 
 function broadcastVoiceList(roomId: string) {
   const members = voiceRooms.get(roomId) ?? new Set<string>();
   const list = [...members].map(id => ({
     socketId: id,
+    userId: publicUserId(id),
     username: userNames.get(id) ?? id,
     avatarUrl: userAvatars.get(id) ?? null,
-    isMuted: isSocketMuted(roomId, id),
+    isMuted: isSocketMuted(roomId, id) || selfMutedVoiceMembers.has(id),
   }));
   io.to(roomId).emit('voice:members-updated', list);
+}
+
+function voiceCounts() {
+  return Object.fromEntries([...voiceRooms].map(([roomId, members]) => [roomId, members.size]));
+}
+
+function broadcastVoiceCounts() {
+  io.emit('voice:counts', voiceCounts());
 }
 
 function handleVoiceLeave(socketId: string, roomId: string) {
   const members = voiceRooms.get(roomId);
   if (!members?.has(socketId)) return;
   members.delete(socketId);
+  selfMutedVoiceMembers.delete(socketId);
+  const username = userNames.get(socketId) ?? socketId;
+  // 客户端异常退出、快速离开再加入时，也必须由服务端关闭旧 Producer。
+  // 否则旧麦克风仍会被其他成员消费，形成双声和“静音后仍有一路”。
+  const peer = peers.get(socketId);
+  if (peer?.roomId === roomId) {
+    // 先关闭该成员正在观看的流，及时把分享者的观众数减掉。
+    for (const consumerId of [...peer.consumers.keys()])
+      closePeerConsumer(socketId, consumerId);
+    for (const [producerId, producer] of peer.producers) {
+      producer.close();
+      peer.producers.delete(producerId);
+    }
+  }
   [...members].forEach(mid => io.to(mid).emit('voice:user-left', { socketId }));
+  io.to(roomId).emit('voice:presence', { action: 'leave', socketId, username });
   broadcastVoiceList(roomId);
+  broadcastVoiceCounts();
 }
 
 function broadcastRoomMembers(roomId: string) {
@@ -260,6 +456,7 @@ function broadcastRoomMembers(roomId: string) {
     const clientId = userClientIds.get(id);
     return {
       socketId: id,
+      userId: publicUserId(id),
       username: userNames.get(id) ?? id,
       avatarUrl: userAvatars.get(id) ?? null,
       isOwner: !!clientId && clientId === room.ownerId,
@@ -302,8 +499,23 @@ function emitForcedMuteState(socketId: string, roomId: string) {
 function pausePeerAudio(socketId: string, paused: boolean) {
   const peer = peers.get(socketId);
   if (!peer) return;
+  for (const [producerId, producer] of peer.producers) {
+    if (producer.kind !== 'audio') continue;
+    if (paused) producer.pause().catch(() => {});
+    else if ((producer.appData as Record<string, unknown>).type === 'screen-audio')
+      syncOnDemandProducer(producerId);
+    else if (selfMutedVoiceMembers.has(socketId)) producer.pause().catch(() => {});
+    else producer.resume().catch(() => {});
+  }
+}
+
+function pausePeerMicrophone(socketId: string, paused: boolean) {
+  const peer = peers.get(socketId);
+  if (!peer) return;
   for (const producer of peer.producers.values()) {
     if (producer.kind !== 'audio') continue;
+    const sourceType = (producer.appData as Record<string, unknown>).type;
+    if (sourceType === 'screen-audio') continue;
     if (paused) producer.pause().catch(() => {});
     else producer.resume().catch(() => {});
   }
@@ -358,6 +570,7 @@ io.on('connection', socket => {
     const updated = stmtUpdateOwnerName.run(username.slice(0, 64), clientId, username.slice(0, 64));
     if (updated.changes > 0) io.emit('rooms:updated', stmtGetRooms.all());
     refreshProfileViews();
+    socket.emit('voice:counts', voiceCounts());
     cb?.({ ok: true });
   });
 
@@ -487,7 +700,9 @@ io.on('connection', socket => {
     }
     roomMembers.delete(roomId);
     voiceRooms.delete(roomId);
+    broadcastVoiceCounts();
     deleteRoomData(roomId);
+    fs.rmSync(path.join(CHAT_IMAGES_DIR, roomId), { recursive: true, force: true });
     io.emit('rooms:updated', stmtGetRooms.all());
     io.emit('room:members:global', { roomId, members: [] });
     cb?.({ ok: true });
@@ -502,9 +717,10 @@ io.on('connection', socket => {
       roomId,
       author: userNames.get(socket.id) ?? 'Unknown',
       content: content.trim(),
+      type: 'chat',
       timestamp: Date.now(),
     };
-    stmtInsertMsg.run(msg.id, msg.roomId, msg.author, msg.content, msg.timestamp);
+    stmtInsertMsg.run(msg.id, msg.roomId, msg.author, msg.content, msg.type, msg.timestamp);
     io.to(roomId).emit('message:new', msg);
   });
 
@@ -514,10 +730,13 @@ io.on('connection', socket => {
     if (!stmtGetRoom.get(roomId)) return;
     if (!voiceRooms.has(roomId)) voiceRooms.set(roomId, new Set());
     const members = voiceRooms.get(roomId)!;
+    if (members.has(socket.id)) return;
     const existing = [...members];
+    selfMutedVoiceMembers.delete(socket.id);
 
     socket.emit('voice:existing-members', existing.map(id => ({
-      socketId: id, username: userNames.get(id) ?? id, avatarUrl: userAvatars.get(id) ?? null,
+      socketId: id, userId: publicUserId(id), username: userNames.get(id) ?? id,
+      avatarUrl: userAvatars.get(id) ?? null,
     })));
 
     existing.forEach(mid =>
@@ -528,11 +747,31 @@ io.on('connection', socket => {
     );
 
     members.add(socket.id);
+    io.to(roomId).emit('voice:presence', {
+      action: 'join',
+      socketId: socket.id,
+      username: userNames.get(socket.id) ?? socket.id,
+    });
     broadcastVoiceList(roomId);
+    broadcastVoiceCounts();
   });
 
   socket.on('voice:leave', (roomId: string) => {
     handleVoiceLeave(socket.id, roomId);
+  });
+
+  socket.on('voice:mute-state', (
+    { roomId, muted }: { roomId: string; muted: boolean },
+  ) => {
+    const voiceMembers = voiceRooms.get(roomId);
+    if (!voiceMembers?.has(socket.id) || !roomMembers.get(roomId)?.has(socket.id)) return;
+
+    if (muted) selfMutedVoiceMembers.add(socket.id);
+    else selfMutedVoiceMembers.delete(socket.id);
+
+    const effectivelyMuted = muted || isSocketMuted(roomId, socket.id);
+    pausePeerMicrophone(socket.id, effectivelyMuted);
+    broadcastVoiceList(roomId);
   });
 
   // ── mediasoup 信令 ────────────────────────────────────────────────────────
@@ -650,7 +889,41 @@ io.on('connection', socket => {
         appData: appData as never,
       });
 
+      // 每个连接的同类来源只能保留一条。高延迟网络下重复点击“加入语音”
+      // 可能并发发布两条 mic；关闭旧流可从服务端兜底避免双重播放。
+      const producerAppData = producer.appData as Record<string, unknown>;
+      const sourceType = typeof producerAppData.type === 'string'
+        ? producerAppData.type
+        : undefined;
+      if (sourceType) {
+        for (const [existingId, existing] of peer.producers) {
+          const existingAppData = existing.appData as Record<string, unknown>;
+          if (existingAppData.type !== sourceType) continue;
+          existing.close();
+          peer.producers.delete(existingId);
+        }
+      }
       peer.producers.set(producer.id, producer);
+
+      const demandType = onDemandMediaType(sourceType);
+      if (demandType) await producer.pause().catch(() => {});
+
+      const producerRoomId = peer.roomId;
+      producer.observer.on('close', () => {
+        peer.producers.delete(producer.id);
+        if (!demandType || !producerRoomId) return;
+        io.to(producerRoomId).emit('ms:producer-closed', {
+          producerId: producer.id,
+          peerId: socket.id,
+          sourceType: demandType,
+        });
+        if (demandType === 'screen') {
+          io.to(producerRoomId).emit('screen:viewers', {
+            peerId: socket.id,
+            viewerCount: 0,
+          });
+        }
+      });
 
       // 禁言必须由服务端兜底。即使成员篡改前端继续发布音频，SFU 也会暂停该流。
       if (producer.kind === 'audio' && peer.roomId && isSocketMuted(peer.roomId, socket.id)) {
@@ -676,6 +949,7 @@ io.on('connection', socket => {
       }
 
       cb({ producerId: producer.id });
+      if (demandType) syncOnDemandProducer(producer.id);
     } catch (e: unknown) {
       cb({ error: String(e) });
     }
@@ -700,6 +974,10 @@ io.on('connection', socket => {
     const transport = peer.recvTransport;
     if (!transport) return cb({ error: 'no recv transport' });
 
+    const owner = findProducerOwner(producerId);
+    if (!owner || !peer.roomId || owner.peer.roomId !== peer.roomId)
+      return cb({ error: 'producer is not in your room' });
+
     if (!router.canConsume({ producerId, rtpCapabilities: rtpCapabilities as never }))
       return cb({ error: 'cannot consume' });
 
@@ -712,7 +990,10 @@ io.on('connection', socket => {
 
       peer.consumers.set(consumer.id, consumer);
 
-      consumer.on('transportclose', () => peer.consumers.delete(consumer.id));
+      consumer.on('transportclose', () => {
+        peer.consumers.delete(consumer.id);
+        syncOnDemandProducer(producerId);
+      });
       consumer.on('producerclose',  () => {
         peer.consumers.delete(consumer.id);
         socket.emit('ms:consumer-closed', { consumerId: consumer.id });
@@ -725,6 +1006,7 @@ io.on('connection', socket => {
         rtpParameters: consumer.rtpParameters,
         appData:       consumer.appData,
       });
+      syncOnDemandProducer(producerId);
     } catch (e: unknown) {
       cb({ error: String(e) });
     }
@@ -740,7 +1022,16 @@ io.on('connection', socket => {
     cb?.();
   });
 
-  /** 8. 关闭一个 producer（停止屏幕共享等） */
+  /** 8. 主动停止接收（“停止观看共享”） */
+  socket.on('ms:close-consumer', (
+    { consumerId }: { consumerId: string },
+    cb?: (result: { ok: boolean }) => void,
+  ) => {
+    closePeerConsumer(socket.id, consumerId);
+    cb?.({ ok: true });
+  });
+
+  /** 9. 关闭一个 producer（停止屏幕共享等） */
   socket.on('ms:close-producer', ({ producerId }: { producerId: string }) => {
     const peer = peers.get(socket.id)!;
     const producer = peer.producers.get(producerId);
@@ -753,16 +1044,30 @@ io.on('connection', socket => {
   // ── 语音包 ────────────────────────────────────────────────────────────────
 
   socket.on('soundpack:play', ({ soundId, roomId }: { soundId: string; roomId: string }) => {
-    if (!stmtGetSoundpack.get(soundId) || !roomMembers.get(roomId)?.has(socket.id)) return;
+    const pack = stmtGetSoundpack.get(soundId) as SoundpackRecord | undefined;
+    if (!pack || !roomMembers.get(roomId)?.has(socket.id)) return;
+    const playedBy = userNames.get(socket.id) ?? socket.id;
     // 只广播给同房间其他人，发送者自己已在客户端直接播放
     socket.to(roomId).emit('soundpack:play', {
       soundId,
-      playedBy: userNames.get(socket.id) ?? socket.id,
+      playedBy,
+      soundName: pack.name,
     });
+
+    const msg: Message = {
+      id: Math.random().toString(36).slice(2, 9),
+      roomId,
+      author: playedBy,
+      content: `${playedBy} 播放了「${pack.name}」`,
+      type: 'soundpack',
+      timestamp: Date.now(),
+    };
+    stmtInsertMsg.run(msg.id, msg.roomId, msg.author, msg.content, msg.type, msg.timestamp);
+    io.to(roomId).emit('message:new', msg);
   });
 
   socket.on('soundpack:delete', (
-    { soundId }: { soundId?: string },
+    { soundId, roomId }: { soundId?: string; roomId?: string },
     cb?: (result: { ok: boolean; error?: string }) => void,
   ) => {
     const pack = soundId ? stmtGetSoundpack.get(soundId) as SoundpackRecord | undefined : undefined;
@@ -772,7 +1077,9 @@ io.on('connection', socket => {
     const ownsPack = !!actorClientId && (
       pack.uploaderId ? pack.uploaderId === actorClientId : pack.uploader === actorName
     );
-    if (!ownsPack) { cb?.({ ok: false, error: '只能删除自己上传的语音包' }); return; }
+    if (!ownsPack && !isRoomOwner(roomId, socket.id)) {
+      cb?.({ ok: false, error: '只能由上传者或当前房主删除语音包' }); return;
+    }
 
     stmtDeleteSoundpack.run(pack.id);
     const safeFilename = path.basename(pack.filename);
@@ -783,6 +1090,54 @@ io.on('connection', socket => {
       console.warn(`[soundpack] 删除文件失败 ${safeFilename}:`, error);
     }
     io.emit('soundpack:deleted', { soundId: pack.id });
+    cb?.({ ok: true });
+  });
+
+  socket.on('soundpack:rename', (
+    { soundId, roomId, name }: { soundId?: string; roomId?: string; name?: string },
+    cb?: (result: { ok: boolean; error?: string; name?: string }) => void,
+  ) => {
+    const pack = soundId ? stmtGetSoundpack.get(soundId) as SoundpackRecord | undefined : undefined;
+    const nextName = name?.trim().slice(0, 64);
+    const actorClientId = userClientIds.get(socket.id);
+    const actorName = userNames.get(socket.id);
+    if (!pack) { cb?.({ ok: false, error: '语音包不存在或已被删除' }); return; }
+    if (!nextName) { cb?.({ ok: false, error: '名称不能为空' }); return; }
+    const ownsPack = !!actorClientId && (
+      pack.uploaderId ? pack.uploaderId === actorClientId : pack.uploader === actorName
+    );
+    if (!ownsPack && !isRoomOwner(roomId, socket.id)) {
+      cb?.({ ok: false, error: '只能由上传者或当前房主修改名称' }); return;
+    }
+
+    stmtRenameSoundpack.run(nextName, pack.id);
+    io.emit('soundpack:renamed', { soundId: pack.id, name: nextName });
+    cb?.({ ok: true, name: nextName });
+  });
+
+  socket.on('soundpack:reorder', (
+    { orderedIds, roomId }: { orderedIds?: string[]; roomId?: string },
+    cb?: (result: { ok: boolean; error?: string }) => void,
+  ) => {
+    if (!roomId || !roomMembers.get(roomId)?.has(socket.id)) {
+      cb?.({ ok: false, error: '请先进入房间' }); return;
+    }
+    if (!Array.isArray(orderedIds) || orderedIds.length > 500) {
+      cb?.({ ok: false, error: '无效的语音包顺序' }); return;
+    }
+
+    const currentIds = (stmtGetSoundpacks.all() as SoundpackRecord[]).map(pack => pack.id);
+    const uniqueIds = new Set(orderedIds);
+    if (
+      orderedIds.length !== currentIds.length
+      || uniqueIds.size !== currentIds.length
+      || currentIds.some(id => !uniqueIds.has(id))
+    ) {
+      cb?.({ ok: false, error: '语音包列表已变化，请刷新后重试' }); return;
+    }
+
+    reorderSoundpacks(orderedIds);
+    io.emit('soundpack:reordered', { orderedIds });
     cb?.({ ok: true });
   });
 

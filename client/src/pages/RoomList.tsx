@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Crown, Hash, LoaderCircle, MessageCircle, Plus, Server, Settings, Users, Wifi, WifiOff, X } from 'lucide-react';
+import { Crown, Hash, Headphones, LoaderCircle, MessageCircle, Plus, Server, Settings, Users, Wifi, WifiOff, X } from 'lucide-react';
 import { Avatar } from '../components/Avatar';
 import { ProfileModal } from '../components/ProfileModal';
 import { socket, normalizeURL } from '../socket';
@@ -26,18 +26,22 @@ export default function RoomList({ profile, onProfileChange, onReset, connected,
   const [draftUrl, setDraftUrl] = useState(localStorage.getItem('cove_server_url') ?? serverURL);
   const [onlineUsers, setOnlineUsers] = useState<OnlineUser[]>([]);
   const [roomMembersMap, setRoomMembersMap] = useState<Record<string, string[]>>({});
+  const [voiceCounts, setVoiceCounts] = useState<Record<string, number>>({});
 
   useEffect(() => {
     const onRooms = (updated: Room[]) => setRooms(updated);
     const onUsers = (users: OnlineUser[]) => setOnlineUsers(users);
     const onMembers = ({ roomId, members }: { roomId: string; members: string[] }) => setRoomMembersMap(previous => ({ ...previous, [roomId]: members }));
+    const onVoiceCounts = (counts: Record<string, number>) => setVoiceCounts(counts);
     socket.on('rooms:updated', onRooms);
     socket.on('users:online', onUsers);
     socket.on('room:members:global', onMembers);
+    socket.on('voice:counts', onVoiceCounts);
     return () => {
       socket.off('rooms:updated', onRooms);
       socket.off('users:online', onUsers);
       socket.off('room:members:global', onMembers);
+      socket.off('voice:counts', onVoiceCounts);
     };
   }, []);
 
@@ -98,7 +102,8 @@ export default function RoomList({ profile, onProfileChange, onReset, connected,
                   <Hash size={17} className="flex-shrink-0 text-white/25 transition group-hover:text-white/55" />
                   <span className="flex-1 truncate text-base font-medium">{room.name}</span>
                   {room.ownerName && <Crown size={15} className="flex-shrink-0 text-amber-300/70" aria-label={`房主：${room.ownerName}`} />}
-                  {(roomMembersMap[room.id]?.length ?? 0) > 0 && <span className="flex-shrink-0 rounded-full bg-white/10 px-2 py-0.5 text-xs text-white/45">{roomMembersMap[room.id].length}</span>}
+                  <span className="inline-flex flex-shrink-0 items-center gap-1 rounded-full bg-cyan-300/10 px-2 py-0.5 text-xs text-cyan-100/65" title="语音人数"><Headphones size={11} />{voiceCounts[room.id] ?? 0}</span>
+                  {(roomMembersMap[room.id]?.length ?? 0) > 0 && <span className="inline-flex flex-shrink-0 items-center gap-1 rounded-full bg-white/10 px-2 py-0.5 text-xs text-white/45" title="频道人数"><Users size={11} />{roomMembersMap[room.id].length}</span>}
                 </button>
               ))}
             </div>
