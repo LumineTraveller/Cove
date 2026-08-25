@@ -1,6 +1,6 @@
 {
   "name": "cove-client",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Cove - 即时通讯客户端",
   "author": "Cove",
   "private": true,
@@ -45,6 +45,7 @@
       "dist-electron/**/*"
     ],
     "win": {
+      "icon": "build/icon.ico",
       "target": "nsis"
     },
     "mac": {
