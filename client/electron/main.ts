@@ -1,5 +1,6 @@
 import { app, BrowserWindow, Menu, session, desktopCapturer } from 'electron';
 import path from 'path';
+import { startAutoUpdater } from './updater';
 
 const isDev = !app.isPackaged;
 
@@ -66,7 +67,10 @@ function createWindow() {
   });
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  createWindow();
+  startAutoUpdater(app.isPackaged);
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

@@ -1,6 +1,6 @@
 {
   "name": "cove-client",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Cove - 即时通讯客户端",
   "author": "Cove",
   "private": true,
@@ -8,12 +8,14 @@
   "scripts": {
     "dev": "vite",
     "electron:compile": "tsc -p electron/tsconfig.json",
+    "test:updater": "npm run electron:compile && node --test tests/updater.test.cjs",
     "electron:dev": "npm run electron:compile && electron .",
     "build": "tsc && vite build",
     "build:electron": "npm run build && npm run electron:compile && electron-builder",
     "preview": "vite preview"
   },
   "dependencies": {
+    "electron-updater": "^6.8.9",
     "lucide-react": "^1.33.0",
     "mediasoup-client": "^3.20.0",
     "react": "^18.2.0",
@@ -40,6 +42,15 @@
     "directories": {
       "output": "dist-app"
     },
+    "artifactName": "Cove-Setup-${version}.${ext}",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "LumineTraveller",
+        "repo": "Cove",
+        "releaseType": "release"
+      }
+    ],
     "files": [
       "dist/**/*",
       "dist-electron/**/*"

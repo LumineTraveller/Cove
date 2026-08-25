@@ -1,0 +1,47 @@
+name: Release Cove Client
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-windows-client:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Verify tag matches client version
+        shell: pwsh
+        run: |
+          $version = node -p "require('./client/package.json').version"
+          if ("v$version" -ne "${{ github.ref_name }}") {
+            throw "Tag ${{ github.ref_name }} does not match client version $version"
+          }
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test updater
+        run: npm run test:updater -w client
+
+      - name: Build and publish Windows release
+        run: npm run build:electron -w client -- --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
