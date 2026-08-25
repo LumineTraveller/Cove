@@ -9,6 +9,8 @@
     "dev": "vite",
     "electron:compile": "tsc -p electron/tsconfig.json",
     "test:updater": "npm run electron:compile && node --test tests/updater.test.cjs",
+    "test:connection": "tsx --test tests/connectionDeadline.test.ts",
+    "test": "npm run test:updater && npm run test:connection",
     "electron:dev": "npm run electron:compile && electron .",
     "build": "tsc && vite build",
     "build:electron": "npm run build && npm run electron:compile && electron-builder",

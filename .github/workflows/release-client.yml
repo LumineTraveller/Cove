@@ -40,8 +40,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Test updater
-        run: npm run test:updater -w client
+      - name: Test desktop client
+        run: npm test -w client
 
       - name: Build Windows release
         run: npm run build:electron -w client -- --publish never
