@@ -1,9 +1,9 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   Activity, ArrowLeft, Crown, Ellipsis, Eye, EyeOff, Gamepad2, Hash, Headphones, ImagePlus, LoaderCircle, Maximize2, Menu, MessageCircle,
   Mic, MicOff, Minimize2, MonitorPlay, MonitorUp, PanelRightClose, PanelRightOpen, PhoneOff,
-  Send, Trash2, Volume2, VolumeX, X,
+  RefreshCw, Send, Settings2, Trash2, UserMinus, UserRound, Volume2, VolumeX, X,
 } from 'lucide-react';
 import { socket } from '../socket';
 import { useWebRTC, SCREEN_PRESETS, ScreenPreset, Fps } from '../hooks/useWebRTC';
@@ -13,6 +13,13 @@ import { UserProfileModal } from '../components/UserProfileModal';
 import { SoundPackPanel } from '../components/SoundPackPanel';
 import { loadProfileRemarks, saveProfileRemark } from '../profileRemarks';
 import { Room, Message, RoomMember, RoomState, UserProfile } from '../types';
+import { AudioDeviceOption, DEFAULT_AUDIO_DEVICE_ID } from '../audioDevices';
+import {
+  CHAT_IMAGE_MAX_BATCH,
+  chatImageMimeType,
+  collectChatImageFiles,
+  validateChatImageFile,
+} from '../chatImages';
 
 interface Props {
   profile: UserProfile;
@@ -106,6 +113,87 @@ function ScreenSettingsModal({ preset, fps, audio, gameMode, onPreset, onFps, on
   );
 }
 
+interface AudioDeviceModalProps {
+  inputDevices: AudioDeviceOption[];
+  outputDevices: AudioDeviceOption[];
+  selectedInputId: string;
+  selectedOutputId: string;
+  refreshing: boolean;
+  switchingInput: boolean;
+  error: string | null;
+  onInput: (deviceId: string) => Promise<void>;
+  onOutput: (deviceId: string) => Promise<void>;
+  onRefresh: (requestPermission?: boolean) => Promise<void>;
+  onClose: () => void;
+}
+
+function AudioDeviceModal({
+  inputDevices, outputDevices, selectedInputId, selectedOutputId,
+  refreshing, switchingInput, error, onInput, onOutput, onRefresh, onClose,
+}: AudioDeviceModalProps) {
+  const inputUnavailable = selectedInputId !== DEFAULT_AUDIO_DEVICE_ID
+    && !inputDevices.some(device => device.deviceId === selectedInputId);
+  const outputUnavailable = selectedOutputId !== DEFAULT_AUDIO_DEVICE_ID
+    && !outputDevices.some(device => device.deviceId === selectedOutputId);
+  const labelsHidden = [...inputDevices, ...outputDevices].some(device => /^(麦克风|扬声器) \d+$/.test(device.label));
+
+  return (
+    <div className="fixed inset-0 z-[130] flex items-center justify-center bg-black/65 p-4 backdrop-blur-md" onMouseDown={onClose}>
+      <section className="w-full max-w-md rounded-3xl border border-white/15 bg-zinc-900/95 p-6 shadow-2xl" onMouseDown={event => event.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="audio-device-title">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h2 id="audio-device-title" className="text-xl font-bold text-white">音频设备</h2>
+            <p className="mt-1 text-sm text-white/40">切换后自动记忆，下次启动继续使用。</p>
+          </div>
+          <button onClick={onClose} className="rounded-xl p-2 text-white/35 transition hover:bg-white/10 hover:text-white" aria-label="关闭音频设备设置"><X size={18} /></button>
+        </div>
+
+        <div className="mt-6 space-y-5">
+          <label className="block">
+            <span className="mb-2 flex items-center gap-2 text-sm font-semibold text-white/65"><Mic size={16} />收音设备</span>
+            <select
+              value={selectedInputId}
+              disabled={switchingInput || refreshing}
+              onChange={event => { void onInput(event.target.value); }}
+              className="w-full rounded-xl border border-white/10 bg-black/35 px-3 py-3 text-sm text-white outline-none transition focus:border-cyan-300/45 disabled:cursor-wait disabled:opacity-50"
+            >
+              <option value={DEFAULT_AUDIO_DEVICE_ID}>系统默认麦克风</option>
+              {inputUnavailable && <option value={selectedInputId}>此前选择的麦克风（当前不可用）</option>}
+              {inputDevices.map(device => <option key={device.deviceId} value={device.deviceId}>{device.label}</option>)}
+            </select>
+            {switchingInput && <span className="mt-2 inline-flex items-center gap-2 text-xs text-cyan-200/70"><LoaderCircle size={13} className="animate-spin" />正在切换麦克风，不会退出语音</span>}
+          </label>
+
+          <label className="block">
+            <span className="mb-2 flex items-center gap-2 text-sm font-semibold text-white/65"><Volume2 size={16} />扬声器</span>
+            <select
+              value={selectedOutputId}
+              disabled={refreshing}
+              onChange={event => { void onOutput(event.target.value); }}
+              className="w-full rounded-xl border border-white/10 bg-black/35 px-3 py-3 text-sm text-white outline-none transition focus:border-cyan-300/45 disabled:cursor-wait disabled:opacity-50"
+            >
+              <option value={DEFAULT_AUDIO_DEVICE_ID}>系统默认扬声器</option>
+              {outputUnavailable && <option value={selectedOutputId}>此前选择的扬声器（当前不可用）</option>}
+              {outputDevices.map(device => <option key={device.deviceId} value={device.deviceId}>{device.label}</option>)}
+            </select>
+            <p className="mt-2 text-xs leading-relaxed text-white/30">影响语音、共享音频、语音包和加入/退出提示音。</p>
+          </label>
+        </div>
+
+        {labelsHidden && <p className="mt-5 rounded-xl border border-amber-300/15 bg-amber-300/[0.06] px-3 py-2 text-xs leading-relaxed text-amber-100/65">Windows 尚未提供设备名称。点击“授权并刷新”后即可显示完整名称。</p>}
+        {error && <p className="mt-4 rounded-xl border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs leading-relaxed text-red-200">{error}</p>}
+
+        <div className="mt-6 flex gap-2.5">
+          <button onClick={() => { void onRefresh(true); }} disabled={refreshing || switchingInput} className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl bg-white/10 py-3 text-sm font-semibold text-white/70 transition hover:bg-white/15 disabled:cursor-wait disabled:opacity-45">
+            {refreshing ? <LoaderCircle size={16} className="animate-spin" /> : <RefreshCw size={16} />}{refreshing ? '正在读取' : '授权并刷新'}
+          </button>
+          <button onClick={onClose} className="flex-1 rounded-xl bg-white py-3 text-sm font-semibold text-zinc-900 transition hover:bg-cyan-100">完成</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function formatTime(ts: number) {
   return new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
 }
@@ -130,6 +218,7 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
   const [roomMembers, setRoomMembers] = useState<RoomMember[]>([]);
   const [isOwner, setIsOwner]         = useState(false);
   const [moderatingId, setModeratingId] = useState<string | null>(null);
+  const [kickingId, setKickingId] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [chatDrawerOpen, setChatDrawerOpen] = useState(true);
   const [showRoomMenu, setShowRoomMenu] = useState(false);
@@ -138,11 +227,16 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
   const [viewingProfile, setViewingProfile] = useState<{ userId: string; socketId: string; username: string; avatarUrl?: string | null } | null>(null);
   const [profileRemarks, setProfileRemarks] = useState(loadProfileRemarks);
   const [roomSynced, setRoomSynced] = useState(false);
+  const [messagesLoaded, setMessagesLoaded] = useState(false);
   const [imageUploading, setImageUploading] = useState(false);
+  const [imageDragActive, setImageDragActive] = useState(false);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const messagesEndRef                = useRef<HTMLDivElement>(null);
   const screenContainerRef            = useRef<HTMLDivElement>(null);
   const imageInputRef                 = useRef<HTMLInputElement>(null);
+  const imageUploadingRef             = useRef(false);
+  const imageDragDepthRef             = useRef(0);
+  const initiallyScrolledRoomRef      = useRef<string | null>(null);
 
   const [showScreenModal, setShowScreenModal] = useState(false);
   const [pendingPreset, setPendingPreset]     = useState<ScreenPreset>('720p');
@@ -150,24 +244,42 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
   const [pendingAudio, setPendingAudio]       = useState(false);
   const [pendingGameMode, setPendingGameMode] = useState(false);
   const [screenMaximized, setScreenMaximized] = useState(false);
+  const [showAudioDevices, setShowAudioDevices] = useState(false);
 
   const rtc = useWebRTC(socket, roomId!);
 
   useEffect(() => {
     if (!roomId) return;
+    let active = true;
+    setRoom(null);
+    setMessages([]);
+    setMessagesLoaded(false);
     fetch(`${serverURL}/api/rooms/${roomId}`)
       .then(r => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json() as Promise<Room>;
-      }).then(setRoom).catch(() => navigate('/'));
+      })
+      .then(nextRoom => { if (active) setRoom(nextRoom); })
+      .catch(() => { if (active) navigate('/'); });
     fetch(`${serverURL}/api/rooms/${roomId}/messages`)
-      .then(r => r.json()).then(setMessages);
+      .then(r => r.json())
+      .then((history: Message[]) => {
+        if (!active) return;
+        setMessages(current => {
+          const merged = new Map(history.map(message => [message.id, message]));
+          current.forEach(message => merged.set(message.id, message));
+          return [...merged.values()].sort((left, right) => left.timestamp - right.timestamp);
+        });
+        setMessagesLoaded(true);
+      })
+      .catch(() => { if (active) setMessagesLoaded(true); });
+    return () => { active = false; };
   }, [roomId, navigate, serverURL]);
 
   useEffect(() => {
     if (!roomId || !sessionReady) { setRoomSynced(false); return; }
     const joinRoom = () => socket.emit('room:join', roomId);
-    const onNew = (msg: Message) => setMessages(prev => [...prev, msg]);
+    const onNew = (msg: Message) => setMessages(prev => prev.some(current => current.id === msg.id) ? prev : [...prev, msg]);
     const onState = (state: RoomState) => {
       if (state.roomId !== roomId) return;
       setRoomMembers(state.members);
@@ -180,23 +292,43 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
       rtc.leaveVoice();
       navigate('/', { replace: true });
     };
+    const onKicked = ({ roomId: kickedRoomId, by }: { roomId: string; by?: string }) => {
+      if (kickedRoomId !== roomId) return;
+      rtc.leaveVoice();
+      window.alert(`你已被${by ? ` ${by} ` : '房主'}移出房间。`);
+      navigate('/', { replace: true });
+    };
+    const onRoomPresence = ({ roomId: presenceRoomId, action }: { roomId: string; action: 'join' | 'leave' }) => {
+      if (presenceRoomId === roomId) rtc.playPresenceTone(action);
+    };
     socket.on('message:new', onNew);
     socket.on('room:state', onState);
     socket.on('room:deleted', onDeleted);
+    socket.on('room:kicked', onKicked);
+    socket.on('room:presence', onRoomPresence);
     joinRoom();
     return () => {
       socket.emit('room:leave', roomId);
       socket.off('message:new', onNew);
       socket.off('room:state', onState);
       socket.off('room:deleted', onDeleted);
+      socket.off('room:kicked', onKicked);
+      socket.off('room:presence', onRoomPresence);
       rtc.leaveVoice();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomId, sessionReady]);
 
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  const chatHistoryReady = messagesLoaded && room?.id === roomId;
+  useLayoutEffect(() => {
+    if (!chatHistoryReady || !roomId || !messagesEndRef.current) return;
+    const isInitialScroll = initiallyScrolledRoomRef.current !== roomId;
+    messagesEndRef.current.scrollIntoView({
+      behavior: isInitialScroll ? 'auto' : 'smooth',
+      block: 'end',
+    });
+    initiallyScrolledRoomRef.current = roomId;
+  }, [chatHistoryReady, messages, roomId]);
 
   const sendMessage = useCallback(() => {
     if (!input.trim() || !roomId) return;
@@ -209,32 +341,84 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
     return `${serverURL.replace(/\/$/, '')}${value.startsWith('/') ? value : `/${value}`}`;
   }, [serverURL]);
 
-  const sendImage = useCallback(async (file?: File) => {
-    if (!file || !roomId || !socket.id || imageUploading) return;
-    if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(file.type)) {
-      window.alert('仅支持 PNG、JPEG、WebP 或 GIF 图片。'); return;
+  const sendImages = useCallback(async (files: File[]) => {
+    if (!files.length || !roomId || !socket.id || !sessionReady || !roomSynced || imageUploadingRef.current) return;
+    if (files.length > CHAT_IMAGE_MAX_BATCH) {
+      window.alert(`一次最多发送 ${CHAT_IMAGE_MAX_BATCH} 张图片。`);
+      return;
     }
-    if (file.size > 5 * 1024 * 1024) {
-      window.alert('图片不能超过 5MB。'); return;
+    for (const file of files) {
+      const validationError = validateChatImageFile(file);
+      if (validationError) { window.alert(validationError); return; }
     }
+
+    imageUploadingRef.current = true;
     setImageUploading(true);
     try {
-      const dataUrl = await readFileAsDataUrl(file);
-      const data = dataUrl.slice(dataUrl.indexOf(',') + 1);
-      const response = await fetch(`${serverURL.replace(/\/$/, '')}/api/rooms/${roomId}/images`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ data, mimeType: file.type, socketId: socket.id }),
-      });
-      const result = await response.json() as { error?: string };
-      if (!response.ok) throw new Error(result.error ?? `HTTP ${response.status}`);
+      for (const file of files) {
+        const dataUrl = await readFileAsDataUrl(file);
+        const data = dataUrl.slice(dataUrl.indexOf(',') + 1);
+        const response = await fetch(`${serverURL.replace(/\/$/, '')}/api/rooms/${roomId}/images`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ data, mimeType: chatImageMimeType(file), socketId: socket.id }),
+        });
+        const result = await response.json() as { error?: string };
+        if (!response.ok) throw new Error(result.error ?? `HTTP ${response.status}`);
+      }
     } catch (cause) {
       window.alert(`图片发送失败：${cause instanceof Error ? cause.message : String(cause)}`);
     } finally {
+      imageUploadingRef.current = false;
       setImageUploading(false);
       if (imageInputRef.current) imageInputRef.current.value = '';
     }
-  }, [imageUploading, roomId, serverURL]);
+  }, [roomId, roomSynced, serverURL, sessionReady]);
+
+  const hasFileItems = useCallback((items: DataTransferItemList) =>
+    Array.from(items).some(item => item.kind === 'file'), []);
+
+  const handleImageDragEnter = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    if (!hasFileItems(event.dataTransfer.items)) return;
+    event.preventDefault();
+    imageDragDepthRef.current += 1;
+    setImageDragActive(true);
+  }, [hasFileItems]);
+
+  const handleImageDragOver = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    if (!hasFileItems(event.dataTransfer.items)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+  }, [hasFileItems]);
+
+  const handleImageDragLeave = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    if (!imageDragActive) return;
+    event.preventDefault();
+    imageDragDepthRef.current = Math.max(0, imageDragDepthRef.current - 1);
+    if (imageDragDepthRef.current === 0) setImageDragActive(false);
+  }, [imageDragActive]);
+
+  const handleImageDrop = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    if (!hasFileItems(event.dataTransfer.items) && event.dataTransfer.files.length === 0) return;
+    event.preventDefault();
+    imageDragDepthRef.current = 0;
+    setImageDragActive(false);
+    const images = collectChatImageFiles(event.dataTransfer.files);
+    if (!images.length) return;
+    void sendImages(images);
+  }, [hasFileItems, sendImages]);
+
+  const handleImagePaste = useCallback((event: React.ClipboardEvent<HTMLInputElement>) => {
+    const clipboardFiles = event.clipboardData.files.length
+      ? event.clipboardData.files
+      : Array.from(event.clipboardData.items)
+          .flatMap(item => item.kind === 'file' ? [item.getAsFile()] : [])
+          .filter((file): file is File => file !== null);
+    const images = collectChatImageFiles(clipboardFiles);
+    if (!images.length) return;
+    event.preventDefault();
+    void sendImages(images);
+  }, [sendImages]);
 
   const setMemberMuted = useCallback(async (member: RoomMember) => {
     if (!roomId || !isOwner || member.isOwner) return;
@@ -255,6 +439,28 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
       alert(error instanceof Error ? error.message : String(error));
     } finally {
       setModeratingId(null);
+    }
+  }, [isOwner, roomId]);
+
+  const kickMember = useCallback(async (member: RoomMember) => {
+    if (!roomId || !isOwner || member.isOwner || member.socketId === socket.id) return;
+    if (!window.confirm(`将 ${member.username} 移出房间？`)) return;
+    setKickingId(member.socketId);
+    try {
+      const result = await new Promise<{ ok: boolean; error?: string }>((resolve, reject) => {
+        socket.timeout(5_000).emit('room:kick', {
+          roomId,
+          targetSocketId: member.socketId,
+        }, (error: Error | null, response: { ok: boolean; error?: string }) => {
+          if (error) reject(error);
+          else resolve(response);
+        });
+      });
+      if (!result.ok) throw new Error(result.error ?? '移除失败');
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : String(error));
+    } finally {
+      setKickingId(null);
     }
   }, [isOwner, roomId]);
 
@@ -296,6 +502,16 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
     <div className="h-full flex items-center justify-center bg-gradient-to-br from-zinc-950 via-black to-zinc-900 text-white/40">加载中…</div>
   );
 
+  // 语音中的成员始终排在仅进入房间的成员之前；同一组内保持服务端顺序稳定。
+  const voiceMemberSocketIds = new Set(rtc.voiceMembers.map(member => member.socketId));
+  const sortedRoomMembers = roomMembers
+    .map((member, index) => ({ member, index }))
+    .sort((left, right) =>
+      Number(voiceMemberSocketIds.has(right.member.socketId))
+      - Number(voiceMemberSocketIds.has(left.member.socketId))
+      || left.index - right.index)
+    .map(({ member }) => member);
+
   const hasScreen    = !!rtc.localScreen || !!rtc.remoteScreen;
   return (
     <div className="h-full flex bg-gradient-to-br from-zinc-950 via-black to-zinc-900 overflow-hidden">
@@ -312,6 +528,22 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
           })}
           onCancel={() => setShowScreenModal(false)}
           onConfirm={() => { setShowScreenModal(false); rtc.startScreenShare(pendingPreset, pendingFps, pendingAudio, pendingGameMode); }}
+        />
+      )}
+
+      {showAudioDevices && (
+        <AudioDeviceModal
+          inputDevices={rtc.audioInputDevices}
+          outputDevices={rtc.audioOutputDevices}
+          selectedInputId={rtc.selectedAudioInputId}
+          selectedOutputId={rtc.selectedAudioOutputId}
+          refreshing={rtc.audioDevicesRefreshing}
+          switchingInput={rtc.audioInputSwitching}
+          error={rtc.audioDeviceError}
+          onInput={rtc.selectAudioInput}
+          onOutput={rtc.selectAudioOutput}
+          onRefresh={rtc.refreshAudioDevices}
+          onClose={() => setShowAudioDevices(false)}
         />
       )}
 
@@ -376,7 +608,7 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
               成员 — {roomMembers.length}
             </p>
             <div className="space-y-1">
-              {roomMembers.map(member => {
+              {sortedRoomMembers.map(member => {
                 const isSelf = member.socketId === socket.id;
                 const voiceMember = rtc.voiceMembers.find(voice => voice.socketId === member.socketId);
                 const inVoice = !!voiceMember;
@@ -411,42 +643,70 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
 
                       {showVoiceState && (
                         <div className="ml-11 mt-2">
-                          <div className="h-1 overflow-hidden rounded-full bg-white/10">
-                            <div
-                              className="h-full rounded-full bg-gradient-to-r from-green-400 to-emerald-300 transition-[width] duration-75"
-                              style={{ width: `${Math.round((voiceMuted || (isSelf && rtc.isMuted) ? 0 : level) * 100)}%` }}
-                            />
-                          </div>
-                          {!isSelf && rtc.inVoice && voiceMember && (
-                            <label className="mt-2 flex items-center gap-2" title={`调整你听到的 ${member.username} 音量`}>
+                          {!isSelf && rtc.inVoice && voiceMember ? (
+                            <label className="grid grid-cols-[13px_minmax(0,1fr)] items-center gap-x-2" title={`调整你听到的 ${member.username} 音量`}>
                               {(rtc.memberVolumes[member.socketId] ?? 1) === 0
                                 ? <VolumeX size={13} className="flex-shrink-0 text-white/35" />
                                 : <Volume2 size={13} className="flex-shrink-0 text-white/35" />}
-                              <input
-                                type="range"
-                                min="0"
-                                max="100"
-                                step="1"
-                                value={Math.round((rtc.memberVolumes[member.socketId] ?? 1) * 100)}
-                                onChange={event => rtc.setMemberVolume(member.socketId, voiceMember.userId, Number(event.target.value) / 100)}
-                                className="h-1 w-full cursor-pointer accent-cyan-300"
-                                aria-label={`${member.username} 的接收音量`}
-                              />
+                              <div className="overflow-hidden rounded-[3px] border border-white/10 bg-white/[0.04]">
+                                <div className="h-1.5 bg-white/10" role="progressbar" aria-label={`${member.username} 的实时声音强度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round((voiceMuted ? 0 : level) * 100)}>
+                                  <div
+                                    className="h-full bg-gradient-to-r from-green-400 to-emerald-300 transition-[width] duration-75"
+                                    style={{ width: `${Math.round((voiceMuted ? 0 : level) * 100)}%` }}
+                                  />
+                                </div>
+                                <div className="relative h-2 border-t border-white/10 bg-white/10">
+                                  <div
+                                    className="pointer-events-none absolute inset-y-0 left-0 bg-cyan-300/65"
+                                    style={{ width: `${Math.round((rtc.memberVolumes[member.socketId] ?? 1) * 100)}%` }}
+                                  />
+                                  <div
+                                    className="pointer-events-none absolute inset-y-0 w-1 -translate-x-1/2 bg-cyan-100 shadow-[0_0_5px_rgba(165,243,252,0.65)]"
+                                    style={{ left: `${Math.round((rtc.memberVolumes[member.socketId] ?? 1) * 100)}%` }}
+                                  />
+                                  <input
+                                    type="range"
+                                    min="0"
+                                    max="100"
+                                    step="1"
+                                    value={Math.round((rtc.memberVolumes[member.socketId] ?? 1) * 100)}
+                                    onChange={event => rtc.setMemberVolume(member.socketId, voiceMember.userId, Number(event.target.value) / 100)}
+                                    className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+                                    aria-label={`${member.username} 的接收音量`}
+                                  />
+                                </div>
+                              </div>
                             </label>
+                          ) : (
+                            <div className="h-1 overflow-hidden rounded-full bg-white/10" role="progressbar" aria-label={`${member.username} 的实时声音强度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round((voiceMuted || (isSelf && rtc.isMuted) ? 0 : level) * 100)}>
+                              <div
+                                className="h-full rounded-full bg-gradient-to-r from-green-400 to-emerald-300 transition-[width] duration-75"
+                                style={{ width: `${Math.round((voiceMuted || (isSelf && rtc.isMuted) ? 0 : level) * 100)}%` }}
+                              />
+                            </div>
                           )}
                         </div>
                       )}
                     </div>
                     {isOwner && !member.isOwner && !isSelf && (
-                      <button
-                        onClick={() => setMemberMuted(member)}
-                        disabled={moderatingId === member.socketId || !sessionReady || !roomSynced}
-                        className={`mt-0.5 flex-shrink-0 rounded-lg px-2 py-1.5 text-xs font-medium transition-colors disabled:opacity-40 ${
-                          member.isMuted
-                            ? 'bg-green-500/10 text-green-300 hover:bg-green-500/20'
-                            : 'bg-red-500/10 text-red-300 hover:bg-red-500/20'
-                        }`}
-                      >{member.isMuted ? '解除禁言' : '禁言'}</button>
+                      <div className="mt-0.5 flex flex-shrink-0 items-center gap-1">
+                        <button
+                          onClick={() => setMemberMuted(member)}
+                          disabled={moderatingId === member.socketId || kickingId === member.socketId || !sessionReady || !roomSynced}
+                          className={`rounded-lg px-2 py-1.5 text-xs font-medium transition-colors disabled:opacity-40 ${
+                            member.isMuted
+                              ? 'bg-green-500/10 text-green-300 hover:bg-green-500/20'
+                              : 'bg-red-500/10 text-red-300 hover:bg-red-500/20'
+                          }`}
+                        >{member.isMuted ? '解禁' : '禁言'}</button>
+                        <button
+                          onClick={() => { void kickMember(member); }}
+                          disabled={kickingId === member.socketId || moderatingId === member.socketId || !sessionReady || !roomSynced}
+                          className="rounded-lg bg-red-500/10 p-1.5 text-red-300 transition hover:bg-red-500/20 disabled:opacity-40"
+                          title={`将 ${member.username} 移出房间`}
+                          aria-label={`将 ${member.username} 移出房间`}
+                        ><UserMinus size={14} /></button>
+                      </div>
                     )}
                   </div>
                 );
@@ -455,7 +715,7 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
           </div>
 
           {/* ── Sound Pack Panel ── */}
-          <SoundPackPanel socket={socket} roomId={roomId!} serverURL={serverURL} disabled={!sessionReady || !roomSynced} />
+          <SoundPackPanel socket={socket} roomId={roomId!} serverURL={serverURL} outputDeviceId={rtc.selectedAudioOutputId} disabled={!sessionReady || !roomSynced} />
 
         </div>
       </aside>
@@ -478,6 +738,12 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
             <Headphones size={14} /> {rtc.voiceMembers.length}
           </div>
           <div className="ml-auto flex items-center gap-2">
+            <button
+              onClick={() => { setShowAudioDevices(true); void rtc.refreshAudioDevices(false); }}
+              className={`rounded-xl p-2 transition ${showAudioDevices ? 'bg-cyan-300/15 text-cyan-200' : 'text-white/45 hover:bg-white/10 hover:text-white'}`}
+              aria-label="选择麦克风和扬声器"
+              title="音频设备"
+            ><Settings2 size={18} /></button>
             {!rtc.inVoice ? (
               <button onClick={rtc.joinVoice} disabled={!sessionReady || !roomSynced || rtc.isJoining} className="inline-flex items-center gap-2 rounded-xl bg-white px-3.5 py-2 text-sm font-semibold text-zinc-900 transition hover:bg-cyan-100 disabled:cursor-not-allowed disabled:opacity-50">{rtc.isJoining ? <LoaderCircle size={17} className="animate-spin" /> : rtc.isForceMuted ? <MicOff size={17} /> : <Mic size={17} />}{rtc.isJoining ? '正在加入' : rtc.isForceMuted ? '加入语音（已被禁言）' : '加入语音'}</button>
             ) : (
@@ -605,6 +871,15 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
             </div>
           )}
           {messages.map((msg, idx) => {
+            if (msg.type === 'system') {
+              return (
+                <div key={msg.id} className="my-5 flex items-center justify-center gap-2 py-1 text-sm text-white/35">
+                  <UserRound size={14} className="text-emerald-200/55" />
+                  <span>{msg.content}</span>
+                  <span className="text-xs text-white/20">{formatTime(msg.timestamp)}</span>
+                </div>
+              );
+            }
             if (msg.type === 'soundpack') {
               return (
                 <div key={msg.id} className="my-5 flex items-center justify-center gap-2 py-1 text-sm text-white/35">
@@ -616,13 +891,13 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
             }
             const isMe    = msg.author === username;
             const prevMsg = messages[idx - 1];
-            const grouped = prevMsg && prevMsg.type !== 'soundpack' && prevMsg.author === msg.author &&
+            const grouped = prevMsg && prevMsg.type !== 'soundpack' && prevMsg.type !== 'system' && prevMsg.author === msg.author &&
               msg.timestamp - prevMsg.timestamp < 5 * 60 * 1000;
 
             return (
-              <div key={msg.id} className={`flex items-end gap-3 ${isMe ? 'flex-row-reverse' : ''} ${grouped ? 'mt-1' : 'mt-5'}`}>
+              <div key={msg.id} className={`flex items-start gap-3 ${isMe ? 'flex-row-reverse' : ''} ${grouped ? 'mt-1' : 'mt-5'}`}>
                 {!grouped ? (
-                  isMe ? <Avatar username={profile.username} avatarUrl={profile.avatarUrl} size="sm" className="mb-0.5" /> : <Avatar username={msg.author} size="sm" className="mb-0.5" />
+                  isMe ? <Avatar username={profile.username} avatarUrl={profile.avatarUrl} size="sm" className="mt-0.5" /> : <Avatar username={msg.author} size="sm" className="mt-0.5" />
                 ) : (
                   <div className="w-9 flex-shrink-0" />
                 )}
@@ -654,13 +929,25 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
 
         {/* Input */}
         <div className={hasScreen ? (chatDrawerOpen ? 'absolute bottom-0 right-0 z-10 w-96 border-l border-t border-white/10 bg-zinc-950/95 px-4 py-3 backdrop-blur-xl' : 'hidden') : 'flex-shrink-0 px-5 py-4 border-t border-white/[0.08]'}>
-          <div className="flex items-center gap-3 bg-white/[0.07] backdrop-blur-xl border border-white/10 rounded-2xl px-5 py-3.5 focus-within:border-white/20 focus-within:bg-white/10 transition-all">
+          <div
+            onDragEnter={handleImageDragEnter}
+            onDragOver={handleImageDragOver}
+            onDragLeave={handleImageDragLeave}
+            onDrop={handleImageDrop}
+            className={`relative flex items-center gap-3 overflow-hidden rounded-2xl border px-5 py-3.5 backdrop-blur-xl transition-all focus-within:bg-white/10 ${imageDragActive ? 'border-cyan-300/70 bg-cyan-300/10 ring-2 ring-cyan-300/20' : 'border-white/10 bg-white/[0.07] focus-within:border-white/20'}`}
+          >
+            {imageDragActive && (
+              <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center gap-2 bg-cyan-950/90 text-sm font-semibold text-cyan-100 backdrop-blur-sm">
+                <ImagePlus size={19} />松开发送图片
+              </div>
+            )}
             <input
               ref={imageInputRef}
               type="file"
               accept="image/png,image/jpeg,image/webp,image/gif"
+              multiple
               className="hidden"
-              onChange={event => sendImage(event.target.files?.[0])}
+              onChange={event => { void sendImages(collectChatImageFiles(event.target.files ?? [])); }}
             />
             <button
               className="flex-shrink-0 text-white/30 transition-colors hover:text-cyan-200 disabled:cursor-not-allowed disabled:opacity-30"
@@ -677,6 +964,7 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && !e.shiftKey && sendMessage()}
+              onPaste={handleImagePaste}
             />
             <button
               className="text-white/25 hover:text-white/70 transition-colors disabled:opacity-20 flex-shrink-0"

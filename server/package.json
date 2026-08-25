@@ -1,6 +1,6 @@
 {
   "name": "cove-server",
-  "version": "0.5.3",
+  "version": "0.6.0",
   "description": "Cove - 即时通讯服务器",
   "author": "Cove",
   "private": true,
@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.build.json",
+    "test": "tsx --test tests/presence.test.ts",
     "electron:compile": "tsc -p electron/tsconfig.json",
     "electron:dev": "npm run electron:compile && electron .",
     "rebuild:native": "cd ../node_modules/better-sqlite3 && npx prebuild-install -r electron -t 29.4.6 --arch x64 --platform win32",
@@ -40,11 +41,13 @@
       "dist-electron/**/*",
       "dist/**/*",
       "node_modules/**/*",
+      "!node_modules/mediasoup/worker/pip_invoke{,/**/*}",
       "package.json"
     ],
     "asarUnpack": [
       "node_modules/better-sqlite3/**/*",
-      "node_modules/mediasoup/**/*"
+      "node_modules/mediasoup/**/*",
+      "!node_modules/mediasoup/worker/pip_invoke{,/**/*}"
     ],
     "extraResources": [
       { "from": "build/vc_redist.x64.exe", "to": "vc_redist.x64.exe" }

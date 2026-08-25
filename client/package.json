@@ -1,6 +1,6 @@
 {
   "name": "cove-client",
-  "version": "0.5.3",
+  "version": "0.6.0",
   "description": "Cove - 即时通讯客户端",
   "author": "Cove",
   "private": true,
@@ -10,7 +10,9 @@
     "electron:compile": "tsc -p electron/tsconfig.json",
     "test:updater": "npm run electron:compile && node --test tests/updater.test.cjs",
     "test:connection": "tsx --test tests/connectionDeadline.test.ts",
-    "test": "npm run test:updater && npm run test:connection",
+    "test:audio-devices": "tsx --test tests/audioDevices.test.ts",
+    "test:chat-images": "tsx --test tests/chatImages.test.ts",
+    "test": "npm run test:updater && npm run test:connection && npm run test:audio-devices && npm run test:chat-images",
     "electron:dev": "npm run electron:compile && electron .",
     "build": "tsc && vite build",
     "build:electron": "npm run build && npm run electron:compile && electron-builder",

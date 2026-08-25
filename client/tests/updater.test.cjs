@@ -1,10 +1,19 @@
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
+const fs = require('node:fs');
 const test = require('node:test');
 const { configureAutoUpdater } = require('../dist-electron/updater-core.js');
 
 test('compiled Electron adapter imports electron-updater at runtime', () => {
   assert.doesNotThrow(() => require('../dist-electron/updater.js'));
+});
+
+test('compiled updater exposes only the in-app IPC bridge and no OS notification prompt', () => {
+  const adapter = fs.readFileSync(require.resolve('../dist-electron/updater.js'), 'utf8');
+  const preload = fs.readFileSync(require.resolve('../dist-electron/preload.js'), 'utf8');
+  assert.doesNotMatch(adapter, /Notification|showMessageBox/);
+  assert.match(preload, /cove:update:check/);
+  assert.match(preload, /cove:update:install/);
 });
 
 class FakeUpdater extends EventEmitter {
@@ -34,8 +43,7 @@ function createHarness(overrides = {}) {
   const repeating = [];
   const cleared = [];
   const progress = [];
-  const notifications = [];
-  const prompts = [];
+  const states = [];
   const logs = [];
   const window = {
     isDestroyed: () => false,
@@ -46,11 +54,7 @@ function createHarness(overrides = {}) {
     updater,
     isPackaged: true,
     getWindow: () => window,
-    notify: (title, body) => notifications.push({ title, body }),
-    promptInstall: async version => {
-      prompts.push(version);
-      return true;
-    },
+    publishState: state => states.push(state),
     logger: {
       info: (...args) => logs.push(['info', ...args]),
       warn: (...args) => logs.push(['warn', ...args]),
@@ -70,7 +74,7 @@ function createHarness(overrides = {}) {
     ...overrides,
   });
 
-  return { updater, controller, once, repeating, cleared, progress, notifications, prompts, logs };
+  return { updater, controller, once, repeating, cleared, progress, states, logs };
 }
 
 test('development builds do not contact the update service', async () => {
@@ -80,8 +84,7 @@ test('development builds do not contact the update service', async () => {
     updater,
     isPackaged: false,
     getWindow: () => null,
-    notify: () => undefined,
-    promptInstall: async () => false,
+    publishState: () => undefined,
     logger: console,
     scheduleOnce: () => { scheduled = true; return {}; },
     scheduleRepeating: () => { scheduled = true; return {}; },
@@ -91,6 +94,8 @@ test('development builds do not contact the update service', async () => {
   await controller.checkNow();
   assert.equal(updater.checkCount, 0);
   assert.equal(scheduled, false);
+  assert.equal(controller.getState().status, 'disabled');
+  assert.equal(controller.installNow(), false);
 });
 
 test('packaged builds configure automatic checks and downloads', async () => {
@@ -108,20 +113,21 @@ test('packaged builds configure automatic checks and downloads', async () => {
   assert.equal(h.updater.checkCount, 1);
 });
 
-test('update events drive notification, progress and silent restart install', async () => {
+test('update events publish in-app state, progress and user-triggered install', async () => {
   const h = createHarness();
   h.updater.emit('update-available', { version: '0.5.2' });
   h.updater.emit('download-progress', { percent: 42.5 });
   h.updater.emit('update-downloaded', { version: '0.5.2' });
-  await new Promise(resolve => setImmediate(resolve));
 
-  assert.deepEqual(h.notifications, [{
-    title: 'Cove 0.5.2 可用',
-    body: '正在后台下载更新，不会中断当前语音或共享。',
-  }]);
+  assert.deepEqual(h.states.map(state => state.status), ['available', 'downloading', 'downloaded']);
+  assert.equal(h.states[1].percent, 42.5);
+  assert.equal(h.controller.getState().status, 'downloaded');
   assert.ok(h.progress.includes(0.425));
   assert.ok(h.progress.includes(-1));
-  assert.deepEqual(h.prompts, ['0.5.2']);
+  assert.deepEqual(h.updater.installCalls, []);
+  await h.controller.checkNow();
+  assert.equal(h.updater.checkCount, 0, 'a downloaded update must remain installable instead of starting another check');
+  assert.equal(h.controller.installNow(), true);
   assert.deepEqual(h.updater.installCalls, [[true, true]]);
 });
 
@@ -130,6 +136,7 @@ test('errors are non-fatal and dispose clears schedules and listeners', () => {
   h.updater.emit('error', new Error('offline'));
   assert.equal(h.progress.at(-1), -1);
   assert.equal(h.logs.some(entry => entry[0] === 'error'), true);
+  assert.deepEqual(h.controller.getState(), { status: 'error', version: undefined, message: 'offline' });
 
   h.controller.dispose();
   assert.equal(h.cleared.length, 2);

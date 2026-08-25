@@ -10,7 +10,7 @@ export interface Message {
   roomId: string;
   author: string;
   content: string;
-  type?: 'chat' | 'soundpack' | 'image';
+  type?: 'chat' | 'soundpack' | 'image' | 'system';
   timestamp: number;
 }
 

@@ -2,9 +2,10 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { Socket } from 'socket.io-client';
 import { AlertTriangle, GripVertical, LayoutGrid, LoaderCircle, Pause, Pencil, Play, Save, Trash2, Upload, Volume2, X } from 'lucide-react';
+import { applyAudioElementOutput, DEFAULT_AUDIO_DEVICE_ID } from '../audioDevices';
 
 interface Soundpack { id: string; name: string; filename: string; uploader: string; createdAt: number; sortOrder: number; canDelete: boolean }
-interface Props { socket: Socket; roomId: string; serverURL: string; disabled?: boolean }
+interface Props { socket: Socket; roomId: string; serverURL: string; outputDeviceId?: string; disabled?: boolean }
 
 const SOUNDPACK_VOLUME_KEY = 'cove:soundpack-volume';
 
@@ -30,7 +31,7 @@ function applySoundpackOrder(packs: Soundpack[], orderedIds: string[]) {
   return [...ordered, ...byId.values()];
 }
 
-export function SoundPackPanel({ socket, roomId, serverURL, disabled = false }: Props) {
+export function SoundPackPanel({ socket, roomId, serverURL, outputDeviceId = DEFAULT_AUDIO_DEVICE_ID, disabled = false }: Props) {
   const [packs, setPacks] = useState<Soundpack[]>([]);
   const [uploading, setUploading] = useState(false);
   const [playingId, setPlayingId] = useState<string | null>(null);
@@ -48,6 +49,12 @@ export function SoundPackPanel({ socket, roomId, serverURL, disabled = false }: 
   const soundpackVolumeRef = useRef(soundpackVolume);
   const packsRef = useRef<Soundpack[]>([]);
   useEffect(() => { packsRef.current = packs; }, [packs]);
+  useEffect(() => {
+    if (!audioRef.current) return;
+    applyAudioElementOutput(audioRef.current, outputDeviceId).catch(error => {
+      console.warn('[soundpack] 切换正在播放的语音包输出设备失败', error);
+    });
+  }, [outputDeviceId]);
 
   const updateSoundpackVolume = (value: number) => {
     const normalized = Math.min(100, Math.max(0, value));
@@ -71,10 +78,15 @@ export function SoundPackPanel({ socket, roomId, serverURL, disabled = false }: 
     audio.volume = soundpackVolumeRef.current / 100;
     audioRef.current = audio;
     setPlayingId(soundId);
-    audio.play().catch(() => setPlayingId(null));
+    applyAudioElementOutput(audio, outputDeviceId).catch(error => {
+      console.warn('[soundpack] 切换输出设备失败，使用系统默认设备', error);
+    }).finally(() => {
+      if (audioRef.current !== audio) return;
+      audio.play().catch(() => setPlayingId(null));
+    });
     audio.onended = () => setPlayingId(null);
     audio.onerror = () => setPlayingId(null);
-  }, [serverURL]);
+  }, [serverURL, outputDeviceId]);
 
   useEffect(() => {
     const onAdded = (sound: Soundpack) => setPacks(previous => [sound, ...previous]);

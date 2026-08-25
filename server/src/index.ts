@@ -12,6 +12,7 @@ import {
   peers, createPeer, removePeer, getRoomProducers,
   MS_IP, MS_PORT,
 } from './ms';
+import { createLobbyPresenceSnapshot } from './presence';
 
 const app = express();
 const httpServer = createServer(app);
@@ -122,7 +123,7 @@ const deleteRoomData = db.transaction((roomId: string) => {
 
 interface Room      { id: string; name: string; createdAt: number; ownerName: string | null }
 interface PrivateRoom extends Room { ownerId: string | null }
-interface Message   { id: string; roomId: string; author: string; content: string; type: 'chat' | 'soundpack' | 'image'; timestamp: number }
+interface Message   { id: string; roomId: string; author: string; content: string; type: 'chat' | 'soundpack' | 'image' | 'system'; timestamp: number }
 interface SoundpackRecord { id: string; name: string; filename: string; uploader: string; uploaderId: string | null; createdAt: number; sortOrder: number }
 interface PublicSoundpack { id: string; name: string; filename: string; uploader: string; createdAt: number; sortOrder: number; canDelete: boolean }
 interface RoomMember {
@@ -404,16 +405,19 @@ function closePeerConsumer(socketId: string, consumerId: string) {
   syncOnDemandProducer(producerId);
 }
 
-function broadcastVoiceList(roomId: string) {
+function currentVoiceList(roomId: string) {
   const members = voiceRooms.get(roomId) ?? new Set<string>();
-  const list = [...members].map(id => ({
+  return [...members].map(id => ({
     socketId: id,
     userId: publicUserId(id),
     username: userNames.get(id) ?? id,
     avatarUrl: userAvatars.get(id) ?? null,
     isMuted: isSocketMuted(roomId, id) || selfMutedVoiceMembers.has(id),
   }));
-  io.to(roomId).emit('voice:members-updated', list);
+}
+
+function broadcastVoiceList(roomId: string) {
+  io.to(roomId).emit('voice:members-updated', currentVoiceList(roomId));
 }
 
 function voiceCounts() {
@@ -480,6 +484,20 @@ function broadcastRoomMembers(roomId: string) {
   io.emit('room:members:global', { roomId, members: names });
 }
 
+function announceRoomPresence(roomId: string, username: string, action: 'join' | 'leave') {
+  const msg: Message = {
+    id: Math.random().toString(36).slice(2, 9),
+    roomId,
+    author: 'Cove',
+    content: `[${username}] ${action === 'join' ? '加入' : '离开'}了房间`,
+    type: 'system',
+    timestamp: Date.now(),
+  };
+  stmtInsertMsg.run(msg.id, msg.roomId, msg.author, msg.content, msg.type, msg.timestamp);
+  io.to(roomId).emit('message:new', msg);
+  io.to(roomId).emit('room:presence', { roomId, username, action });
+}
+
 function isClientMuted(roomId: string, clientId: string): boolean {
   return !!stmtIsRoomMuted.get(roomId, clientId);
 }
@@ -528,11 +546,9 @@ io.on('connection', socket => {
   createPeer(socket.id);
 
   function broadcastOnlineUsers() {
-    io.emit('users:online', [...userNames.entries()].map(([socketId, username]) => ({
-      socketId,
-      username,
-      avatarUrl: userAvatars.get(socketId) ?? null,
-    })));
+    io.emit('users:online', createLobbyPresenceSnapshot(
+      userNames, userAvatars, roomMembers, voiceRooms,
+    ).onlineUsers);
   }
 
   const sanitizeAvatarUrl = (value: unknown): string | null => {
@@ -589,6 +605,16 @@ io.on('connection', socket => {
     cb?.({ ok: true });
   });
 
+  socket.on('presence:get', (
+    cb?: (result: ReturnType<typeof createLobbyPresenceSnapshot> & { ok: true }) => void,
+  ) => {
+    if (!userNames.has(socket.id)) return;
+    cb?.({
+      ok: true,
+      ...createLobbyPresenceSnapshot(userNames, userAvatars, roomMembers, voiceRooms),
+    });
+  });
+
   socket.on('room:create', (
     { name }: { name?: string },
     cb?: (result: { room?: Room; error?: string }) => void,
@@ -625,20 +651,26 @@ io.on('connection', socket => {
     }
     socket.join(roomId);
     if (!roomMembers.has(roomId)) roomMembers.set(roomId, new Set());
-    roomMembers.get(roomId)!.add(socket.id);
+    const members = roomMembers.get(roomId)!;
+    const newlyJoined = !members.has(socket.id);
+    members.add(socket.id);
     broadcastRoomMembers(roomId);
+    // 新进入频道的客户端可能错过之前的语音广播，进入时必须补发当前完整列表。
+    broadcastVoiceList(roomId);
     emitForcedMuteState(socket.id, roomId);
     // Track room for mediasoup
     const peer = peers.get(socket.id);
     if (peer) peer.roomId = roomId;
+    if (newlyJoined) announceRoomPresence(roomId, username, 'join');
     cb?.({ ok: true });
   });
 
   socket.on('room:leave', (roomId: string) => {
     handleVoiceLeave(socket.id, roomId);
-    roomMembers.get(roomId)?.delete(socket.id);
-    broadcastRoomMembers(roomId);
+    const leftRoom = roomMembers.get(roomId)?.delete(socket.id) ?? false;
     socket.leave(roomId);
+    if (leftRoom) announceRoomPresence(roomId, userNames.get(socket.id) ?? socket.id, 'leave');
+    broadcastRoomMembers(roomId);
     const peer = peers.get(socket.id);
     if (peer) peer.roomId = null;
   });
@@ -680,6 +712,38 @@ io.on('connection', socket => {
     cb?.({ ok: true });
   });
 
+  socket.on('room:kick', (
+    { roomId, targetSocketId }: { roomId: string; targetSocketId: string },
+    cb?: (result: { ok: boolean; error?: string }) => void,
+  ) => {
+    const room = stmtGetRoomPrivate.get(roomId) as PrivateRoom | undefined;
+    const actorClientId = userClientIds.get(socket.id);
+    const targetClientId = userClientIds.get(targetSocketId);
+    const targetName = userNames.get(targetSocketId);
+    const members = roomMembers.get(roomId);
+
+    if (!room || !actorClientId || room.ownerId !== actorClientId) {
+      cb?.({ ok: false, error: '只有房主可以移除成员' }); return;
+    }
+    if (!members?.has(socket.id) || !members.has(targetSocketId) || !targetClientId || !targetName) {
+      cb?.({ ok: false, error: '目标成员不在房间中' }); return;
+    }
+    if (targetClientId === room.ownerId || targetSocketId === socket.id) {
+      cb?.({ ok: false, error: '不能移除房主' }); return;
+    }
+
+    handleVoiceLeave(targetSocketId, roomId);
+    members.delete(targetSocketId);
+    const targetSocket = io.sockets.sockets.get(targetSocketId);
+    targetSocket?.leave(roomId);
+    const peer = peers.get(targetSocketId);
+    if (peer?.roomId === roomId) peer.roomId = null;
+    io.to(targetSocketId).emit('room:kicked', { roomId, by: userNames.get(socket.id) ?? '房主' });
+    announceRoomPresence(roomId, targetName, 'leave');
+    broadcastRoomMembers(roomId);
+    cb?.({ ok: true });
+  });
+
   socket.on('room:delete', (
     { roomId }: { roomId: string },
     cb?: (result: { ok: boolean; error?: string }) => void,
@@ -711,7 +775,7 @@ io.on('connection', socket => {
   // ── Messages ──────────────────────────────────────────────────────────────
 
   socket.on('message:send', ({ roomId, content }: { roomId: string; content: string }) => {
-    if (!content?.trim() || !stmtGetRoom.get(roomId)) return;
+    if (!content?.trim() || !stmtGetRoom.get(roomId) || !roomMembers.get(roomId)?.has(socket.id)) return;
     const msg: Message = {
       id: Math.random().toString(36).slice(2, 9),
       roomId,
@@ -727,10 +791,13 @@ io.on('connection', socket => {
   // ── Voice member tracking (UI only) ───────────────────────────────────────
 
   socket.on('voice:join', (roomId: string) => {
-    if (!stmtGetRoom.get(roomId)) return;
+    if (!stmtGetRoom.get(roomId) || !roomMembers.get(roomId)?.has(socket.id)) return;
     if (!voiceRooms.has(roomId)) voiceRooms.set(roomId, new Set());
     const members = voiceRooms.get(roomId)!;
-    if (members.has(socket.id)) return;
+    if (members.has(socket.id)) {
+      socket.emit('voice:members-updated', currentVoiceList(roomId));
+      return;
+    }
     const existing = [...members];
     selfMutedVoiceMembers.delete(socket.id);
 
@@ -1146,8 +1213,11 @@ io.on('connection', socket => {
   socket.on('disconnect', () => {
     console.log(`[-] ${socket.id}`);
     voiceRooms.forEach((_, roomId) => handleVoiceLeave(socket.id, roomId));
+    const username = userNames.get(socket.id) ?? socket.id;
     roomMembers.forEach((members, roomId) => {
-      if (members.delete(socket.id)) broadcastRoomMembers(roomId);
+      if (!members.delete(socket.id)) return;
+      announceRoomPresence(roomId, username, 'leave');
+      broadcastRoomMembers(roomId);
     });
     userNames.delete(socket.id);
     userAvatars.delete(socket.id);

@@ -1,8 +1,15 @@
-import { app, BrowserWindow, Menu, session, desktopCapturer } from 'electron';
+import { app, BrowserWindow, Menu, session, desktopCapturer, ipcMain } from 'electron';
 import path from 'path';
 import { startAutoUpdater } from './updater';
+import type { AutoUpdaterController, UpdateState } from './updater-core';
 
 const isDev = !app.isPackaged;
+let updaterController: AutoUpdaterController | null = null;
+
+const unavailableUpdateState: UpdateState = {
+  status: 'disabled',
+  message: '更新服务尚未准备好。',
+};
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -14,6 +21,7 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      preload: path.join(__dirname, 'preload.js'),
     },
   });
 
@@ -68,9 +76,14 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  ipcMain.handle('cove:update:get-state', () => updaterController?.getState() ?? unavailableUpdateState);
+  ipcMain.handle('cove:update:check', () => updaterController?.checkNow() ?? unavailableUpdateState);
+  ipcMain.handle('cove:update:install', () => updaterController?.installNow() ?? false);
   createWindow();
-  startAutoUpdater(app.isPackaged);
+  updaterController = startAutoUpdater(app.isPackaged);
 });
+
+app.on('will-quit', () => updaterController?.dispose());
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

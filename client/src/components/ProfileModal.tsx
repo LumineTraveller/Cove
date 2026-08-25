@@ -4,6 +4,7 @@ import { prepareAvatar } from '../profile';
 import type { UserProfile } from '../types';
 import { Avatar } from './Avatar';
 import packageInfo from '../../package.json';
+import { openUpdateCenter } from '../update';
 
 interface Props {
   profile: UserProfile;
@@ -95,9 +96,9 @@ export function ProfileModal({ profile, serverURL, onSave, onClose, onOpenServer
             </button>
           )}
         </div>
-        <span className="pointer-events-none absolute bottom-3 right-5 select-none text-[11px] font-medium tracking-wide text-white/20">
+        <button onClick={openUpdateCenter} className="absolute bottom-2.5 right-4 rounded-lg px-2 py-1 text-[11px] font-medium tracking-wide text-white/20 transition hover:bg-cyan-300/10 hover:text-cyan-100/80 focus:outline-none focus:ring-2 focus:ring-cyan-300/40" title="检查 Cove 更新" aria-label={`Cove v${packageInfo.version}，点击检查更新`}>
           Cove v{packageInfo.version}
-        </span>
+        </button>
       </section>
     </div>
   );

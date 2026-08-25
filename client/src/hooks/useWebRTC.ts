@@ -7,6 +7,18 @@ type Producer        = MsTypes.Producer;
 type Consumer        = MsTypes.Consumer;
 type RtpCapabilities = MsTypes.RtpCapabilities;
 import { VoiceMember } from '../types';
+import {
+  applyAudioContextOutput,
+  applyAudioElementOutput,
+  AUDIO_INPUT_DEVICE_KEY,
+  AUDIO_OUTPUT_DEVICE_KEY,
+  AudioDeviceOption,
+  createMicrophoneConstraints,
+  DEFAULT_AUDIO_DEVICE_ID,
+  loadAudioDeviceId,
+  saveAudioDeviceId,
+  toAudioDeviceOptions,
+} from '../audioDevices';
 
 // 普通模式下分辨率只决定上限，实际帧率和码率由本地画面变化检测自动选择；
 // 游戏模式会固定使用所选分辨率档位的 60fps 最高码率配置。
@@ -67,6 +79,10 @@ interface AvailableScreen {
   socketId: string;
   videoProducerId: string;
   audioProducerId?: string;
+}
+interface ProcessedMicrophone {
+  stream: MediaStream;
+  context: AudioContext | null;
 }
 
 const MEMBER_VOLUME_KEY = 'cove_member_volumes_v1';
@@ -206,6 +222,13 @@ export function useWebRTC(socket: Socket, roomId: string) {
   const [watchingScreenPeer, setWatchingScreenPeer] = useState<string | null>(null);
   const [screenReceiveVolume, setScreenReceiveVolumeState] = useState(() => loadNumber(SCREEN_RECEIVE_VOLUME_KEY, 1));
   const [screenShareVolume, setScreenShareVolumeState] = useState(() => loadNumber(SCREEN_SHARE_VOLUME_KEY, 1));
+  const [audioInputDevices, setAudioInputDevices] = useState<AudioDeviceOption[]>([]);
+  const [audioOutputDevices, setAudioOutputDevices] = useState<AudioDeviceOption[]>([]);
+  const [selectedAudioInputId, setSelectedAudioInputId] = useState(() => loadAudioDeviceId(AUDIO_INPUT_DEVICE_KEY));
+  const [selectedAudioOutputId, setSelectedAudioOutputId] = useState(() => loadAudioDeviceId(AUDIO_OUTPUT_DEVICE_KEY));
+  const [audioDevicesRefreshing, setAudioDevicesRefreshing] = useState(false);
+  const [audioInputSwitching, setAudioInputSwitching] = useState(false);
+  const [audioDeviceError, setAudioDeviceError] = useState<string | null>(null);
 
   // 实时统计（帧率 / 延迟 / 丢包），开关控制是否采集
   const [statsEnabled, setStatsEnabled] = useState(false);
@@ -230,6 +253,8 @@ export function useWebRTC(socket: Socket, roomId: string) {
   const voiceMembersRef = useRef<VoiceMember[]>([]);
   const screenReceiveVolumeRef = useRef(screenReceiveVolume);
   const screenShareVolumeRef = useRef(screenShareVolume);
+  const selectedAudioInputRef = useRef(selectedAudioInputId);
+  const selectedAudioOutputRef = useRef(selectedAudioOutputId);
   // consumerId → { consumer, socketId, kind, sourceType }
   const consumers       = useRef<Map<string, { consumer: Consumer; socketId: string; kind: string; producerId: string; sourceType?: string }>>(new Map());
   // 同一个 producer 只允许创建一个 consumer；同时记录进行中的请求以避免信令竞态。
@@ -300,11 +325,66 @@ export function useWebRTC(socket: Socket, roomId: string) {
     if (screenAudioGain.current) screenAudioGain.current.gain.value = normalized;
   }, []);
 
+  const refreshAudioDevices = useCallback(async (requestPermission = false) => {
+    if (!navigator.mediaDevices?.enumerateDevices) {
+      setAudioDeviceError('当前环境无法读取音频设备。');
+      return;
+    }
+    setAudioDevicesRefreshing(true);
+    setAudioDeviceError(null);
+    let permissionStream: MediaStream | null = null;
+    try {
+      if (requestPermission && !rawAudioRef.current) {
+        permissionStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      }
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      setAudioInputDevices(toAudioDeviceOptions(devices, 'audioinput'));
+      setAudioOutputDevices(toAudioDeviceOptions(devices, 'audiooutput'));
+    } catch (error) {
+      setAudioDeviceError(error instanceof Error ? error.message : '读取音频设备失败。');
+    } finally {
+      permissionStream?.getTracks().forEach(track => track.stop());
+      setAudioDevicesRefreshing(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshAudioDevices(false);
+    const mediaDevices = navigator.mediaDevices;
+    if (!mediaDevices?.addEventListener) return;
+    const onDeviceChange = () => { refreshAudioDevices(false); };
+    mediaDevices.addEventListener('devicechange', onDeviceChange);
+    return () => mediaDevices.removeEventListener('devicechange', onDeviceChange);
+  }, [refreshAudioDevices]);
+
+  const selectAudioOutput = useCallback(async (deviceId: string) => {
+    const nextDeviceId = deviceId || DEFAULT_AUDIO_DEVICE_ID;
+    selectedAudioOutputRef.current = nextDeviceId;
+    setSelectedAudioOutputId(nextDeviceId);
+    saveAudioDeviceId(AUDIO_OUTPUT_DEVICE_KEY, nextDeviceId);
+    setAudioDeviceError(null);
+
+    const changes: Promise<boolean>[] = [];
+    audioEls.current.forEach(element => {
+      changes.push(applyAudioElementOutput(element, nextDeviceId));
+    });
+    if (audioCtxRef.current) changes.push(applyAudioContextOutput(audioCtxRef.current, nextDeviceId));
+    const results = await Promise.allSettled(changes);
+    const rejected = results.find(result => result.status === 'rejected');
+    if (rejected?.status === 'rejected') {
+      const reason = rejected.reason;
+      setAudioDeviceError(`切换扬声器失败：${reason instanceof Error ? reason.message : String(reason)}`);
+    }
+  }, []);
+
   // ── 音量分析工具 ──────────────────────────────────────────────────────────────
   const ensureAudioCtx = useCallback(() => {
     if (!audioCtxRef.current) {
       const Ctx = window.AudioContext ?? (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       audioCtxRef.current = new Ctx();
+      applyAudioContextOutput(audioCtxRef.current, selectedAudioOutputRef.current).catch(error => {
+        console.warn('[audio] 提示音切换输出设备失败', error);
+      });
     }
     return audioCtxRef.current;
   }, []);
@@ -322,7 +402,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
         oscillator.type = 'sine';
         oscillator.frequency.value = frequency;
         gain.gain.setValueAtTime(0.0001, noteStart);
-        gain.gain.exponentialRampToValueAtTime(0.075, noteStart + 0.012);
+        gain.gain.exponentialRampToValueAtTime(0.13, noteStart + 0.012);
         gain.gain.exponentialRampToValueAtTime(0.0001, noteStart + 0.13);
         oscillator.connect(gain).connect(context.destination);
         oscillator.start(noteStart);
@@ -578,10 +658,12 @@ export function useWebRTC(socket: Socket, roomId: string) {
           : memberVolumesRef.current[peerId] ?? 1;
         el.srcObject = stream;
         audioEls.current.set(consumer.id, el);
-        el.play().catch(() => {
+        applyAudioElementOutput(el, selectedAudioOutputRef.current).catch(error => {
+          console.warn('[audio] 远端音频切换输出设备失败，使用系统默认设备', error);
+        }).finally(() => el.play().catch(() => {
           const resume = () => { el.play(); document.removeEventListener('click', resume); };
           document.addEventListener('click', resume);
-        });
+        }));
         // 只对麦克风音频做音量分析（系统音频不计入"说话"）
         if (appData?.type !== 'screen-audio') {
           attachAnalyser(consumer.id, stream, peerId);
@@ -831,8 +913,8 @@ export function useWebRTC(socket: Socket, roomId: string) {
     return () => { socket.off('room:force-muted', onForcedMute); };
   }, [socket, roomId]);
 
-  const createProcessedMicStream = useCallback(async (rawStream: MediaStream) => {
-    if (!/Windows/i.test(navigator.userAgent)) return rawStream;
+  const createProcessedMicStream = useCallback(async (rawStream: MediaStream): Promise<ProcessedMicrophone> => {
+    if (!/Windows/i.test(navigator.userAgent)) return { stream: rawStream, context: null };
     const Ctx = window.AudioContext ?? (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
     const context = new Ctx({ sampleRate: 48_000, latencyHint: 'interactive' });
     const source = context.createMediaStreamSource(rawStream);
@@ -861,11 +943,79 @@ export function useWebRTC(socket: Socket, roomId: string) {
     if (noiseGate) tail.connect(noiseGate).connect(outputGain).connect(destination);
     else tail.connect(outputGain).connect(destination);
     await context.resume();
-    micProcessingContext.current = context;
     const processedTrack = destination.stream.getAudioTracks()[0];
     if (processedTrack) processedTrack.contentHint = 'speech';
-    return destination.stream;
+    return { stream: destination.stream, context };
   }, []);
+
+  const requestMicrophone = useCallback(async (deviceId: string) => {
+    return Promise.race([
+      navigator.mediaDevices.getUserMedia({ audio: createMicrophoneConstraints(deviceId) }),
+      new Promise<MediaStream>((_, reject) =>
+        setTimeout(() => reject(new Error('getUserMedia 超时（10s）——很可能是麦克风权限被系统/应用挡住')), 10_000)),
+    ]);
+  }, []);
+
+  const replaceMicrophone = useCallback(async (deviceId: string) => {
+    const producer = audioProducer.current;
+    if (!producer) return;
+
+    let nextRaw: MediaStream | null = null;
+    let nextProcessed: ProcessedMicrophone | null = null;
+    try {
+      nextRaw = await requestMicrophone(deviceId);
+      nextProcessed = await createProcessedMicStream(nextRaw);
+      const nextTrack = nextProcessed.stream.getAudioTracks()[0];
+      if (!nextTrack) throw new Error('选择的设备没有提供音频轨道');
+      nextTrack.contentHint = 'speech';
+      await producer.replaceTrack({ track: nextTrack });
+
+      const previousRaw = rawAudioRef.current;
+      const previousProcessed = localAudioRef.current;
+      const previousContext = micProcessingContext.current;
+      rawAudioRef.current = nextRaw;
+      localAudioRef.current = nextProcessed.stream;
+      micProcessingContext.current = nextProcessed.context;
+
+      detachAnalyser('local');
+      attachAnalyser('local', nextProcessed.stream, socket.id ?? 'local');
+      previousProcessed?.getTracks().forEach(track => track.stop());
+      if (previousRaw && previousRaw !== previousProcessed)
+        previousRaw.getTracks().forEach(track => track.stop());
+      previousContext?.close().catch(() => {});
+      refreshAudioDevices(false);
+    } catch (error) {
+      nextProcessed?.stream.getTracks().forEach(track => track.stop());
+      if (nextRaw && nextRaw !== nextProcessed?.stream)
+        nextRaw.getTracks().forEach(track => track.stop());
+      nextProcessed?.context?.close().catch(() => {});
+      throw error;
+    }
+  }, [createProcessedMicStream, refreshAudioDevices, requestMicrophone, socket.id]);
+
+  const selectAudioInput = useCallback(async (deviceId: string) => {
+    const nextDeviceId = deviceId || DEFAULT_AUDIO_DEVICE_ID;
+    const previousDeviceId = selectedAudioInputRef.current;
+    if (nextDeviceId === previousDeviceId) return;
+
+    selectedAudioInputRef.current = nextDeviceId;
+    setSelectedAudioInputId(nextDeviceId);
+    saveAudioDeviceId(AUDIO_INPUT_DEVICE_KEY, nextDeviceId);
+    setAudioDeviceError(null);
+    if (!inVoice || !audioProducer.current) return;
+
+    setAudioInputSwitching(true);
+    try {
+      await replaceMicrophone(nextDeviceId);
+    } catch (error) {
+      selectedAudioInputRef.current = previousDeviceId;
+      setSelectedAudioInputId(previousDeviceId);
+      saveAudioDeviceId(AUDIO_INPUT_DEVICE_KEY, previousDeviceId);
+      setAudioDeviceError(`切换麦克风失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setAudioInputSwitching(false);
+    }
+  }, [inVoice, replaceMicrophone]);
 
   // ── 加入语音 ───────────────────────────────────────────────────────────────
 
@@ -879,19 +1029,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
     try {
       console.log('[joinVoice] 请求麦克风权限 getUserMedia…');
       // 超时保护：Electron 权限挂起时 getUserMedia 会永不返回，加 10s 超时把问题暴露出来
-      rawStream = await Promise.race([
-        navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: false,
-            channelCount: 1,
-            sampleRate: 48_000,
-          },
-        }),
-        new Promise<MediaStream>((_, rej) =>
-          setTimeout(() => rej(new Error('getUserMedia 超时（10s）——很可能是麦克风权限被系统/应用挡住')), 10_000)),
-      ]);
+      rawStream = await requestMicrophone(selectedAudioInputRef.current);
       console.log('%c[joinVoice] [OK] 已获取麦克风', 'color:#22c55e');
       const rawTrack = rawStream.getAudioTracks()[0];
       if (rawTrack) {
@@ -906,8 +1044,11 @@ export function useWebRTC(socket: Socket, roomId: string) {
         });
       }
       rawAudioRef.current = rawStream;
-      stream = await createProcessedMicStream(rawStream);
+      const processed = await createProcessedMicStream(rawStream);
+      stream = processed.stream;
+      micProcessingContext.current = processed.context;
       localAudioRef.current = stream;
+      refreshAudioDevices(false);
 
       console.log('[joinVoice] 初始化 mediasoup Device 和传输通道…');
       const ok = await setupDevice();
@@ -975,7 +1116,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
       joiningRef.current = false;
       setIsJoining(false);
     }
-  }, [socket, roomId, inVoice, setupDevice, consumeProducer, storeAvailableScreen, createProcessedMicStream]);
+  }, [socket, roomId, inVoice, setupDevice, consumeProducer, storeAvailableScreen, createProcessedMicStream, refreshAudioDevices, requestMicrophone]);
 
   // ── 离开语音 ───────────────────────────────────────────────────────────────
 
@@ -1310,6 +1451,11 @@ export function useWebRTC(socket: Socket, roomId: string) {
     memberVolumes, setMemberVolume,
     screenReceiveVolume, setScreenReceiveVolume,
     screenShareVolume, setScreenShareVolume,
+    audioInputDevices, audioOutputDevices,
+    selectedAudioInputId, selectedAudioOutputId,
+    audioDevicesRefreshing, audioInputSwitching, audioDeviceError,
+    refreshAudioDevices, selectAudioInput, selectAudioOutput,
+    playPresenceTone,
     localSocketId: socket.id,
   };
 }

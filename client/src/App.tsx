@@ -3,6 +3,7 @@ import { HashRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { LoaderCircle, LogIn, Server, UserRound, WifiOff } from 'lucide-react';
 import RoomList from './pages/RoomList';
 import ChatRoom from './pages/ChatRoom';
+import { UpdateCenter } from './components/UpdateCenter';
 import { createConnectionDeadline } from './connectionDeadline';
 import { clearProfile, persistProfile, readProfile } from './profile';
 import { socket, getClientId, getServerURL, normalizeURL } from './socket';
@@ -150,10 +151,11 @@ export default function App() {
   return (
     <HashRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
       <Routes>
-        <Route path="/" element={<RoomList profile={profile} onProfileChange={handleProfileChange} onReset={handleReset} connected={connected} sessionReady={sessionReady} serverURL={serverURL} />} />
+        <Route path="/" element={<RoomList profile={profile} onProfileChange={handleProfileChange} onReset={handleReset} sessionReady={sessionReady} serverURL={serverURL} />} />
         <Route path="/room/:roomId" element={<ChatRoom profile={profile} onProfileChange={handleProfileChange} sessionReady={sessionReady} serverURL={serverURL} />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
+      <UpdateCenter />
       {connected !== true && (
         <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/55 p-6 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="connection-title">
           <div className="w-full max-w-sm rounded-3xl border border-white/15 bg-zinc-900/95 p-7 shadow-2xl">

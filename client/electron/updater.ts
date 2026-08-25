@@ -1,8 +1,13 @@
-import { app, BrowserWindow, Notification, dialog, type MessageBoxOptions } from 'electron';
+import { app, BrowserWindow } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import fs from 'fs';
 import path from 'path';
-import { configureAutoUpdater, type AutoUpdaterController, type LoggerLike } from './updater-core';
+import {
+  configureAutoUpdater,
+  type AutoUpdaterController,
+  type LoggerLike,
+  type UpdateState,
+} from './updater-core';
 
 function createLogger(): LoggerLike {
   const logPath = path.join(app.getPath('userData'), 'updater.log');
@@ -26,27 +31,10 @@ function getMainWindow(): BrowserWindow | null {
   return BrowserWindow.getAllWindows().find(win => !win.isDestroyed()) ?? null;
 }
 
-async function promptInstall(version: string): Promise<boolean> {
-  const options: MessageBoxOptions = {
-    type: 'info',
-    title: 'Cove 更新已准备好',
-    message: `Cove ${version} 已下载完成`,
-    detail: '立即重启即可完成更新。选择“稍后”时，Cove 会在正常退出后自动安装。',
-    buttons: ['立即重启更新', '稍后'],
-    defaultId: 0,
-    cancelId: 1,
-    noLink: true,
-  };
-  const win = getMainWindow();
-  const result = win
-    ? await dialog.showMessageBox(win, options)
-    : await dialog.showMessageBox(options);
-  return result.response === 0;
-}
-
-function notify(title: string, body: string): void {
-  if (!Notification.isSupported()) return;
-  new Notification({ title, body, silent: true }).show();
+function publishState(state: UpdateState): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send('cove:update:state', state);
+  }
 }
 
 export function startAutoUpdater(isPackaged: boolean): AutoUpdaterController {
@@ -54,8 +42,7 @@ export function startAutoUpdater(isPackaged: boolean): AutoUpdaterController {
     updater: autoUpdater,
     isPackaged,
     getWindow: getMainWindow,
-    notify,
-    promptInstall,
+    publishState,
     logger: createLogger(),
   });
 }

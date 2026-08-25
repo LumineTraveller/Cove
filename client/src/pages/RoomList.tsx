@@ -1,21 +1,28 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Crown, Hash, Headphones, LoaderCircle, MessageCircle, Plus, Server, Settings, Users, Wifi, WifiOff, X } from 'lucide-react';
+import { Crown, Hash, Headphones, LoaderCircle, MessageCircle, Plus, Server, Settings, Users, X } from 'lucide-react';
 import { Avatar } from '../components/Avatar';
 import { ProfileModal } from '../components/ProfileModal';
 import { socket, normalizeURL } from '../socket';
 import type { OnlineUser, Room, UserProfile } from '../types';
+import coveIcon from '../../build/icon.ico';
 
 interface Props {
   profile: UserProfile;
   onProfileChange: (profile: UserProfile) => void;
   onReset: () => void;
-  connected: boolean | null;
   sessionReady: boolean;
   serverURL: string;
 }
 
-export default function RoomList({ profile, onProfileChange, onReset, connected, sessionReady, serverURL }: Props) {
+interface LobbyPresenceSnapshot {
+  ok: true;
+  onlineUsers: OnlineUser[];
+  roomMembers: Record<string, string[]>;
+  voiceCounts: Record<string, number>;
+}
+
+export default function RoomList({ profile, onProfileChange, onReset, sessionReady, serverURL }: Props) {
   const navigate = useNavigate();
   const [rooms, setRooms] = useState<Room[]>([]);
   const [creating, setCreating] = useState(false);
@@ -44,6 +51,21 @@ export default function RoomList({ profile, onProfileChange, onReset, connected,
       socket.off('voice:counts', onVoiceCounts);
     };
   }, []);
+
+  useEffect(() => {
+    if (!sessionReady) return;
+    let active = true;
+    socket.timeout(5_000).emit('presence:get', (
+      error: Error | null,
+      snapshot?: LobbyPresenceSnapshot,
+    ) => {
+      if (!active || error || !snapshot?.ok) return;
+      setOnlineUsers(snapshot.onlineUsers);
+      setRoomMembersMap(snapshot.roomMembers);
+      setVoiceCounts(snapshot.voiceCounts);
+    });
+    return () => { active = false; };
+  }, [sessionReady]);
 
   useEffect(() => {
     if (!sessionReady) return;
@@ -78,12 +100,8 @@ export default function RoomList({ profile, onProfileChange, onReset, connected,
   return (
     <div className="flex h-full overflow-hidden bg-gradient-to-br from-zinc-950 via-black to-zinc-900">
       <aside className="flex w-72 flex-shrink-0 flex-col border-r border-white/[0.08] bg-white/[0.055] backdrop-blur-2xl">
-        <div className="flex h-16 flex-shrink-0 items-center justify-between border-b border-white/[0.08] px-5">
-          <span className="text-xl font-bold tracking-tight text-white">Cove</span>
-          <div className="flex items-center gap-1.5">
-            <span className={`rounded-lg p-1.5 ${connected === true ? 'text-emerald-300' : connected === false ? 'text-red-300' : 'text-white/30'}`} title={connected === true ? '服务器已连接' : connected === false ? '服务器连接中断' : '正在连接服务器'}>{connected === false ? <WifiOff size={16} /> : connected === true ? <Wifi size={16} /> : <LoaderCircle size={16} className="animate-spin" />}</span>
-            <button onClick={() => setShowSettings(true)} className="rounded-xl p-2 text-white/35 transition hover:bg-white/10 hover:text-white focus:outline-none focus:ring-2 focus:ring-cyan-300/50" aria-label="服务器设置" title="服务器设置"><Settings size={19} /></button>
-          </div>
+        <div className="flex h-16 flex-shrink-0 items-center border-b border-white/[0.08] px-5">
+          <img src={coveIcon} alt="Cove" className="h-9 w-9 rounded-xl shadow-lg shadow-black/30" />
         </div>
 
         <div className="flex-1 overflow-y-auto px-3 py-4">
@@ -134,7 +152,7 @@ export default function RoomList({ profile, onProfileChange, onReset, connected,
         <div className="space-y-4 text-center">
           <div className="mx-auto flex h-20 w-20 items-center justify-center rounded-3xl border border-white/10 bg-white/[0.06] text-cyan-100/70 backdrop-blur-xl"><MessageCircle size={36} /></div>
           <div><p className="text-xl font-semibold text-white">选择一个频道</p><p className="mt-1.5 text-base text-white/40">从左侧选择频道开始聊天或共享屏幕</p></div>
-          <button className="inline-flex items-center gap-2 rounded-xl px-3 py-2 text-base text-white/40 transition hover:bg-white/10 hover:text-white disabled:opacity-20" onClick={() => setCreating(true)} disabled={!sessionReady}><Plus size={17} /> 创建第一个频道</button>
+          <button className="inline-flex items-center gap-2 rounded-xl px-3 py-2 text-base text-white/40 transition hover:bg-white/10 hover:text-white disabled:opacity-20" onClick={() => setCreating(true)} disabled={!sessionReady}><Plus size={17} /> 创建一个频道</button>
         </div>
       </main>
 
