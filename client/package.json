@@ -1,6 +1,6 @@
 {
   "name": "cove-client",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "Cove - 即时通讯客户端",
   "author": "Cove",
   "private": true,
