@@ -7,9 +7,14 @@ interface CoveUpdaterApi {
   onState(listener: (state: UpdateState) => void): () => void;
 }
 
+interface CoveShellApi {
+  openExternal(url: string): Promise<boolean>;
+}
+
 declare global {
   interface Window {
     coveUpdater?: CoveUpdaterApi;
+    coveShell?: CoveShellApi;
   }
 }
 

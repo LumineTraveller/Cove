@@ -30,8 +30,12 @@ jobs:
         shell: pwsh
         run: |
           $version = node -p "require('./client/package.json').version"
+          $serverVersion = node -p "require('./server/package.json').version"
           if ("v$version" -ne "${{ github.ref_name }}") {
             throw "Tag ${{ github.ref_name }} does not match client version $version"
+          }
+          if ($serverVersion -ne $version) {
+            throw "Server version $serverVersion does not match client version $version"
           }
           if (-not (Select-String -Path RELEASE_NOTES.md -SimpleMatch "Cove v$version" -Quiet)) {
             throw "RELEASE_NOTES.md does not describe Cove v$version"
@@ -43,8 +47,16 @@ jobs:
       - name: Test desktop client
         run: npm test -w client
 
+      - name: Test server
+        run: npm test -w server
+
       - name: Build Windows release
         run: npm run build:electron -w client -- --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: Build Windows server release
+        run: npm run build:electron -w server
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
@@ -57,8 +69,10 @@ jobs:
           $installer = "client/dist-app/Cove-Setup-$version.exe"
           $blockmap = "$installer.blockmap"
           $manifest = "client/dist-app/latest.yml"
+          $serverInstaller = "server/dist-app/Cove Server Setup $version.exe"
+          $serverBlockmap = "$serverInstaller.blockmap"
 
-          foreach ($asset in @($installer, $blockmap, $manifest)) {
+          foreach ($asset in @($installer, $blockmap, $manifest, $serverInstaller, $serverBlockmap)) {
             if (-not (Test-Path -LiteralPath $asset)) {
               throw "Missing release asset: $asset"
             }
@@ -67,11 +81,11 @@ jobs:
           $tag = "${{ github.ref_name }}"
           $repo = "${{ github.repository }}"
           if (gh release view $tag --repo $repo 2>$null) {
-            gh release upload $tag $installer $blockmap $manifest --clobber --repo $repo
+            gh release upload $tag $installer $blockmap $manifest $serverInstaller $serverBlockmap --clobber --repo $repo
             gh release edit $tag --title "Cove v$version" --notes-file RELEASE_NOTES.md --repo $repo
           } else {
             gh release create $tag `
-              $installer $blockmap $manifest `
+              $installer $blockmap $manifest $serverInstaller $serverBlockmap `
               --repo $repo `
               --verify-tag `
               --title "Cove v$version" `

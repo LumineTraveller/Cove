@@ -13,6 +13,8 @@ import {
   MS_IP, MS_PORT,
 } from './ms';
 import { createLobbyPresenceSnapshot } from './presence';
+import { soundpackVoiceAudience } from './soundpackAudience';
+import { createVoicePresenceEvent, voicePresenceMessage, type VoicePresenceAction } from './voicePresence';
 
 const app = express();
 const httpServer = createServer(app);
@@ -428,6 +430,28 @@ function broadcastVoiceCounts() {
   io.emit('voice:counts', voiceCounts());
 }
 
+function announceVoicePresence(
+  roomId: string,
+  socketId: string,
+  username: string,
+  action: VoicePresenceAction,
+  audience: Iterable<string>,
+) {
+  const event = createVoicePresenceEvent(action, socketId, username);
+  for (const audienceSocketId of audience) io.to(audienceSocketId).emit('voice:presence', event);
+
+  const msg: Message = {
+    id: Math.random().toString(36).slice(2, 9),
+    roomId,
+    author: 'Cove',
+    content: voicePresenceMessage(username, action),
+    type: 'system',
+    timestamp: event.timestamp,
+  };
+  stmtInsertMsg.run(msg.id, msg.roomId, msg.author, msg.content, msg.type, msg.timestamp);
+  io.to(roomId).emit('message:new', msg);
+}
+
 function handleVoiceLeave(socketId: string, roomId: string) {
   const members = voiceRooms.get(roomId);
   if (!members?.has(socketId)) return;
@@ -447,7 +471,7 @@ function handleVoiceLeave(socketId: string, roomId: string) {
     }
   }
   [...members].forEach(mid => io.to(mid).emit('voice:user-left', { socketId }));
-  io.to(roomId).emit('voice:presence', { action: 'leave', socketId, username });
+  announceVoicePresence(roomId, socketId, username, 'leave', members);
   broadcastVoiceList(roomId);
   broadcastVoiceCounts();
 }
@@ -814,11 +838,13 @@ io.on('connection', socket => {
     );
 
     members.add(socket.id);
-    io.to(roomId).emit('voice:presence', {
-      action: 'join',
-      socketId: socket.id,
-      username: userNames.get(socket.id) ?? socket.id,
-    });
+    announceVoicePresence(
+      roomId,
+      socket.id,
+      userNames.get(socket.id) ?? socket.id,
+      'join',
+      members,
+    );
     broadcastVoiceList(roomId);
     broadcastVoiceCounts();
   });
@@ -865,8 +891,9 @@ io.on('connection', socket => {
         enableUdp: true,
         enableTcp: true,
         preferUdp: true,
-        // 与默认 720p/30 预设对齐，减少刚开始共享时反复爬升/回退造成的抖动。
-        initialAvailableOutgoingBitrate: 1_200_000,
+        // 让 1080p 动态共享不必从 1.2 Mbps 缓慢爬升。这只是拥塞控制的
+        // 初始估计而不是硬限速，后续仍会按接收端反馈自动升降。
+        initialAvailableOutgoingBitrate: 4_000_000,
       });
 
       // 存到 peer（前两次调用对应 send/recv，按顺序）
@@ -1110,16 +1137,19 @@ io.on('connection', socket => {
 
   // ── 语音包 ────────────────────────────────────────────────────────────────
 
-  socket.on('soundpack:play', ({ soundId, roomId }: { soundId: string; roomId: string }) => {
+  socket.on('soundpack:play', (
+    { soundId, roomId }: { soundId: string; roomId: string },
+    cb?: (result: { ok: boolean; error?: string }) => void,
+  ) => {
     const pack = stmtGetSoundpack.get(soundId) as SoundpackRecord | undefined;
-    if (!pack || !roomMembers.get(roomId)?.has(socket.id)) return;
+    if (!pack) { cb?.({ ok: false, error: '语音包不存在' }); return; }
+    const audience = soundpackVoiceAudience(roomMembers.get(roomId), voiceRooms.get(roomId), socket.id);
+    if (!audience) { cb?.({ ok: false, error: '请先加入语音再播放语音包' }); return; }
     const playedBy = userNames.get(socket.id) ?? socket.id;
-    // 只广播给同房间其他人，发送者自己已在客户端直接播放
-    socket.to(roomId).emit('soundpack:play', {
-      soundId,
-      playedBy,
-      soundName: pack.name,
-    });
+    // 包括发送者在内，只有当前仍在语音中的成员会收到音频播放事件。
+    // 发送者也等待此权威事件再播放，避免频道成员通过篡改客户端绕过限制。
+    for (const targetSocketId of audience)
+      io.to(targetSocketId).emit('soundpack:play', { soundId, playedBy, soundName: pack.name });
 
     const msg: Message = {
       id: Math.random().toString(36).slice(2, 9),
@@ -1131,6 +1161,7 @@ io.on('connection', socket => {
     };
     stmtInsertMsg.run(msg.id, msg.roomId, msg.author, msg.content, msg.type, msg.timestamp);
     io.to(roomId).emit('message:new', msg);
+    cb?.({ ok: true });
   });
 
   socket.on('soundpack:delete', (

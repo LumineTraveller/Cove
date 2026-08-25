@@ -3,6 +3,16 @@ const { EventEmitter } = require('node:events');
 const fs = require('node:fs');
 const test = require('node:test');
 const { configureAutoUpdater } = require('../dist-electron/updater-core.js');
+const { compareReleaseVersions, discoverUpdateSources } = require('../dist-electron/update-sources.js');
+
+const githubSource = {
+  id: 'github', label: 'GitHub', version: '0.7.0',
+  feedUrl: 'https://github.com/LumineTraveller/Cove/releases/download/v0.7.0/', latencyMs: 30,
+};
+const giteeSource = {
+  id: 'gitee', label: 'Gitee', version: '0.7.0',
+  feedUrl: 'https://gitee.com/LumineTraveller/Cove/releases/download/v0.7.0/', latencyMs: 10,
+};
 
 test('compiled Electron adapter imports electron-updater at runtime', () => {
   assert.doesNotThrow(() => require('../dist-electron/updater.js'));
@@ -25,11 +35,19 @@ class FakeUpdater extends EventEmitter {
     this.logger = null;
     this.checkCount = 0;
     this.installCalls = [];
+    this.feedCalls = [];
+    this.checkErrors = [];
   }
 
   async checkForUpdates() {
     this.checkCount += 1;
+    const error = this.checkErrors.shift();
+    if (error) throw error;
     return null;
+  }
+
+  setFeedURL(options) {
+    this.feedCalls.push(options);
   }
 
   quitAndInstall(...args) {
@@ -71,6 +89,7 @@ function createHarness(overrides = {}) {
       return timer;
     },
     clearScheduled: timer => cleared.push(timer),
+    resolveSources: async () => [githubSource],
     ...overrides,
   });
 
@@ -111,6 +130,28 @@ test('packaged builds configure automatic checks and downloads', async () => {
 
   await h.once[0].callback();
   assert.equal(h.updater.checkCount, 1);
+  assert.equal(h.updater.feedCalls[0].url, githubSource.feedUrl);
+});
+
+test('release discovery selects the newest version, then the faster mirror', async () => {
+  const fetchImpl = async input => {
+    const url = String(input);
+    const tag_name = url.includes('gitee.com') ? 'v0.7.1' : 'v0.7.0';
+    return new Response(JSON.stringify({ tag_name }), { status: 200 });
+  };
+  const sources = await discoverUpdateSources(fetchImpl, 1_000);
+  assert.deepEqual(sources.map(source => [source.id, source.version]), [['gitee', '0.7.1'], ['github', '0.7.0']]);
+  assert.equal(compareReleaseVersions('0.7.0', '0.6.9') > 0, true);
+  assert.match(sources[0].feedUrl, /gitee\.com\/LumineTraveller\/Cove\/releases\/download\/v0\.7\.1\/$/);
+});
+
+test('a failed primary source automatically falls back to the other release mirror', async () => {
+  const h = createHarness({ resolveSources: async () => [giteeSource, githubSource] });
+  h.updater.checkErrors.push(new Error('gitee offline'));
+  await h.controller.checkNow();
+  assert.equal(h.updater.checkCount, 2);
+  assert.deepEqual(h.updater.feedCalls.map(call => call.url), [giteeSource.feedUrl, githubSource.feedUrl]);
+  assert.equal(h.controller.getState().sourceLabel, 'GitHub');
 });
 
 test('update events publish in-app state, progress and user-triggered install', async () => {

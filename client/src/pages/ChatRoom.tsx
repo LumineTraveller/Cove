@@ -20,6 +20,35 @@ import {
   collectChatImageFiles,
   validateChatImageFile,
 } from '../chatImages';
+import { parseChatText } from '../chatLinks';
+
+function ChatMessageText({ content, isMe }: { content: string; isMe: boolean }) {
+  const openExternal = (event: React.MouseEvent<HTMLAnchorElement>, url: string) => {
+    event.preventDefault();
+    if (window.coveShell) {
+      void window.coveShell.openExternal(url);
+      return;
+    }
+    window.open(url, '_blank', 'noopener,noreferrer');
+  };
+
+  return (
+    <>
+      {parseChatText(content).map((segment, index) => segment.kind === 'link' && segment.href ? (
+        <a
+          key={`${index}-${segment.href}`}
+          href={segment.href}
+          onClick={event => openExternal(event, segment.href!)}
+          className={`break-all font-medium underline decoration-1 underline-offset-2 transition-colors ${isMe ? 'text-blue-600 decoration-blue-600/65 hover:text-blue-800' : 'text-blue-400 decoration-blue-400/70 hover:text-blue-300'}`}
+          title="在默认浏览器中打开"
+          rel="noreferrer noopener"
+        >
+          {segment.text}
+        </a>
+      ) : <span key={index}>{segment.text}</span>)}
+    </>
+  );
+}
 
 interface Props {
   profile: UserProfile;
@@ -234,6 +263,7 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
   const messagesEndRef                = useRef<HTMLDivElement>(null);
   const screenContainerRef            = useRef<HTMLDivElement>(null);
   const imageInputRef                 = useRef<HTMLInputElement>(null);
+  const messageInputRef               = useRef<HTMLTextAreaElement>(null);
   const imageUploadingRef             = useRef(false);
   const imageDragDepthRef             = useRef(0);
   const initiallyScrolledRoomRef      = useRef<string | null>(null);
@@ -330,6 +360,15 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
     initiallyScrolledRoomRef.current = roomId;
   }, [chatHistoryReady, messages, roomId]);
 
+  useLayoutEffect(() => {
+    const element = messageInputRef.current;
+    if (!element) return;
+    element.style.height = '0px';
+    const height = Math.min(Math.max(element.scrollHeight, 24), 128);
+    element.style.height = `${height}px`;
+    element.style.overflowY = element.scrollHeight > 128 ? 'auto' : 'hidden';
+  }, [input]);
+
   const sendMessage = useCallback(() => {
     if (!input.trim() || !roomId) return;
     socket.emit('message:send', { roomId, content: input.trim() });
@@ -408,7 +447,7 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
     void sendImages(images);
   }, [hasFileItems, sendImages]);
 
-  const handleImagePaste = useCallback((event: React.ClipboardEvent<HTMLInputElement>) => {
+  const handleImagePaste = useCallback((event: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const clipboardFiles = event.clipboardData.files.length
       ? event.clipboardData.files
       : Array.from(event.clipboardData.items)
@@ -648,33 +687,37 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
                               {(rtc.memberVolumes[member.socketId] ?? 1) === 0
                                 ? <VolumeX size={13} className="flex-shrink-0 text-white/35" />
                                 : <Volume2 size={13} className="flex-shrink-0 text-white/35" />}
-                              <div className="overflow-hidden rounded-[3px] border border-white/10 bg-white/[0.04]">
-                                <div className="h-1.5 bg-white/10" role="progressbar" aria-label={`${member.username} 的实时声音强度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round((voiceMuted ? 0 : level) * 100)}>
-                                  <div
-                                    className="h-full bg-gradient-to-r from-green-400 to-emerald-300 transition-[width] duration-75"
-                                    style={{ width: `${Math.round((voiceMuted ? 0 : level) * 100)}%` }}
-                                  />
-                                </div>
-                                <div className="relative h-2 border-t border-white/10 bg-white/10">
-                                  <div
-                                    className="pointer-events-none absolute inset-y-0 left-0 bg-cyan-300/65"
-                                    style={{ width: `${Math.round((rtc.memberVolumes[member.socketId] ?? 1) * 100)}%` }}
-                                  />
-                                  <div
-                                    className="pointer-events-none absolute inset-y-0 w-1 -translate-x-1/2 bg-cyan-100 shadow-[0_0_5px_rgba(165,243,252,0.65)]"
-                                    style={{ left: `${Math.round((rtc.memberVolumes[member.socketId] ?? 1) * 100)}%` }}
-                                  />
-                                  <input
-                                    type="range"
-                                    min="0"
-                                    max="100"
-                                    step="1"
-                                    value={Math.round((rtc.memberVolumes[member.socketId] ?? 1) * 100)}
-                                    onChange={event => rtc.setMemberVolume(member.socketId, voiceMember.userId, Number(event.target.value) / 100)}
-                                    className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
-                                    aria-label={`${member.username} 的接收音量`}
-                                  />
-                                </div>
+                              <div className="relative h-5 min-w-0" data-testid="voice-volume-meter">
+                                {/* 同一条中心线上：较宽的绿色实时电平位于底层，较细的青色音量轨位于上层。 */}
+                                <div
+                                  className="pointer-events-none absolute left-0 top-1/2 h-2.5 -translate-y-1/2 rounded-full bg-gradient-to-r from-green-500/75 to-emerald-300 transition-[width] duration-75"
+                                  style={{ width: `${Math.round((voiceMuted ? 0 : Math.min(rtc.memberVolumes[member.socketId] ?? 1, level * (rtc.memberVolumes[member.socketId] ?? 1))) * 100)}%` }}
+                                  role="progressbar"
+                                  aria-label={`${member.username} 调整后的实时声音强度`}
+                                  aria-valuemin={0}
+                                  aria-valuemax={100}
+                                  aria-valuenow={Math.round((voiceMuted ? 0 : Math.min(rtc.memberVolumes[member.socketId] ?? 1, level * (rtc.memberVolumes[member.socketId] ?? 1))) * 100)}
+                                />
+                                <div className="pointer-events-none absolute inset-x-0 top-1/2 h-1 -translate-y-1/2 rounded-full bg-white/15" />
+                                <div
+                                  className="pointer-events-none absolute left-0 top-1/2 h-1 -translate-y-1/2 rounded-full bg-cyan-300/75"
+                                  style={{ width: `${Math.round((rtc.memberVolumes[member.socketId] ?? 1) * 100)}%` }}
+                                />
+                                <div
+                                  className="pointer-events-none absolute top-1/2 h-3 w-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full border border-cyan-50/80 bg-cyan-100 shadow-[0_0_6px_rgba(165,243,252,0.75)]"
+                                  style={{ left: `${Math.round((rtc.memberVolumes[member.socketId] ?? 1) * 100)}%` }}
+                                  aria-hidden="true"
+                                />
+                                <input
+                                  type="range"
+                                  min="0"
+                                  max="100"
+                                  step="1"
+                                  value={Math.round((rtc.memberVolumes[member.socketId] ?? 1) * 100)}
+                                  onChange={event => rtc.setMemberVolume(member.socketId, voiceMember.userId, Number(event.target.value) / 100)}
+                                  className="absolute inset-x-0 top-1/2 h-5 w-full -translate-y-1/2 cursor-pointer opacity-0"
+                                  aria-label={`${member.username} 的接收音量`}
+                                />
                               </div>
                             </label>
                           ) : (
@@ -715,7 +758,7 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
           </div>
 
           {/* ── Sound Pack Panel ── */}
-          <SoundPackPanel socket={socket} roomId={roomId!} serverURL={serverURL} outputDeviceId={rtc.selectedAudioOutputId} disabled={!sessionReady || !roomSynced} />
+          <SoundPackPanel socket={socket} roomId={roomId!} serverURL={serverURL} outputDeviceId={rtc.selectedAudioOutputId} inVoice={rtc.inVoice} disabled={!sessionReady || !roomSynced} />
 
         </div>
       </aside>
@@ -844,7 +887,7 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
                   <div>码率：<span className="text-cyan-300">{rtc.stats.bitrate != null ? `${rtc.stats.bitrate} kbps` : '—'}</span></div>
                   {rtc.localScreen && <div>{rtc.screenGameMode ? '固定上限' : '自动上限'}：<span className="text-cyan-300">{rtc.screenTargetBitrate ? `${Math.round(rtc.screenTargetBitrate / 1000)} kbps` : '—'}</span></div>}
                   {rtc.localScreen && <div>画面模式：<span className="text-cyan-300">{rtc.screenGameMode ? '游戏模式' : rtc.screenActivity === 'static' ? '自动 · 静止' : rtc.screenActivity === 'motion' ? '自动 · 动态' : '自动 · 普通操作'}</span></div>}
-                  <div>可用带宽：<span className="text-cyan-300">{rtc.stats.availableBitrate != null ? `${rtc.stats.availableBitrate} kbps` : '—'}</span></div>
+                  <div>{rtc.localScreen ? '发送可用带宽' : '接收可用带宽'}：<span className="text-cyan-300">{rtc.localScreen && rtc.stats.availableBitrate != null ? `${rtc.stats.availableBitrate} kbps` : '浏览器不提供'}</span></div>
                   <div>延迟 RTT：<span className="text-amber-400">{rtc.stats.rtt != null ? `${rtc.stats.rtt} ms` : '—'}</span></div>
                   <div>抖动 Jitter：<span className="text-amber-400">{rtc.stats.jitter != null ? `${rtc.stats.jitter} ms` : '—'}</span></div>
                   <div>丢包 Loss：<span className="text-red-400">{rtc.stats.loss != null ? `${rtc.stats.loss}%` : '—'}</span></div>
@@ -909,7 +952,7 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
                       <span className="text-sm text-white/25">{formatTime(msg.timestamp)}</span>
                     </div>
                   )}
-                  <div className={`rounded-2xl text-base leading-relaxed ${msg.type === 'image' ? 'overflow-hidden border border-white/10 bg-black/30 p-1' : 'px-4 py-2.5'} ${
+                  <div className={`rounded-2xl text-base leading-relaxed ${msg.type === 'image' ? 'overflow-hidden border border-white/10 bg-black/30 p-1' : 'whitespace-pre-wrap break-words px-4 py-2.5'} ${
                     isMe
                       ? msg.type === 'image' ? 'rounded-br-sm' : 'bg-white text-zinc-900 rounded-br-sm'
                       : msg.type === 'image' ? 'rounded-bl-sm' : 'bg-white/10 backdrop-blur-sm text-white rounded-bl-sm border border-white/[0.08]'
@@ -918,7 +961,7 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
                       <button onClick={() => setPreviewImage(resolveImageUrl(msg.content))} className="block max-w-full cursor-zoom-in" title="点击查看原图">
                         <img src={resolveImageUrl(msg.content)} alt={`${msg.author} 发送的图片`} loading="lazy" className="max-h-80 max-w-full rounded-xl object-contain" />
                       </button>
-                    ) : msg.content}
+                    ) : <ChatMessageText content={msg.content} isMe={isMe} />}
                   </div>
                 </div>
               </div>
@@ -934,7 +977,7 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
             onDragOver={handleImageDragOver}
             onDragLeave={handleImageDragLeave}
             onDrop={handleImageDrop}
-            className={`relative flex items-center gap-3 overflow-hidden rounded-2xl border px-5 py-3.5 backdrop-blur-xl transition-all focus-within:bg-white/10 ${imageDragActive ? 'border-cyan-300/70 bg-cyan-300/10 ring-2 ring-cyan-300/20' : 'border-white/10 bg-white/[0.07] focus-within:border-white/20'}`}
+            className={`relative flex items-end gap-3 overflow-hidden rounded-2xl border px-5 py-3.5 backdrop-blur-xl transition-all focus-within:bg-white/10 ${imageDragActive ? 'border-cyan-300/70 bg-cyan-300/10 ring-2 ring-cyan-300/20' : 'border-white/10 bg-white/[0.07] focus-within:border-white/20'}`}
           >
             {imageDragActive && (
               <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center gap-2 bg-cyan-950/90 text-sm font-semibold text-cyan-100 backdrop-blur-sm">
@@ -958,12 +1001,18 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
             >
               {imageUploading ? <LoaderCircle size={19} className="animate-spin" /> : <ImagePlus size={19} />}
             </button>
-            <input
-              className="flex-1 bg-transparent text-white text-base placeholder-white/25 outline-none"
+            <textarea
+              ref={messageInputRef}
+              rows={1}
+              className="min-h-6 max-h-32 flex-1 resize-none bg-transparent text-base leading-6 text-white outline-none placeholder-white/25"
               placeholder={`在 #${room.name} 发消息…`}
               value={input}
               onChange={e => setInput(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && !e.shiftKey && sendMessage()}
+              onKeyDown={event => {
+                if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return;
+                event.preventDefault();
+                sendMessage();
+              }}
               onPaste={handleImagePaste}
             />
             <button

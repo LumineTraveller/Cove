@@ -11,3 +11,7 @@ contextBridge.exposeInMainWorld('coveUpdater', {
     return () => ipcRenderer.off('cove:update:state', handler);
   },
 });
+
+contextBridge.exposeInMainWorld('coveShell', {
+  openExternal: (url: string): Promise<boolean> => ipcRenderer.invoke('cove:shell:open-external', url),
+});

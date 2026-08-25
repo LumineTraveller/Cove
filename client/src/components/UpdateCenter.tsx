@@ -85,6 +85,7 @@ export function UpdateCenter() {
         <div className="min-w-0 flex-1">
           <p className="font-semibold text-white">{statusTitle(state)}</p>
           <p className="mt-1 text-sm leading-relaxed text-white/45">{state.message ?? `当前版本 Cove v${packageInfo.version}`}</p>
+          {state.sourceLabel && <p className="mt-1 text-xs text-cyan-100/40">更新源：{state.sourceLabel}</p>}
         </div>
         <button onClick={() => { manualCheckRef.current = false; setOpen(false); }} className="rounded-lg p-1.5 text-white/30 transition hover:bg-white/10 hover:text-white" aria-label="关闭更新提示"><X size={17} /></button>
       </div>

@@ -30,8 +30,13 @@ export let webRtcServer: T.WebRtcServer;
 const CODECS = [
   { kind: 'audio', mimeType: 'audio/opus',  clockRate: 48000, channels: 2 },
   {
-    // 屏幕共享优先选择 VP9；同画质下比 VP8 更省码率。客户端不支持时会
-    // 自动回退到后面的 VP8 / H.264，避免牺牲旧设备兼容性。
+    // 新版 Chromium 支持时优先使用 AV1。mediasoup 只负责转发 RTP，不做转码；
+    // 不支持 AV1 的客户端不会把该 codec 放进协商后的发送能力，客户端会回退 VP9。
+    kind: 'video', mimeType: 'video/AV1', clockRate: 90000,
+    parameters: {},
+  },
+  {
+    // AV1 不可用时使用 VP9；同画质下仍比 VP8 更省码率。
     kind: 'video', mimeType: 'video/VP9', clockRate: 90000,
     parameters: { 'profile-id': 0 },
   },

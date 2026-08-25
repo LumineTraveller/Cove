@@ -23,9 +23,9 @@ import {
 // 普通模式下分辨率只决定上限，实际帧率和码率由本地画面变化检测自动选择；
 // 游戏模式会固定使用所选分辨率档位的 60fps 最高码率配置。
 export const SCREEN_PRESETS = {
-  '540p':  { label: '540p 流畅',  width: 960,  height: 540,  staticBitrate: 350_000, activeBitrate:   600_000, motionBitrate60: 1_000_000 },
-  '720p':  { label: '720p 均衡',  width: 1280, height: 720,  staticBitrate: 650_000, activeBitrate: 1_100_000, motionBitrate60: 1_800_000 },
-  '1080p': { label: '1080p 清晰', width: 1920, height: 1080, staticBitrate: 1_100_000, activeBitrate: 2_000_000, motionBitrate60: 3_200_000 },
+  '540p':  { label: '540p 流畅',  width: 960,  height: 540,  staticBitrate: 350_000, activeBitrate:   700_000, motionBitrate60: 1_500_000 },
+  '720p':  { label: '720p 均衡',  width: 1280, height: 720,  staticBitrate: 650_000, activeBitrate: 1_400_000, motionBitrate60: 2_800_000 },
+  '1080p': { label: '1080p 清晰', width: 1920, height: 1080, staticBitrate: 1_100_000, activeBitrate: 2_800_000, motionBitrate60: 6_000_000 },
 } as const;
 export type ScreenPreset = keyof typeof SCREEN_PRESETS;
 export type Fps = 30 | 60;
@@ -251,6 +251,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
   const memberVolumesRef = useRef<Record<string, number>>({});
   const rememberedMemberVolumes = useRef<Record<string, number>>(loadMemberVolumes());
   const voiceMembersRef = useRef<VoiceMember[]>([]);
+  const seenVoicePresenceEvents = useRef<string[]>([]);
   const screenReceiveVolumeRef = useRef(screenReceiveVolume);
   const screenShareVolumeRef = useRef(screenShareVolume);
   const selectedAudioInputRef = useRef(selectedAudioInputId);
@@ -451,16 +452,20 @@ export function useWebRTC(socket: Socket, roomId: string) {
   type AnyStat = Record<string, unknown>;
   const collectStats = useCallback(async () => {
     const next: MediaStats = { ...EMPTY_STATS };
+    const sendingScreen = Boolean(screenProducer.current);
+    const watchedPeerId = watchingScreenPeerRef.current;
 
     try {
-      const st = sendTransport.current;
+      // 共享方看发送通道；观看方看接收通道。接收通道没有可靠的
+      // availableIncomingBitrate，因此不能拿本机发送通道的上行估计冒充下行。
+      const st = sendingScreen ? sendTransport.current : watchedPeerId ? recvTransport.current : sendTransport.current;
       if (st) {
         const report = await st.getStats();
         report.forEach((s: AnyStat) => {
           if (s.type !== 'candidate-pair' || s.currentRoundTripTime == null) return;
           if (s.state && s.state !== 'succeeded') return;
           next.rtt = Math.round((s.currentRoundTripTime as number) * 1000);
-          if (s.availableOutgoingBitrate != null)
+          if (sendingScreen && s.availableOutgoingBitrate != null)
             next.availableBitrate = Math.round((s.availableOutgoingBitrate as number) / 1000);
           const candidate = report.get(s.localCandidateId as string) as AnyStat | undefined;
           if (candidate?.protocol) next.protocol = String(candidate.protocol).toUpperCase();
@@ -472,8 +477,11 @@ export function useWebRTC(socket: Socket, roomId: string) {
       let framesSrc: RTCStatsReport | null = null;
       if (screenProducer.current) framesSrc = await screenProducer.current.getStats();
       else {
-        for (const { consumer, kind } of consumers.current.values()) {
-          if (kind === 'video') { framesSrc = await consumer.getStats(); break; }
+        for (const { consumer, kind, socketId } of consumers.current.values()) {
+          if (kind === 'video' && (!watchedPeerId || socketId === watchedPeerId)) {
+            framesSrc = await consumer.getStats();
+            break;
+          }
         }
       }
       framesSrc?.forEach((s: AnyStat) => {
@@ -501,7 +509,10 @@ export function useWebRTC(socket: Socket, roomId: string) {
 
     try {
       let lost = 0, recv = 0, maxJitter = 0;
-      for (const { consumer } of consumers.current.values()) {
+      for (const { consumer, kind, socketId } of consumers.current.values()) {
+        // 调试悬浮层只统计当前观看的屏幕视频，避免语音、系统音频以及
+        // 其他人的共享把丢包和抖动混在一起。
+        if (kind !== 'video' || (watchedPeerId && socketId !== watchedPeerId)) continue;
         const report = await consumer.getStats();
         report.forEach((s: AnyStat) => {
           if (s.type === 'inbound-rtp') {
@@ -746,6 +757,8 @@ export function useWebRTC(socket: Socket, roomId: string) {
 
     watchingScreenPeerRef.current = source.socketId;
     setWatchingScreenPeer(source.socketId);
+    videoBytesPrev.current = null;
+    lossPrev.current = null;
     const videoOk = await consumeProducer(source.videoProducerId, source.socketId, 'video', { type: 'screen' });
     if (!videoOk) {
       watchingScreenPeerRef.current = null;
@@ -778,8 +791,13 @@ export function useWebRTC(socket: Socket, roomId: string) {
       setVoiceMembers(list);
     };
 
-    const onVoicePresence = ({ action }: { action: 'join' | 'leave' }) => {
-      if (deviceRef.current) playPresenceTone(action);
+    const onVoicePresence = ({ eventId, action }: { eventId?: string; action: 'join' | 'leave' }) => {
+      if (!deviceRef.current) return;
+      if (eventId) {
+        if (seenVoicePresenceEvents.current.includes(eventId)) return;
+        seenVoicePresenceEvents.current = [...seenVoicePresenceEvents.current.slice(-63), eventId];
+      }
+      playPresenceTone(action);
     };
 
     // 服务端通知：有新的 producer（有人加入语音或开始共享）
@@ -1327,28 +1345,43 @@ export function useWebRTC(socket: Socket, roomId: string) {
       setLocalScreen(stream);
       videoBytesPrev.current = null;
 
-      const preferredCodec = deviceRef.current?.rtpCapabilities.codecs?.find(
-        codec => codec.mimeType.toLowerCase() === 'video/vp9',
-      );
-      // 发送端使用克隆轨道。无人观看时 Producer.pause() 只关闭发送轨道，
-      // 本地预览和轻量画面采样仍能工作，不会变成黑屏。
-      const senderVideoTrack = videoTrack.clone();
-      senderVideoTrack.contentHint = gameMode ? 'motion' : 'detail';
-      let producer: Producer;
-      try {
-        producer = await sendTransport.current!.produce({
-          track:   senderVideoTrack,
-          appData: { type: 'screen', adaptation: gameMode ? 'game' : 'content', preset, maxFps: currentFps },
-          encodings: [{ maxBitrate: initialProfile.bitrate, maxFramerate: initialProfile.fps }],
-          codecOptions: { videoGoogleStartBitrate: Math.round(initialProfile.bitrate / (gameMode ? 1000 : 2000)) },
-          ...(preferredCodec ? { codec: preferredCodec } : {}),
-          disableTrackOnPause: true,
-          zeroRtpOnPause: true,
-        });
-      } catch (error) {
-        senderVideoTrack.stop();
-        throw error;
+      const negotiatedCodecs = deviceRef.current?.rtpCapabilities.codecs ?? [];
+      const codecCandidates = ['video/av1', 'video/vp9']
+        .map(mimeType => negotiatedCodecs.find(codec => codec.mimeType.toLowerCase() === mimeType))
+        .filter((codec): codec is NonNullable<typeof codec> => Boolean(codec));
+
+      // 优先尝试 AV1；Chromium/驱动只声明了解码能力但实际无法创建编码器时，
+      // 使用全新的克隆轨道自动回退 VP9，再由浏览器协商默认 codec。
+      let producer: Producer | null = null;
+      let lastProduceError: unknown = null;
+      for (const codec of [...codecCandidates, undefined]) {
+        const senderVideoTrack = videoTrack.clone();
+        senderVideoTrack.contentHint = gameMode ? 'motion' : 'detail';
+        try {
+          producer = await sendTransport.current!.produce({
+            track: senderVideoTrack,
+            appData: {
+              type: 'screen',
+              adaptation: gameMode ? 'game' : 'content',
+              preset,
+              maxFps: currentFps,
+              preferredCodec: codec?.mimeType ?? 'auto',
+            },
+            encodings: [{ maxBitrate: initialProfile.bitrate, maxFramerate: initialProfile.fps }],
+            codecOptions: { videoGoogleStartBitrate: Math.round(initialProfile.bitrate / (gameMode ? 1000 : 2000)) },
+            ...(codec ? { codec } : {}),
+            disableTrackOnPause: true,
+            zeroRtpOnPause: true,
+          });
+          console.info(`[screen share] 编码器：${codec?.mimeType ?? '浏览器自动选择'}`);
+          break;
+        } catch (error) {
+          senderVideoTrack.stop();
+          lastProduceError = error;
+          console.warn(`[screen share] ${codec?.mimeType ?? '自动 codec'} 编码失败，尝试回退`, error);
+        }
       }
+      if (!producer) throw lastProduceError ?? new Error('没有可用的屏幕共享视频编码器');
       screenProducer.current = producer;
       if (!screenDemandActiveRef.current) producer.pause();
       applyScreenActivity(preset, currentFps, initialActivity);

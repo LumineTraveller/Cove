@@ -8,6 +8,7 @@ import {
   type LoggerLike,
   type UpdateState,
 } from './updater-core';
+import { discoverUpdateSources } from './update-sources';
 
 function createLogger(): LoggerLike {
   const logPath = path.join(app.getPath('userData'), 'updater.log');
@@ -44,5 +45,6 @@ export function startAutoUpdater(isPackaged: boolean): AutoUpdaterController {
     getWindow: getMainWindow,
     publishState,
     logger: createLogger(),
+    resolveSources: discoverUpdateSources,
   });
 }

@@ -1,7 +1,8 @@
-import { app, BrowserWindow, Menu, session, desktopCapturer, ipcMain } from 'electron';
+import { app, BrowserWindow, Menu, session, desktopCapturer, ipcMain, shell } from 'electron';
 import path from 'path';
 import { startAutoUpdater } from './updater';
 import type { AutoUpdaterController, UpdateState } from './updater-core';
+import { normalizeExternalHttpUrl } from './external-links';
 
 const isDev = !app.isPackaged;
 let updaterController: AutoUpdaterController | null = null;
@@ -76,6 +77,12 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  ipcMain.handle('cove:shell:open-external', async (_event, value: unknown) => {
+    const url = normalizeExternalHttpUrl(value);
+    if (!url) return false;
+    await shell.openExternal(url);
+    return true;
+  });
   ipcMain.handle('cove:update:get-state', () => updaterController?.getState() ?? unavailableUpdateState);
   ipcMain.handle('cove:update:check', () => updaterController?.checkNow() ?? unavailableUpdateState);
   ipcMain.handle('cove:update:install', () => updaterController?.installNow() ?? false);

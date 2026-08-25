@@ -5,7 +5,7 @@ import { AlertTriangle, GripVertical, LayoutGrid, LoaderCircle, Pause, Pencil, P
 import { applyAudioElementOutput, DEFAULT_AUDIO_DEVICE_ID } from '../audioDevices';
 
 interface Soundpack { id: string; name: string; filename: string; uploader: string; createdAt: number; sortOrder: number; canDelete: boolean }
-interface Props { socket: Socket; roomId: string; serverURL: string; outputDeviceId?: string; disabled?: boolean }
+interface Props { socket: Socket; roomId: string; serverURL: string; outputDeviceId?: string; inVoice: boolean; disabled?: boolean }
 
 const SOUNDPACK_VOLUME_KEY = 'cove:soundpack-volume';
 
@@ -31,7 +31,7 @@ function applySoundpackOrder(packs: Soundpack[], orderedIds: string[]) {
   return [...ordered, ...byId.values()];
 }
 
-export function SoundPackPanel({ socket, roomId, serverURL, outputDeviceId = DEFAULT_AUDIO_DEVICE_ID, disabled = false }: Props) {
+export function SoundPackPanel({ socket, roomId, serverURL, outputDeviceId = DEFAULT_AUDIO_DEVICE_ID, inVoice, disabled = false }: Props) {
   const [packs, setPacks] = useState<Soundpack[]>([]);
   const [uploading, setUploading] = useState(false);
   const [playingId, setPlayingId] = useState<string | null>(null);
@@ -55,6 +55,14 @@ export function SoundPackPanel({ socket, roomId, serverURL, outputDeviceId = DEF
       console.warn('[soundpack] 切换正在播放的语音包输出设备失败', error);
     });
   }, [outputDeviceId]);
+
+  useEffect(() => {
+    if (inVoice) return;
+    audioRef.current?.pause();
+    if (audioRef.current) audioRef.current.src = '';
+    audioRef.current = null;
+    setPlayingId(null);
+  }, [inVoice]);
 
   const updateSoundpackVolume = (value: number) => {
     const normalized = Math.min(100, Math.max(0, value));
@@ -90,7 +98,9 @@ export function SoundPackPanel({ socket, roomId, serverURL, outputDeviceId = DEF
 
   useEffect(() => {
     const onAdded = (sound: Soundpack) => setPacks(previous => [sound, ...previous]);
-    const onPlay = ({ soundId }: { soundId: string }) => playSound(soundId);
+    const onPlay = ({ soundId }: { soundId: string }) => {
+      if (inVoice) playSound(soundId);
+    };
     const onDeleted = ({ soundId }: { soundId: string }) => {
       setPacks(previous => previous.filter(sound => sound.id !== soundId));
       setPlayingId(current => {
@@ -115,12 +125,18 @@ export function SoundPackPanel({ socket, roomId, serverURL, outputDeviceId = DEF
     socket.on('soundpack:renamed', onRenamed);
     socket.on('soundpack:reordered', onReordered);
     return () => { socket.off('soundpack:added', onAdded); socket.off('soundpack:play', onPlay); socket.off('soundpack:deleted', onDeleted); socket.off('soundpack:renamed', onRenamed); socket.off('soundpack:reordered', onReordered); };
-  }, [socket, playSound]);
+  }, [socket, playSound, inVoice]);
 
   const handlePlay = (sound: Soundpack) => {
-    if (disabled) return;
-    playSound(sound.id);
-    socket.emit('soundpack:play', { soundId: sound.id, roomId });
+    if (disabled || !inVoice) return;
+    socket.timeout(5_000).emit(
+      'soundpack:play',
+      { soundId: sound.id, roomId },
+      (error: Error | null, result?: { ok: boolean; error?: string }) => {
+        if (error) { window.alert('语音包播放请求超时，请重试'); return; }
+        if (!result?.ok) window.alert(result?.error ?? '语音包播放失败');
+      },
+    );
   };
 
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -233,7 +249,7 @@ export function SoundPackPanel({ socket, roomId, serverURL, outputDeviceId = DEF
           <section className="relative flex max-h-[82vh] w-full max-w-3xl flex-col overflow-hidden rounded-3xl border border-white/15 bg-zinc-900/95 shadow-2xl" onMouseDown={event => event.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="soundpack-title">
             <header className="flex items-center gap-3 border-b border-white/10 px-6 py-5">
               <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-cyan-300/10 text-cyan-200"><Volume2 size={20} /></div>
-              <div className="min-w-0 flex-1"><h2 id="soundpack-title" className="text-lg font-bold text-white">房间语音包</h2><p className="text-sm text-white/40">点击同步播放，拖动方格调整所有成员看到的顺序</p></div>
+              <div className="min-w-0 flex-1"><h2 id="soundpack-title" className="text-lg font-bold text-white">房间语音包</h2><p className="text-sm text-white/40">{inVoice ? '点击后只对语音中的成员同步播放，拖动方格调整顺序' : '加入语音后才能同步播放；仍可上传和管理语音包'}</p></div>
               <button onClick={() => fileInputRef.current?.click()} disabled={uploading || disabled} className="inline-flex items-center gap-2 rounded-xl bg-white/10 px-3.5 py-2.5 text-sm font-medium text-white/65 transition hover:bg-white/15 hover:text-white disabled:opacity-35"><Upload size={17} />{uploading ? '上传中' : '上传音频'}</button>
               <button onClick={() => setOpen(false)} className="rounded-xl p-2.5 text-white/40 transition hover:bg-white/10 hover:text-white" aria-label="关闭语音包"><X size={19} /></button>
               <input ref={fileInputRef} type="file" accept="audio/*" className="hidden" onChange={handleFileChange} />
@@ -288,7 +304,7 @@ export function SoundPackPanel({ socket, roomId, serverURL, outputDeviceId = DEF
                         onDragEnd={() => setDraggedId(null)}
                         className={`group relative min-h-20 ${packs.length > 1 && !disabled ? 'cursor-grab active:cursor-grabbing' : ''} ${draggedId === sound.id ? 'opacity-45' : ''}`}
                       >
-                        <button onClick={() => handlePlay(sound)} disabled={disabled} className={`relative h-full min-h-20 w-full overflow-hidden rounded-2xl border px-4 py-3 text-left transition-all focus:outline-none focus:ring-2 focus:ring-cyan-300/50 disabled:opacity-35 ${sound.canDelete ? 'pr-20' : ''} ${playing ? 'border-cyan-300/50 bg-cyan-300/15 text-cyan-100 shadow-lg shadow-cyan-950/30' : 'border-white/[0.07] bg-white/[0.055] text-white/75 hover:-translate-y-0.5 hover:border-cyan-300/25 hover:bg-white/10 hover:text-white'}`} title="点击同步播放">
+                        <button onClick={() => handlePlay(sound)} disabled={disabled || !inVoice} className={`relative h-full min-h-20 w-full overflow-hidden rounded-2xl border px-4 py-3 text-left transition-all focus:outline-none focus:ring-2 focus:ring-cyan-300/50 disabled:cursor-not-allowed disabled:opacity-35 ${sound.canDelete ? 'pr-20' : ''} ${playing ? 'border-cyan-300/50 bg-cyan-300/15 text-cyan-100 shadow-lg shadow-cyan-950/30' : 'border-white/[0.07] bg-white/[0.055] text-white/75 hover:-translate-y-0.5 hover:border-cyan-300/25 hover:bg-white/10 hover:text-white'}`} title={inVoice ? '只对语音中的成员同步播放' : '请先加入语音'}>
                           <span className="flex items-start gap-3"><span className={`mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-xl ${playing ? 'bg-cyan-200 text-zinc-900' : 'bg-white/10 text-white/45 group-hover:bg-cyan-300/10 group-hover:text-cyan-100'}`}>{playing ? <Pause size={15} /> : <Play size={15} fill="currentColor" />}</span><span className="min-w-0"><span className="block truncate text-sm font-semibold">{sound.name}</span><span className="mt-1 block truncate text-xs text-white/30">{sound.uploader}</span></span></span>
                           {playing && <span className="absolute inset-x-0 bottom-0 h-0.5 animate-pulse bg-cyan-300" />}
                         </button>

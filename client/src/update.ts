@@ -13,6 +13,8 @@ export interface UpdateState {
   version?: string;
   percent?: number;
   message?: string;
+  source?: 'github' | 'gitee';
+  sourceLabel?: 'GitHub' | 'Gitee';
 }
 
 export const UPDATE_CENTER_OPEN_EVENT = 'cove:update:open';
