@@ -3,6 +3,10 @@ const { EventEmitter } = require('node:events');
 const test = require('node:test');
 const { configureAutoUpdater } = require('../dist-electron/updater-core.js');
 
+test('compiled Electron adapter imports electron-updater at runtime', () => {
+  assert.doesNotThrow(() => require('../dist-electron/updater.js'));
+});
+
 class FakeUpdater extends EventEmitter {
   constructor() {
     super();

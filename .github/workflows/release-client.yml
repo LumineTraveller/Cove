@@ -64,9 +64,16 @@ jobs:
             }
           }
 
-          gh release create "${{ github.ref_name }}" `
-            $installer $blockmap $manifest `
-            --repo "${{ github.repository }}" `
-            --verify-tag `
-            --title "Cove v$version" `
-            --notes-file RELEASE_NOTES.md
+          $tag = "${{ github.ref_name }}"
+          $repo = "${{ github.repository }}"
+          if (gh release view $tag --repo $repo 2>$null) {
+            gh release upload $tag $installer $blockmap $manifest --clobber --repo $repo
+            gh release edit $tag --title "Cove v$version" --notes-file RELEASE_NOTES.md --repo $repo
+          } else {
+            gh release create $tag `
+              $installer $blockmap $manifest `
+              --repo $repo `
+              --verify-tag `
+              --title "Cove v$version" `
+              --notes-file RELEASE_NOTES.md
+          }

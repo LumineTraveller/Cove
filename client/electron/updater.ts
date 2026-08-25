@@ -1,10 +1,8 @@
 import { app, BrowserWindow, Notification, dialog, type MessageBoxOptions } from 'electron';
-import electronUpdater from 'electron-updater';
+import { autoUpdater } from 'electron-updater';
 import fs from 'fs';
 import path from 'path';
 import { configureAutoUpdater, type AutoUpdaterController, type LoggerLike } from './updater-core';
-
-const { autoUpdater } = electronUpdater;
 
 function createLogger(): LoggerLike {
   const logPath = path.join(app.getPath('userData'), 'updater.log');
