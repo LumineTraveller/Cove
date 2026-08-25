@@ -33,6 +33,9 @@ jobs:
           if ("v$version" -ne "${{ github.ref_name }}") {
             throw "Tag ${{ github.ref_name }} does not match client version $version"
           }
+          if (-not (Select-String -Path RELEASE_NOTES.md -SimpleMatch "Cove v$version" -Quiet)) {
+            throw "RELEASE_NOTES.md does not describe Cove v$version"
+          }
 
       - name: Install dependencies
         run: npm ci
@@ -40,8 +43,30 @@ jobs:
       - name: Test updater
         run: npm run test:updater -w client
 
-      - name: Build and publish Windows release
-        run: npm run build:electron -w client -- --publish always
+      - name: Build Windows release
+        run: npm run build:electron -w client -- --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: Create GitHub release
+        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: |
+          $version = node -p "require('./client/package.json').version"
+          $installer = "client/dist-app/Cove-Setup-$version.exe"
+          $blockmap = "$installer.blockmap"
+          $manifest = "client/dist-app/latest.yml"
+
+          foreach ($asset in @($installer, $blockmap, $manifest)) {
+            if (-not (Test-Path -LiteralPath $asset)) {
+              throw "Missing release asset: $asset"
+            }
+          }
+
+          gh release create "${{ github.ref_name }}" `
+            $installer $blockmap $manifest `
+            --repo "${{ github.repository }}" `
+            --verify-tag `
+            --title "Cove v$version" `
+            --notes-file RELEASE_NOTES.md
