@@ -1,11 +1,36 @@
 import { app, BrowserWindow, Menu, session, desktopCapturer, ipcMain, shell } from 'electron';
 import path from 'path';
+import fs from 'fs';
 import { startAutoUpdater } from './updater';
 import type { AutoUpdaterController, UpdateState } from './updater-core';
 import { normalizeExternalHttpUrl } from './external-links';
 
+const sessionStamp = new Date().toISOString().replace(/[:.]/g, '-');
+const chromiumCaptureLogPath = path.join(
+  app.getPath('userData'),
+  `chromium-screen-capture-${sessionStamp}.log`,
+);
+
+// Electron 29 / Chromium 122 在 Windows 上默认关闭 WGC 屏幕捕获，回退到
+// 较慢的 DXGI/GDI 抓屏路径。WGC 直接使用 Windows.Graphics.Capture 与
+// D3D11 图形链路；不受支持时 WebRTC 会安全回退到默认捕获器。
+// 该 Chromium Feature 必须在 app.whenReady() 之前启用。
+if (process.platform === 'win32') {
+  app.commandLine.appendSwitch('enable-features', 'AllowWgcScreenCapturer');
+
+  // beta 诊断：记录 Chromium 实际选择 WGC 还是 DXGI/GDI，以及请求帧率、
+  // 单帧捕获耗时和调度周期。每次启动使用独立文件，避免覆盖上次测试证据。
+  app.commandLine.appendSwitch('enable-logging', 'file');
+  app.commandLine.appendSwitch('log-file', chromiumCaptureLogPath);
+  app.commandLine.appendSwitch(
+    'vmodule',
+    'desktop_capture_device=2,desktop_capturer=1,media_stream_manager=1',
+  );
+}
+
 const isDev = !app.isPackaged;
 let updaterController: AutoUpdaterController | null = null;
+let mediaDiagnosticLogPath = '';
 
 const unavailableUpdateState: UpdateState = {
   status: 'disabled',
@@ -77,6 +102,7 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  mediaDiagnosticLogPath = path.join(app.getPath('userData'), `media-diagnostics-${sessionStamp}.jsonl`);
   ipcMain.handle('cove:shell:open-external', async (_event, value: unknown) => {
     const url = normalizeExternalHttpUrl(value);
     if (!url) return false;
@@ -86,6 +112,20 @@ app.whenReady().then(() => {
   ipcMain.handle('cove:update:get-state', () => updaterController?.getState() ?? unavailableUpdateState);
   ipcMain.handle('cove:update:check', () => updaterController?.checkNow() ?? unavailableUpdateState);
   ipcMain.handle('cove:update:install', () => updaterController?.installNow() ?? false);
+  ipcMain.handle('cove:diagnostics:append', async (_event, value: unknown) => {
+    if (!mediaDiagnosticLogPath || !value || typeof value !== 'object') return false;
+    const line = JSON.stringify(value, (_key, item) => typeof item === 'bigint' ? Number(item) : item);
+    if (line.length > 128 * 1024) return false;
+    await fs.promises.appendFile(mediaDiagnosticLogPath, `${line}\n`, 'utf8');
+    return true;
+  });
+  ipcMain.handle('cove:diagnostics:open-log', async () => {
+    if (!mediaDiagnosticLogPath) return false;
+    if (!fs.existsSync(mediaDiagnosticLogPath))
+      await fs.promises.writeFile(mediaDiagnosticLogPath, '', 'utf8');
+    shell.showItemInFolder(mediaDiagnosticLogPath);
+    return true;
+  });
   createWindow();
   updaterController = startAutoUpdater(app.isPackaged);
 });

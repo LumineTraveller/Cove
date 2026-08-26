@@ -26,6 +26,16 @@ test('compiled updater exposes only the in-app IPC bridge and no OS notification
   assert.match(preload, /cove:update:install/);
 });
 
+test('compiled Electron main selects WGC capture and removes the ineffective Chromium 122 CPU switch', () => {
+  const main = fs.readFileSync(require.resolve('../dist-electron/main.js'), 'utf8');
+  const wgc = main.indexOf("appendSwitch('enable-features', 'AllowWgcScreenCapturer')");
+  const ready = main.search(/\.whenReady\(\)\.then/);
+  assert.ok(wgc >= 0, 'WGC desktop capture feature is missing');
+  assert.ok(ready > wgc, 'WGC feature must be applied before app.whenReady()');
+  assert.doesNotMatch(main, /webrtc-max-cpu-consumption-percentage/);
+  assert.match(main, /desktop_capture_device=2,desktop_capturer=1,media_stream_manager=1/);
+});
+
 class FakeUpdater extends EventEmitter {
   constructor() {
     super();

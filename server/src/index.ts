@@ -15,6 +15,7 @@ import {
 import { createLobbyPresenceSnapshot } from './presence';
 import { soundpackVoiceAudience } from './soundpackAudience';
 import { createVoicePresenceEvent, voicePresenceMessage, type VoicePresenceAction } from './voicePresence';
+import { summarizeRtpStat, summarizeTransportStat } from './mediaDiagnostics';
 
 const app = express();
 const httpServer = createServer(app);
@@ -360,6 +361,102 @@ function findProducerOwner(producerId: string) {
   return null;
 }
 
+async function mediaDiagnosticsForPeer(socketId: string) {
+  const peer = peers.get(socketId);
+  if (!peer) return { timestamp: Date.now(), role: 'idle', transports: {}, producers: [], consumers: [] };
+
+  const transportStats = async (transport: typeof peer.sendTransport) => {
+    if (!transport || transport.closed) return null;
+    try {
+      const [stat] = await transport.getStats();
+      return summarizeTransportStat(stat as unknown as Record<string, unknown>);
+    } catch { return null; }
+  };
+
+  const producers = await Promise.all([...peer.producers.values()]
+    .filter(producer => (producer.appData as Record<string, unknown>).type === 'screen')
+    .map(async producer => {
+      let stats: ReturnType<typeof summarizeRtpStat>[] = [];
+      try {
+        stats = (await producer.getStats()).map(stat =>
+          summarizeRtpStat(stat as unknown as Record<string, unknown>));
+      } catch { /* producer may close while the snapshot is collected */ }
+      return {
+        id: producer.id,
+        kind: producer.kind,
+        sourceType: 'screen',
+        paused: producer.paused,
+        score: producer.score,
+        stats,
+      };
+    }));
+
+  const consumers = await Promise.all([...peer.consumers.values()]
+    .filter(consumer => {
+      const owner = findProducerOwner(consumer.producerId);
+      return (owner?.producer.appData as Record<string, unknown> | undefined)?.type === 'screen';
+    })
+    .map(async consumer => {
+      let stats: ReturnType<typeof summarizeRtpStat>[] = [];
+      try {
+        stats = (await consumer.getStats()).map(stat =>
+          summarizeRtpStat(stat as unknown as Record<string, unknown>));
+      } catch { /* consumer may close while the snapshot is collected */ }
+      return {
+        id: consumer.id,
+        producerId: consumer.producerId,
+        kind: consumer.kind,
+        paused: consumer.paused,
+        producerPaused: consumer.producerPaused,
+        score: consumer.score,
+        stats,
+      };
+    }));
+
+  return {
+    timestamp: Date.now(),
+    role: producers.length ? 'sender' : consumers.length ? 'receiver' : 'idle',
+    transports: {
+      send: await transportStats(peer.sendTransport),
+      receive: await transportStats(peer.recvTransport),
+    },
+    producers,
+    consumers,
+  };
+}
+
+let mediaDiagnosticsBusy = false;
+async function logActiveScreenDiagnostics() {
+  if (mediaDiagnosticsBusy) return;
+  mediaDiagnosticsBusy = true;
+  try {
+    for (const [socketId, peer] of peers) {
+      const activeScreen = [...peer.producers.values()].some(producer =>
+        !producer.closed && !producer.paused &&
+        (producer.appData as Record<string, unknown>).type === 'screen');
+      if (!activeScreen) continue;
+
+      const sender = await mediaDiagnosticsForPeer(socketId);
+      const viewers = [];
+      for (const [viewerId, viewer] of peers) {
+        if (viewerId === socketId) continue;
+        const watching = [...viewer.consumers.values()].some(consumer =>
+          sender.producers.some(producer => producer.id === consumer.producerId));
+        if (watching) viewers.push({ peerId: viewerId.slice(0, 8), snapshot: await mediaDiagnosticsForPeer(viewerId) });
+      }
+      console.log('[media-diag]', JSON.stringify({
+        peerId: socketId.slice(0, 8),
+        sender,
+        viewers,
+      }));
+    }
+  } catch (error) {
+    console.warn('[media-diag] 采集服务端媒体统计失败', error);
+  } finally {
+    mediaDiagnosticsBusy = false;
+  }
+}
+
 /**
  * 屏幕流只在至少有一个真实 Consumer 时传输。服务端 Producer.pause() 负责
  * 停止向观看者转发，同时通知发送端暂停本地 Producer，避免远程分享者仍把
@@ -509,11 +606,14 @@ function broadcastRoomMembers(roomId: string) {
 }
 
 function announceRoomPresence(roomId: string, username: string, action: 'join' | 'leave') {
+  // 加入房间与加入语音同时发生时会产生重复提示。房间成员状态仍由
+  // room:state / room:members 广播，这里只保留离开房间的聊天播报。
+  if (action === 'join') return;
   const msg: Message = {
     id: Math.random().toString(36).slice(2, 9),
     roomId,
     author: 'Cove',
-    content: `[${username}] ${action === 'join' ? '加入' : '离开'}了房间`,
+    content: `[${username}] 离开了房间`,
     type: 'system',
     timestamp: Date.now(),
   };
@@ -880,6 +980,13 @@ io.on('connection', socket => {
     cb(router.rtpCapabilities);
   });
 
+  /** 媒体诊断快照：只返回当前连接自己的传输及屏幕流统计。 */
+  socket.on('ms:media-diagnostics', async (...args: unknown[]) => {
+    const cb = args.find(a => typeof a === 'function') as ((snapshot: unknown) => void) | undefined;
+    if (!cb) return;
+    cb(await mediaDiagnosticsForPeer(socket.id));
+  });
+
   /** 2. 创建 WebRTC transport（发送 or 接收） */
   socket.on('ms:create-transport', async (
     data: unknown,
@@ -999,6 +1106,14 @@ io.on('connection', socket => {
       }
       peer.producers.set(producer.id, producer);
 
+      if (sourceType === 'screen') {
+        producer.on('score', score => {
+          console.log('[media-diag] producer-score', JSON.stringify({
+            peerId: socket.id.slice(0, 8), producerId: producer.id, score,
+          }));
+        });
+      }
+
       const demandType = onDemandMediaType(sourceType);
       if (demandType) await producer.pause().catch(() => {});
 
@@ -1083,6 +1198,16 @@ io.on('connection', socket => {
       });
 
       peer.consumers.set(consumer.id, consumer);
+
+      const consumedSourceType = (owner.producer.appData as Record<string, unknown>).type;
+      if (consumedSourceType === 'screen') {
+        consumer.on('score', score => {
+          console.log('[media-diag] consumer-score', JSON.stringify({
+            peerId: socket.id.slice(0, 8), consumerId: consumer.id,
+            producerId, score,
+          }));
+        });
+      }
 
       consumer.on('transportclose', () => {
         peer.consumers.delete(consumer.id);
@@ -1262,6 +1387,8 @@ io.on('connection', socket => {
 
 export async function startServer(port = 3001): Promise<number> {
   await initMediasoup();
+  const mediaTimer = setInterval(() => { void logActiveScreenDiagnostics(); }, 5_000);
+  mediaTimer.unref?.();
   return new Promise((resolve, reject) => {
     // 显式绑定 0.0.0.0（所有 IPv4 接口），确保 frp 用 127.0.0.1 也能连上。
     // 不指定 host 时 Windows 默认只绑 IPv6(::)，导致 frp 拨 127.0.0.1 被拒绝。

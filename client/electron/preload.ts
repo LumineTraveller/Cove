@@ -15,3 +15,8 @@ contextBridge.exposeInMainWorld('coveUpdater', {
 contextBridge.exposeInMainWorld('coveShell', {
   openExternal: (url: string): Promise<boolean> => ipcRenderer.invoke('cove:shell:open-external', url),
 });
+
+contextBridge.exposeInMainWorld('coveDiagnostics', {
+  append: (entry: unknown): Promise<boolean> => ipcRenderer.invoke('cove:diagnostics:append', entry),
+  openLog: (): Promise<boolean> => ipcRenderer.invoke('cove:diagnostics:open-log'),
+});

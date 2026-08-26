@@ -1,7 +1,7 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
-  Activity, ArrowLeft, Crown, Ellipsis, Eye, EyeOff, Gamepad2, Hash, Headphones, ImagePlus, LoaderCircle, Maximize2, Menu, MessageCircle,
+  Activity, ArrowLeft, Crown, Download, Ellipsis, Eye, EyeOff, FileText, Gamepad2, Hash, Headphones, ImagePlus, LoaderCircle, Maximize2, Menu, MessageCircle,
   Mic, MicOff, Minimize2, MonitorPlay, MonitorUp, PanelRightClose, PanelRightOpen, PhoneOff,
   RefreshCw, Send, Settings2, Trash2, UserMinus, UserRound, Volume2, VolumeX, X,
 } from 'lucide-react';
@@ -21,6 +21,8 @@ import {
   validateChatImageFile,
 } from '../chatImages';
 import { parseChatText } from '../chatLinks';
+import { isScreenEncodingWithinPlan } from '../screenCapture';
+import { sortRoomMembers } from '../memberOrdering';
 
 function ChatMessageText({ content, isMe }: { content: string; isMe: boolean }) {
   const openExternal = (event: React.MouseEvent<HTMLAnchorElement>, url: string) => {
@@ -87,8 +89,8 @@ function ScreenSettingsModal({ preset, fps, audio, gameMode, onPreset, onFps, on
         <h2 className="text-white font-bold text-xl">屏幕共享设置</h2>
         <p className={`rounded-2xl border px-4 py-3 text-xs leading-relaxed ${gameMode ? 'border-amber-300/20 bg-amber-300/[0.07] text-amber-100/75' : 'border-cyan-300/10 bg-cyan-300/[0.05] text-cyan-100/65'}`}>
           {gameMode
-            ? '游戏模式不会分析画面变化，会持续使用所选画质的 60 FPS 与最高码率。网络占用会明显增加。'
-            : 'Cove 会自动识别静止画面、普通操作和动态内容，并实时调整帧率与码率。下方帧率仅表示允许使用的最高值。'}
+            ? '游戏模式不会分析画面变化，会持续使用所选传输清晰度的 60 FPS 与最高码率。网络占用会明显增加。'
+            : 'Cove 会保留屏幕原始采集画面用于高质量缩放，并把实际传输分辨率限制在所选档位内；同时根据画面变化调整帧率与码率。'}
         </p>
         <div>
           <p className="text-white/40 text-sm font-medium mb-2.5">传输模式</p>
@@ -100,7 +102,7 @@ function ScreenSettingsModal({ preset, fps, audio, gameMode, onPreset, onFps, on
           </button>
         </div>
         <div>
-          <p className="text-white/40 text-sm font-medium mb-2.5">画质</p>
+          <p className="text-white/40 text-sm font-medium mb-2.5">传输清晰度</p>
           <div className="flex gap-2">
             {(Object.keys(SCREEN_PRESETS) as ScreenPreset[]).map(p => (
               <button key={p} onClick={() => onPreset(p)}
@@ -329,7 +331,8 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
       navigate('/', { replace: true });
     };
     const onRoomPresence = ({ roomId: presenceRoomId, action }: { roomId: string; action: 'join' | 'leave' }) => {
-      if (presenceRoomId === roomId) rtc.playPresenceTone(action);
+      // 房间加入不再播放提示音；语音加入仍由 useWebRTC 的 voice:presence 处理。
+      if (presenceRoomId === roomId && action === 'leave') rtc.playPresenceTone(action);
     };
     socket.on('message:new', onNew);
     socket.on('room:state', onState);
@@ -541,15 +544,9 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
     <div className="h-full flex items-center justify-center bg-gradient-to-br from-zinc-950 via-black to-zinc-900 text-white/40">加载中…</div>
   );
 
-  // 语音中的成员始终排在仅进入房间的成员之前；同一组内保持服务端顺序稳定。
+  // 自己始终置顶，其余成员按“语音中 > 仅在房间”排序；组内保持服务端顺序稳定。
   const voiceMemberSocketIds = new Set(rtc.voiceMembers.map(member => member.socketId));
-  const sortedRoomMembers = roomMembers
-    .map((member, index) => ({ member, index }))
-    .sort((left, right) =>
-      Number(voiceMemberSocketIds.has(right.member.socketId))
-      - Number(voiceMemberSocketIds.has(left.member.socketId))
-      || left.index - right.index)
-    .map(({ member }) => member);
+  const sortedRoomMembers = sortRoomMembers(roomMembers, voiceMemberSocketIds, rtc.localSocketId ?? socket.id);
 
   const hasScreen    = !!rtc.localScreen || !!rtc.remoteScreen;
   return (
@@ -658,97 +655,100 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
                   : 0;
                 const speaking = showVoiceState && level > 0.08 && !voiceMuted && !(isSelf && rtc.isMuted);
                 return (
-                  <div key={member.socketId} className="group flex items-start gap-2 rounded-xl px-2 py-2 transition-colors hover:bg-white/[0.06]">
-                    <div className="min-w-0 flex-1">
-                      <button
-                        onClick={() => isSelf ? setShowProfile(true) : setViewingProfile(member)}
-                        className="flex w-full min-w-0 items-center gap-3 rounded-xl text-left focus:outline-none focus:ring-2 focus:ring-cyan-300/35"
-                        title={isSelf ? '打开个人名片' : `查看 ${member.username} 的主页`}
-                      >
-                        <Avatar username={member.username} avatarUrl={member.avatarUrl} size="sm" className={speaking ? 'border-green-400/60 ring-2 ring-green-400/40' : isSelf ? 'border-white/30' : 'transition group-hover:border-cyan-200/30'} />
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-1.5">
-                            <span className={`min-w-0 flex-1 truncate text-base font-medium ${isSelf ? 'text-white' : 'text-white/55'}`}>
-                              {isSelf ? `${member.username}（你）` : (profileRemarks[member.userId] || member.username)}
-                            </span>
-                            {member.isOwner && <Crown size={14} className="flex-shrink-0 text-amber-300" aria-label="房主" />}
-                            {showVoiceState && voiceMuted && <MicOff size={13} className="flex-shrink-0 text-red-300/70" aria-label="麦克风已关闭" />}
-                            {showVoiceState && !isSelf && <span className="text-xs tabular-nums text-white/30">{Math.round((rtc.memberVolumes[member.socketId] ?? 1) * 100)}%</span>}
-                          </div>
-                          {profileRemarks[member.userId] && !isSelf && <p className="mt-0.5 truncate text-xs text-white/30">用户名：{member.username}</p>}
-                          {member.isOwner && <p className="mt-0.5 text-xs text-amber-300/50">房主</p>}
-                        </div>
-                      </button>
-
-                      {showVoiceState && (
-                        <div className="ml-11 mt-2">
-                          {!isSelf && rtc.inVoice && voiceMember ? (
-                            <label className="grid grid-cols-[13px_minmax(0,1fr)] items-center gap-x-2" title={`调整你听到的 ${member.username} 音量`}>
-                              {(rtc.memberVolumes[member.socketId] ?? 1) === 0
-                                ? <VolumeX size={13} className="flex-shrink-0 text-white/35" />
-                                : <Volume2 size={13} className="flex-shrink-0 text-white/35" />}
-                              <div className="relative h-5 min-w-0" data-testid="voice-volume-meter">
-                                {/* 同一条中心线上：较宽的绿色实时电平位于底层，较细的青色音量轨位于上层。 */}
-                                <div
-                                  className="pointer-events-none absolute left-0 top-1/2 h-2.5 -translate-y-1/2 rounded-full bg-gradient-to-r from-green-500/75 to-emerald-300 transition-[width] duration-75"
-                                  style={{ width: `${Math.round((voiceMuted ? 0 : Math.min(rtc.memberVolumes[member.socketId] ?? 1, level * (rtc.memberVolumes[member.socketId] ?? 1))) * 100)}%` }}
-                                  role="progressbar"
-                                  aria-label={`${member.username} 调整后的实时声音强度`}
-                                  aria-valuemin={0}
-                                  aria-valuemax={100}
-                                  aria-valuenow={Math.round((voiceMuted ? 0 : Math.min(rtc.memberVolumes[member.socketId] ?? 1, level * (rtc.memberVolumes[member.socketId] ?? 1))) * 100)}
-                                />
-                                <div className="pointer-events-none absolute inset-x-0 top-1/2 h-1 -translate-y-1/2 rounded-full bg-white/15" />
-                                <div
-                                  className="pointer-events-none absolute left-0 top-1/2 h-1 -translate-y-1/2 rounded-full bg-cyan-300/75"
-                                  style={{ width: `${Math.round((rtc.memberVolumes[member.socketId] ?? 1) * 100)}%` }}
-                                />
-                                <div
-                                  className="pointer-events-none absolute top-1/2 h-3 w-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full border border-cyan-50/80 bg-cyan-100 shadow-[0_0_6px_rgba(165,243,252,0.75)]"
-                                  style={{ left: `${Math.round((rtc.memberVolumes[member.socketId] ?? 1) * 100)}%` }}
-                                  aria-hidden="true"
-                                />
-                                <input
-                                  type="range"
-                                  min="0"
-                                  max="100"
-                                  step="1"
-                                  value={Math.round((rtc.memberVolumes[member.socketId] ?? 1) * 100)}
-                                  onChange={event => rtc.setMemberVolume(member.socketId, voiceMember.userId, Number(event.target.value) / 100)}
-                                  className="absolute inset-x-0 top-1/2 h-5 w-full -translate-y-1/2 cursor-pointer opacity-0"
-                                  aria-label={`${member.username} 的接收音量`}
-                                />
-                              </div>
-                            </label>
-                          ) : (
-                            <div className="h-1 overflow-hidden rounded-full bg-white/10" role="progressbar" aria-label={`${member.username} 的实时声音强度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round((voiceMuted || (isSelf && rtc.isMuted) ? 0 : level) * 100)}>
-                              <div
-                                className="h-full rounded-full bg-gradient-to-r from-green-400 to-emerald-300 transition-[width] duration-75"
-                                style={{ width: `${Math.round((voiceMuted || (isSelf && rtc.isMuted) ? 0 : level) * 100)}%` }}
-                              />
+                  <div key={member.socketId} className="group rounded-xl px-2 py-2 transition-colors hover:bg-white/[0.06]">
+                    {/* 操作按钮只参与这一行的布局；电平轨道移到整行下方，避免被按钮挤窄。 */}
+                    <div className="flex items-start gap-2">
+                      <div className="min-w-0 flex-1">
+                        <button
+                          onClick={() => isSelf ? setShowProfile(true) : setViewingProfile(member)}
+                          className="flex w-full min-w-0 items-center gap-3 rounded-xl text-left focus:outline-none focus:ring-2 focus:ring-cyan-300/35"
+                          title={isSelf ? '打开个人名片' : `查看 ${member.username} 的主页`}
+                        >
+                          <Avatar username={member.username} avatarUrl={member.avatarUrl} size="sm" className={speaking ? 'border-green-400/60 ring-2 ring-green-400/40' : isSelf ? 'border-white/30' : 'transition group-hover:border-cyan-200/30'} />
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5">
+                              <span className={`min-w-0 flex-1 truncate text-base font-medium ${isSelf ? 'text-white' : 'text-white/55'}`}>
+                                {isSelf ? `${member.username}（你）` : (profileRemarks[member.userId] || member.username)}
+                              </span>
+                              {member.isOwner && <Crown size={14} className="flex-shrink-0 text-amber-300" aria-label="房主" />}
+                              {showVoiceState && voiceMuted && <MicOff size={13} className="flex-shrink-0 text-red-300/70" aria-label="麦克风已关闭" />}
+                              {showVoiceState && !isSelf && <span className="text-xs tabular-nums text-white/30">{Math.round((rtc.memberVolumes[member.socketId] ?? 1) * 100)}%</span>}
                             </div>
-                          )}
+                            {profileRemarks[member.userId] && !isSelf && <p className="mt-0.5 truncate text-xs text-white/30">用户名：{member.username}</p>}
+                            {member.isOwner && <p className="mt-0.5 text-xs text-amber-300/50">房主</p>}
+                          </div>
+                        </button>
+                      </div>
+                      {isOwner && !member.isOwner && !isSelf && (
+                        <div className="mt-0.5 flex flex-shrink-0 items-center gap-1">
+                          <button
+                            onClick={() => setMemberMuted(member)}
+                            disabled={moderatingId === member.socketId || kickingId === member.socketId || !sessionReady || !roomSynced}
+                            className={`rounded-lg px-2 py-1.5 text-xs font-medium transition-colors disabled:opacity-40 ${
+                              member.isMuted
+                                ? 'bg-green-500/10 text-green-300 hover:bg-green-500/20'
+                                : 'bg-red-500/10 text-red-300 hover:bg-red-500/20'
+                            }`}
+                          >{member.isMuted ? '解禁' : '禁言'}</button>
+                          <button
+                            onClick={() => { void kickMember(member); }}
+                            disabled={kickingId === member.socketId || moderatingId === member.socketId || !sessionReady || !roomSynced}
+                            className="rounded-lg bg-red-500/10 p-1.5 text-red-300 transition hover:bg-red-500/20 disabled:opacity-40"
+                            title={`将 ${member.username} 移出房间`}
+                            aria-label={`将 ${member.username} 移出房间`}
+                          ><UserMinus size={14} /></button>
                         </div>
                       )}
                     </div>
-                    {isOwner && !member.isOwner && !isSelf && (
-                      <div className="mt-0.5 flex flex-shrink-0 items-center gap-1">
-                        <button
-                          onClick={() => setMemberMuted(member)}
-                          disabled={moderatingId === member.socketId || kickingId === member.socketId || !sessionReady || !roomSynced}
-                          className={`rounded-lg px-2 py-1.5 text-xs font-medium transition-colors disabled:opacity-40 ${
-                            member.isMuted
-                              ? 'bg-green-500/10 text-green-300 hover:bg-green-500/20'
-                              : 'bg-red-500/10 text-red-300 hover:bg-red-500/20'
-                          }`}
-                        >{member.isMuted ? '解禁' : '禁言'}</button>
-                        <button
-                          onClick={() => { void kickMember(member); }}
-                          disabled={kickingId === member.socketId || moderatingId === member.socketId || !sessionReady || !roomSynced}
-                          className="rounded-lg bg-red-500/10 p-1.5 text-red-300 transition hover:bg-red-500/20 disabled:opacity-40"
-                          title={`将 ${member.username} 移出房间`}
-                          aria-label={`将 ${member.username} 移出房间`}
-                        ><UserMinus size={14} /></button>
+
+                    {showVoiceState && (
+                      <div className="ml-11 mt-2 flex min-w-0 items-center gap-2">
+                        {!isSelf && rtc.inVoice && voiceMember ? (
+                          <label className="flex min-w-0 flex-1 items-center gap-x-2" title={`调整你听到的 ${member.username} 音量`}>
+                            {(rtc.memberVolumes[member.socketId] ?? 1) === 0
+                              ? <VolumeX size={13} className="flex-shrink-0 text-white/35" />
+                              : <Volume2 size={13} className="flex-shrink-0 text-white/35" />}
+                            <div className="relative h-5 min-w-0 w-0 flex-1" data-testid="voice-volume-meter">
+                              {/* 所有成员共用整行的固定右边界；绿色强度轨和青色音量轨叠在同一中心线上。 */}
+                              <div
+                                className="pointer-events-none absolute left-0 top-1/2 h-2.5 -translate-y-1/2 rounded-full bg-gradient-to-r from-green-500/75 to-emerald-300 transition-[width] duration-75"
+                                style={{ width: `${Math.round((voiceMuted ? 0 : Math.min(rtc.memberVolumes[member.socketId] ?? 1, level * (rtc.memberVolumes[member.socketId] ?? 1))) * 100)}%` }}
+                                role="progressbar"
+                                aria-label={`${member.username} 调整后的实时声音强度`}
+                                aria-valuemin={0}
+                                aria-valuemax={100}
+                                aria-valuenow={Math.round((voiceMuted ? 0 : Math.min(rtc.memberVolumes[member.socketId] ?? 1, level * (rtc.memberVolumes[member.socketId] ?? 1))) * 100)}
+                              />
+                              <div className="pointer-events-none absolute inset-x-0 top-1/2 h-1 -translate-y-1/2 rounded-full bg-white/15" />
+                              <div
+                                className="pointer-events-none absolute left-0 top-1/2 h-1 -translate-y-1/2 rounded-full bg-cyan-300/75"
+                                style={{ width: `${Math.round((rtc.memberVolumes[member.socketId] ?? 1) * 100)}%` }}
+                              />
+                              <div
+                                className="pointer-events-none absolute top-1/2 h-3 w-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full border border-cyan-50/80 bg-cyan-100 shadow-[0_0_6px_rgba(165,243,252,0.75)]"
+                                style={{ left: `${Math.round((rtc.memberVolumes[member.socketId] ?? 1) * 100)}%` }}
+                                aria-hidden="true"
+                              />
+                              <input
+                                type="range"
+                                min="0"
+                                max="100"
+                                step="1"
+                                value={Math.round((rtc.memberVolumes[member.socketId] ?? 1) * 100)}
+                                onChange={event => rtc.setMemberVolume(member.socketId, voiceMember.userId, Number(event.target.value) / 100)}
+                                className="absolute inset-x-0 top-1/2 h-5 w-full -translate-y-1/2 cursor-pointer opacity-0"
+                                aria-label={`${member.username} 的接收音量`}
+                              />
+                            </div>
+                          </label>
+                        ) : (
+                          <div className="h-1 min-w-0 w-0 flex-1 overflow-hidden rounded-full bg-white/10" role="progressbar" aria-label={`${member.username} 的实时声音强度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round((voiceMuted || (isSelf && rtc.isMuted) ? 0 : level) * 100)}>
+                            <div
+                              className="h-full rounded-full bg-gradient-to-r from-green-400 to-emerald-300 transition-[width] duration-75"
+                              style={{ width: `${Math.round((voiceMuted || (isSelf && rtc.isMuted) ? 0 : level) * 100)}%` }}
+                            />
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -855,7 +855,7 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
                 <>
                   <LocalScreenVideo stream={rtc.localScreen} />
                   <div className="absolute bottom-3 left-3 bg-white/10 backdrop-blur-md text-white text-sm px-3 py-1.5 rounded-xl font-medium border border-white/15">
-                    你正在共享 · {rtc.screenViewerCount} 人观看 · {rtc.screenGameMode ? '游戏模式' : `自动${rtc.screenActivity === 'static' ? '静止' : rtc.screenActivity === 'motion' ? '动态' : '操作'}`}
+                    你正在共享 · {rtc.screenViewerCount} 人观看 · {rtc.screenEncodingPlan ? `${rtc.screenEncodingPlan.outputWidth}×${rtc.screenEncodingPlan.outputHeight}` : SCREEN_PRESETS[rtc.screenPreset].label} · {rtc.screenGameMode ? '游戏模式' : `自动${rtc.screenActivity === 'static' ? '静止' : rtc.screenActivity === 'motion' ? '动态' : '操作'}`}
                   </div>
                 </>
               ) : null}
@@ -880,20 +880,37 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
 
               {/* 实时统计悬浮显示（开关在语音栏） */}
               {rtc.statsEnabled && (
-                <div className="absolute top-3 left-3 bg-black/70 backdrop-blur-md text-white text-xs px-3 py-2 rounded-xl border border-white/10 font-mono space-y-0.5 pointer-events-none">
-                  <div>帧率 FPS：<span className="text-green-400">{rtc.stats.fps ?? '—'}</span></div>
-                  <div>画面：<span className="text-cyan-300">{rtc.stats.width && rtc.stats.height ? `${rtc.stats.width}×${rtc.stats.height}` : '—'}</span></div>
-                  <div>编码：<span className="text-cyan-300">{rtc.stats.codec ?? '—'}</span></div>
-                  <div>码率：<span className="text-cyan-300">{rtc.stats.bitrate != null ? `${rtc.stats.bitrate} kbps` : '—'}</span></div>
-                  {rtc.localScreen && <div>{rtc.screenGameMode ? '固定上限' : '自动上限'}：<span className="text-cyan-300">{rtc.screenTargetBitrate ? `${Math.round(rtc.screenTargetBitrate / 1000)} kbps` : '—'}</span></div>}
+                <div className="absolute top-3 left-3 min-w-[360px] bg-black/80 backdrop-blur-md text-white text-xs px-3 py-2 rounded-xl border border-white/10 font-mono space-y-0.5">
+                  <div className="mb-1 flex items-center justify-between gap-3 border-b border-white/10 pb-1">
+                    <span className="font-sans font-semibold text-white/90">媒体诊断 · {rtc.localScreen ? '共享方' : '观看方'}</span>
+                    <div className="flex gap-1 font-sans">
+                      <button onClick={rtc.exportMediaDiagnostics} className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-white/60 hover:bg-white/10 hover:text-white" title="导出最近十分钟诊断数据"><Download size={12} />导出</button>
+                      {window.coveDiagnostics && <button onClick={rtc.openMediaDiagnosticsLog} className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-white/60 hover:bg-white/10 hover:text-white" title="在资源管理器中显示持续记录的诊断日志"><FileText size={12} />日志</button>}
+                    </div>
+                  </div>
+                  {rtc.localScreen ? (
+                    <div>帧率 轨道/采集/编码/发送：<span className="text-green-400">{rtc.stats.trackFps ?? '—'} / {rtc.stats.captureFps ?? '—'} / {rtc.stats.encodeFps ?? '—'} / {rtc.stats.sendFps ?? '—'} fps</span></div>
+                  ) : (
+                    <div>帧率 接收/解码：<span className="text-green-400">{rtc.stats.receiveFps ?? '—'} / {rtc.stats.decodeFps ?? rtc.stats.fps ?? '—'} fps</span></div>
+                  )}
+                  <div>原始采集/实际编码/档位上限：<span className={isScreenEncodingWithinPlan(rtc.stats.width, rtc.stats.height, rtc.localScreen ? rtc.screenEncodingPlan : null) === false ? 'text-red-300' : 'text-cyan-300'}>{rtc.stats.trackWidth && rtc.stats.trackHeight ? `${rtc.stats.trackWidth}×${rtc.stats.trackHeight}` : '—'} / {rtc.stats.width && rtc.stats.height ? `${rtc.stats.width}×${rtc.stats.height}` : '—'} / {rtc.localScreen && rtc.screenEncodingPlan ? `${rtc.screenEncodingPlan.outputWidth}×${rtc.screenEncodingPlan.outputHeight}` : '—'}</span></div>
+                  {rtc.localScreen && rtc.screenEncodingPlan && <div>编码缩放：<span className="text-cyan-300">{rtc.screenEncodingPlan.scaleResolutionDownBy.toFixed(3)}×</span></div>}
+                  {isScreenEncodingWithinPlan(rtc.stats.width, rtc.stats.height, rtc.localScreen ? rtc.screenEncodingPlan : null) === false && <div className="rounded bg-red-500/15 px-1.5 py-1 text-red-200">编码输出超过所选档位，RTP 缩放没有生效</div>}
+                  <div>编码：<span className="text-cyan-300">{rtc.stats.codec ?? '—'}{rtc.stats.encoderImplementation ? ` · ${rtc.stats.encoderImplementation}` : rtc.stats.decoderImplementation ? ` · ${rtc.stats.decoderImplementation}` : ''}</span></div>
+                  {rtc.localScreen && <div>节能编码器：<span className="text-white/70">{rtc.stats.powerEfficientEncoder == null ? '未知' : rtc.stats.powerEfficientEncoder ? '是' : '否'}</span></div>}
+                  <div>RTP 媒体码率：<span className="text-cyan-300">{rtc.stats.bitrate != null ? `${rtc.stats.bitrate} kbps` : '等待第二个样本'}</span></div>
+                  {rtc.localScreen && <div>编码器目标/配置上限：<span className="text-cyan-300">{rtc.stats.targetBitrate != null ? `${rtc.stats.targetBitrate} kbps` : '浏览器未提供'} / {rtc.screenTargetBitrate ? `${Math.round(rtc.screenTargetBitrate / 1000)} kbps` : '—'}</span></div>}
                   {rtc.localScreen && <div>画面模式：<span className="text-cyan-300">{rtc.screenGameMode ? '游戏模式' : rtc.screenActivity === 'static' ? '自动 · 静止' : rtc.screenActivity === 'motion' ? '自动 · 动态' : '自动 · 普通操作'}</span></div>}
-                  <div>{rtc.localScreen ? '发送可用带宽' : '接收可用带宽'}：<span className="text-cyan-300">{rtc.localScreen && rtc.stats.availableBitrate != null ? `${rtc.stats.availableBitrate} kbps` : '浏览器不提供'}</span></div>
-                  <div>延迟 RTT：<span className="text-amber-400">{rtc.stats.rtt != null ? `${rtc.stats.rtt} ms` : '—'}</span></div>
-                  <div>抖动 Jitter：<span className="text-amber-400">{rtc.stats.jitter != null ? `${rtc.stats.jitter} ms` : '—'}</span></div>
-                  <div>丢包 Loss：<span className="text-red-400">{rtc.stats.loss != null ? `${rtc.stats.loss}%` : '—'}</span></div>
-                  <div>丢帧：<span className="text-red-400">{rtc.stats.droppedFrames ?? '—'}</span></div>
-                  <div>受限原因：<span className="text-white/70">{rtc.stats.qualityLimitation ?? '—'}</span></div>
-                  <div>协议：<span className="text-white/70">{rtc.stats.protocol ?? '—'}</span></div>
+                  {rtc.localScreen && <div>发送可用带宽：<span className="text-cyan-300">{rtc.stats.availableBitrate != null ? `${rtc.stats.availableBitrate} kbps` : '浏览器未提供'}</span></div>}
+                  <div>服务器入口/出口：<span className="text-cyan-300">{rtc.stats.serverIngressBitrate != null ? `${rtc.stats.serverIngressBitrate} kbps` : '—'} / {rtc.stats.serverEgressBitrate != null ? `${rtc.stats.serverEgressBitrate} kbps` : '—'}</span>　Score：<span className="text-cyan-300">{rtc.stats.serverScore ?? '—'}</span></div>
+                  {rtc.localScreen && <div>编码耗时/平均 QP：<span className="text-amber-300">{rtc.stats.encodeTimeMs != null ? `${rtc.stats.encodeTimeMs} ms/帧` : '—'} / {rtc.stats.averageQp ?? '—'}</span></div>}
+                  {!rtc.localScreen && <div>解码耗时：<span className="text-amber-300">{rtc.stats.decodeTimeMs != null ? `${rtc.stats.decodeTimeMs} ms/帧` : '—'}</span></div>}
+                  <div>延迟/抖动：<span className="text-amber-400">{rtc.stats.rtt != null ? `${rtc.stats.rtt} ms` : '—'} / {rtc.stats.jitter != null ? `${rtc.stats.jitter} ms` : '—'}</span></div>
+                  <div>{rtc.localScreen ? '上传反馈丢包' : '接收丢包'}：<span className="text-red-400">{(rtc.localScreen ? rtc.stats.remoteLoss : rtc.stats.loss) != null ? `${rtc.localScreen ? rtc.stats.remoteLoss : rtc.stats.loss}%` : '等待反馈'}</span>　重传：<span className="text-red-300">{rtc.stats.retransmitBitrate != null ? `${rtc.stats.retransmitBitrate} kbps` : '—'}</span></div>
+                  <div>NACK / PLI / FIR：<span className="text-red-300">{rtc.stats.nackPerSecond ?? '—'} / {rtc.stats.pliPerSecond ?? '—'} / {rtc.stats.firPerSecond ?? '—'} 次/秒</span></div>
+                  <div>掉帧：<span className="text-red-400">{rtc.stats.droppedFrames != null ? `${rtc.stats.droppedFrames}/秒` : '—'}</span></div>
+                  <div>受限原因：<span className="text-white/70">{rtc.stats.qualityLimitation ?? '—'}</span>{rtc.localScreen && <span className="text-white/40">　CPU {rtc.stats.qualityLimitationCpuSeconds ?? '—'}s / 带宽 {rtc.stats.qualityLimitationBandwidthSeconds ?? '—'}s</span>}</div>
+                  <div>协议/来源：<span className="text-white/70">{rtc.stats.protocol ?? '—'} / {rtc.stats.displaySurface ?? '—'}</span></div>
                 </div>
               )}
 

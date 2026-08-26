@@ -8,6 +8,10 @@ node_modules/
 **/dist-app*/
 *.blockmap
 
+# Local release staging and diagnostic builds
+diagnostic-build/
+.release-gitee/
+
 # Runtime and temporary data
 tmp/
 *.db

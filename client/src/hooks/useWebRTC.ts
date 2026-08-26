@@ -19,45 +19,103 @@ import {
   saveAudioDeviceId,
   toAudioDeviceOptions,
 } from '../audioDevices';
+import {
+  intervalLossPercent,
+  mediaDiagnosticSessionKey,
+  shouldPersistMediaDiagnosticSample,
+  statNumber,
+  type RtcStat,
+  type RtcVideoCounterSample,
+  videoCounterRates,
+  videoCounterSample,
+} from '../mediaDiagnostics';
+import {
+  applyScreenCaptureConstraints,
+  createScreenEncodingPlan,
+  toScreenRtpEncoding,
+  type ScreenActivity,
+  type ScreenEncodingPlan,
+  type ScreenPreset,
+} from '../screenCapture';
 
-// 普通模式下分辨率只决定上限，实际帧率和码率由本地画面变化检测自动选择；
-// 游戏模式会固定使用所选分辨率档位的 60fps 最高码率配置。
-export const SCREEN_PRESETS = {
-  '540p':  { label: '540p 流畅',  width: 960,  height: 540,  staticBitrate: 350_000, activeBitrate:   700_000, motionBitrate60: 1_500_000 },
-  '720p':  { label: '720p 均衡',  width: 1280, height: 720,  staticBitrate: 650_000, activeBitrate: 1_400_000, motionBitrate60: 2_800_000 },
-  '1080p': { label: '1080p 清晰', width: 1920, height: 1080, staticBitrate: 1_100_000, activeBitrate: 2_800_000, motionBitrate60: 6_000_000 },
-} as const;
-export type ScreenPreset = keyof typeof SCREEN_PRESETS;
+export { SCREEN_PRESETS } from '../screenCapture';
+export type { ScreenPreset } from '../screenCapture';
 export type Fps = 30 | 60;
-export type ScreenActivity = 'static' | 'active' | 'motion';
 
 export interface MediaStats {
+  role: 'sender' | 'receiver' | 'idle';
   rtt: number | null;
   fps: number | null;
+  trackFps: number | null;
+  captureFps: number | null;
+  encodeFps: number | null;
+  sendFps: number | null;
+  receiveFps: number | null;
+  decodeFps: number | null;
   loss: number | null;
+  remoteLoss: number | null;
   bitrate: number | null;
+  targetBitrate: number | null;
   availableBitrate: number | null;
+  retransmitBitrate: number | null;
   jitter: number | null;
   width: number | null;
   height: number | null;
+  trackWidth: number | null;
+  trackHeight: number | null;
   droppedFrames: number | null;
+  encodeTimeMs: number | null;
+  decodeTimeMs: number | null;
+  averageQp: number | null;
+  nackPerSecond: number | null;
+  pliPerSecond: number | null;
+  firPerSecond: number | null;
   qualityLimitation: string | null;
+  qualityLimitationCpuSeconds: number | null;
+  qualityLimitationBandwidthSeconds: number | null;
   protocol: string | null;
   codec: string | null;
+  encoderImplementation: string | null;
+  decoderImplementation: string | null;
+  powerEfficientEncoder: boolean | null;
+  powerEfficientDecoder: boolean | null;
+  displaySurface: string | null;
+  serverIngressBitrate: number | null;
+  serverEgressBitrate: number | null;
+  serverScore: number | null;
 }
 
 const EMPTY_STATS: MediaStats = {
-  rtt: null, fps: null, loss: null, bitrate: null, availableBitrate: null,
-  jitter: null, width: null, height: null, droppedFrames: null,
-  qualityLimitation: null, protocol: null, codec: null,
+  role: 'idle', rtt: null, fps: null,
+  trackFps: null, captureFps: null, encodeFps: null, sendFps: null,
+  receiveFps: null, decodeFps: null,
+  loss: null, remoteLoss: null, bitrate: null, targetBitrate: null,
+  availableBitrate: null, retransmitBitrate: null,
+  jitter: null, width: null, height: null, trackWidth: null, trackHeight: null,
+  droppedFrames: null, encodeTimeMs: null, decodeTimeMs: null, averageQp: null,
+  nackPerSecond: null, pliPerSecond: null, firPerSecond: null,
+  qualityLimitation: null, qualityLimitationCpuSeconds: null,
+  qualityLimitationBandwidthSeconds: null,
+  protocol: null, codec: null,
+  encoderImplementation: null, decoderImplementation: null,
+  powerEfficientEncoder: null, powerEfficientDecoder: null,
+  displaySurface: null,
+  serverIngressBitrate: null, serverEgressBitrate: null, serverScore: null,
 };
 
-function screenProfile(preset: ScreenPreset, maxFps: Fps, activity: ScreenActivity) {
-  const profile = SCREEN_PRESETS[preset];
-  if (activity === 'static') return { fps: 15, bitrate: profile.staticBitrate };
-  if (activity === 'motion' && maxFps === 60)
-    return { fps: 60, bitrate: profile.motionBitrate60 };
-  return { fps: 30, bitrate: profile.activeBitrate };
+interface ServerRtpDiagnostic {
+  bitrateKbps: number | null;
+  score: number | null;
+}
+
+interface ServerMediaDiagnostics {
+  role: 'sender' | 'receiver' | 'idle';
+  transports: {
+    send?: { rtpRecvBitrateKbps: number | null } | null;
+    receive?: { rtpSendBitrateKbps: number | null } | null;
+  };
+  producers: { stats: ServerRtpDiagnostic[]; score: { score?: number }[] }[];
+  consumers: { stats: ServerRtpDiagnostic[]; score: { score?: number; producerScore?: number } }[];
 }
 
 // ── 工具：把 socket.emit 包装成 Promise ────────────────────────────────────────
@@ -214,6 +272,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
   const [screenGameMode, setScreenGameMode] = useState(false);
   const [screenActivity, setScreenActivity] = useState<ScreenActivity>('active');
   const [screenTargetBitrate, setScreenTargetBitrate] = useState(0);
+  const [screenEncodingPlan, setScreenEncodingPlan] = useState<ScreenEncodingPlan | null>(null);
   const [screenViewerCount, setScreenViewerCount] = useState(0);
   const [voiceMembers, setVoiceMembers] = useState<VoiceMember[]>([]);
   const [localScreen,  setLocalScreen]  = useState<MediaStream | null>(null);
@@ -288,8 +347,11 @@ export function useWebRTC(socket: Socket, roomId: string) {
   const volumeTimer     = useRef<ReturnType<typeof setInterval> | null>(null);
   const statsTimer      = useRef<ReturnType<typeof setInterval> | null>(null);
   const statsEnabledRef = useRef(false);
-  const lossPrev        = useRef<{ lost: number; recv: number } | null>(null);
-  const videoBytesPrev  = useRef<{ bytes: number; timestamp: number } | null>(null);
+  const statsCollecting = useRef(false);
+  const videoCounterPrev = useRef<RtcVideoCounterSample | null>(null);
+  const receiveLossPrev = useRef<{ lost: number; packets: number } | null>(null);
+  const remoteLossPrev = useRef<{ lost: number; packets: number } | null>(null);
+  const diagnosticHistory = useRef<{ timestamp: string; stats: MediaStats; trackSettings: MediaTrackSettings | null }[]>([]);
 
   const setMemberVolume = useCallback((socketId: string, userId: string, volume: number) => {
     const normalized = Math.max(0, Math.min(1, volume));
@@ -448,92 +510,210 @@ export function useWebRTC(socket: Socket, roomId: string) {
     setSpeakingLevels({});
   }, []);
 
-  // 采集帧率 / 延迟 / 丢包（仅在开关打开时调用）
-  type AnyStat = Record<string, unknown>;
+  // 分阶段媒体统计：采集 → 编码 → RTP 发送 → SFU → RTP 接收 → 解码。
+  // 每个速率都由同一个 RTP 对象的累计计数器求差，避免切换共享或统计对象时出现假低值/假峰值。
   const collectStats = useCallback(async () => {
+    if (statsCollecting.current) return;
+    statsCollecting.current = true;
     const next: MediaStats = { ...EMPTY_STATS };
-    const sendingScreen = Boolean(screenProducer.current);
+    const sendingProducerId = screenProducer.current?.id ?? null;
+    const sendingScreen = Boolean(sendingProducerId);
     const watchedPeerId = watchingScreenPeerRef.current;
+    const capturedSessionKey = mediaDiagnosticSessionKey(sendingProducerId, watchedPeerId);
+    if (!statsEnabledRef.current || !capturedSessionKey) {
+      videoCounterPrev.current = null;
+      receiveLossPrev.current = null;
+      remoteLossPrev.current = null;
+      setStats(EMPTY_STATS);
+      statsCollecting.current = false;
+      return;
+    }
+    next.role = sendingScreen ? 'sender' : watchedPeerId ? 'receiver' : 'idle';
 
     try {
-      // 共享方看发送通道；观看方看接收通道。接收通道没有可靠的
-      // availableIncomingBitrate，因此不能拿本机发送通道的上行估计冒充下行。
-      const st = sendingScreen ? sendTransport.current : watchedPeerId ? recvTransport.current : sendTransport.current;
-      if (st) {
-        const report = await st.getStats();
-        report.forEach((s: AnyStat) => {
-          if (s.type !== 'candidate-pair' || s.currentRoundTripTime == null) return;
-          if (s.state && s.state !== 'succeeded') return;
-          next.rtt = Math.round((s.currentRoundTripTime as number) * 1000);
-          if (sendingScreen && s.availableOutgoingBitrate != null)
-            next.availableBitrate = Math.round((s.availableOutgoingBitrate as number) / 1000);
-          const candidate = report.get(s.localCandidateId as string) as AnyStat | undefined;
-          if (candidate?.protocol) next.protocol = String(candidate.protocol).toUpperCase();
+      const selectedTransport = sendingScreen
+        ? sendTransport.current
+        : watchedPeerId ? recvTransport.current : null;
+      if (selectedTransport) {
+        const report = await selectedTransport.getStats();
+        const pairs: RtcStat[] = [];
+        report.forEach(stat => {
+          const value = stat as unknown as RtcStat;
+          if (value.type === 'candidate-pair' && (!value.state || value.state === 'succeeded')) pairs.push(value);
         });
-      }
-    } catch { /* ignore */ }
-
-    try {
-      let framesSrc: RTCStatsReport | null = null;
-      if (screenProducer.current) framesSrc = await screenProducer.current.getStats();
-      else {
-        for (const { consumer, kind, socketId } of consumers.current.values()) {
-          if (kind === 'video' && (!watchedPeerId || socketId === watchedPeerId)) {
-            framesSrc = await consumer.getStats();
-            break;
-          }
+        const pair = pairs.find(value => value.nominated === true || value.selected === true) ?? pairs[0];
+        if (pair) {
+          if (typeof pair.currentRoundTripTime === 'number')
+            next.rtt = Math.round(pair.currentRoundTripTime * 1_000);
+          if (sendingScreen && typeof pair.availableOutgoingBitrate === 'number')
+            next.availableBitrate = Math.round(pair.availableOutgoingBitrate / 1_000);
+          const candidate = report.get(String(pair.localCandidateId ?? '')) as unknown as RtcStat | undefined;
+          if (candidate?.protocol) next.protocol = String(candidate.protocol).toUpperCase();
         }
       }
-      framesSrc?.forEach((s: AnyStat) => {
-        if (s.type !== 'outbound-rtp' && s.type !== 'inbound-rtp') return;
-        if (s.kind && s.kind !== 'video' && s.mediaType !== 'video') return;
-        if (s.framesPerSecond != null) next.fps = Math.round(s.framesPerSecond as number);
-        if (s.frameWidth != null) next.width = Number(s.frameWidth);
-        if (s.frameHeight != null) next.height = Number(s.frameHeight);
-        if (s.framesDropped != null) next.droppedFrames = Number(s.framesDropped);
-        if (s.qualityLimitationReason) next.qualityLimitation = String(s.qualityLimitationReason);
-        if (s.codecId) {
-          const codec = framesSrc?.get(String(s.codecId)) as AnyStat | undefined;
+
+      let videoReport: RTCStatsReport | null = null;
+      let videoTrack: MediaStreamTrack | null = null;
+      if (screenProducer.current) {
+        videoReport = await screenProducer.current.getStats();
+        videoTrack = screenProducer.current.track ?? null;
+      } else {
+        for (const { consumer, kind, socketId } of consumers.current.values()) {
+          if (kind !== 'video' || (watchedPeerId && socketId !== watchedPeerId)) continue;
+          videoReport = await consumer.getStats();
+          videoTrack = consumer.track ?? null;
+          break;
+        }
+      }
+
+      if (videoTrack) {
+        const settings = videoTrack.getSettings();
+        next.trackFps = typeof settings.frameRate === 'number' ? Math.round(settings.frameRate * 10) / 10 : null;
+        next.trackWidth = settings.width ?? null;
+        next.trackHeight = settings.height ?? null;
+        next.displaySurface = settings.displaySurface ?? null;
+      }
+
+      let rtpStat: RtcStat | undefined;
+      let remoteInbound: RtcStat | undefined;
+      let mediaSource: RtcStat | undefined;
+      videoReport?.forEach(stat => {
+        const value = stat as unknown as RtcStat;
+        const isVideo = !value.kind || value.kind === 'video' || value.mediaType === 'video';
+        if (sendingScreen && value.type === 'outbound-rtp' && value.isRemote !== true && isVideo) rtpStat = value;
+        if (!sendingScreen && value.type === 'inbound-rtp' && value.isRemote !== true && isVideo) rtpStat = value;
+        if (value.type === 'remote-inbound-rtp' && isVideo) remoteInbound = value;
+        if (value.type === 'media-source' && isVideo) mediaSource = value;
+      });
+
+      if (rtpStat && videoReport) {
+        if (rtpStat.mediaSourceId) {
+          const linkedSource = videoReport.get(String(rtpStat.mediaSourceId)) as unknown as RtcStat | undefined;
+          if (linkedSource) mediaSource = linkedSource;
+        }
+        const counterStat: RtcStat = {
+          ...rtpStat,
+          id: `${String(rtpStat.id ?? '')}:${String(mediaSource?.id ?? '')}`,
+          framesCaptured: statNumber(mediaSource, 'frames', statNumber(rtpStat, 'framesCaptured')),
+        };
+        const sample = videoCounterSample(counterStat);
+        const rates = videoCounterRates(sample, videoCounterPrev.current);
+        videoCounterPrev.current = sample;
+
+        const sourceReportedFps = typeof mediaSource?.framesPerSecond === 'number'
+          ? Math.round(mediaSource.framesPerSecond * 10) / 10 : null;
+        const rtpReportedFps = typeof rtpStat.framesPerSecond === 'number'
+          ? Math.round(rtpStat.framesPerSecond * 10) / 10 : null;
+        const hasCaptureCounter = typeof mediaSource?.frames === 'number'
+          || typeof rtpStat.framesCaptured === 'number';
+        next.captureFps = hasCaptureCounter ? rates.captureFps ?? sourceReportedFps : sourceReportedFps;
+        next.encodeFps = typeof rtpStat.framesEncoded === 'number' ? rates.encodeFps : null;
+        next.sendFps = typeof rtpStat.framesSent === 'number' ? rates.sendFps : null;
+        next.receiveFps = typeof rtpStat.framesReceived === 'number' ? rates.receiveFps : null;
+        next.decodeFps = typeof rtpStat.framesDecoded === 'number'
+          ? rates.decodeFps ?? (!sendingScreen ? rtpReportedFps : null)
+          : !sendingScreen ? rtpReportedFps : null;
+        next.fps = sendingScreen
+          ? next.sendFps ?? next.encodeFps ?? rtpReportedFps
+          : next.decodeFps ?? next.receiveFps ?? rtpReportedFps;
+        next.bitrate = rates.bitrateKbps;
+        next.retransmitBitrate = rates.retransmitKbps;
+        next.encodeTimeMs = rates.encodeTimeMs;
+        next.decodeTimeMs = rates.decodeTimeMs;
+        next.averageQp = rates.averageQp;
+        next.nackPerSecond = rates.nackPerSecond;
+        next.pliPerSecond = rates.pliPerSecond;
+        next.firPerSecond = rates.firPerSecond;
+        next.droppedFrames = typeof rtpStat.framesDropped === 'number' ? rates.droppedFps : null;
+        next.width = typeof rtpStat.frameWidth === 'number' ? rtpStat.frameWidth : null;
+        next.height = typeof rtpStat.frameHeight === 'number' ? rtpStat.frameHeight : null;
+        next.targetBitrate = typeof rtpStat.targetBitrate === 'number'
+          ? Math.round(rtpStat.targetBitrate / 1_000) : null;
+        next.qualityLimitation = typeof rtpStat.qualityLimitationReason === 'string'
+          ? rtpStat.qualityLimitationReason : null;
+        const durations = rtpStat.qualityLimitationDurations as RtcStat | undefined;
+        next.qualityLimitationCpuSeconds = typeof durations?.cpu === 'number'
+          ? Math.round(durations.cpu * 10) / 10 : null;
+        next.qualityLimitationBandwidthSeconds = typeof durations?.bandwidth === 'number'
+          ? Math.round(durations.bandwidth * 10) / 10 : null;
+        next.encoderImplementation = typeof rtpStat.encoderImplementation === 'string'
+          ? rtpStat.encoderImplementation : null;
+        next.decoderImplementation = typeof rtpStat.decoderImplementation === 'string'
+          ? rtpStat.decoderImplementation : null;
+        next.powerEfficientEncoder = typeof rtpStat.powerEfficientEncoder === 'boolean'
+          ? rtpStat.powerEfficientEncoder : null;
+        next.powerEfficientDecoder = typeof rtpStat.powerEfficientDecoder === 'boolean'
+          ? rtpStat.powerEfficientDecoder : null;
+        if (rtpStat.codecId) {
+          const codec = videoReport.get(String(rtpStat.codecId)) as unknown as RtcStat | undefined;
           if (codec?.mimeType) next.codec = String(codec.mimeType).replace(/^video\//i, '').toUpperCase();
         }
 
-        const bytes = Number(s.bytesSent ?? s.bytesReceived ?? 0);
-        const timestamp = Number(s.timestamp ?? 0);
-        const prev = videoBytesPrev.current;
-        if (bytes > 0 && timestamp > 0 && prev && bytes >= prev.bytes && timestamp > prev.timestamp) {
-          next.bitrate = Math.round(((bytes - prev.bytes) * 8) / (timestamp - prev.timestamp));
+        if (sendingScreen && remoteInbound) {
+          const lost = statNumber(remoteInbound, 'packetsLost');
+          next.remoteLoss = intervalLossPercent(lost, sample.packets, remoteLossPrev.current, true);
+          remoteLossPrev.current = { lost, packets: sample.packets };
+          if (typeof remoteInbound.roundTripTime === 'number')
+            next.rtt = Math.round(remoteInbound.roundTripTime * 1_000);
+          if (typeof remoteInbound.jitter === 'number')
+            next.jitter = Math.round(remoteInbound.jitter * 1_000);
+        } else if (!sendingScreen) {
+          const lost = statNumber(rtpStat, 'packetsLost');
+          const received = statNumber(rtpStat, 'packetsReceived');
+          next.loss = intervalLossPercent(lost, received, receiveLossPrev.current);
+          receiveLossPrev.current = { lost, packets: received };
+          if (typeof rtpStat.jitter === 'number') next.jitter = Math.round(rtpStat.jitter * 1_000);
         }
-        if (bytes > 0 && timestamp > 0) videoBytesPrev.current = { bytes, timestamp };
+      }
+
+      const serverSnapshot = await new Promise<ServerMediaDiagnostics | null>(resolve => {
+        socket.timeout(1_500).emit(
+          'ms:media-diagnostics', {},
+          (error: Error | null, value: ServerMediaDiagnostics) => resolve(error ? null : value),
+        );
       });
-    } catch { /* ignore */ }
-
-    try {
-      let lost = 0, recv = 0, maxJitter = 0;
-      for (const { consumer, kind, socketId } of consumers.current.values()) {
-        // 调试悬浮层只统计当前观看的屏幕视频，避免语音、系统音频以及
-        // 其他人的共享把丢包和抖动混在一起。
-        if (kind !== 'video' || (watchedPeerId && socketId !== watchedPeerId)) continue;
-        const report = await consumer.getStats();
-        report.forEach((s: AnyStat) => {
-          if (s.type === 'inbound-rtp') {
-            lost += (s.packetsLost as number) ?? 0;
-            recv += (s.packetsReceived as number) ?? 0;
-            if (s.jitter != null) maxJitter = Math.max(maxJitter, Number(s.jitter));
-          }
-        });
+      if (serverSnapshot?.role === 'sender') {
+        const producer = serverSnapshot.producers[0];
+        next.serverIngressBitrate = producer?.stats[0]?.bitrateKbps
+          ?? serverSnapshot.transports.send?.rtpRecvBitrateKbps ?? null;
+        next.serverScore = producer?.stats[0]?.score
+          ?? producer?.score?.[0]?.score ?? null;
+      } else if (serverSnapshot?.role === 'receiver') {
+        const consumer = serverSnapshot.consumers[0];
+        next.serverEgressBitrate = consumer?.stats[0]?.bitrateKbps
+          ?? serverSnapshot.transports.receive?.rtpSendBitrateKbps ?? null;
+        next.serverScore = consumer?.stats[0]?.score
+          ?? consumer?.score?.score ?? null;
       }
-      if (maxJitter > 0) next.jitter = Math.round(maxJitter * 1000);
-      if (lossPrev.current) {
-        const dLost = lost - lossPrev.current.lost;
-        const dRecv = recv - lossPrev.current.recv;
-        const total = dLost + dRecv;
-        next.loss = total > 0 ? Math.max(0, Math.round((dLost / total) * 1000) / 10) : 0;
-      }
-      lossPrev.current = { lost, recv };
-    } catch { /* ignore */ }
 
-    setStats(next);
-  }, []);
+      const currentSessionKey = mediaDiagnosticSessionKey(
+        screenProducer.current?.id ?? null,
+        watchingScreenPeerRef.current,
+      );
+      if (!shouldPersistMediaDiagnosticSample(
+        statsEnabledRef.current,
+        capturedSessionKey,
+        currentSessionKey,
+      )) {
+        setStats(EMPTY_STATS);
+        return;
+      }
+
+      const trackSettings = videoTrack?.getSettings() ?? null;
+      const diagnosticEntry = { timestamp: new Date().toISOString(), stats: next, trackSettings };
+      diagnosticHistory.current.push(diagnosticEntry);
+      if (diagnosticHistory.current.length > 600) diagnosticHistory.current.shift();
+      if (diagnosticHistory.current.length % 5 === 0) console.info('[media-diag]', diagnosticEntry);
+      void window.coveDiagnostics?.append(diagnosticEntry).catch(error => {
+        console.warn('[media-diag] 写入客户端诊断日志失败', error);
+      });
+      setStats(next);
+    } catch (error) {
+      console.warn('[media-diag] 采集客户端媒体统计失败', error);
+    } finally {
+      statsCollecting.current = false;
+    }
+  }, [socket]);
 
   // stats 开关：打开时每秒采集一次
   const toggleStats = useCallback(() => {
@@ -544,13 +724,47 @@ export function useWebRTC(socket: Socket, roomId: string) {
         if (!statsTimer.current) statsTimer.current = setInterval(() => { collectStats(); }, 1000);
       } else {
         if (statsTimer.current) { clearInterval(statsTimer.current); statsTimer.current = null; }
-        lossPrev.current = null;
-        videoBytesPrev.current = null;
+        receiveLossPrev.current = null;
+        remoteLossPrev.current = null;
+        videoCounterPrev.current = null;
         setStats(EMPTY_STATS);
       }
       return next;
     });
   }, [collectStats]);
+
+  const exportMediaDiagnostics = useCallback(() => {
+    const producer = screenProducer.current;
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      roomId,
+      socketId: socket.id ?? null,
+      userAgent: navigator.userAgent,
+      screen: {
+        preset: screenPreset,
+        requestedFps: screenGameMode ? 60 : fps,
+        gameMode: screenGameMode,
+        targetBitrate: screenTargetBitrate,
+        encodingPlan: screenEncodingPlan,
+        trackSettings: producer?.track?.getSettings() ?? null,
+        senderParameters: producer?.rtpSender?.getParameters() ?? null,
+      },
+      samples: diagnosticHistory.current,
+    };
+    const text = JSON.stringify(payload, (_key, value) => typeof value === 'bigint' ? Number(value) : value, 2);
+    const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `cove-media-diagnostics-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1_000);
+  }, [fps, roomId, screenEncodingPlan, screenGameMode, screenPreset, screenTargetBitrate, socket.id]);
+
+  const openMediaDiagnosticsLog = useCallback(() => {
+    void window.coveDiagnostics?.openLog().catch(error => {
+      console.warn('[media-diag] 打开客户端诊断日志失败', error);
+    });
+  }, []);
 
   // 卸载时清理所有定时器和音频上下文
   useEffect(() => () => {
@@ -746,6 +960,9 @@ export function useWebRTC(socket: Socket, roomId: string) {
     watchingScreenPeerRef.current = null;
     setWatchingScreenPeer(null);
     setRemoteScreen(current => current?.socketId === peerId ? null : current);
+    videoCounterPrev.current = null;
+    receiveLossPrev.current = null;
+    if (!screenProducer.current) setStats(EMPTY_STATS);
   }, [closeLocalConsumer]);
 
   const watchScreen = useCallback(async (socketId?: string) => {
@@ -757,8 +974,8 @@ export function useWebRTC(socket: Socket, roomId: string) {
 
     watchingScreenPeerRef.current = source.socketId;
     setWatchingScreenPeer(source.socketId);
-    videoBytesPrev.current = null;
-    lossPrev.current = null;
+    videoCounterPrev.current = null;
+    receiveLossPrev.current = null;
     const videoOk = await consumeProducer(source.videoProducerId, source.socketId, 'video', { type: 'screen' });
     if (!videoOk) {
       watchingScreenPeerRef.current = null;
@@ -834,6 +1051,9 @@ export function useWebRTC(socket: Socket, roomId: string) {
       if (entry.sourceType === 'screen') {
         watchingScreenPeerRef.current = null;
         setWatchingScreenPeer(null);
+        videoCounterPrev.current = null;
+        receiveLossPrev.current = null;
+        if (!screenProducer.current) setStats(EMPTY_STATS);
       }
     };
 
@@ -862,8 +1082,24 @@ export function useWebRTC(socket: Socket, roomId: string) {
       if (sourceType === 'screen') {
         screenDemandActiveRef.current = active;
         setScreenViewerCount(viewerCount);
-        if (active) screenProducer.current?.resume();
-        else screenProducer.current?.pause();
+        const producer = screenProducer.current;
+        if (active) {
+          producer?.resume();
+          if (producer?.track && producer.appData?.adaptation === 'game') {
+            void applyScreenCaptureConstraints(producer.track, {
+              fps: 60,
+              strictFrameRate: true,
+            }).then(result => {
+              console.info('[media-diag] 观看恢复后重新应用游戏模式采集约束', {
+                mode: result.mode,
+                constraints: result.constraints,
+                settings: producer.track?.getSettings(),
+              });
+            }).catch(error => {
+              console.warn('[media-diag] 观看恢复后重新应用采集约束失败', error);
+            });
+          }
+        } else producer?.pause();
       } else if (active && !forceMutedRef.current) screenAudioProducer.current?.resume();
       else screenAudioProducer.current?.pause();
     };
@@ -886,6 +1122,9 @@ export function useWebRTC(socket: Socket, roomId: string) {
       if (watchingScreenPeerRef.current === socketId) {
         watchingScreenPeerRef.current = null;
         setWatchingScreenPeer(null);
+        videoCounterPrev.current = null;
+        receiveLossPrev.current = null;
+        if (!screenProducer.current) setStats(EMPTY_STATS);
       }
     };
 
@@ -1179,8 +1418,9 @@ export function useWebRTC(socket: Socket, roomId: string) {
     // 停止音量计和统计
     stopMeters();
     analysers.current.clear();
-    lossPrev.current = null;
-    videoBytesPrev.current = null;
+    receiveLossPrev.current = null;
+    remoteLossPrev.current = null;
+    videoCounterPrev.current = null;
     setStats(EMPTY_STATS);
 
     setRemoteScreen(null);
@@ -1190,6 +1430,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
     setWatchingScreenPeer(null);
     screenDemandActiveRef.current = false;
     setScreenViewerCount(0);
+    setScreenEncodingPlan(null);
     setInVoice(false);
     voiceMembersRef.current = [];
     setVoiceMembers([]);
@@ -1230,30 +1471,63 @@ export function useWebRTC(socket: Socket, roomId: string) {
     preset: ScreenPreset,
     maxFps: Fps,
     activity: ScreenActivity,
+    strictFrameRate = false,
   ) => {
     const producer = screenProducer.current;
-    const track = localScreenRef.current?.getVideoTracks()[0];
-    const target = screenProfile(preset, maxFps, activity);
-    const contentHint = activity === 'motion' ? 'motion' : 'detail';
+    const track = producer?.track ?? localScreenRef.current?.getVideoTracks()[0];
+    const settings = track?.getSettings();
+    const plan = createScreenEncodingPlan({
+      preset,
+      maxFps,
+      activity,
+      sourceWidth: settings?.width,
+      sourceHeight: settings?.height,
+    });
     screenActivityRef.current = activity;
     setScreenActivity(activity);
-    setScreenTargetBitrate(target.bitrate);
+    setScreenTargetBitrate(plan.bitrate);
+    setScreenEncodingPlan(plan);
     if (track) {
-      track.contentHint = contentHint;
-      track.applyConstraints({ frameRate: { max: target.fps } }).catch(() => {});
+      track.contentHint = plan.contentHint;
+      void applyScreenCaptureConstraints(track, {
+        fps: plan.fps,
+        strictFrameRate: strictFrameRate && plan.fps === 60,
+      }).then(result => {
+        console.info('[media-diag] 已应用屏幕采集帧率约束', {
+          activity,
+          mode: result.mode,
+          constraints: result.constraints,
+          settings: track.getSettings(),
+        });
+      }).catch(error => {
+        console.warn('[media-diag] 更新屏幕采集帧率约束失败', error);
+      });
     }
     if (!producer) return;
-    if (producer.track) producer.track.contentHint = contentHint;
+    if (producer.track) producer.track.contentHint = plan.contentHint;
     try {
       const params = producer.rtpSender?.getParameters();
       if (!params) return;
       if (params.encodings?.[0]) {
-        params.encodings[0].maxBitrate = target.bitrate;
-        params.encodings[0].maxFramerate = target.fps;
+        Object.assign(params.encodings[0], toScreenRtpEncoding(plan));
       }
-      params.degradationPreference = activity === 'motion' ? 'maintain-framerate' : 'maintain-resolution';
-      producer.rtpSender?.setParameters(params).catch(() => {});
-    } catch { /* ignore */ }
+      params.degradationPreference = plan.degradationPreference;
+      producer.rtpSender?.setParameters(params).then(() => {
+        console.info('[media-diag] 已应用屏幕编码参数', {
+          activity,
+          source: `${plan.sourceWidth}x${plan.sourceHeight}`,
+          outputLimit: `${plan.outputWidth}x${plan.outputHeight}`,
+          scaleResolutionDownBy: plan.scaleResolutionDownBy,
+          requestedFps: plan.fps,
+          maxBitrate: plan.bitrate,
+          parameters: producer.rtpSender?.getParameters(),
+        });
+      }).catch(error => {
+        console.warn('[media-diag] 应用屏幕编码参数失败', error);
+      });
+    } catch (error) {
+      console.warn('[media-diag] 读取屏幕编码参数失败', error);
+    }
   }, []);
 
   /**
@@ -1325,58 +1599,81 @@ export function useWebRTC(socket: Socket, roomId: string) {
     if (initAudio   !== undefined) setShareAudio(initAudio);
     if (initGameMode !== undefined) setScreenGameMode(initGameMode);
 
-    const { width, height } = SCREEN_PRESETS[preset];
     const initialActivity: ScreenActivity = gameMode ? 'motion' : 'active';
-    const initialProfile = screenProfile(preset, currentFps, initialActivity);
+    let acquiredStream: MediaStream | null = null;
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { width: { ideal: width }, height: { ideal: height }, frameRate: { ideal: currentFps } },
+        // 桌面源保持原始尺寸，720p/1080p 由 RTP 编码缩放统一控制。
+        video: { frameRate: { ideal: currentFps, max: currentFps } },
         audio,
       });
+      acquiredStream = stream;
       const videoTrack = stream.getVideoTracks()[0];
+      if (!videoTrack) throw new Error('没有取得屏幕视频轨道');
       videoTrack.contentHint = gameMode ? 'motion' : 'detail';
-      await videoTrack.applyConstraints({
-        width: { max: width },
-        height: { max: height },
-        frameRate: { max: currentFps },
-      }).catch(() => {});
-      console.log('[screen share] 实际采集参数:', videoTrack.getSettings());
+      const captureConstraints = await applyScreenCaptureConstraints(videoTrack, {
+        fps: currentFps,
+        strictFrameRate: gameMode,
+      });
+      const trackSettings = videoTrack.getSettings();
+      const initialPlan = createScreenEncodingPlan({
+        preset,
+        maxFps: currentFps,
+        activity: initialActivity,
+        sourceWidth: trackSettings.width,
+        sourceHeight: trackSettings.height,
+      });
+      console.info('[media-diag] 屏幕采集已开始', {
+        requested: {
+          preset,
+          outputLimit: `${initialPlan.outputWidth}x${initialPlan.outputHeight}`,
+          fps: currentFps,
+          gameMode,
+        },
+        constraintMode: captureConstraints.mode,
+        strictConstraintError: captureConstraints.strictError
+          ? String(captureConstraints.strictError) : null,
+        settings: trackSettings,
+        constraints: videoTrack.getConstraints(),
+        capabilities: videoTrack.getCapabilities(),
+      });
       localScreenRef.current = stream;
       setLocalScreen(stream);
-      videoBytesPrev.current = null;
+      videoCounterPrev.current = null;
+      remoteLossPrev.current = null;
 
       const negotiatedCodecs = deviceRef.current?.rtpCapabilities.codecs ?? [];
       const codecCandidates = ['video/av1', 'video/vp9']
         .map(mimeType => negotiatedCodecs.find(codec => codec.mimeType.toLowerCase() === mimeType))
         .filter((codec): codec is NonNullable<typeof codec> => Boolean(codec));
 
-      // 优先尝试 AV1；Chromium/驱动只声明了解码能力但实际无法创建编码器时，
-      // 使用全新的克隆轨道自动回退 VP9，再由浏览器协商默认 codec。
+      // 直接发送实际应用采集约束的轨道。旧实现 clone() 后继续只约束原轨道，
+      // 会让 Producer 的轨道停留在 Chromium 自行选择的低采集帧率。
       let producer: Producer | null = null;
       let lastProduceError: unknown = null;
       for (const codec of [...codecCandidates, undefined]) {
-        const senderVideoTrack = videoTrack.clone();
-        senderVideoTrack.contentHint = gameMode ? 'motion' : 'detail';
         try {
           producer = await sendTransport.current!.produce({
-            track: senderVideoTrack,
+            track: videoTrack,
             appData: {
               type: 'screen',
               adaptation: gameMode ? 'game' : 'content',
               preset,
               maxFps: currentFps,
+              outputWidth: initialPlan.outputWidth,
+              outputHeight: initialPlan.outputHeight,
               preferredCodec: codec?.mimeType ?? 'auto',
             },
-            encodings: [{ maxBitrate: initialProfile.bitrate, maxFramerate: initialProfile.fps }],
-            codecOptions: { videoGoogleStartBitrate: Math.round(initialProfile.bitrate / (gameMode ? 1000 : 2000)) },
+            encodings: [toScreenRtpEncoding(initialPlan)],
+            codecOptions: { videoGoogleStartBitrate: Math.round(initialPlan.bitrate / (gameMode ? 1000 : 2000)) },
             ...(codec ? { codec } : {}),
-            disableTrackOnPause: true,
+            stopTracks: false,
+            disableTrackOnPause: false,
             zeroRtpOnPause: true,
           });
           console.info(`[screen share] 编码器：${codec?.mimeType ?? '浏览器自动选择'}`);
           break;
         } catch (error) {
-          senderVideoTrack.stop();
           lastProduceError = error;
           console.warn(`[screen share] ${codec?.mimeType ?? '自动 codec'} 编码失败，尝试回退`, error);
         }
@@ -1384,7 +1681,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
       if (!producer) throw lastProduceError ?? new Error('没有可用的屏幕共享视频编码器');
       screenProducer.current = producer;
       if (!screenDemandActiveRef.current) producer.pause();
-      applyScreenActivity(preset, currentFps, initialActivity);
+      applyScreenActivity(preset, currentFps, initialActivity, gameMode);
       if (gameMode) stopScreenAnalysis();
       else startScreenAnalysis(stream, preset, currentFps);
 
@@ -1432,6 +1729,28 @@ export function useWebRTC(socket: Socket, roomId: string) {
       stream.getVideoTracks()[0].onended = () => stopScreenShare();
     } catch (e) {
       console.error('[screen share]', e);
+      stopScreenAnalysis();
+      if (screenProducer.current) {
+        socket.emit('ms:close-producer', { producerId: screenProducer.current.id });
+        screenProducer.current.close();
+        screenProducer.current = null;
+      }
+      if (screenAudioProducer.current) {
+        socket.emit('ms:close-producer', { producerId: screenAudioProducer.current.id });
+        screenAudioProducer.current.close();
+        screenAudioProducer.current = null;
+      }
+      screenAudioContext.current?.close().catch(() => {});
+      screenAudioContext.current = null;
+      screenAudioGain.current = null;
+      acquiredStream?.getTracks().forEach(track => track.stop());
+      if (localScreenRef.current === acquiredStream) localScreenRef.current = null;
+      setLocalScreen(null);
+      setIsSharing(false);
+      setScreenEncodingPlan(null);
+      setScreenTargetBitrate(0);
+      if (!(e instanceof DOMException && e.name === 'NotAllowedError'))
+        window.alert(`无法开始屏幕共享：${e instanceof Error ? e.message : String(e)}`);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [socket, roomId, inVoice, isSharing, screenPreset, fps, shareAudio, screenGameMode, applyScreenActivity, startScreenAnalysis, stopScreenAnalysis]);
@@ -1460,7 +1779,10 @@ export function useWebRTC(socket: Socket, roomId: string) {
     setScreenActivity('active');
     screenActivityRef.current = 'active';
     setScreenTargetBitrate(0);
-    videoBytesPrev.current = null;
+    setScreenEncodingPlan(null);
+    videoCounterPrev.current = null;
+    remoteLossPrev.current = null;
+    if (!watchingScreenPeerRef.current) setStats(EMPTY_STATS);
   }, [socket, stopScreenAnalysis]);
 
   const toggleShareAudio = useCallback(() => setShareAudio(p => !p), []);
@@ -1468,7 +1790,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
   return {
     inVoice, isJoining, isMuted, isForceMuted, isSharing,
     screenPreset, fps, shareAudio, screenGameMode,
-    screenActivity, screenTargetBitrate, screenViewerCount,
+    screenActivity, screenTargetBitrate, screenEncodingPlan, screenViewerCount,
     voiceMembers,
     localScreen,
     remoteScreen,        // { socketId, stream: MediaStream } | null
@@ -1479,7 +1801,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
     startScreenShare, stopScreenShare,
     watchScreen, stopWatchingScreen, toggleShareAudio,
     // 新增：实时统计 + 音量
-    stats, statsEnabled, toggleStats,
+    stats, statsEnabled, toggleStats, exportMediaDiagnostics, openMediaDiagnosticsLog,
     speakingLevels,      // socketId → 0~1
     memberVolumes, setMemberVolume,
     screenReceiveVolume, setScreenReceiveVolume,

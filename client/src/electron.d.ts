@@ -11,10 +11,16 @@ interface CoveShellApi {
   openExternal(url: string): Promise<boolean>;
 }
 
+interface CoveDiagnosticsApi {
+  append(entry: unknown): Promise<boolean>;
+  openLog(): Promise<boolean>;
+}
+
 declare global {
   interface Window {
     coveUpdater?: CoveUpdaterApi;
     coveShell?: CoveShellApi;
+    coveDiagnostics?: CoveDiagnosticsApi;
   }
 }
 
