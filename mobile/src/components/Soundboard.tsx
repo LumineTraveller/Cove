@@ -11,6 +11,7 @@ interface Props {
   roomId: string;
   serverURL: string;
   ready: boolean;
+  inVoice: boolean;
 }
 
 interface Playback {
@@ -30,7 +31,7 @@ function applySoundpackOrder(packs: Soundpack[], orderedIds: string[]) {
   return [...ordered, ...byId.values()];
 }
 
-export function Soundboard({ socket, roomId, serverURL, ready }: Props) {
+export function Soundboard({ socket, roomId, serverURL, ready, inVoice }: Props) {
   const [packs, setPacks] = useState<Soundpack[]>([]);
   const [loading, setLoading] = useState(true);
   const [playback, setPlayback] = useState<Playback | null>(null);
@@ -94,8 +95,7 @@ export function Soundboard({ socket, roomId, serverURL, ready }: Props) {
   }, [playSound, socket]);
 
   const triggerSound = (sound: Soundpack) => {
-    if (!ready) return;
-    playSound(sound.id);
+    if (!ready || !inVoice) return;
     socket.emit('soundpack:play', { soundId: sound.id, roomId });
   };
 
@@ -133,7 +133,7 @@ export function Soundboard({ socket, roomId, serverURL, ready }: Props) {
         <View style={styles.headingIcon}><Volume2 size={18} color={colors.cyan} /></View>
         <View>
           <Text style={styles.title}>语音包</Text>
-          <Text style={styles.subtitle}>点按播放，箭头调整所有成员看到的顺序</Text>
+          <Text style={styles.subtitle}>{inVoice ? '点按播放，箭头调整所有成员看到的顺序' : '加入语音后才能播放语音包'}</Text>
         </View>
       </View>
 
@@ -162,7 +162,7 @@ export function Soundboard({ socket, roomId, serverURL, ready }: Props) {
             const playing = playback?.soundId === sound.id;
             return (
               <View key={sound.id} style={[styles.tile, playing && styles.tilePlaying]}>
-                <TouchableOpacity style={styles.tileMain} disabled={!ready} onPress={() => triggerSound(sound)} activeOpacity={0.75}>
+                <TouchableOpacity style={styles.tileMain} disabled={!ready || !inVoice} onPress={() => triggerSound(sound)} activeOpacity={0.75}>
                   <View style={[styles.playIcon, playing && styles.playIconActive]}>
                     <Play size={13} color={playing ? '#083344' : colors.textMuted} fill={playing ? '#083344' : 'transparent'} />
                   </View>

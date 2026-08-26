@@ -8,6 +8,8 @@ import { createConnectionDeadline } from './connectionDeadline';
 import { clearProfile, persistProfile, readProfile } from './profile';
 import { socket, getClientId, getServerURL, normalizeURL } from './socket';
 import type { UserProfile } from './types';
+import { ServerCertificateToggle } from './components/ServerCertificateToggle';
+import { hasServerCertificateException, saveServerCertificateException } from './serverCertificate';
 
 const DEFAULT_SERVER = 'http://localhost:3001';
 type ConnectionProblem = 'timeout' | 'registration' | null;
@@ -18,6 +20,8 @@ export default function App() {
   const [connected, setConnected] = useState<boolean | null>(null);
   const [draftName, setDraftName] = useState('');
   const [draftUrl, setDraftUrl] = useState(() => localStorage.getItem('cove_server_url') ?? DEFAULT_SERVER);
+  const [allowUntrustedCertificate, setAllowUntrustedCertificate] = useState(() =>
+    hasServerCertificateException(localStorage.getItem('cove_server_url') ?? DEFAULT_SERVER));
   const [editingServer, setEditingServer] = useState(false);
   const [initialConnectionPending, setInitialConnectionPending] = useState(false);
   const [connectionProblem, setConnectionProblem] = useState<ConnectionProblem>(null);
@@ -68,8 +72,20 @@ export default function App() {
     socket.on('connect', register);
     socket.on('disconnect', disconnect);
     socket.on('connect_error', connectError);
-    socket.connect();
-    if (socket.connected) register();
+    const connectToServer = async () => {
+      try {
+        await window.coveSecurity?.setServerCertificateException(
+          serverURL,
+          hasServerCertificateException(serverURL),
+        );
+      } catch (error) {
+        console.warn('[security] 无法配置服务器证书例外:', error);
+      }
+      if (!active) return;
+      socket.connect();
+      if (socket.connected) register();
+    };
+    void connectToServer();
     return () => {
       active = false;
       deadline.cancel();
@@ -84,19 +100,23 @@ export default function App() {
     const username = draftName.trim();
     if (!username || !draftUrl.trim()) return;
     persistProfile({ username, avatarUrl: null });
-    localStorage.setItem('cove_server_url', normalizeURL(draftUrl || DEFAULT_SERVER));
+    const nextServerUrl = normalizeURL(draftUrl || DEFAULT_SERVER);
+    localStorage.setItem('cove_server_url', nextServerUrl);
+    saveServerCertificateException(nextServerUrl, allowUntrustedCertificate);
     window.location.reload();
   };
 
   const handleReset = () => {
     clearProfile();
     localStorage.removeItem('cove_server_url');
+    saveServerCertificateException('', false);
     window.location.reload();
   };
 
   const editServer = () => {
     socket.disconnect();
     setDraftUrl(serverURL);
+    setAllowUntrustedCertificate(hasServerCertificateException(serverURL));
     setInitialConnectionPending(false);
     setConnectionProblem(null);
     setEditingServer(true);
@@ -104,7 +124,9 @@ export default function App() {
 
   const saveServerAndReconnect = () => {
     if (!draftUrl.trim()) return;
-    localStorage.setItem('cove_server_url', normalizeURL(draftUrl));
+    const nextServerUrl = normalizeURL(draftUrl);
+    localStorage.setItem('cove_server_url', nextServerUrl);
+    saveServerCertificateException(nextServerUrl, allowUntrustedCertificate);
     window.location.reload();
   };
 
@@ -139,6 +161,7 @@ export default function App() {
               </div>
               <p className="mt-2 text-xs leading-relaxed text-white/30">这是连接 Cove 的必填地址，可填写你的 HTTPS 或本地服务器地址。</p>
               <p className="mt-1.5 text-xs leading-relaxed text-amber-200/45">localhost 只适用于服务器就在这台电脑上；其他用户需要填写房主提供的地址。</p>
+              <ServerCertificateToggle serverUrl={draftUrl} checked={allowUntrustedCertificate} onChange={setAllowUntrustedCertificate} />
             </div>
             <button className="mt-1 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-white py-3 text-base font-semibold text-zinc-900 transition hover:bg-cyan-100 disabled:cursor-not-allowed disabled:opacity-25" disabled={!draftName.trim() || !draftUrl.trim()} onClick={handleLogin}><LogIn size={18} /> 进入 Cove</button>
           </div>
@@ -170,6 +193,7 @@ export default function App() {
                   <input id="reconnect-server" className="min-w-0 flex-1 bg-transparent py-3 font-mono text-sm text-white outline-none" value={draftUrl} onChange={event => setDraftUrl(event.target.value)} onKeyDown={event => event.key === 'Enter' && saveServerAndReconnect()} autoFocus />
                 </div>
                 <p className="mt-2 text-xs leading-relaxed text-amber-200/45">localhost 只适用于服务器所在电脑；朋友的电脑应填写房主提供的公网或局域网地址。</p>
+                <ServerCertificateToggle serverUrl={draftUrl} checked={allowUntrustedCertificate} onChange={setAllowUntrustedCertificate} />
                 <button className="mt-5 w-full rounded-xl bg-white py-3 font-semibold text-zinc-900 transition hover:bg-cyan-100 disabled:cursor-not-allowed disabled:opacity-25" disabled={!draftUrl.trim()} onClick={saveServerAndReconnect}>保存并重新连接</button>
               </>
             ) : (

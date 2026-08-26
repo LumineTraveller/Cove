@@ -4,6 +4,12 @@ import fs from 'fs';
 import { startAutoUpdater } from './updater';
 import type { AutoUpdaterController, UpdateState } from './updater-core';
 import { normalizeExternalHttpUrl } from './external-links';
+import { ServerCertificatePolicy } from './server-certificate-policy';
+import {
+  ApplicationAudioCaptureController,
+  listApplicationAudioSources,
+  type ApplicationAudioSource,
+} from './application-audio';
 
 const sessionStamp = new Date().toISOString().replace(/[:.]/g, '-');
 const chromiumCaptureLogPath = path.join(
@@ -31,6 +37,20 @@ if (process.platform === 'win32') {
 const isDev = !app.isPackaged;
 let updaterController: AutoUpdaterController | null = null;
 let mediaDiagnosticLogPath = '';
+let mainWindow: BrowserWindow | null = null;
+const serverCertificatePolicy = new ServerCertificatePolicy();
+const applicationAudioCapture = new ApplicationAudioCaptureController();
+
+// A certificate exception is accepted only for the exact HTTPS origin chosen
+// in Cove's server settings and only inside the main application window.
+app.on('certificate-error', (event, webContents, url, _error, _certificate, callback) => {
+  if (webContents === mainWindow?.webContents && serverCertificatePolicy.allows(url)) {
+    event.preventDefault();
+    callback(true);
+    return;
+  }
+  callback(false);
+});
 
 const unavailableUpdateState: UpdateState = {
   status: 'disabled',
@@ -49,6 +69,10 @@ function createWindow() {
       contextIsolation: true,
       preload: path.join(__dirname, 'preload.js'),
     },
+  });
+  mainWindow = win;
+  win.on('closed', () => {
+    if (mainWindow === win) mainWindow = null;
   });
 
   Menu.setApplicationMenu(null);
@@ -109,6 +133,10 @@ app.whenReady().then(() => {
     await shell.openExternal(url);
     return true;
   });
+  ipcMain.handle('cove:security:set-server-certificate-exception', (event, serverUrl: unknown, enabled: unknown) => {
+    if (event.sender !== mainWindow?.webContents) return null;
+    return serverCertificatePolicy.configure(serverUrl, enabled);
+  });
   ipcMain.handle('cove:update:get-state', () => updaterController?.getState() ?? unavailableUpdateState);
   ipcMain.handle('cove:update:check', () => updaterController?.checkNow() ?? unavailableUpdateState);
   ipcMain.handle('cove:update:install', () => updaterController?.installNow() ?? false);
@@ -126,11 +154,36 @@ app.whenReady().then(() => {
     shell.showItemInFolder(mediaDiagnosticLogPath);
     return true;
   });
+  ipcMain.handle('cove:application-audio:list', async (event) => {
+    if (event.sender !== mainWindow?.webContents) return [];
+    return listApplicationAudioSources();
+  });
+  ipcMain.handle('cove:application-audio:start', async (event, sourceId: unknown) => {
+    if (event.sender !== mainWindow?.webContents || typeof sourceId !== 'string')
+      return { ok: false, error: '无效的应用音频请求。' };
+    try {
+      const source = (await listApplicationAudioSources()).find(item => item.id === sourceId) as ApplicationAudioSource | undefined;
+      if (!source) return { ok: false, error: '所选应用已关闭或无法捕获。请刷新列表后重试。' };
+      applicationAudioCapture.start(event.sender, source);
+      return { ok: true };
+    } catch (error) {
+      console.error('[application-audio] 启动失败', error);
+      return { ok: false, error: error instanceof Error ? error.message : '无法启动应用音频捕获。' };
+    }
+  });
+  ipcMain.handle('cove:application-audio:stop', (event) => {
+    if (event.sender !== mainWindow?.webContents) return false;
+    applicationAudioCapture.stop();
+    return true;
+  });
   createWindow();
   updaterController = startAutoUpdater(app.isPackaged);
 });
 
-app.on('will-quit', () => updaterController?.dispose());
+app.on('will-quit', () => {
+  applicationAudioCapture.stop();
+  updaterController?.dispose();
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

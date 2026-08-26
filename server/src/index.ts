@@ -605,23 +605,6 @@ function broadcastRoomMembers(roomId: string) {
   io.emit('room:members:global', { roomId, members: names });
 }
 
-function announceRoomPresence(roomId: string, username: string, action: 'join' | 'leave') {
-  // 加入房间与加入语音同时发生时会产生重复提示。房间成员状态仍由
-  // room:state / room:members 广播，这里只保留离开房间的聊天播报。
-  if (action === 'join') return;
-  const msg: Message = {
-    id: Math.random().toString(36).slice(2, 9),
-    roomId,
-    author: 'Cove',
-    content: `[${username}] 离开了房间`,
-    type: 'system',
-    timestamp: Date.now(),
-  };
-  stmtInsertMsg.run(msg.id, msg.roomId, msg.author, msg.content, msg.type, msg.timestamp);
-  io.to(roomId).emit('message:new', msg);
-  io.to(roomId).emit('room:presence', { roomId, username, action });
-}
-
 function isClientMuted(roomId: string, clientId: string): boolean {
   return !!stmtIsRoomMuted.get(roomId, clientId);
 }
@@ -643,10 +626,11 @@ function pausePeerAudio(socketId: string, paused: boolean) {
   if (!peer) return;
   for (const [producerId, producer] of peer.producers) {
     if (producer.kind !== 'audio') continue;
+    const sourceType = (producer.appData as Record<string, unknown>).type;
     if (paused) producer.pause().catch(() => {});
-    else if ((producer.appData as Record<string, unknown>).type === 'screen-audio')
+    else if (sourceType === 'screen-audio')
       syncOnDemandProducer(producerId);
-    else if (selfMutedVoiceMembers.has(socketId)) producer.pause().catch(() => {});
+    else if (sourceType === 'mic' && selfMutedVoiceMembers.has(socketId)) producer.pause().catch(() => {});
     else producer.resume().catch(() => {});
   }
 }
@@ -657,7 +641,7 @@ function pausePeerMicrophone(socketId: string, paused: boolean) {
   for (const producer of peer.producers.values()) {
     if (producer.kind !== 'audio') continue;
     const sourceType = (producer.appData as Record<string, unknown>).type;
-    if (sourceType === 'screen-audio') continue;
+    if (sourceType !== 'mic') continue;
     if (paused) producer.pause().catch(() => {});
     else producer.resume().catch(() => {});
   }
@@ -776,7 +760,6 @@ io.on('connection', socket => {
     socket.join(roomId);
     if (!roomMembers.has(roomId)) roomMembers.set(roomId, new Set());
     const members = roomMembers.get(roomId)!;
-    const newlyJoined = !members.has(socket.id);
     members.add(socket.id);
     broadcastRoomMembers(roomId);
     // 新进入频道的客户端可能错过之前的语音广播，进入时必须补发当前完整列表。
@@ -785,15 +768,13 @@ io.on('connection', socket => {
     // Track room for mediasoup
     const peer = peers.get(socket.id);
     if (peer) peer.roomId = roomId;
-    if (newlyJoined) announceRoomPresence(roomId, username, 'join');
     cb?.({ ok: true });
   });
 
   socket.on('room:leave', (roomId: string) => {
     handleVoiceLeave(socket.id, roomId);
-    const leftRoom = roomMembers.get(roomId)?.delete(socket.id) ?? false;
+    roomMembers.get(roomId)?.delete(socket.id);
     socket.leave(roomId);
-    if (leftRoom) announceRoomPresence(roomId, userNames.get(socket.id) ?? socket.id, 'leave');
     broadcastRoomMembers(roomId);
     const peer = peers.get(socket.id);
     if (peer) peer.roomId = null;
@@ -863,7 +844,6 @@ io.on('connection', socket => {
     const peer = peers.get(targetSocketId);
     if (peer?.roomId === roomId) peer.roomId = null;
     io.to(targetSocketId).emit('room:kicked', { roomId, by: userNames.get(socket.id) ?? '房主' });
-    announceRoomPresence(roomId, targetName, 'leave');
     broadcastRoomMembers(roomId);
     cb?.({ ok: true });
   });
@@ -1369,10 +1349,8 @@ io.on('connection', socket => {
   socket.on('disconnect', () => {
     console.log(`[-] ${socket.id}`);
     voiceRooms.forEach((_, roomId) => handleVoiceLeave(socket.id, roomId));
-    const username = userNames.get(socket.id) ?? socket.id;
     roomMembers.forEach((members, roomId) => {
       if (!members.delete(socket.id)) return;
-      announceRoomPresence(roomId, username, 'leave');
       broadcastRoomMembers(roomId);
     });
     userNames.delete(socket.id);

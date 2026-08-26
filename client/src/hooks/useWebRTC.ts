@@ -37,6 +37,7 @@ import {
   type ScreenEncodingPlan,
   type ScreenPreset,
 } from '../screenCapture';
+import { ApplicationAudioPipeline, type ApplicationAudioSource } from '../applicationAudio';
 
 export { SCREEN_PRESETS } from '../screenCapture';
 export type { ScreenPreset } from '../screenCapture';
@@ -146,6 +147,7 @@ interface ProcessedMicrophone {
 const MEMBER_VOLUME_KEY = 'cove_member_volumes_v1';
 const SCREEN_RECEIVE_VOLUME_KEY = 'cove_screen_receive_volume_v1';
 const SCREEN_SHARE_VOLUME_KEY = 'cove_screen_share_volume_v1';
+const APPLICATION_AUDIO_SHARE_VOLUME_KEY = 'cove_application_audio_share_volume_v1';
 
 // Chromium 的系统降噪负责处理连续噪声；这个轻量自适应噪声门只在用户不说话时
 // 继续衰减残留底噪，让 Opus DTX 能真正进入静音状态。门限会缓慢跟随本机噪声底，
@@ -266,6 +268,8 @@ export function useWebRTC(socket: Socket, roomId: string) {
   const [isMuted,      setIsMuted]      = useState(false);
   const [isForceMuted, setIsForceMuted] = useState(false);
   const [isSharing,    setIsSharing]    = useState(false);
+  const [isApplicationAudioSharing, setIsApplicationAudioSharing] = useState(false);
+  const [applicationAudioLabel, setApplicationAudioLabel] = useState<string | null>(null);
   const [screenPreset, setScreenPreset] = useState<ScreenPreset>('720p');
   const [fps,          setFps]          = useState<Fps>(30);
   const [shareAudio,   setShareAudio]   = useState(false);
@@ -281,6 +285,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
   const [watchingScreenPeer, setWatchingScreenPeer] = useState<string | null>(null);
   const [screenReceiveVolume, setScreenReceiveVolumeState] = useState(() => loadNumber(SCREEN_RECEIVE_VOLUME_KEY, 1));
   const [screenShareVolume, setScreenShareVolumeState] = useState(() => loadNumber(SCREEN_SHARE_VOLUME_KEY, 1));
+  const [applicationAudioShareVolume, setApplicationAudioShareVolumeState] = useState(() => loadNumber(APPLICATION_AUDIO_SHARE_VOLUME_KEY, 1));
   const [audioInputDevices, setAudioInputDevices] = useState<AudioDeviceOption[]>([]);
   const [audioOutputDevices, setAudioOutputDevices] = useState<AudioDeviceOption[]>([]);
   const [selectedAudioInputId, setSelectedAudioInputId] = useState(() => loadAudioDeviceId(AUDIO_INPUT_DEVICE_KEY));
@@ -304,6 +309,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
   const audioProducer   = useRef<Producer | null>(null);
   const screenProducer  = useRef<Producer | null>(null);
   const screenAudioProducer = useRef<Producer | null>(null); // 共享屏幕时的系统音频
+  const applicationAudioProducer = useRef<Producer | null>(null);
   const selfMutedRef    = useRef(false);
   const forceMutedRef   = useRef(false);
   const joiningRef      = useRef(false);
@@ -313,6 +319,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
   const seenVoicePresenceEvents = useRef<string[]>([]);
   const screenReceiveVolumeRef = useRef(screenReceiveVolume);
   const screenShareVolumeRef = useRef(screenShareVolume);
+  const applicationAudioShareVolumeRef = useRef(applicationAudioShareVolume);
   const selectedAudioInputRef = useRef(selectedAudioInputId);
   const selectedAudioOutputRef = useRef(selectedAudioOutputId);
   // consumerId → { consumer, socketId, kind, sourceType }
@@ -329,6 +336,8 @@ export function useWebRTC(socket: Socket, roomId: string) {
   const localScreenRef  = useRef<MediaStream | null>(null);
   const screenAudioContext = useRef<AudioContext | null>(null);
   const screenAudioGain = useRef<GainNode | null>(null);
+  const applicationAudioPipeline = useRef<ApplicationAudioPipeline | null>(null);
+  const applicationAudioUnsubscribe = useRef<(() => void) | null>(null);
   const availableScreensRef = useRef<Map<string, AvailableScreen>>(new Map());
   const pendingScreenAudioByPeer = useRef<Map<string, string>>(new Map());
   const watchingScreenPeerRef = useRef<string | null>(null);
@@ -386,6 +395,14 @@ export function useWebRTC(socket: Socket, roomId: string) {
     setScreenShareVolumeState(normalized);
     localStorage.setItem(SCREEN_SHARE_VOLUME_KEY, String(normalized));
     if (screenAudioGain.current) screenAudioGain.current.gain.value = normalized;
+  }, []);
+
+  const setApplicationAudioShareVolume = useCallback((volume: number) => {
+    const normalized = Math.max(0, Math.min(1, volume));
+    applicationAudioShareVolumeRef.current = normalized;
+    setApplicationAudioShareVolumeState(normalized);
+    localStorage.setItem(APPLICATION_AUDIO_SHARE_VOLUME_KEY, String(normalized));
+    applicationAudioPipeline.current?.setVolume(normalized);
   }, []);
 
   const refreshAudioDevices = useCallback(async (requestPermission = false) => {
@@ -775,6 +792,11 @@ export function useWebRTC(socket: Socket, roomId: string) {
     audioCtxRef.current?.close().catch(() => {});
     micProcessingContext.current?.close().catch(() => {});
     screenAudioContext.current?.close().catch(() => {});
+    applicationAudioUnsubscribe.current?.();
+    applicationAudioUnsubscribe.current = null;
+    applicationAudioPipeline.current?.close();
+    applicationAudioPipeline.current = null;
+    void window.coveApplicationAudio?.stop();
   }, []);
 
   // ── 初始化 mediasoup Device + 两条 transport ────────────────────────────────
@@ -890,7 +912,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
           document.addEventListener('click', resume);
         }));
         // 只对麦克风音频做音量分析（系统音频不计入"说话"）
-        if (appData?.type !== 'screen-audio') {
+        if (appData?.type !== 'screen-audio' && appData?.type !== 'application-audio') {
           attachAnalyser(consumer.id, stream, peerId);
           startMeters();
         }
@@ -1160,9 +1182,11 @@ export function useWebRTC(socket: Socket, roomId: string) {
       if (muted) {
         audioProducer.current?.pause();
         screenAudioProducer.current?.pause();
+        applicationAudioProducer.current?.pause();
       } else {
         if (!selfMutedRef.current) audioProducer.current?.resume();
         if (screenDemandActiveRef.current) screenAudioProducer.current?.resume();
+        applicationAudioProducer.current?.resume();
       }
       setIsMuted(muted || selfMutedRef.current);
     };
@@ -1383,6 +1407,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
     audioProducer.current?.close();       audioProducer.current       = null;
     screenProducer.current?.close();      screenProducer.current      = null;
     screenAudioProducer.current?.close(); screenAudioProducer.current = null;
+    applicationAudioProducer.current?.close(); applicationAudioProducer.current = null;
     sendTransport.current?.close();       sendTransport.current       = null;
     recvTransport.current?.close();       recvTransport.current       = null;
     deviceRef.current = null;
@@ -1396,6 +1421,13 @@ export function useWebRTC(socket: Socket, roomId: string) {
     screenAudioContext.current?.close().catch(() => {});
     screenAudioContext.current = null;
     screenAudioGain.current = null;
+    applicationAudioUnsubscribe.current?.();
+    applicationAudioUnsubscribe.current = null;
+    applicationAudioPipeline.current?.close();
+    applicationAudioPipeline.current = null;
+    void window.coveApplicationAudio?.stop();
+    setIsApplicationAudioSharing(false);
+    setApplicationAudioLabel(null);
     localScreenRef.current?.getTracks().forEach(t => t.stop());
     localScreenRef.current = null;
     setLocalScreen(null);
@@ -1785,11 +1817,66 @@ export function useWebRTC(socket: Socket, roomId: string) {
     if (!watchingScreenPeerRef.current) setStats(EMPTY_STATS);
   }, [socket, stopScreenAnalysis]);
 
+  const stopApplicationAudioShare = useCallback(() => {
+    const producer = applicationAudioProducer.current;
+    if (producer) {
+      socket.emit('ms:close-producer', { producerId: producer.id });
+      producer.close();
+      applicationAudioProducer.current = null;
+    }
+    applicationAudioUnsubscribe.current?.();
+    applicationAudioUnsubscribe.current = null;
+    applicationAudioPipeline.current?.close();
+    applicationAudioPipeline.current = null;
+    void window.coveApplicationAudio?.stop();
+    setIsApplicationAudioSharing(false);
+    setApplicationAudioLabel(null);
+  }, [socket]);
+
+  const startApplicationAudioShare = useCallback(async (source: ApplicationAudioSource) => {
+    if (!inVoice || applicationAudioProducer.current) return;
+    const bridge = window.coveApplicationAudio;
+    if (!bridge) {
+      window.alert('应用音频共享仅可在 Windows 桌面版中使用。');
+      return;
+    }
+    let pipeline: ApplicationAudioPipeline | null = null;
+    let unsubscribe: (() => void) | null = null;
+    try {
+      pipeline = new ApplicationAudioPipeline(applicationAudioShareVolumeRef.current);
+      await pipeline.resume();
+      unsubscribe = bridge.onChunk(chunk => pipeline?.pushPcm(chunk));
+      const capture = await bridge.start(source.id);
+      if (!capture.ok) throw new Error(capture.error ?? '无法开始应用音频捕获。');
+      const producer = await sendTransport.current!.produce({
+        track: pipeline.track,
+        codecOptions: { opusStereo: true, opusDtx: true, opusFec: true },
+        encodings: [{ maxBitrate: 96_000 }],
+        appData: { type: 'application-audio', label: source.name, processId: source.processId },
+        disableTrackOnPause: true,
+        zeroRtpOnPause: true,
+      });
+      applicationAudioPipeline.current = pipeline;
+      applicationAudioUnsubscribe.current = unsubscribe;
+      applicationAudioProducer.current = producer;
+      if (forceMutedRef.current) producer.pause();
+      setApplicationAudioLabel(source.name);
+      setIsApplicationAudioSharing(true);
+    } catch (error) {
+      unsubscribe?.();
+      pipeline?.close();
+      await bridge.stop().catch(() => false);
+      console.error('[application-audio] 分享失败', error);
+      window.alert(`无法共享应用音频：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, [inVoice]);
+
   const toggleShareAudio = useCallback(() => setShareAudio(p => !p), []);
 
   return {
     inVoice, isJoining, isMuted, isForceMuted, isSharing,
     screenPreset, fps, shareAudio, screenGameMode,
+    isApplicationAudioSharing, applicationAudioLabel, applicationAudioShareVolume,
     screenActivity, screenTargetBitrate, screenEncodingPlan, screenViewerCount,
     voiceMembers,
     localScreen,
@@ -1799,6 +1886,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
     isWatchingScreen: !!watchingScreenPeer,
     joinVoice, leaveVoice, toggleMute,
     startScreenShare, stopScreenShare,
+    startApplicationAudioShare, stopApplicationAudioShare, setApplicationAudioShareVolume,
     watchScreen, stopWatchingScreen, toggleShareAudio,
     // 新增：实时统计 + 音量
     stats, statsEnabled, toggleStats, exportMediaDiagnostics, openMediaDiagnosticsLog,

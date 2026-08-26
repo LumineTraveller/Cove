@@ -1,7 +1,7 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
-  Activity, ArrowLeft, Crown, Download, Ellipsis, Eye, EyeOff, FileText, Gamepad2, Hash, Headphones, ImagePlus, LoaderCircle, Maximize2, Menu, MessageCircle,
+  Activity, AppWindow, ArrowLeft, AudioLines, Crown, Download, Ellipsis, Eye, EyeOff, FileText, Gamepad2, Hash, Headphones, ImagePlus, LoaderCircle, Maximize2, Menu, MessageCircle,
   Mic, MicOff, Minimize2, MonitorPlay, MonitorUp, PanelRightClose, PanelRightOpen, PhoneOff,
   RefreshCw, Send, Settings2, Trash2, UserMinus, UserRound, Volume2, VolumeX, X,
 } from 'lucide-react';
@@ -23,6 +23,7 @@ import {
 import { parseChatText } from '../chatLinks';
 import { isScreenEncodingWithinPlan } from '../screenCapture';
 import { sortRoomMembers } from '../memberOrdering';
+import type { ApplicationAudioSource } from '../applicationAudio';
 
 function ChatMessageText({ content, isMe }: { content: string; isMe: boolean }) {
   const openExternal = (event: React.MouseEvent<HTMLAnchorElement>, url: string) => {
@@ -140,6 +141,52 @@ function ScreenSettingsModal({ preset, fps, audio, gameMode, onPreset, onFps, on
           <button onClick={onConfirm} className="flex-1 py-3 rounded-xl text-base bg-white hover:bg-zinc-100 text-zinc-900 font-semibold transition-colors">开始共享</button>
         </div>
       </div>
+    </div>
+  );
+}
+
+function ApplicationAudioModal({
+  sources, loading, onRefresh, onSelect, onClose,
+}: {
+  sources: ApplicationAudioSource[];
+  loading: boolean;
+  onRefresh: () => void;
+  onSelect: (source: ApplicationAudioSource) => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-[130] flex items-center justify-center bg-black/65 p-4 backdrop-blur-md" onMouseDown={onClose}>
+      <section className="flex max-h-[80vh] w-full max-w-lg flex-col overflow-hidden rounded-3xl border border-white/15 bg-zinc-900/95 shadow-2xl" onMouseDown={event => event.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="application-audio-title">
+        <header className="flex items-start gap-4 border-b border-white/10 px-6 py-5">
+          <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-2xl bg-violet-300/15 text-violet-100"><AudioLines size={22} /></div>
+          <div className="min-w-0 flex-1">
+            <h2 id="application-audio-title" className="text-xl font-bold text-white">共享应用音频</h2>
+            <p className="mt-1 text-sm leading-relaxed text-white/45">仅发送所选应用及其子进程的声音，不包含 Cove 通话或其他系统声音。</p>
+          </div>
+          <button onClick={onClose} className="rounded-xl p-2 text-white/35 transition hover:bg-white/10 hover:text-white" aria-label="关闭应用音频选择"><X size={18} /></button>
+        </header>
+        <div className="flex items-center justify-between gap-3 border-b border-white/[0.08] bg-black/10 px-6 py-3">
+          <span className="text-xs text-white/35">Windows 11 · 仅音频 · 共享后可调节发送音量</span>
+          <button onClick={onRefresh} disabled={loading} className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-cyan-100 transition hover:bg-white/10 disabled:opacity-40"><RefreshCw size={14} className={loading ? 'animate-spin' : ''} />刷新</button>
+        </div>
+        <div className="min-h-36 overflow-y-auto p-4">
+          {loading ? (
+            <div className="flex min-h-32 items-center justify-center gap-2 text-sm text-white/40"><LoaderCircle size={17} className="animate-spin" />正在读取可共享的应用…</div>
+          ) : sources.length ? (
+            <div className="space-y-2">
+              {sources.map(source => (
+                <button key={`${source.processId}-${source.id}`} onClick={() => onSelect(source)} className="flex w-full items-center gap-3 rounded-2xl border border-white/[0.08] bg-white/[0.045] px-4 py-3 text-left transition hover:border-violet-300/30 hover:bg-violet-300/[0.08]">
+                  <span className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl bg-white/10 text-white/55"><AppWindow size={18} /></span>
+                  <span className="min-w-0 flex-1"><span className="block truncate text-sm font-semibold text-white/85">{source.name}</span><span className="mt-0.5 block truncate text-xs text-white/35">{source.processName} · PID {source.processId}</span></span>
+                  <span className="text-xs font-semibold text-violet-200/80">共享音频</span>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="flex min-h-32 flex-col items-center justify-center gap-2 text-center text-sm text-white/40"><AudioLines size={25} className="text-white/25" /><span>没有可捕获的应用窗口。</span><span className="text-xs text-white/25">请先打开要播放声音的应用，再点击刷新。</span></div>
+          )}
+        </div>
+      </section>
     </div>
   );
 }
@@ -271,6 +318,9 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
   const initiallyScrolledRoomRef      = useRef<string | null>(null);
 
   const [showScreenModal, setShowScreenModal] = useState(false);
+  const [showApplicationAudioModal, setShowApplicationAudioModal] = useState(false);
+  const [applicationAudioSources, setApplicationAudioSources] = useState<ApplicationAudioSource[]>([]);
+  const [applicationAudioLoading, setApplicationAudioLoading] = useState(false);
   const [pendingPreset, setPendingPreset]     = useState<ScreenPreset>('720p');
   const [pendingFps, setPendingFps]           = useState<Fps>(30);
   const [pendingAudio, setPendingAudio]       = useState(false);
@@ -279,6 +329,31 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
   const [showAudioDevices, setShowAudioDevices] = useState(false);
 
   const rtc = useWebRTC(socket, roomId!);
+
+  const refreshApplicationAudioSources = useCallback(async () => {
+    if (!window.coveApplicationAudio) {
+      window.alert('应用音频共享仅可在 Windows 桌面版中使用。');
+      return;
+    }
+    setApplicationAudioLoading(true);
+    try {
+      setApplicationAudioSources(await window.coveApplicationAudio.listSources());
+    } catch (error) {
+      console.error('[application-audio] 读取应用列表失败', error);
+      window.alert(`无法读取应用列表：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setApplicationAudioLoading(false);
+    }
+  }, []);
+
+  const openApplicationAudioModal = useCallback(() => {
+    if (!window.coveApplicationAudio) {
+      window.alert('应用音频共享仅可在 Windows 桌面版中使用。');
+      return;
+    }
+    setShowApplicationAudioModal(true);
+    void refreshApplicationAudioSources();
+  }, [refreshApplicationAudioSources]);
 
   useEffect(() => {
     if (!roomId) return;
@@ -330,15 +405,10 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
       window.alert(`你已被${by ? ` ${by} ` : '房主'}移出房间。`);
       navigate('/', { replace: true });
     };
-    const onRoomPresence = ({ roomId: presenceRoomId, action }: { roomId: string; action: 'join' | 'leave' }) => {
-      // 房间加入不再播放提示音；语音加入仍由 useWebRTC 的 voice:presence 处理。
-      if (presenceRoomId === roomId && action === 'leave') rtc.playPresenceTone(action);
-    };
     socket.on('message:new', onNew);
     socket.on('room:state', onState);
     socket.on('room:deleted', onDeleted);
     socket.on('room:kicked', onKicked);
-    socket.on('room:presence', onRoomPresence);
     joinRoom();
     return () => {
       socket.emit('room:leave', roomId);
@@ -346,7 +416,6 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
       socket.off('room:state', onState);
       socket.off('room:deleted', onDeleted);
       socket.off('room:kicked', onKicked);
-      socket.off('room:presence', onRoomPresence);
       rtc.leaveVoice();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -564,6 +633,19 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
           })}
           onCancel={() => setShowScreenModal(false)}
           onConfirm={() => { setShowScreenModal(false); rtc.startScreenShare(pendingPreset, pendingFps, pendingAudio, pendingGameMode); }}
+        />
+      )}
+
+      {showApplicationAudioModal && (
+        <ApplicationAudioModal
+          sources={applicationAudioSources}
+          loading={applicationAudioLoading}
+          onRefresh={() => { void refreshApplicationAudioSources(); }}
+          onSelect={source => {
+            setShowApplicationAudioModal(false);
+            void rtc.startApplicationAudioShare(source);
+          }}
+          onClose={() => setShowApplicationAudioModal(false)}
         />
       )}
 
@@ -794,6 +876,7 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
                 <button onClick={rtc.toggleStats} className={`rounded-xl p-2 transition ${rtc.statsEnabled ? 'bg-sky-500/20 text-sky-300' : 'text-white/45 hover:bg-white/10 hover:text-white'}`} aria-label={rtc.statsEnabled ? '关闭媒体统计' : '打开媒体统计'} title="媒体统计"><Activity size={18} /></button>
                 <button onClick={rtc.toggleMute} disabled={rtc.isForceMuted || !sessionReady} className={`rounded-xl p-2 transition disabled:cursor-not-allowed ${rtc.isForceMuted || rtc.isMuted ? 'bg-red-500/20 text-red-300' : 'text-white/60 hover:bg-white/10 hover:text-white'}`} aria-label={rtc.isForceMuted ? '已被房主语音禁言' : rtc.isMuted ? '取消静音' : '静音'} title={rtc.isForceMuted ? '已被房主语音禁言' : rtc.isMuted ? '取消静音' : '静音'}>{rtc.isMuted || rtc.isForceMuted ? <MicOff size={18} /> : <Mic size={18} />}</button>
                 <button onClick={!rtc.isSharing ? () => setShowScreenModal(true) : rtc.stopScreenShare} disabled={!sessionReady} className={`rounded-xl p-2 transition ${rtc.isSharing ? 'bg-amber-500/20 text-amber-300' : 'text-white/60 hover:bg-white/10 hover:text-white'}`} aria-label={rtc.isSharing ? '停止屏幕共享' : '开始屏幕共享'} title={rtc.isSharing ? '停止屏幕共享' : '开始屏幕共享'}><MonitorUp size={18} /></button>
+                <button onClick={rtc.isApplicationAudioSharing ? rtc.stopApplicationAudioShare : openApplicationAudioModal} disabled={!sessionReady} className={`rounded-xl p-2 transition ${rtc.isApplicationAudioSharing ? 'bg-violet-400/20 text-violet-200' : 'text-white/60 hover:bg-white/10 hover:text-white'}`} aria-label={rtc.isApplicationAudioSharing ? '停止应用音频共享' : '共享应用音频'} title={rtc.isApplicationAudioSharing ? `停止共享 ${rtc.applicationAudioLabel ?? '应用'} 的音频` : '共享应用音频（仅音频）'}><AudioLines size={18} /></button>
                 <button onClick={rtc.leaveVoice} className="rounded-xl p-2 text-white/45 transition hover:bg-red-500/20 hover:text-red-300" aria-label="离开语音" title="离开语音"><PhoneOff size={18} /></button>
               </div>
             )}
@@ -833,6 +916,15 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
                 );
               })}
             </div>
+          </div>
+        )}
+
+        {rtc.inVoice && rtc.isApplicationAudioSharing && (
+          <div className="mx-5 mt-4 flex flex-shrink-0 items-center gap-3 rounded-2xl border border-violet-300/20 bg-violet-300/[0.07] px-4 py-3 text-sm text-violet-50/85">
+            <span className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl bg-violet-200 text-zinc-900"><AudioLines size={18} /></span>
+            <div className="min-w-0 flex-1"><p className="truncate font-semibold">正在共享 {rtc.applicationAudioLabel ?? '应用'} 的音频</p><p className="mt-0.5 text-xs text-violet-100/45">仅共享该应用及其子进程的声音</p></div>
+            <label className="flex items-center gap-2 text-xs text-violet-100/70" title="调节对方听到的应用音频音量"><Volume2 size={15} /><input type="range" min="0" max="100" step="1" value={Math.round(rtc.applicationAudioShareVolume * 100)} onChange={event => rtc.setApplicationAudioShareVolume(Number(event.target.value) / 100)} className="h-1 w-24 cursor-pointer accent-violet-200" aria-label="应用音频发送音量" /><span className="w-8 text-right tabular-nums">{Math.round(rtc.applicationAudioShareVolume * 100)}%</span></label>
+            <button onClick={rtc.stopApplicationAudioShare} className="rounded-xl bg-white/10 px-3 py-2 text-xs font-semibold text-white/75 transition hover:bg-red-500/20 hover:text-red-200">停止</button>
           </div>
         )}
 

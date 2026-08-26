@@ -245,7 +245,7 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
           </ScrollView>
         </View>
 
-        <Soundboard socket={socket} roomId={room.id} serverURL={config.serverURL} ready={roomReady} />
+        <Soundboard socket={socket} roomId={room.id} serverURL={config.serverURL} ready={roomReady} inVoice={media.inVoice} />
         <View style={styles.bottomSpacer} />
       </ScrollView>
 

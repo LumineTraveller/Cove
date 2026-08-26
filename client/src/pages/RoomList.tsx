@@ -3,7 +3,9 @@ import { useNavigate } from 'react-router-dom';
 import { Crown, Hash, Headphones, LoaderCircle, MessageCircle, Plus, Server, Settings, Users, X } from 'lucide-react';
 import { Avatar } from '../components/Avatar';
 import { ProfileModal } from '../components/ProfileModal';
+import { ServerCertificateToggle } from '../components/ServerCertificateToggle';
 import { socket, normalizeURL } from '../socket';
+import { hasServerCertificateException, saveServerCertificateException } from '../serverCertificate';
 import type { OnlineUser, Room, UserProfile } from '../types';
 import coveIcon from '../../build/icon.ico';
 
@@ -31,6 +33,7 @@ export default function RoomList({ profile, onProfileChange, onReset, sessionRea
   const [showSettings, setShowSettings] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
   const [draftUrl, setDraftUrl] = useState(localStorage.getItem('cove_server_url') ?? serverURL);
+  const [allowUntrustedCertificate, setAllowUntrustedCertificate] = useState(() => hasServerCertificateException(serverURL));
   const [onlineUsers, setOnlineUsers] = useState<OnlineUser[]>([]);
   const [roomMembersMap, setRoomMembersMap] = useState<Record<string, string[]>>({});
   const [voiceCounts, setVoiceCounts] = useState<Record<string, number>>({});
@@ -93,7 +96,9 @@ export default function RoomList({ profile, onProfileChange, onReset, sessionRea
 
   const saveSettings = () => {
     if (!draftUrl.trim()) return;
-    localStorage.setItem('cove_server_url', normalizeURL(draftUrl));
+    const nextServerUrl = normalizeURL(draftUrl);
+    localStorage.setItem('cove_server_url', nextServerUrl);
+    saveServerCertificateException(nextServerUrl, allowUntrustedCertificate);
     window.location.reload();
   };
 
@@ -173,6 +178,7 @@ export default function RoomList({ profile, onProfileChange, onReset, sessionRea
             <label className="mb-2 mt-5 block text-sm font-medium text-white/55" htmlFor="settings-server">服务器地址</label>
             <div className="flex items-center gap-3 rounded-xl border border-white/10 bg-white/[0.07] px-4 focus-within:border-cyan-300/45"><Server size={18} className="text-white/30" /><input id="settings-server" className="min-w-0 flex-1 bg-transparent py-3 font-mono text-sm text-white outline-none" value={draftUrl} onChange={event => setDraftUrl(event.target.value)} onKeyDown={event => event.key === 'Enter' && saveSettings()} autoFocus /></div>
             <p className="mt-2 text-xs text-white/35">保存后客户端会重启连接。服务器地址不会被隐藏。</p>
+            <ServerCertificateToggle serverUrl={draftUrl} checked={allowUntrustedCertificate} onChange={setAllowUntrustedCertificate} />
             <button className="mt-5 w-full rounded-xl bg-white py-3 font-semibold text-zinc-900 transition hover:bg-cyan-100 disabled:opacity-25" disabled={!draftUrl.trim()} onClick={saveSettings}>保存并重连</button>
           </section>
         </div>
