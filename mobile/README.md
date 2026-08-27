@@ -67,7 +67,7 @@ Android 登录页输入 HTTPS 地址后，可选择“允许此服务器使用�
 `update.json` 是手机端独立更新清单；`release: null` 可用于尚未发布手机更新时，不会把桌面安装包或旧 APK 当成新版。发布流程（以下命令在 `mobile` 目录运行）：
 
 1. 修改 `mobile/package.json` 和 `android/app/build.gradle` 的手机版本，递增 Gradle `versionCode`；使用与现有安装包一致的签名证书和应用 ID。不要更换签名导致无法覆盖安装。
-2. 准备手机端专用更新说明 Markdown 文件，测试后执行 `npm run android:apk` 重新构建。不要使用上次残留 APK。
+2. 准备手机端专用更新说明 Markdown 文件，测试后执行 `npm run android:apk -- -PreactNativeArchitectures=armeabi-v7a,arm64-v8a` 重新构建 ARM 手机版，减少体积以符合 Gitee 单附件 100 MB 上限。不要使用上次残留 APK；需要 x86 模拟器包时可单独构建，但不混入正式手机清单。
 3. 选择两平台均已存在的桌面 Release 作为附件存放位置，执行 `npm run update:prepare -- <更新说明文件路径> <已有Release标签>`（最后一个参数例如 `v0.8.0`）。读取 APK 构建元数据，核对版本并生成 `build/updates/mobile-vX.Y.Z/Cove-Mobile-X.Y.Z.apk` 和 `update.json`；不上传、不修改在线清单，且拒绝覆盖已有暂存文件。
 4. 在两平台选定的同一个 Release 上传生成的 APK（保留文件名），追加手机端更新说明，**保留桌面附件、原有说明和标签**。确认两个 APK 地址均可下载。手机显示/比较的是清单里的手机版本和 `versionCode`，不是承载附件的桌面标签。不需重新打标签或触发桌面构建。
 5. 将生成的清单复制到仓库 `mobile/update.json`，提交并推送两平台 `main`。必须先上传 APK，再公布清单。检查两平台 raw 清单与附件都无需登录。
