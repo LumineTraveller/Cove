@@ -1,6 +1,6 @@
 # Cove
 
-Cove 是一个实时语音与聊天应用，包含客户端（Web / Electron）和服务器两部分，支持自托管或本地运行。它为多用户房间提供在线存在(presence)、音频/屏幕采集和自定义声包(soundpacks)功能。
+Cove 是一个实时语音与聊天应用，包含客户端（Web / Electron）和服务器两部分，支持自托管或本地运行。它为多用户房间提供在线存在(presence)、音频/屏幕采集和自定义语音包(soundpacks)功能。
 
 ## 技术栈
 - 语言：TypeScript（客户端 & 服务器）
@@ -8,12 +8,12 @@ Cove 是一个实时语音与聊天应用，包含客户端（Web / Electron）�
 - 服务器：Node.js（TypeScript） + Electron（桌面打包/运行）
 - 主要库/工具（仓库中可见）：Electron、Vite、React、Tailwind CSS、PostCSS、concurrently
 
-## 仓库结构（重要的顶级条目）
+## 仓库结构
 ```
 .github/                   GitHub 工作流与仓库配置
 .gitignore                 忽略规则
 CHANGELOG.md               更新日志
-Cove服务器配置指南.pdf     服务器部署与配置指南（中文）
+Cove服务器配置指南.pdf      服务器部署与配置指南（中文）
 RELEASE_NOTES.md           发布说明
 assets/                    静态资源
 client/                    前端应用（Vite + React + TypeScript）
@@ -33,11 +33,11 @@ start.ps1                  Windows 启动/辅助脚本
 - 服务器（server/src/index.ts）负责实时协同、presence 与 voice 的协调，包含 voicePresence、presence 等模块；Electron 相关的代码也放在 server/electron 或 client/electron 目录下以支持桌面打包。
 - 运行时流程：客户端通过 client/src/socket.ts 与服务器建立 WebSocket（或类似）连接，用于实时存在和消息/音频路由；客户端负责音频采集与播放（applicationAudio.ts、screenCapture.ts、mediaDiagnostics.ts），服务器负责房间与音频分发、声包管理等逻辑。
 
-## 主要功能（从代码中观察到）
+## 主要功能
 - 多房间聊天与界面（client/src/pages/ChatRoom.tsx、RoomList.tsx）
 - 实时 presence 与语音支持（server/src/presence.ts、server/src/voicePresence.ts；client 侧有 socket 支持）
 - 应用级音频与屏幕采集（client/src/applicationAudio.ts、client/src/screenCapture.ts）
-- 声包管理与展示（client/src/components/SoundPackPanel.tsx、server/src/soundpackAudience.ts）
+- 语音包管理与展示（client/src/components/SoundPackPanel.tsx、server/src/soundpackAudience.ts）
 - Electron 桌面打包与测试（server/electron、client/electron 相关目录）
 - 媒体设备诊断工具（client/src/mediaDiagnostics.ts）
 
@@ -93,22 +93,8 @@ npm test
 ```
 （具体脚本请查看各自 package.json 中的 test 配置。）
 
-## 贡献
-- 提交 issue 或 PR 报告 bug、请求新特性或改善文档。
-- 在提交代码前请确保通过本地构建与测试，遵循 TypeScript 代码风格并添加必要的测试。
-- 仓库未在根目录发现 LICENSE 文件，请在贡献前与仓库维护者确认许可与贡献政策。
-
 ## 仓库中的重要文件/入口
 - 客户端入口：client/src/main.tsx、client/src/pages/ChatRoom.tsx
 - 服务器入口：server/src/index.ts、server/src/voicePresence.ts
 - 服务器配置指南（中文）：Cove服务器配置指南.pdf
 - 更新与发布记录：CHANGELOG.md、RELEASE_NOTES.md
-
-## 建议你可以问的问题（示例）
-- 语音的端到端路由是如何实现的？请查看 server/src/voicePresence.ts 与 client/src/applicationAudio.ts。
-- 声包（soundpacks）如何加载与分发到客户端？请查看 client/src/components/SoundPackPanel.tsx 与 server/src/soundpackAudience.ts。
-- 生产环境下服务器需要哪些环境变量或证书？请参考 Cove服务器配置指南.pdf 与 client/src/serverCertificate.ts。
-
----
-
-如果你需要，我可以把这份 README.md 直接提交到仓库（我现在就可以帮你上传）。
