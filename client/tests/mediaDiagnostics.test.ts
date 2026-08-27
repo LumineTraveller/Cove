@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   intervalLossPercent,
   mediaDiagnosticSessionKey,
-  shouldPersistMediaDiagnosticSample,
+  shouldAcceptMediaDiagnosticSample,
   videoCounterRates,
   videoCounterSample,
 } from '../src/mediaDiagnostics';
@@ -55,10 +55,10 @@ test('diagnostic session exists only while sharing or actively watching', () => 
 
 test('late async samples are discarded after sharing or watching stops', () => {
   const captured = mediaDiagnosticSessionKey('producer-1', null);
-  assert.equal(shouldPersistMediaDiagnosticSample(true, captured, captured), true);
-  assert.equal(shouldPersistMediaDiagnosticSample(true, captured, null), false);
-  assert.equal(shouldPersistMediaDiagnosticSample(false, captured, captured), false);
-  assert.equal(shouldPersistMediaDiagnosticSample(
+  assert.equal(shouldAcceptMediaDiagnosticSample(true, captured, captured), true);
+  assert.equal(shouldAcceptMediaDiagnosticSample(true, captured, null), false);
+  assert.equal(shouldAcceptMediaDiagnosticSample(false, captured, captured), false);
+  assert.equal(shouldAcceptMediaDiagnosticSample(
     true,
     mediaDiagnosticSessionKey(null, 'peer-1'),
     mediaDiagnosticSessionKey(null, 'peer-2'),

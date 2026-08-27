@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   applyAudioElementOutput,
+  createVoiceAudioOutput,
+  isMemberVoiceAudio,
   createMicrophoneConstraints,
   DEFAULT_AUDIO_DEVICE_ID,
   resolvedSinkId,
@@ -55,4 +57,57 @@ test('audio elements switch to the requested output device', async () => {
 test('unsupported audio elements fail open and keep system playback working', async () => {
   const element = {} as HTMLMediaElement;
   assert.equal(await applyAudioElementOutput(element, 'speaker-123'), false);
+});
+
+test('member volume only affects microphone consumers, including legacy unlabelled audio', () => {
+  assert.equal(isMemberVoiceAudio('audio', 'mic'), true);
+  assert.equal(isMemberVoiceAudio('audio'), true);
+  assert.equal(isMemberVoiceAudio('audio', 'screen-audio'), false);
+  assert.equal(isMemberVoiceAudio('audio', 'application-audio'), false);
+  assert.equal(isMemberVoiceAudio('video', 'screen'), false);
+});
+
+test('live microphone audio enters the gain node directly, with remembered mute or amplification', () => {
+  for (const [volume, expected] of [[0, 0], [0.5, 0.5], [1, 1], [2, 2], [3, 2], [-1, 0], [NaN, 1]]) {
+    const stream = {} as MediaStream;
+    const destination = {};
+    const connections: unknown[] = [];
+    const gain = { gain: { value: -1 }, connect: (target: unknown) => { connections.push(target); }, disconnect() {} };
+    const source = { connect: (target: unknown) => { connections.push(target); return gain; }, disconnect() {} };
+    const context = {
+      destination,
+      createMediaStreamSource: (input: MediaStream) => { assert.equal(input, stream); return source; },
+      createGain: () => gain,
+      createMediaElementSource: () => { throw new Error('A live stream must not use the element playback path'); },
+    } as unknown as AudioContext;
+    const activation = { pause() {} } as HTMLAudioElement;
+    const output = createVoiceAudioOutput(context, stream, volume, activation);
+    assert.equal(output.gain.gain.value, expected);
+    assert.deepEqual(connections, [gain, destination]);
+    assert.equal(activation.srcObject, stream);
+    assert.equal(activation.muted, true);
+    assert.equal(activation.volume, 0);
+    output.close();
+    assert.equal(activation.srcObject, null);
+  }
+});
+
+test('voice output activates the muted stream and releases it without stopping the incoming track', async () => {
+  let resumed = 0, played = 0, paused = 0, disconnected = 0;
+  const gain = { gain: { value: 1 }, connect() {}, disconnect() { disconnected++; } };
+  const source = { connect: () => gain, disconnect() { disconnected++; } };
+  const context = { createMediaStreamSource: () => source, createGain: () => gain, destination: {}, resume: async () => { resumed++; } } as unknown as AudioContext;
+  const activation = { play: async () => { played++; }, pause: () => { paused++; } } as unknown as HTMLAudioElement;
+  const stream = { getTracks: () => { throw new Error('Do not stop shared incoming tracks'); } } as unknown as MediaStream;
+  const output = createVoiceAudioOutput(context, stream, 0.35, activation);
+  await output.resume();
+  assert.equal(resumed, 1);
+  assert.equal(played, 1);
+  output.close();
+  output.close();
+  await output.resume();
+  assert.equal(paused, 1);
+  assert.equal(disconnected, 2);
+  assert.equal(played, 1);
+  assert.equal(activation.srcObject, null);
 });

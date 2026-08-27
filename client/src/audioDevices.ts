@@ -82,3 +82,48 @@ export async function applyAudioContextOutput(
   await sinkContext.setSinkId(resolvedSinkId(deviceId));
   return true;
 }
+
+export function isMemberVoiceAudio(kind: string, sourceType?: string): boolean {
+  return kind === 'audio' && sourceType !== 'screen-audio' && sourceType !== 'application-audio';
+}
+
+/** Only the gain path is audible; Chromium also needs a muted element to activate remote playout. */
+export function createVoiceAudioOutput(
+  context: AudioContext,
+  stream: MediaStream,
+  volume: number,
+  activationElement: HTMLAudioElement = new Audio(),
+) {
+  const source = context.createMediaStreamSource(stream);
+  const gain = context.createGain();
+  // Electron 29 的远端 WebRTC 流需要媒体元素激活才能进入 Web Audio。
+  // 双重静音仅作用于这个元素，不影响原始 track；它绝不能形成第二条可听路径。
+  activationElement.muted = true;
+  activationElement.volume = 0;
+  activationElement.srcObject = stream;
+  gain.gain.value = Number.isFinite(volume) ? Math.max(0, Math.min(2, volume)) : 1;
+  try {
+    source.connect(gain).connect(context.destination);
+  } catch (error) {
+    source.disconnect();
+    gain.disconnect();
+    activationElement.srcObject = null;
+    throw error;
+  }
+  let closed = false;
+  return {
+    source,
+    gain,
+    async resume() {
+      if (!closed) await Promise.all([context.resume(), activationElement.play()]);
+    },
+    close() {
+      if (closed) return;
+      closed = true;
+      activationElement.pause();
+      activationElement.srcObject = null;
+      source.disconnect();
+      gain.disconnect();
+    },
+  };
+}

@@ -47,7 +47,7 @@ export function mediaDiagnosticSessionKey(
   return null;
 }
 
-export function shouldPersistMediaDiagnosticSample(
+export function shouldAcceptMediaDiagnosticSample(
   statsEnabled: boolean,
   capturedSessionKey: string | null,
   currentSessionKey: string | null,

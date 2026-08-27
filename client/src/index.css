@@ -15,6 +15,49 @@ html, body, #root {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 }
 
+/* Fullscreen API 只会把共享画面容器提升到显示器顶层，明确铺满视口，
+   避免浏览器的默认 inline/flex 尺寸让画面仍停留在窗口大小。 */
+.cove-screen-container:fullscreen {
+  width: 100vw;
+  height: 100vh;
+  background: #000;
+}
+
+.cove-media-banner {
+  overflow: hidden;
+}
+.cove-media-banner-panel {
+  transform: translateX(0);
+  opacity: 1;
+  visibility: visible;
+  transition: transform 280ms ease, opacity 220ms ease, visibility 0s;
+}
+.cove-media-banner.is-collapsed .cove-media-banner-panel {
+  transform: translateX(calc(-100% - 1.25rem));
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: transform 280ms ease, opacity 220ms ease, visibility 0s 280ms;
+}
+.cove-media-banner-tab {
+  transform: translate(-100%, -50%);
+  opacity: 0;
+  pointer-events: none;
+  transition: transform 280ms ease, opacity 180ms ease, width 150ms ease, background-color 150ms ease;
+}
+.cove-media-banner.is-collapsed .cove-media-banner-tab {
+  transform: translate(0, -50%);
+  opacity: 1;
+  pointer-events: auto;
+}
+@media (prefers-reduced-motion: reduce) {
+  .cove-media-banner-panel,
+  .cove-media-banner-tab,
+  .cove-media-banner.is-collapsed .cove-media-banner-panel {
+    transition: none;
+  }
+}
+
 ::-webkit-scrollbar {
   width: 6px;
 }

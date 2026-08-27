@@ -1,28 +1,19 @@
+import { isUpdateBusy, transferPercent, type UpdateState } from './update-state';
+export type { UpdateState, UpdateStatus } from './update-state';
+
 export interface UpdateInfoLike {
   version: string;
 }
 
 export interface DownloadProgressLike {
   percent: number;
+  transferred?: number;
+  total?: number;
+  bytesPerSecond?: number;
 }
 
-export type UpdateStatus =
-  | 'disabled'
-  | 'idle'
-  | 'checking'
-  | 'available'
-  | 'downloading'
-  | 'downloaded'
-  | 'not-available'
-  | 'error';
-
-export interface UpdateState {
-  status: UpdateStatus;
-  version?: string;
-  percent?: number;
-  message?: string;
-  source?: 'github' | 'gitee';
-  sourceLabel?: 'GitHub' | 'Gitee';
+export interface UpdateCheckResultLike {
+  downloadPromise?: Promise<unknown> | null;
 }
 
 export interface UpdateSourceCandidate {
@@ -47,7 +38,7 @@ export interface UpdaterLike {
   on(event: string, listener: (...args: any[]) => void): unknown;
   off?(event: string, listener: (...args: any[]) => void): unknown;
   setFeedURL?(options: any): void;
-  checkForUpdates(): Promise<unknown>;
+  checkForUpdates(): Promise<UpdateCheckResultLike | null | void>;
   quitAndInstall(isSilent?: boolean, isForceRunAfter?: boolean): void;
 }
 
@@ -72,6 +63,7 @@ export interface AutoUpdaterOptions {
   startupDelayMs?: number;
   checkIntervalMs?: number;
   resolveSources?: () => Promise<UpdateSourceCandidate[]>;
+  now?: () => number;
 }
 
 export interface AutoUpdaterController {
@@ -104,14 +96,22 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
     startupDelayMs = DEFAULT_STARTUP_DELAY_MS,
     checkIntervalMs = DEFAULT_CHECK_INTERVAL_MS,
     resolveSources = async () => [],
+    now = Date.now,
   } = options;
 
   let state: UpdateState = isPackaged
     ? { status: 'idle' }
     : { status: 'disabled', message: '开发模式不连接更新服务，请在正式安装版中检查更新。' };
+  let disposed = false;
   const setState = (next: UpdateState) => {
-    state = next;
-    publishState(next);
+    if (disposed) return;
+    const changed = next.status !== state.status || next.source !== state.source;
+    const stageStartedAt = changed ? now() : state.stageStartedAt ?? now();
+    if (changed) logger.info(`[updater] 阶段 ${state.status} → ${next.status}`, {
+      source: next.source, version: next.version, previousStageMs: state.stageStartedAt == null ? 0 : now() - state.stageStartedAt,
+    });
+    state = { ...next, stageStartedAt, lastActivityAt: changed ? stageStartedAt : next.lastActivityAt ?? stageStartedAt };
+    publishState(state);
   };
 
   if (!isPackaged) {
@@ -135,6 +135,22 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
   let sources: UpdateSourceCandidate[] = [];
   let sourceIndex = -1;
   let activeSource: UpdateSourceCandidate | undefined;
+  let sourceGeneration = 0;
+  let deferredDownloadError: Error | null = null;
+  let handledError: Error | null = null;
+  let activeDownloadPromise: Promise<unknown> | null = null;
+
+  const isDownloading = () => ['available', 'downloading', 'finalizing'].includes(state.status);
+
+  // checkForUpdates resolves before its automatic download. Observe the second
+  // promise too, including errors that arrive while source discovery is active.
+  const observeDownload = (result: UpdateCheckResultLike | null | void, generation: number) => {
+    activeDownloadPromise = result?.downloadPromise ?? null;
+    void activeDownloadPromise?.catch(cause => {
+      if (disposed || generation !== sourceGeneration || !isDownloading()) return;
+      onError(cause instanceof Error ? cause : new Error(String(cause)));
+    });
+  };
 
   const stateForSource = (next: UpdateState): UpdateState => activeSource
     ? { ...next, source: activeSource.id, sourceLabel: activeSource.label }
@@ -144,6 +160,9 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
     const source = sources[index];
     if (!source) return false;
     sourceIndex = index;
+    sourceGeneration += 1;
+    deferredDownloadError = null;
+    activeDownloadPromise = null;
     activeSource = source;
     updater.setFeedURL?.({ provider: 'generic', url: source.feedUrl, useMultipleRangeRequest: false });
     logger.info(`[updater] 使用 ${source.label} 更新源 ${source.feedUrl}`);
@@ -166,27 +185,52 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
     setState(stateForSource({ status: 'not-available', version: info.version, message: '当前已经是最新版本。' }));
   };
   const onProgress = (progress: DownloadProgressLike) => {
-    const percent = Math.max(0, Math.min(100, Number.isFinite(progress.percent) ? progress.percent : 0));
-    setWindowProgress(getWindow, percent / 100);
-    setState(stateForSource({ status: 'downloading', version: state.version, percent, message: '正在后台下载更新…' }));
+    if (disposed || !isDownloading()) return;
+    const percent = transferPercent(progress);
+    const finite = (value: number | undefined) => value != null && Number.isFinite(value) && value >= 0 ? value : undefined;
+    const transferred = finite(progress.transferred);
+    const total = finite(progress.total);
+    const changed = transferred != null && state.transferred != null
+      ? transferred !== state.transferred || total !== state.total
+      : percent !== state.percent;
+    const status = percent >= 100 ? 'finalizing' : 'downloading';
+    setWindowProgress(getWindow, status === 'finalizing' ? 2 : percent / 100);
+    setState(stateForSource({
+      status, version: state.version, percent, transferred, total,
+      bytesPerSecond: status === 'downloading' ? finite(progress.bytesPerSecond) : undefined,
+      lastActivityAt: changed || status !== state.status ? now() : state.lastActivityAt,
+      message: status === 'finalizing'
+        ? '当前传输已完成，正在等待更新器完成校验与文件准备；尚不可安装。'
+        : '正在传输更新文件，不会中断当前通话。',
+    }));
   };
   const onDownloaded = (info: UpdateInfoLike) => {
     checking = false;
     setWindowProgress(getWindow, -1);
     logger.info(`[updater] 版本 ${info.version} 下载完成`);
-    setState(stateForSource({ status: 'downloaded', version: info.version, percent: 100, message: '更新已下载，重启 Cove 即可安装。' }));
+    if (disposed) return;
+    setState(stateForSource({ status: 'downloaded', version: info.version, percent: 100,
+      transferred: state.transferred, total: state.total,
+      message: '更新器已确认安装包就绪。可以立即重启安装，或退出 Cove 时安装。',
+    }));
   };
   const onCancelled = () => {
     checking = false;
     logger.warn('[updater] 更新下载已取消');
     setWindowProgress(getWindow, -1);
-    setState(stateForSource({ status: 'error', version: state.version, message: '更新下载已取消，请重新检查。' }));
+    setState(stateForSource({ ...state, status: 'error', failedStage: state.status, message: '更新下载已取消，请重新检查。' }));
   };
   const publishFinalError = (error: Error) => {
     checking = false;
     logger.error('[updater] 自动更新失败', error);
     setWindowProgress(getWindow, -1);
-    setState(stateForSource({ status: 'error', version: state.version, message: error.message || '检查更新失败，请稍后重试。' }));
+    const code = (error as Error & { code?: string }).code;
+    setState(stateForSource({ ...state, status: 'error', failedStage: state.status,
+      message: state.status === 'finalizing' ? '传输结束，但校验或安装文件准备失败；请重试或手动下载。'
+        : state.status === 'installing' ? '无法启动安装，请查看错误详情或手动下载安装。'
+        : isDownloading() ? '更新下载失败，请重试或从发布页手动下载。' : '检查更新失败，请检查网络后重试。',
+      errorDetail: error.message || String(error), errorCode: typeof code === 'string' ? code : undefined,
+    }));
   };
   const retryDownloadFromFallback = async (initialError: Error) => {
     retryingDownload = true;
@@ -195,8 +239,9 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
       checking = true;
       setState(stateForSource({ status: 'checking', version: state.version, message: `下载失败，正在自动切换到 ${activeSource!.label}…` }));
       try {
-        await updater.checkForUpdates();
+        observeDownload(await updater.checkForUpdates(), sourceGeneration);
         retryingDownload = false;
+        flushDeferredError();
         return;
       } catch (cause) {
         lastError = cause instanceof Error ? cause : new Error(String(cause));
@@ -204,18 +249,34 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
       }
     }
     retryingDownload = false;
+    deferredDownloadError = null;
     publishFinalError(lastError);
   };
   const onError = (error: Error) => {
+    if (disposed || handledError === error) return;
     if (probingSources || retryingDownload) {
+      if (isDownloading()) deferredDownloadError = error;
       logger.warn('[updater] 当前更新源失败，准备尝试备用源', error);
       return;
     }
-    if ((state.status === 'available' || state.status === 'downloading') && sourceIndex + 1 < sources.length) {
-      void retryDownloadFromFallback(error);
+    handledError = error;
+    if (isDownloading() && sourceIndex + 1 < sources.length) {
+      // Let electron-updater finish clearing its rejected download promise before
+      // starting another source, or it may return the previous failed download.
+      retryingDownload = true;
+      void (activeDownloadPromise?.catch(() => undefined) ?? Promise.resolve()).then(() => {
+        retryingDownload = false;
+        deferredDownloadError = null;
+        if (!disposed) return retryDownloadFromFallback(error);
+      }).catch(publishFinalError);
       return;
     }
     publishFinalError(error);
+  };
+  const flushDeferredError = () => {
+    const error = deferredDownloadError;
+    deferredDownloadError = null;
+    if (error) onError(error);
   };
 
   updater.on('checking-for-update', onChecking);
@@ -227,11 +288,15 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
   updater.on('error', onError);
 
   const checkNow = async (): Promise<UpdateState> => {
-    if (checking || state.status === 'available' || state.status === 'downloading' || state.status === 'downloaded') return state;
+    if (disposed || checking || isUpdateBusy(state.status) || state.status === 'downloaded') return state;
     checking = true;
+    activeSource = undefined;
+    handledError = null;
+    deferredDownloadError = null;
     setState({ status: 'checking', message: '正在连接更新服务器…' });
     try {
       sources = await resolveSources();
+      if (disposed) return state;
       if (!sources.length) throw new Error('GitHub 与 Gitee 更新源均无法访问，请检查网络后重试。');
       probingSources = true;
       let lastError: Error | null = null;
@@ -239,7 +304,7 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
         selectSource(index);
         setState(stateForSource({ status: 'checking', message: `正在通过 ${activeSource!.label} 检查更新…` }));
         try {
-          await updater.checkForUpdates();
+          observeDownload(await updater.checkForUpdates(), sourceGeneration);
           lastError = null;
           break;
         } catch (cause) {
@@ -253,6 +318,7 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
     } finally {
       probingSources = false;
       checking = false;
+      flushDeferredError();
     }
     return state;
   };
@@ -277,11 +343,18 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
     checkNow,
     getState: () => state,
     installNow: () => {
-      if (state.status !== 'downloaded') return false;
-      updater.quitAndInstall(true, true);
-      return true;
+      if (disposed || state.status !== 'downloaded') return false;
+      setState(stateForSource({ ...state, status: 'installing', message: '正在请求启动安装并退出 Cove。安装将中断通话；此处不代表已经安装成功。' }));
+      try {
+        updater.quitAndInstall(true, true);
+        return (state as UpdateState).status === 'installing';
+      } catch (cause) {
+        onError(cause instanceof Error ? cause : new Error(String(cause)));
+        return false;
+      }
     },
     dispose: () => {
+      disposed = true;
       clearScheduled(startupTimer);
       clearScheduled(intervalTimer);
       if (updater.off) {

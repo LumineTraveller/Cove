@@ -136,6 +136,8 @@ interface RoomMember {
   avatarUrl: string | null;
   isOwner: boolean;
   isMuted: boolean;
+  isSharingScreen: boolean;
+  isSharingApplicationAudio: boolean;
 }
 
 // ── 语音包文件目录 ─────────────────────────────────────────────────────────────
@@ -425,38 +427,6 @@ async function mediaDiagnosticsForPeer(socketId: string) {
   };
 }
 
-let mediaDiagnosticsBusy = false;
-async function logActiveScreenDiagnostics() {
-  if (mediaDiagnosticsBusy) return;
-  mediaDiagnosticsBusy = true;
-  try {
-    for (const [socketId, peer] of peers) {
-      const activeScreen = [...peer.producers.values()].some(producer =>
-        !producer.closed && !producer.paused &&
-        (producer.appData as Record<string, unknown>).type === 'screen');
-      if (!activeScreen) continue;
-
-      const sender = await mediaDiagnosticsForPeer(socketId);
-      const viewers = [];
-      for (const [viewerId, viewer] of peers) {
-        if (viewerId === socketId) continue;
-        const watching = [...viewer.consumers.values()].some(consumer =>
-          sender.producers.some(producer => producer.id === consumer.producerId));
-        if (watching) viewers.push({ peerId: viewerId.slice(0, 8), snapshot: await mediaDiagnosticsForPeer(viewerId) });
-      }
-      console.log('[media-diag]', JSON.stringify({
-        peerId: socketId.slice(0, 8),
-        sender,
-        viewers,
-      }));
-    }
-  } catch (error) {
-    console.warn('[media-diag] 采集服务端媒体统计失败', error);
-  } finally {
-    mediaDiagnosticsBusy = false;
-  }
-}
-
 /**
  * 屏幕流只在至少有一个真实 Consumer 时传输。服务端 Producer.pause() 负责
  * 停止向观看者转发，同时通知发送端暂停本地 Producer，避免远程分享者仍把
@@ -569,6 +539,8 @@ function handleVoiceLeave(socketId: string, roomId: string) {
   }
   [...members].forEach(mid => io.to(mid).emit('voice:user-left', { socketId }));
   announceVoicePresence(roomId, socketId, username, 'leave', members);
+  // 共享状态属于频道成员状态，即使成员不在语音中也要及时清除头像下的提示。
+  broadcastRoomMembers(roomId);
   broadcastVoiceList(roomId);
   broadcastVoiceCounts();
 }
@@ -579,6 +551,10 @@ function broadcastRoomMembers(roomId: string) {
   if (!room) return;
   const list: RoomMember[] = [...members].map(id => {
     const clientId = userClientIds.get(id);
+    const peer = peers.get(id);
+    const producers = peer ? [...peer.producers.values()].filter(producer => !producer.closed) : [];
+    const hasProducerType = (type: string) => producers.some(producer =>
+      (producer.appData as Record<string, unknown>).type === type);
     return {
       socketId: id,
       userId: publicUserId(id),
@@ -586,6 +562,8 @@ function broadcastRoomMembers(roomId: string) {
       avatarUrl: userAvatars.get(id) ?? null,
       isOwner: !!clientId && clientId === room.ownerId,
       isMuted: !!clientId && isClientMuted(roomId, clientId),
+      isSharingScreen: hasProducerType('screen'),
+      isSharingApplicationAudio: hasProducerType('application-audio'),
     };
   });
 
@@ -1098,8 +1076,10 @@ io.on('connection', socket => {
       if (demandType) await producer.pause().catch(() => {});
 
       const producerRoomId = peer.roomId;
+      if (producerRoomId) broadcastRoomMembers(producerRoomId);
       producer.observer.on('close', () => {
         peer.producers.delete(producer.id);
+        if (producerRoomId) broadcastRoomMembers(producerRoomId);
         if (!demandType || !producerRoomId) return;
         io.to(producerRoomId).emit('ms:producer-closed', {
           producerId: producer.id,
@@ -1237,6 +1217,7 @@ io.on('connection', socket => {
     if (!producer) return;
     producer.close();
     peer.producers.delete(producerId);
+    if (peer.roomId) broadcastRoomMembers(peer.roomId);
     // consumer 的 producerclose 事件会自动触发，通知对方
   });
 
@@ -1365,8 +1346,6 @@ io.on('connection', socket => {
 
 export async function startServer(port = 3001): Promise<number> {
   await initMediasoup();
-  const mediaTimer = setInterval(() => { void logActiveScreenDiagnostics(); }, 5_000);
-  mediaTimer.unref?.();
   return new Promise((resolve, reject) => {
     // 显式绑定 0.0.0.0（所有 IPv4 接口），确保 frp 用 127.0.0.1 也能连上。
     // 不指定 host 时 Windows 默认只绑 IPv6(::)，导致 frp 拨 127.0.0.1 被拒绝。

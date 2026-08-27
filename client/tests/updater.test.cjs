@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const test = require('node:test');
 const { configureAutoUpdater } = require('../dist-electron/updater-core.js');
 const { compareReleaseVersions, discoverUpdateSources } = require('../dist-electron/update-sources.js');
+const { formatTransferPercent, transferPercent, updateWaitWarning, updateStepIndex } = require('../dist-electron/update-state.js');
 
 const githubSource = {
   id: 'github', label: 'GitHub', version: '0.7.0',
@@ -24,16 +25,19 @@ test('compiled updater exposes only the in-app IPC bridge and no OS notification
   assert.doesNotMatch(adapter, /Notification|showMessageBox/);
   assert.match(preload, /cove:update:check/);
   assert.match(preload, /cove:update:install/);
+  assert.match(preload, /cove:update:open-log/);
 });
 
-test('compiled Electron main selects WGC capture and removes the ineffective Chromium 122 CPU switch', () => {
+test('compiled Electron main keeps WGC capture without diagnostic file logging', () => {
   const main = fs.readFileSync(require.resolve('../dist-electron/main.js'), 'utf8');
   const wgc = main.indexOf("appendSwitch('enable-features', 'AllowWgcScreenCapturer')");
   const ready = main.search(/\.whenReady\(\)\.then/);
   assert.ok(wgc >= 0, 'WGC desktop capture feature is missing');
   assert.ok(ready > wgc, 'WGC feature must be applied before app.whenReady()');
   assert.doesNotMatch(main, /webrtc-max-cpu-consumption-percentage/);
-  assert.match(main, /desktop_capture_device=2,desktop_capturer=1,media_stream_manager=1/);
+  assert.doesNotMatch(main, /enable-logging|log-file|vmodule|chromium-screen-capture|media-diagnostics|cove:diagnostics:/);
+  const preload = fs.readFileSync(require.resolve('../dist-electron/preload.js'), 'utf8');
+  assert.doesNotMatch(preload, /coveDiagnostics|cove:diagnostics:/);
 });
 
 class FakeUpdater extends EventEmitter {
@@ -187,10 +191,167 @@ test('errors are non-fatal and dispose clears schedules and listeners', () => {
   h.updater.emit('error', new Error('offline'));
   assert.equal(h.progress.at(-1), -1);
   assert.equal(h.logs.some(entry => entry[0] === 'error'), true);
-  assert.deepEqual(h.controller.getState(), { status: 'error', version: undefined, message: 'offline' });
+  assert.equal(h.controller.getState().status, 'error');
+  assert.equal(h.controller.getState().errorDetail, 'offline');
+  assert.match(h.controller.getState().message, /检查更新失败/);
+  assert.equal(updateStepIndex(h.controller.getState()), 0);
 
   h.controller.dispose();
   assert.equal(h.cleared.length, 2);
   assert.equal(h.updater.listenerCount('update-available'), 0);
   assert.equal(h.progress.at(-1), -1);
+});
+
+test('transfer percentage never rounds an incomplete download to 100%', () => {
+  assert.equal(formatTransferPercent(99.5), '99.5%');
+  assert.equal(formatTransferPercent(99.999), '99.9%');
+  assert.equal(formatTransferPercent(100), '100%');
+  assert.equal(transferPercent({ percent: 100, transferred: 995, total: 1000 }), 99.5);
+  assert.equal(transferPercent({ percent: NaN }), 0);
+});
+
+test('100% means finalizing, not installable; duplicates do not hide a long wait', async () => {
+  let clock = 1_000;
+  const h = createHarness({ now: () => clock });
+  h.updater.emit('update-available', { version: '0.8.1' });
+  h.updater.emit('download-progress', { percent: 100, transferred: 995, total: 1000, bytesPerSecond: 50 });
+  assert.equal(h.controller.getState().status, 'downloading');
+  assert.equal(h.controller.getState().bytesPerSecond, 50);
+  clock = 2_000;
+  h.updater.emit('download-progress', { percent: 100, transferred: 1000, total: 1000 });
+  assert.equal(h.controller.getState().status, 'finalizing');
+  assert.equal(h.controller.installNow(), false);
+  await h.controller.checkNow();
+  assert.equal(h.updater.checkCount, 0);
+  clock = 32_000;
+  h.updater.emit('download-progress', { percent: 100, transferred: 1000, total: 1000 });
+  assert.equal(h.controller.getState().lastActivityAt, 2_000);
+  assert.match(updateWaitWarning(h.controller.getState(), clock), /30 秒.*尚未收到安装就绪确认/);
+  h.updater.emit('update-downloaded', { version: '0.8.1' });
+  assert.equal(updateWaitWarning(h.controller.getState(), clock + 90_000), null);
+  assert.equal(h.controller.installNow(), true);
+  assert.equal(h.controller.getState().status, 'installing');
+  assert.equal(h.controller.getState().lastActivityAt, clock);
+  assert.equal(h.controller.installNow(), false);
+  assert.equal(h.updater.installCalls.length, 1);
+  h.updater.emit('download-progress', { percent: 50 });
+  assert.equal(h.controller.getState().status, 'installing', 'late progress must not replace the install state');
+});
+
+test('cached installers can become ready without any progress events', () => {
+  const h = createHarness();
+  h.updater.emit('update-available', { version: '0.8.1' });
+  h.updater.emit('update-downloaded', { version: '0.8.1' });
+  assert.equal(h.controller.getState().status, 'downloaded');
+  assert.equal(h.controller.installNow(), true);
+});
+
+test('a differential download can fall back to a full transfer after 100%', () => {
+  const h = createHarness();
+  h.updater.emit('update-available', { version: '0.8.1' });
+  h.updater.emit('download-progress', { percent: 100, transferred: 100, total: 100 });
+  h.updater.emit('download-progress', { percent: 10, transferred: 100, total: 1000 });
+  assert.equal(h.controller.getState().status, 'downloading');
+  assert.equal(h.controller.getState().total, 1000);
+  assert.equal(h.controller.installNow(), false);
+});
+
+test('validation failure retains failed stage, transfer metrics and raw error', () => {
+  const h = createHarness();
+  h.updater.emit('update-available', { version: '0.8.1' });
+  h.updater.emit('download-progress', { percent: 100, transferred: 1000, total: 1000 });
+  const error = Object.assign(new Error('sha512 checksum mismatch'), { code: 'ERR_CHECKSUM_MISMATCH' });
+  h.updater.emit('error', error);
+  const state = h.controller.getState();
+  assert.equal(state.status, 'error');
+  assert.equal(state.failedStage, 'finalizing');
+  assert.equal(state.errorDetail, error.message);
+  assert.equal(state.errorCode, error.code);
+  assert.equal(state.transferred, 1000);
+  assert.equal(updateStepIndex(state), 3);
+  assert.equal(h.controller.installNow(), false);
+});
+
+test('installation exceptions and synchronous error events remain visible', () => {
+  for (const event of [false, true]) {
+    const h = createHarness();
+    h.updater.emit('update-downloaded', { version: '0.8.1' });
+    h.updater.quitAndInstall = () => {
+      const error = new Error('installer could not start');
+      if (event) h.updater.emit('error', error);
+      else throw error;
+    };
+    assert.equal(h.controller.installNow(), false);
+    assert.equal(h.controller.getState().failedStage, 'installing');
+    assert.match(h.controller.getState().errorDetail, /could not start/);
+  }
+});
+
+test('errors during source probing are not lost, including rejected automatic downloads', async () => {
+  for (const emitError of [false, true]) {
+    const h = createHarness();
+    h.updater.checkForUpdates = async () => {
+      h.updater.emit('update-available', { version: '0.8.1' });
+      h.updater.emit('download-progress', { percent: 100 });
+      const error = new Error('download validation failed');
+      if (emitError) h.updater.emit('error', error);
+      return { downloadPromise: Promise.reject(error) };
+    };
+    await h.controller.checkNow();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.controller.getState().status, 'error');
+    assert.equal(h.controller.getState().failedStage, 'finalizing');
+    assert.match(h.controller.getState().errorDetail, /validation failed/);
+    h.controller.dispose();
+  }
+});
+
+test('fallback waits for failed download cleanup and clears old transfer metrics', async () => {
+  const h = createHarness({ resolveSources: async () => [giteeSource, githubSource] });
+  let rejectDownload;
+  let cleaned = false;
+  h.updater.checkForUpdates = async () => {
+    h.updater.checkCount++;
+    h.updater.emit('update-available', { version: '0.8.1' });
+    if (h.updater.checkCount === 1) return {
+      downloadPromise: new Promise((_, reject) => { rejectDownload = reject; })
+        .catch(error => { h.updater.emit('error', error); throw error; })
+        .finally(() => { cleaned = true; }),
+    };
+    assert.equal(cleaned, true);
+    return { downloadPromise: Promise.resolve() };
+  };
+  await h.controller.checkNow();
+  h.updater.emit('download-progress', { percent: 100, transferred: 1000, total: 1000 });
+  rejectDownload(new Error('gitee checksum failed'));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.updater.checkCount, 2);
+  assert.equal(h.controller.getState().sourceLabel, 'GitHub');
+  assert.equal(h.controller.getState().status, 'available');
+  assert.equal(h.controller.getState().transferred, undefined);
+  assert.equal(h.controller.getState().percent, 0);
+  h.updater.emit('update-downloaded', { version: '0.8.1' });
+  assert.equal(h.controller.getState().status, 'downloaded');
+});
+
+test('a disposed controller ignores rejected pending downloads', async () => {
+  const h = createHarness();
+  let rejectDownload;
+  h.updater.checkForUpdates = async () => {
+    h.updater.emit('update-available', { version: '0.8.1' });
+    return { downloadPromise: new Promise((_, reject) => { rejectDownload = reject; }) };
+  };
+  await h.controller.checkNow();
+  h.controller.dispose();
+  const count = h.states.length;
+  rejectDownload(new Error('late failure'));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.states.length, count);
+});
+
+test('wait notices distinguish stalls, preparation and installer handoff', () => {
+  assert.equal(updateWaitWarning({ status: 'downloading', lastActivityAt: 0 }, 29_999), null);
+  assert.match(updateWaitWarning({ status: 'downloading', lastActivityAt: 0 }, 30_000), /没有新增下载数据/);
+  assert.match(updateWaitWarning({ status: 'available', stageStartedAt: 0 }, 30_000), /尚未收到后续进展/);
+  assert.match(updateWaitWarning({ status: 'installing', stageStartedAt: 0 }, 15_000), /尚未退出/);
 });

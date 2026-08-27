@@ -29,6 +29,9 @@ export interface RoomMember {
   avatarUrl?: string | null;
   isOwner: boolean;
   isMuted: boolean;
+  /** 当前成员是否正在发布屏幕或应用音频；旧服务端未提供时保持 undefined。 */
+  isSharingScreen?: boolean;
+  isSharingApplicationAudio?: boolean;
 }
 
 export interface UserProfile {

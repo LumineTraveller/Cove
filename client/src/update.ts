@@ -1,21 +1,7 @@
-export type UpdateStatus =
-  | 'disabled'
-  | 'idle'
-  | 'checking'
-  | 'available'
-  | 'downloading'
-  | 'downloaded'
-  | 'not-available'
-  | 'error';
-
-export interface UpdateState {
-  status: UpdateStatus;
-  version?: string;
-  percent?: number;
-  message?: string;
-  source?: 'github' | 'gitee';
-  sourceLabel?: 'GitHub' | 'Gitee';
-}
+export {
+  UPDATE_STEPS, formatTransferPercent, isUpdateBusy, updateStepIndex, updateWaitWarning,
+} from '../electron/update-state';
+export type { UpdateState, UpdateStatus } from '../electron/update-state';
 
 export const UPDATE_CENTER_OPEN_EVENT = 'cove:update:open';
 

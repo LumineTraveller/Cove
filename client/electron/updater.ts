@@ -1,4 +1,4 @@
-import { app, BrowserWindow } from 'electron';
+import { app, BrowserWindow, shell } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import fs from 'fs';
 import path from 'path';
@@ -26,6 +26,12 @@ function createLogger(): LoggerLike {
     warn: (message, ...args) => { console.warn(message, ...args); write('WARN', message, ...args); },
     error: (message, ...args) => { console.error(message, ...args); write('ERROR', message, ...args); },
   };
+}
+
+export async function openUpdaterLog(): Promise<boolean> {
+  const logPath = path.join(app.getPath('userData'), 'updater.log');
+  if (!fs.existsSync(logPath)) return false;
+  return (await shell.openPath(logPath)) === '';
 }
 
 function getMainWindow(): BrowserWindow | null {
