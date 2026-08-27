@@ -43,4 +43,5 @@ export interface SessionConfig {
   username: string;
   serverURL: string;
   clientId: string;
+  allowInvalidServerCertificate?: boolean;
 }

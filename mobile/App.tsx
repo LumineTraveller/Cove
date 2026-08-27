@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   StatusBar,
   StyleSheet,
   Text,
@@ -16,8 +17,14 @@ import { createCoveSocket } from './src/socket';
 import { clearServerConfig, readSessionConfig, saveSessionConfig } from './src/storage';
 import { colors } from './src/theme';
 import type { Room, SessionConfig } from './src/types';
+import { configureServerCertificate } from './src/serverCertificate';
+import { MobileUpdateProvider } from './src/components/MobileUpdater';
 
 export default function App() {
+  return <MobileUpdateProvider><CoveSession /></MobileUpdateProvider>;
+}
+
+function CoveSession() {
   const [loadingConfig, setLoadingConfig] = useState(true);
   const [savingConfig, setSavingConfig] = useState(false);
   const [config, setConfig] = useState<SessionConfig | null>(null);
@@ -75,7 +82,10 @@ export default function App() {
     nextSocket.on('disconnect', disconnect);
     nextSocket.on('connect_error', connectError);
     setSocket(nextSocket);
-    nextSocket.connect();
+    // Native HTTPS policy must be ready before HTTP polling or WSS starts.
+    configureServerCertificate(config.serverURL, config.allowInvalidServerCertificate === true)
+      .then(() => { if (active) nextSocket.connect(); })
+      .catch(cause => { if (active) connectError(cause instanceof Error ? cause : new Error(String(cause))); });
 
     return () => {
       active = false;
@@ -86,10 +96,12 @@ export default function App() {
     };
   }, [config]);
 
-  const handleLogin = async (username: string, serverURL: string) => {
+  const handleLogin = async (username: string, serverURL: string, allowInvalidServerCertificate: boolean) => {
     setSavingConfig(true);
     try {
-      setConfig(await saveSessionConfig(username, serverURL));
+      setConfig(await saveSessionConfig(username, serverURL, allowInvalidServerCertificate));
+    } catch (cause) {
+      Alert.alert('无法保存配置', cause instanceof Error ? cause.message : String(cause));
     } finally {
       setSavingConfig(false);
     }
@@ -100,6 +112,7 @@ export default function App() {
     setConfig(null);
     setConnectionError(null);
     await clearServerConfig();
+    await configureServerCertificate('', false);
   };
 
   const leaveRoom = useCallback(() => setSelectedRoom(null), []);

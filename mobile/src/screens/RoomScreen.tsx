@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import {
   ArrowLeft,
+  AudioLines,
   CheckCircle2,
   Crown,
   Eye,
@@ -215,6 +216,31 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
           </View>
         )}
 
+        {media.inVoice && media.applicationAudioShares.map(share => {
+          const owner = members.find(member => member.socketId === share.socketId);
+          const name = owner ? profileRemarks[owner.userId] || owner.username : '成员';
+          return (
+            <View key={share.producerId} style={styles.applicationAudioCard}>
+              <View style={styles.applicationAudioHeading}>
+                <AudioLines size={22} color={colors.cyan} />
+                <View style={styles.applicationAudioCopy}>
+                  <Text style={styles.sectionTitle}>{name} 正在共享音频</Text>
+                  <Text style={styles.sectionSubtitle} numberOfLines={2}>{share.label} · 仅音频，无需观看屏幕</Text>
+                </View>
+              </View>
+              <View style={styles.applicationAudioControls}>
+                <TouchableOpacity accessibilityLabel={`${name}的应用音频${share.volume === 0 ? '取消静音' : '静音'}`} style={styles.volumeStep} onPress={() => media.setApplicationAudioVolume(share.producerId, share.volume === 0 ? 1 : 0)}>
+                  {share.volume === 0 ? <VolumeX size={18} color={colors.textMuted} /> : <Volume2 size={18} color={colors.cyan} />}
+                </TouchableOpacity>
+                <Text style={styles.screenVolumeLabel}>应用音频音量</Text>
+                <TouchableOpacity accessibilityLabel={`降低${name}的应用音频音量`} style={styles.volumeStep} onPress={() => media.setApplicationAudioVolume(share.producerId, share.volume - 0.01)}><Minus size={16} color={colors.textMuted} /></TouchableOpacity>
+                <Text style={styles.screenVolumeValue}>{Math.round(share.volume * 100)}%</Text>
+                <TouchableOpacity accessibilityLabel={`提高${name}的应用音频音量`} style={styles.volumeStep} onPress={() => media.setApplicationAudioVolume(share.producerId, share.volume + 0.01)}><Plus size={16} color={colors.textMuted} /></TouchableOpacity>
+              </View>
+            </View>
+          );
+        })}
+
         <View style={styles.memberCard}>
           <View style={styles.sectionHeading}>
             <View style={styles.sectionIcon}><Users size={18} color={colors.cyan} /></View>
@@ -306,6 +332,10 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
 }
 
 const styles = StyleSheet.create({
+  applicationAudioCard: { marginHorizontal: 14, marginBottom: 14, padding: 14, gap: 12, borderWidth: 1, borderColor: 'rgba(103,232,249,0.25)', borderRadius: 18, backgroundColor: colors.cyanSoft },
+  applicationAudioHeading: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  applicationAudioCopy: { flex: 1 },
+  applicationAudioControls: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   safeArea: { flex: 1, backgroundColor: colors.background },
   header: { minHeight: 66, flexDirection: 'row', alignItems: 'center', gap: 11, paddingHorizontal: 14, borderBottomWidth: 1, borderBottomColor: colors.border },
   iconButton: { width: 40, height: 40, borderRadius: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surface },

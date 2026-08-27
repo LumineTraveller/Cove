@@ -12,6 +12,7 @@ import android.os.Looper
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
+import com.facebook.react.bridge.Promise
 
 class CoveNativeModule(private val reactContext: ReactApplicationContext) :
   ReactContextBaseJavaModule(reactContext) {
@@ -34,6 +35,16 @@ class CoveNativeModule(private val reactContext: ReactApplicationContext) :
   }
 
   override fun getName(): String = "CoveNative"
+
+  @ReactMethod
+  fun configureServerCertificate(serverURL: String, enabled: Boolean, promise: Promise) {
+    try {
+      ServerCertificateNetwork.configure(serverURL, enabled)
+      promise.resolve(null)
+    } catch (error: Exception) {
+      promise.reject("CERTIFICATE_POLICY", error.message, error)
+    }
+  }
 
   @ReactMethod
   fun startVoiceService() {

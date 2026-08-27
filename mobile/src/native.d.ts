@@ -9,6 +9,9 @@ declare module 'react-native-incall-manager' {
     start(options?: StartOptions): void;
     stop(options?: { busytone?: string }): void;
     setForceSpeakerphoneOn(enabled: boolean | null): void;
+    stopProximitySensor(): void;
+    turnScreenOn(): void;
+    setKeepScreenOn(enabled: boolean): void;
     setSpeakerphoneOn(enabled: boolean): void;
   };
 

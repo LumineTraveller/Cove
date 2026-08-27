@@ -14,6 +14,7 @@ import { ChevronRight, Radio, Server, Users, WifiOff } from 'lucide-react-native
 import type { Socket } from 'socket.io-client';
 import { colors } from '../theme';
 import type { Room, SessionConfig } from '../types';
+import { MobileUpdateButton } from '../components/MobileUpdater';
 
 interface Props {
   socket: Socket;
@@ -90,6 +91,7 @@ export function RoomListScreen({
         </TouchableOpacity>
       </View>
 
+      <MobileUpdateButton />
       <View style={styles.sectionHeader}>
         <View><Text style={styles.sectionTitle}>房间</Text><Text style={styles.sectionHint}>手机端只能加入现有房间</Text></View>
       </View>

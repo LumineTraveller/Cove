@@ -5,6 +5,7 @@ import {
   SafeAreaView,
   StatusBar,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   TouchableOpacity,
@@ -12,17 +13,22 @@ import {
 } from 'react-native';
 import { LogIn, Server, UserRound } from 'lucide-react-native';
 import { colors } from '../theme';
+import { httpsOrigin } from '../serverCertificate';
+import { MobileUpdateButton } from '../components/MobileUpdater';
 
 interface Props {
   initialName?: string;
   initialServer?: string;
   saving: boolean;
-  onSubmit: (username: string, serverURL: string) => void;
+  onSubmit: (username: string, serverURL: string, allowInvalidServerCertificate: boolean) => void;
 }
 
 export function LoginScreen({ initialName = '', initialServer = '', saving, onSubmit }: Props) {
   const [username, setUsername] = useState(initialName);
   const [serverURL, setServerURL] = useState(initialServer);
+  const [certificateException, setCertificateException] = useState(false);
+  const canUseException = Platform.OS === 'android' && !!httpsOrigin(serverURL);
+  const submit = () => onSubmit(username, serverURL, canUseException && certificateException);
   const canSubmit = !!username.trim() && !!serverURL.trim() && !saving;
 
   return (
@@ -58,28 +64,41 @@ export function LoginScreen({ initialName = '', initialServer = '', saving, onSu
               <TextInput
                 style={styles.input}
                 value={serverURL}
-                onChangeText={setServerURL}
+                onChangeText={value => {
+                  if (httpsOrigin(value) !== httpsOrigin(serverURL)) setCertificateException(false);
+                  setServerURL(value);
+                }}
                 placeholder="https://example.com:3001"
                 placeholderTextColor={colors.textFaint}
                 autoCapitalize="none"
                 autoCorrect={false}
                 keyboardType="url"
                 returnKeyType="go"
-                onSubmitEditing={() => canSubmit && onSubmit(username, serverURL)}
+                onSubmitEditing={() => canSubmit && submit()}
               />
             </View>
             <Text style={styles.help}>填写与桌面客户端相同的 Cove 服务器地址，此项不会被隐藏。</Text>
+            {canUseException && (
+              <>
+                <View style={styles.certificateRow}>
+                  <Text style={styles.certificateLabel}>允许此服务器使用不受信任的证书</Text>
+                  <Switch accessibilityLabel="允许此服务器使用不受信任的证书" value={certificateException} onValueChange={setCertificateException} />
+                </View>
+                <Text style={styles.help}>仅对当前 HTTPS 主机和端口生效。开启后无法可靠核验服务器身份，请只用于你信任的服务器。</Text>
+              </>
+            )}
 
             <TouchableOpacity
               style={[styles.submit, !canSubmit && styles.disabled]}
               disabled={!canSubmit}
-              onPress={() => onSubmit(username, serverURL)}
+              onPress={submit}
               activeOpacity={0.82}
             >
               <LogIn size={19} color="#0f172a" />
               <Text style={styles.submitText}>{saving ? '正在保存' : '连接服务器'}</Text>
             </TouchableOpacity>
           </View>
+          <MobileUpdateButton />
         </View>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -87,6 +106,8 @@ export function LoginScreen({ initialName = '', initialServer = '', saving, onSu
 }
 
 const styles = StyleSheet.create({
+  certificateRow: { flexDirection: 'row', alignItems: 'center', marginTop: 12, gap: 8 },
+  certificateLabel: { flex: 1, color: colors.textMuted, fontSize: 12 },
   safeArea: { flex: 1, backgroundColor: colors.background },
   keyboard: { flex: 1 },
   content: { flex: 1, justifyContent: 'center', paddingHorizontal: 22, paddingBottom: 26 },

@@ -82,8 +82,8 @@ android {
         applicationId "com.cove.mobile"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 5
-        versionName "0.3.1"
+        versionCode 6
+        versionName "0.4.0"
     }
     signingConfigs {
         debug {
@@ -108,6 +108,7 @@ android {
 }
 
 dependencies {
+    testImplementation("junit:junit:4.13.2")
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
 

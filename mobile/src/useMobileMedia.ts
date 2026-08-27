@@ -9,6 +9,7 @@ import {
   mediaDevices,
 } from 'react-native-webrtc';
 import type { VoiceMember } from './types';
+import { startVoiceAudioSession } from './voiceAudioSession';
 
 type Transport = MsTypes.Transport;
 type Producer = MsTypes.Producer;
@@ -25,6 +26,13 @@ interface AvailableScreen {
   socketId: string;
   videoProducerId: string;
   audioProducerId?: string;
+}
+
+export interface ApplicationAudioShare {
+  producerId: string;
+  socketId: string;
+  label: string;
+  volume: number;
 }
 
 interface CoveNativeModule {
@@ -77,6 +85,7 @@ export function useMobileMedia(socket: Socket, roomId: string) {
   const [voiceMembers, setVoiceMembers] = useState<VoiceMember[]>([]);
   const [remoteScreen, setRemoteScreen] = useState<RemoteScreen | null>(null);
   const [availableScreens, setAvailableScreens] = useState<AvailableScreen[]>([]);
+  const [applicationAudioShares, setApplicationAudioShares] = useState<ApplicationAudioShare[]>([]);
   const [isWatchingScreen, setIsWatchingScreen] = useState(false);
   const [screenReceiveVolume, setScreenReceiveVolumeState] = useState(1);
   const [connectionState, setConnectionState] = useState<ConnectionState>('idle');
@@ -97,6 +106,9 @@ export function useMobileMedia(socket: Socket, roomId: string) {
   }>());
   const consumerByProducer = useRef(new Map<string, string>());
   const pendingProducers = useRef(new Set<string>());
+  const closedProducers = useRef(new Set<string>());
+  const mediaGeneration = useRef(0);
+  const applicationAudioVolumes = useRef(new Map<string, number>());
   const inVoiceRef = useRef(false);
   const selfMutedRef = useRef(false);
   const forceMutedRef = useRef(false);
@@ -127,6 +139,7 @@ export function useMobileMedia(socket: Socket, roomId: string) {
   }, [publishAvailableScreens]);
 
   const teardown = useCallback((notifyServer: boolean) => {
+    mediaGeneration.current += 1;
     if (notifyServer && socket.connected) socket.emit('voice:leave', roomId);
 
     audioProducer.current?.close();
@@ -146,6 +159,9 @@ export function useMobileMedia(socket: Socket, roomId: string) {
     consumers.current.clear();
     consumerByProducer.current.clear();
     pendingProducers.current.clear();
+    closedProducers.current.clear();
+    applicationAudioVolumes.current.clear();
+    setApplicationAudioShares([]);
     pendingScreenAudioByPeer.current.clear();
 
     if (inVoiceRef.current) {
@@ -236,6 +252,10 @@ export function useMobileMedia(socket: Socket, roomId: string) {
     entry.consumer.close();
     if (notifyServer && socket.connected) socket.emit('ms:close-consumer', { consumerId });
     entry.stream.release(false);
+    if (entry.sourceType === 'application-audio') {
+      applicationAudioVolumes.current.delete(entry.producerId);
+      setApplicationAudioShares(current => current.filter(share => share.producerId !== entry.producerId));
+    }
     if (entry.kind === 'video') {
       setRemoteScreen(current => current?.consumerId === consumerId ? null : current);
     }
@@ -249,16 +269,29 @@ export function useMobileMedia(socket: Socket, roomId: string) {
   ) => {
     const device = deviceRef.current;
     const incoming = recvTransport.current;
-    if (!device || !incoming) return false;
+    const generation = mediaGeneration.current;
+    if (!device || !incoming || !inVoiceRef.current || closedProducers.current.has(producerId)) return false;
     if (consumerByProducer.current.has(producerId) || pendingProducers.current.has(producerId)) return true;
     pendingProducers.current.add(producerId);
+    let createdConsumer: Consumer | undefined;
+    const isStale = () => generation !== mediaGeneration.current || !inVoiceRef.current || closedProducers.current.has(producerId);
 
     try {
       const params = await emitAsync<Record<string, unknown>>(socket, 'ms:consume', {
         producerId,
         rtpCapabilities: device.rtpCapabilities,
       });
+      if (isStale()) {
+        if (socket.connected && params.id) socket.emit('ms:close-consumer', { consumerId: params.id });
+        return false;
+      }
       const consumer = await incoming.consume(params as never);
+      createdConsumer = consumer;
+      if (isStale()) {
+        consumer.close();
+        if (socket.connected) socket.emit('ms:close-consumer', { consumerId: consumer.id });
+        return false;
+      }
       consumer.track.enabled = true;
       const stream = new MediaStream([
         consumer.track as unknown as MediaStreamTrack,
@@ -273,6 +306,7 @@ export function useMobileMedia(socket: Socket, roomId: string) {
       });
       consumerByProducer.current.set(producerId, consumer.id);
       await emitAsync(socket, 'ms:resume-consumer', { consumerId: consumer.id });
+      if (isStale()) { removeConsumer(consumer.id, true); return false; }
 
       if (kind === 'video') {
         setRemoteScreen({ socketId: peerId, consumerId: consumer.id, stream });
@@ -281,14 +315,24 @@ export function useMobileMedia(socket: Socket, roomId: string) {
         const adjustableTrack = consumer.track as unknown as { _setVolume?: (volume: number) => void };
         adjustableTrack._setVolume?.(screenReceiveVolumeRef.current);
       }
+      if (kind === 'audio' && appData.type === 'application-audio') {
+        const volume = applicationAudioVolumes.current.get(producerId) ?? 1;
+        applicationAudioVolumes.current.set(producerId, volume);
+        (consumer.track as unknown as MediaStreamTrack)._setVolume(volume);
+        setApplicationAudioShares(current => [
+          ...current.filter(share => share.producerId !== producerId),
+          { producerId, socketId: peerId, label: typeof appData.label === 'string' ? appData.label : '应用', volume },
+        ]);
+      }
       consumer.on('trackended', () => removeConsumer(consumer.id));
       consumer.on('transportclose', () => removeConsumer(consumer.id));
       return true;
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '无法接收媒体流');
+      if (createdConsumer) removeConsumer(createdConsumer.id, true);
+      if (!isStale()) setError(cause instanceof Error ? cause.message : '无法接收媒体流');
       return false;
     } finally {
-      pendingProducers.current.delete(producerId);
+      if (generation === mediaGeneration.current) pendingProducers.current.delete(producerId);
     }
   }, [removeConsumer, socket]);
 
@@ -336,6 +380,17 @@ export function useMobileMedia(socket: Socket, roomId: string) {
     }
   }, []);
 
+  const setApplicationAudioVolume = useCallback((producerId: string, value: number) => {
+    if (!Number.isFinite(value)) return;
+    const consumerId = consumerByProducer.current.get(producerId);
+    const entry = consumerId ? consumers.current.get(consumerId) : undefined;
+    if (entry?.sourceType !== 'application-audio') return;
+    const volume = Math.round(Math.max(0, Math.min(1, value)) * 100) / 100;
+    (entry.consumer.track as unknown as MediaStreamTrack)._setVolume(volume);
+    applicationAudioVolumes.current.set(producerId, volume);
+    setApplicationAudioShares(current => current.map(share => share.producerId === producerId ? { ...share, volume } : share));
+  }, []);
+
   useEffect(() => {
     const onVoiceMembers = (members: VoiceMember[]) => setVoiceMembers(members);
     const onNewProducer = async ({
@@ -369,7 +424,11 @@ export function useMobileMedia(socket: Socket, roomId: string) {
       producerId,
       peerId,
       sourceType,
-    }: { producerId: string; peerId: string; sourceType: 'screen' | 'screen-audio' }) => {
+    }: { producerId: string; peerId: string; sourceType: string }) => {
+      closedProducers.current.add(producerId);
+      const consumerId = consumerByProducer.current.get(producerId);
+      if (consumerId) removeConsumer(consumerId);
+      if (sourceType === 'application-audio') return;
       if (sourceType === 'screen-audio') {
         if (pendingScreenAudioByPeer.current.get(peerId) === producerId)
           pendingScreenAudioByPeer.current.delete(peerId);
@@ -379,6 +438,9 @@ export function useMobileMedia(socket: Socket, roomId: string) {
         }
         return;
       }
+      if (sourceType !== 'screen') return;
+      const currentScreen = availableScreensRef.current.get(peerId);
+      if (currentScreen?.videoProducerId !== producerId) return;
       removeAvailableScreen(peerId, producerId);
       if (watchingScreenPeerRef.current === peerId) stopWatchingScreen();
     };
@@ -465,9 +527,7 @@ export function useMobileMedia(socket: Socket, roomId: string) {
       audioProducer.current = producer;
       if (forceMutedRef.current) producer.pause();
 
-      InCallManager.start({ media: 'audio', auto: true });
-      InCallManager.setForceSpeakerphoneOn(true);
-      InCallManager.setSpeakerphoneOn(true);
+      startVoiceAudioSession();
       CoveNative?.setSpeakerphoneEnabled(true);
       inVoiceRef.current = true;
       setInVoice(true);
@@ -530,6 +590,8 @@ export function useMobileMedia(socket: Socket, roomId: string) {
     voiceMembers,
     remoteScreen,
     availableScreens,
+    applicationAudioShares,
+    setApplicationAudioVolume,
     watchingScreenPeerId: watchingScreenPeerRef.current,
     isWatchingScreen,
     screenReceiveVolume,

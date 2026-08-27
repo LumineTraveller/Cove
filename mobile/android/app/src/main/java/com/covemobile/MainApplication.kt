@@ -25,6 +25,7 @@ class MainApplication : Application(), ReactApplication {
 
   override fun onCreate() {
     super.onCreate()
+    ServerCertificateNetwork.install()
 
     // 在 WebRTC 模块初始化前启用适合语音通话的原生音频属性。
     val audioAttributes = AudioAttributes.Builder()
