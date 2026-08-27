@@ -68,11 +68,11 @@ Android 登录页输入 HTTPS 地址后，可选择“允许此服务器使用�
 
 1. 修改 `mobile/package.json` 和 `android/app/build.gradle` 的手机版本，递增 Gradle `versionCode`；使用与现有安装包一致的签名证书和应用 ID。不要更换签名导致无法覆盖安装。
 2. 准备手机端专用更新说明 Markdown 文件，测试后执行 `npm run android:apk -- -PreactNativeArchitectures=armeabi-v7a,arm64-v8a` 重新构建 ARM 手机版，减少体积以符合 Gitee 单附件 100 MB 上限。不要使用上次残留 APK；需要 x86 模拟器包时可单独构建，但不混入正式手机清单。
-3. 选择两平台均已存在的桌面 Release 作为附件存放位置，执行 `npm run update:prepare -- <更新说明文件路径> <已有Release标签>`（最后一个参数例如 `v0.8.0`）。读取 APK 构建元数据，核对版本并生成 `build/updates/mobile-vX.Y.Z/Cove-Mobile-X.Y.Z.apk` 和 `update.json`；不上传、不修改在线清单，且拒绝覆盖已有暂存文件。
-4. 在两平台选定的同一个 Release 上传生成的 APK（保留文件名），追加手机端更新说明，**保留桌面附件、原有说明和标签**。确认两个 APK 地址均可下载。手机显示/比较的是清单里的手机版本和 `versionCode`，不是承载附件的桌面标签。不需重新打标签或触发桌面构建。
+3. 提交手机端代码并将独立标签 `mobile-vX.Y.Z` 推送两平台。执行 `npm run update:prepare -- <更新说明文件路径> mobile-vX.Y.Z`，读取 APK 构建元数据，核对版本并生成 `build/updates/mobile-vX.Y.Z/Cove-Mobile-X.Y.Z.apk` 和 `update.json`；不上传、不修改在线清单，且拒绝覆盖已有暂存文件。
+4. 两平台分别新建独立手机 Release，例如标题 `cove mobile 0.4.0`、标签 `mobile-v0.4.0`，上传生成的 APK（保留文件名）和手机端更新说明。**不把手机版附加到桌面 Release，不替换桌面附件、原有说明或标签**。确认两个 APK 地址均可下载且大小、SHA-256 与清单一致。手机显示/比较的是清单中的手机版本和 `versionCode`；独立手机标签不会触发 Windows 构建工作流。
 5. 将生成的清单复制到仓库 `mobile/update.json`，提交并推送两平台 `main`。必须先上传 APK，再公布清单。检查两平台 raw 清单与附件都无需登录。
 
-清单也允许独立 `mobile-vX.Y.Z` 标签，但当前桌面更新器依赖仓库的 `/releases/latest`；不要让手机专用 Release 占用该结果，否则旧桌面端可能无法发现桌面更新。优先使用上述共享 Release 附件方案。若将来改用独立手机 Release，需先解决两平台的 Latest 选择兼容问题。
+当前桌面更新器依赖仓库的 `/releases/latest`，发布手机专用 Release 后必须复查两平台的该接口。GitHub 发布时指定 `make_latest: false`，保留桌面版为 Latest。2026-08-27 实测 Gitee 的 Latest 在手机版正式发布、改为预览版以及原样保存旧桌面发行版后，均返回 `mobile-v0.4.0`；不能使用这些操作来保留桌面 Latest。当前旧桌面客户端会因此忽略 Gitee 源，仍可使用 GitHub 源；后续桌面更新器需要从发行版列表中过滤手机标签并选择最新桌面版。手机端不依赖 Latest 或发行版的预览标记，只认独立更新清单。
 
 现有手机工程仍用 `debug.keystore` 签名 Release；它不适合作为正式分发的长期安全凭据。迁移专用发布密钥需同时规划老用户换装，不能直接换钥匙后宣称支持覆盖升级。Android 要求覆盖更新保持签名身份一致且 `versionCode` 不降低，参见 [Android 签名文档](https://developer.android.com/studio/publish/app-signing) 和 [版本管理文档](https://developer.android.com/studio/publish/versioning)。
 
