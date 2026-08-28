@@ -9,8 +9,9 @@ import { socket } from '../socket';
 import { useWebRTC, SCREEN_PRESETS, ScreenPreset, Fps } from '../hooks/useWebRTC';
 import { useScreenFullscreen } from '../hooks/useScreenFullscreen';
 import { Avatar } from '../components/Avatar';
-import { CollapsibleMediaBanner } from '../components/CollapsibleMediaBanner';
+import { CollapsibleMediaBanner, WatchingScreenBanner } from '../components/CollapsibleMediaBanner';
 import { ScreenFullscreenControl } from '../components/ScreenFullscreenControl';
+import { ScreenVolumeControl } from '../components/ScreenVolumeControl';
 import { ProfileModal } from '../components/ProfileModal';
 import { UserProfileModal } from '../components/UserProfileModal';
 import { SoundPackPanel } from '../components/SoundPackPanel';
@@ -616,8 +617,9 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
   const sortedRoomMembers = sortRoomMembers(roomMembers, voiceMemberSocketIds, rtc.localSocketId ?? socket.id);
 
   const hasScreen    = !!rtc.localScreen || !!rtc.remoteScreen;
-  const hasScreenBanner = rtc.inVoice && rtc.availableScreens.length > 0 && !rtc.localScreen;
-  const hasApplicationAudioBanner = rtc.inVoice && (rtc.isApplicationAudioSharing || rtc.remoteApplicationAudios.length > 0);
+  // 观看期间仅在视频内部显示当前共享提示，不改动其他共享的订阅或播放状态。
+  const hasScreenBanner = rtc.inVoice && rtc.availableScreens.length > 0 && !rtc.localScreen && !rtc.remoteScreen;
+  const hasApplicationAudioBanner = rtc.inVoice && !rtc.remoteScreen && (rtc.isApplicationAudioSharing || rtc.remoteApplicationAudios.length > 0);
   const compactDiagnosticsFps = rtc.localScreen ? rtc.stats.sendFps : rtc.stats.receiveFps;
   const compactDiagnosticsResolution = rtc.stats.width && rtc.stats.height
     ? `${rtc.stats.width}×${rtc.stats.height}`
@@ -788,15 +790,7 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
                           className="flex w-full min-w-0 items-center gap-3 rounded-xl text-left focus:outline-none focus:ring-2 focus:ring-cyan-300/35"
                           title={isSelf ? '打开个人名片' : `查看 ${member.username} 的主页`}
                         >
-                          <span className="flex flex-shrink-0 flex-col items-center gap-1">
-                            <Avatar username={member.username} avatarUrl={member.avatarUrl} size="sm" className={speaking ? 'border-green-400/60 ring-2 ring-green-400/40' : isSelf ? 'border-white/30' : 'transition group-hover:border-cyan-200/30'} />
-                            {(sharingScreen || sharingApplicationAudio) && (
-                              <span className="flex items-center gap-1" aria-label={`${member.username} 正在共享媒体`}>
-                                {sharingScreen && <span className="flex h-4 w-4 items-center justify-center rounded-md bg-amber-300/15 text-amber-300" title="正在共享屏幕"><MonitorUp size={11} /></span>}
-                                {sharingApplicationAudio && <span className="flex h-4 w-4 items-center justify-center rounded-md bg-violet-300/15 text-violet-300" title="正在共享应用音频"><AudioLines size={11} /></span>}
-                              </span>
-                            )}
-                          </span>
+                          <Avatar username={member.username} avatarUrl={member.avatarUrl} size="sm" className={speaking ? 'border-green-400/60 ring-2 ring-green-400/40' : isSelf ? 'border-white/30' : 'transition group-hover:border-cyan-200/30'} />
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-1.5">
                               <span className={`min-w-0 flex-1 truncate text-base font-medium ${isSelf ? 'text-white' : 'text-white/55'}`}>
@@ -834,13 +828,18 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
                     </div>
 
                     {showVoiceState && (
-                      <div className="ml-11 mt-2 flex min-w-0 items-center gap-2">
+                      <div className="relative ml-11 mt-2 flex min-w-0 items-center gap-2">
+                        {/* 图标留在头像正下方，只下移到电平条中线，不挤占原有音量控件。 */}
+                        <span className="absolute -left-11 top-1/2 flex h-5 w-8 -translate-y-1/2 items-center justify-center gap-1" aria-label={sharingScreen || sharingApplicationAudio ? `${member.username} 正在共享媒体` : undefined}>
+                          {sharingScreen && <span className="flex h-4 w-4 items-center justify-center rounded-md bg-amber-300/15 text-amber-300" title="正在共享屏幕"><MonitorUp size={11} /></span>}
+                          {sharingApplicationAudio && <span className="flex h-4 w-4 items-center justify-center rounded-md bg-violet-300/15 text-violet-300" title="正在共享应用音频"><AudioLines size={11} /></span>}
+                        </span>
                         {!isSelf && rtc.inVoice && voiceMember ? (
                           <div className="flex min-w-0 flex-1 items-center gap-x-2" title={`调整你听到的 ${member.username} 音量；100%为原始音量，最高200%`}>
                             <button
                               type="button"
                               onClick={() => rtc.toggleMemberMute(member.socketId, voiceMember.userId)}
-                              className="flex-shrink-0 rounded-md p-0.5 text-white/35 transition hover:bg-white/10 hover:text-white focus:outline-none focus:ring-2 focus:ring-cyan-300/35"
+                              className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md p-0.5 text-white/35 transition hover:bg-white/10 hover:text-white focus:outline-none focus:ring-2 focus:ring-cyan-300/35"
                               title={(rtc.memberVolumes[member.socketId] ?? 1) === 0 ? `恢复 ${member.username} 的声音` : `静音 ${member.username}`}
                               aria-label={(rtc.memberVolumes[member.socketId] ?? 1) === 0 ? `恢复 ${member.username} 的声音` : `静音 ${member.username}`}
                             >
@@ -848,7 +847,20 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
                                 ? <VolumeX size={13} />
                                 : <Volume2 size={13} />}
                             </button>
-                            <div className="relative h-5 min-w-0 w-0 flex-1" data-testid="voice-volume-meter">
+                            <div
+                              className="relative h-5 min-w-0 w-0 flex-1"
+                              data-testid="voice-volume-meter"
+                              title={`悬停后滚动调节 ${member.username} 的音量；100%为原始音量，最高200%`}
+                              onWheel={event => {
+                                if (event.deltaY === 0) return;
+                                event.preventDefault();
+                                event.stopPropagation();
+                                const current = Math.round((rtc.memberVolumes[member.socketId] ?? 1) * 100);
+                                const next = Math.max(0, Math.min(200, current + (event.deltaY < 0 ? 1 : -1)));
+                                if (next !== current)
+                                  rtc.setMemberVolume(member.socketId, voiceMember.userId, next / 100);
+                              }}
+                            >
                               {/* 所有成员共用整行的固定右边界；绿色强度轨和青色音量轨叠在同一中心线上。 */}
                               <div
                                 className="pointer-events-none absolute left-0 top-1/2 h-2.5 -translate-y-1/2 rounded-full bg-gradient-to-r from-green-500/75 to-emerald-300 transition-[width] duration-75"
@@ -883,7 +895,7 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
                           </div>
                         ) : (
                           <>
-                            <span className="flex h-5 w-[13px] flex-shrink-0 items-center justify-center text-white/35" title={rtc.isMuted ? '麦克风已关闭' : '麦克风声音强度'}>
+                            <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center text-white/35" title={rtc.isMuted ? '麦克风已关闭' : '麦克风声音强度'}>
                               {rtc.isMuted ? <MicOff size={13} /> : <Mic size={13} />}
                             </span>
                             <div className="h-1 min-w-0 w-0 flex-1 overflow-hidden rounded-full bg-white/10" role="progressbar" aria-label={`${member.username} 的实时声音强度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round((voiceMuted || (isSelf && rtc.isMuted) ? 0 : level) * 100)}>
@@ -1017,6 +1029,11 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
               {rtc.remoteScreen ? (
                 <>
                   <RemoteScreenVideo stream={rtc.remoteScreen.stream} />
+                  <WatchingScreenBanner
+                    key={rtc.remoteScreen.stream.id}
+                    sharer={rtc.voiceMembers.find(member => member.socketId === rtc.remoteScreen!.socketId)?.username ?? '成员'}
+                    onStopWatching={rtc.stopWatchingScreen}
+                  />
                   <div className="absolute bottom-3 left-3 bg-black/60 backdrop-blur-md text-white text-sm px-3 py-1.5 rounded-xl font-medium border border-white/10">
                     {rtc.voiceMembers.find(m => m.socketId === rtc.remoteScreen!.socketId)?.username ?? rtc.remoteScreen.socketId} 正在共享
                   </div>
@@ -1030,23 +1047,25 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
                 </>
               ) : null}
 
-              {(rtc.remoteScreen || (rtc.localScreen && rtc.shareAudio)) && (
-                <label className="absolute bottom-3 right-3 flex items-center gap-2 rounded-xl border border-white/10 bg-black/65 px-3 py-2 text-xs text-white/70 backdrop-blur-md" title={rtc.remoteScreen ? '调节你听到的共享音量' : '调节对方听到的共享音量'}>
-                  {(rtc.remoteScreen ? rtc.screenReceiveVolume : rtc.screenShareVolume) === 0 ? <VolumeX size={15} /> : <Volume2 size={15} />}
-                  <span>{rtc.remoteScreen ? '共享音量' : '发送音量'}</span>
+              {rtc.remoteScreen ? (
+                <ScreenVolumeControl volume={rtc.screenReceiveVolume} onChange={rtc.setScreenReceiveVolume} />
+              ) : rtc.localScreen && rtc.shareAudio ? (
+                <label className="absolute bottom-3 right-3 flex items-center gap-2 rounded-xl border border-white/10 bg-black/65 px-3 py-2 text-xs text-white/70 backdrop-blur-md" title="调节对方听到的共享音量">
+                  {rtc.screenShareVolume === 0 ? <VolumeX size={15} /> : <Volume2 size={15} />}
+                  <span>发送音量</span>
                   <input
                     type="range"
                     min="0"
                     max="100"
                     step="1"
-                    value={Math.round((rtc.remoteScreen ? rtc.screenReceiveVolume : rtc.screenShareVolume) * 100)}
-                    onChange={event => (rtc.remoteScreen ? rtc.setScreenReceiveVolume : rtc.setScreenShareVolume)(Number(event.target.value) / 100)}
+                    value={Math.round(rtc.screenShareVolume * 100)}
+                    onChange={event => rtc.setScreenShareVolume(Number(event.target.value) / 100)}
                     className="h-1 w-24 cursor-pointer accent-cyan-300"
-                    aria-label={rtc.remoteScreen ? '共享接收音量' : '共享发送音量'}
+                    aria-label="共享发送音量"
                   />
-                  <span className="w-8 text-right tabular-nums">{Math.round((rtc.remoteScreen ? rtc.screenReceiveVolume : rtc.screenShareVolume) * 100)}%</span>
+                  <span className="w-8 text-right tabular-nums">{Math.round(rtc.screenShareVolume * 100)}%</span>
                 </label>
-              )}
+              ) : null}
 
               {/* 实时统计悬浮显示（开关在语音栏） */}
               {rtc.statsEnabled && (
@@ -1098,6 +1117,7 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
               <ScreenFullscreenControl
                 maximized={screenMaximized}
                 nativeFullscreen={nativeFullscreen}
+                allowNativeFullscreen={!rtc.localScreen}
                 onToggleWindow={toggleFullscreen}
                 onToggleNative={() => { void toggleNativeFullscreen(); }}
               />

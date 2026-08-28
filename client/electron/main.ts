@@ -23,6 +23,10 @@ let updaterController: AutoUpdaterController | null = null;
 let mainWindow: BrowserWindow | null = null;
 const serverCertificatePolicy = new ServerCertificatePolicy();
 const applicationAudioCapture = new ApplicationAudioCaptureController();
+// The global Electron loopback source also captures Cove's own voice and
+// sound-pack playback. Screen sharing uses a separate native process-loopback
+// capture which excludes the Cove process tree.
+const screenAudioCapture = new ApplicationAudioCaptureController('cove:screen-audio:chunk');
 
 // A certificate exception is accepted only for the exact HTTPS origin chosen
 // in Cove's server settings and only inside the main application window.
@@ -99,17 +103,14 @@ function createWindow() {
   });
 
   // Electron 不允许渲染进程直接调用 getDisplayMedia，必须在主进程注册处理函数
-  session.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
+  session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
     desktopCapturer.getSources({ types: ['screen', 'window'] }).then(sources => {
       if (!sources.length) { callback({}); return; }
-      // Chromium 的 audio:true 只表示“请求音频”；Electron 仍需在主进程显式
-      // 提供 Windows loopback 音源，否则返回的屏幕流永远只有视频轨。
-      callback({
-        video: sources[0],
-        ...(request.audioRequested && process.platform === 'win32'
-          ? { audio: 'loopback' as const }
-          : {}),
-      });
+      // Do not expose Electron's global `loopback` source here. It includes
+      // Cove's own rendered voice/chat audio. The renderer starts a native
+      // process-loopback capture with Cove excluded when system audio is
+      // requested, and the display stream itself remains video-only.
+      callback({ video: sources[0] });
     }).catch(() => callback({}));
   });
 }
@@ -154,12 +155,32 @@ app.whenReady().then(() => {
     applicationAudioCapture.stop();
     return true;
   });
+  ipcMain.handle('cove:screen-audio:start', (event) => {
+    if (event.sender !== mainWindow?.webContents)
+      return { ok: false, error: '无效的系统音频请求。' };
+    try {
+      // The main process is the root of the renderer/GPU/audio process tree.
+      // The native process-loopback API's exclude mode therefore removes all
+      // audio rendered by Cove while retaining other desktop applications.
+      screenAudioCapture.startExcludingProcess(event.sender, process.pid);
+      return { ok: true };
+    } catch (error) {
+      console.error('[screen-audio] 启动失败', error);
+      return { ok: false, error: error instanceof Error ? error.message : '无法启动系统音频捕获。' };
+    }
+  });
+  ipcMain.handle('cove:screen-audio:stop', (event) => {
+    if (event.sender !== mainWindow?.webContents) return false;
+    screenAudioCapture.stop();
+    return true;
+  });
   createWindow();
   updaterController = startAutoUpdater(app.isPackaged);
 });
 
 app.on('will-quit', () => {
   applicationAudioCapture.stop();
+  screenAudioCapture.stop();
   updaterController?.dispose();
 });
 

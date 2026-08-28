@@ -32,3 +32,15 @@ contextBridge.exposeInMainWorld('coveApplicationAudio', {
     return () => ipcRenderer.off('cove:application-audio:chunk', handler);
   },
 });
+
+// Screen sharing uses a native process-loopback capture in the main process.
+// Its exclude mode removes Cove's own rendered audio from the desktop mix.
+contextBridge.exposeInMainWorld('coveScreenAudio', {
+  start: () => ipcRenderer.invoke('cove:screen-audio:start'),
+  stop: () => ipcRenderer.invoke('cove:screen-audio:stop'),
+  onChunk: (listener: (chunk: Uint8Array) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, chunk: Uint8Array) => listener(chunk);
+    ipcRenderer.on('cove:screen-audio:chunk', handler);
+    return () => ipcRenderer.off('cove:screen-audio:chunk', handler);
+  },
+});

@@ -91,12 +91,17 @@ export async function listApplicationAudioSources(): Promise<ApplicationAudioSou
 }
 
 export class ApplicationAudioCaptureController {
+  constructor(private readonly chunkChannel = 'cove:application-audio:chunk') {}
+
   private capture: LoopbackCapture | null = null;
   private owner: WebContents | null = null;
   private queued: Buffer[] = [];
   private flushTimer: NodeJS.Timeout | null = null;
 
-  start(owner: WebContents, source: ApplicationAudioSource) {
+  private startCapture(
+    owner: WebContents,
+    start: (capture: LoopbackCapture, onChunk: (chunk: Buffer) => void) => void,
+  ) {
     this.stop();
     if (process.platform !== 'win32') throw new Error('应用音频共享目前仅支持 Windows。');
     // N-API keeps this binary ABI-stable across Node and Electron releases.
@@ -107,7 +112,7 @@ export class ApplicationAudioCaptureController {
     this.owner = owner;
     this.flushTimer = setInterval(() => this.flush(), 40);
     try {
-      capture.start(source.processId, true, chunk => {
+      start(capture, chunk => {
         if (this.capture !== capture || !Buffer.isBuffer(chunk) || !chunk.length) return;
         this.queued.push(chunk);
       });
@@ -115,6 +120,28 @@ export class ApplicationAudioCaptureController {
       this.stop();
       throw error;
     }
+  }
+
+  start(owner: WebContents, source: ApplicationAudioSource) {
+    this.startCapture(owner, (capture, onChunk) => {
+      // Include the selected process tree so child processes (for example a
+      // browser's GPU/audio process) are captured as part of the application.
+      capture.start(source.processId, true, onChunk);
+    });
+  }
+
+  /**
+   * Capture desktop audio while excluding Cove's process tree. Windows'
+   * process-loopback API supports this mode natively; unlike Electron's
+   * global `loopback` source it cannot feed Cove's own voice/chat playback
+   * back into a screen-share audio track.
+   */
+  startExcludingProcess(owner: WebContents, processId: number) {
+    if (!Number.isSafeInteger(processId) || processId <= 0)
+      throw new Error('无效的 Cove 进程标识。');
+    this.startCapture(owner, (capture, onChunk) => {
+      capture.start(processId, false, onChunk);
+    });
   }
 
   stop() {
@@ -137,6 +164,6 @@ export class ApplicationAudioCaptureController {
     // The addon produces signed 16-bit PCM, 48 kHz, stereo. Electron IPC
     // structured-clones the Uint8Array; no filesystem or external process data
     // is exposed to the renderer.
-    owner.send('cove:application-audio:chunk', new Uint8Array(chunk));
+    owner.send(this.chunkChannel, new Uint8Array(chunk));
   }
 }

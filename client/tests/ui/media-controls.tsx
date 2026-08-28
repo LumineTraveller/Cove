@@ -2,33 +2,40 @@
 import { useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { AudioLines, MonitorPlay } from 'lucide-react';
-import { CollapsibleMediaBanner } from '../../src/components/CollapsibleMediaBanner';
+import { CollapsibleMediaBanner, WatchingScreenBanner } from '../../src/components/CollapsibleMediaBanner';
 import { ScreenFullscreenControl } from '../../src/components/ScreenFullscreenControl';
+import { ScreenVolumeControl } from '../../src/components/ScreenVolumeControl';
 import { createVoiceAudioOutput } from '../../src/audioDevices';
 import { useScreenFullscreen } from '../../src/hooks/useScreenFullscreen';
 import '../../src/index.css';
 
 function Fixture() {
   const [active, setActive] = useState(true);
+  const [watching, setWatching] = useState<string | null>(null);
+  const [volume, setVolume] = useState(1);
   const { screenContainerRef: screen, screenMaximized: maximized, nativeFullscreen: fullscreen,
-    toggleFullscreen, toggleNativeFullscreen } = useScreenFullscreen(active);
-  return <main className="h-full overflow-auto bg-zinc-950 text-white">
-    <header className="flex h-16 items-center border-b border-white/10 px-5">媒体控件测试 · 使用真实组件
+    toggleFullscreen, toggleNativeFullscreen } = useScreenFullscreen(active && watching !== null);
+  return <main className="flex h-full flex-col overflow-hidden bg-zinc-950 text-white">
+    <header className="flex h-16 flex-shrink-0 items-center border-b border-white/10 px-5">媒体控件测试 · 使用真实组件
       <button data-testid="toggle-share" onClick={() => setActive(value => !value)}>切换共享状态</button>
     </header>
+    {!watching && <>
     <CollapsibleMediaBanner kind="screen">
       <MonitorPlay className="text-cyan-200" />
       <div className="min-w-0 flex-1"><p>2 位成员正在共享屏幕</p><p className="text-xs text-white/50">测试横幅位置及收回动画</p></div>
-      <button className="rounded-xl bg-cyan-100 px-3 py-2 text-zinc-900">观看共享</button>
+      {['小雨', '小林'].map(name => <button key={name} onClick={() => { setActive(true); setWatching(name); }} className="rounded-xl bg-cyan-100 px-3 py-2 text-zinc-900">观看 {name}</button>)}
     </CollapsibleMediaBanner>
     {['小雨', '小林'].map(name => <CollapsibleMediaBanner kind="audio" key={name}>
       <AudioLines className="text-violet-200" />
       <div className="min-w-0 flex-1"><p>正在接收 {name} 共享的应用音频</p><p className="text-xs text-white/50">每条横幅独立收回</p></div>
       <input aria-label={`${name} 应用音频音量`} type="range" className="w-24 accent-violet-200" />
     </CollapsibleMediaBanner>)}
-    {active && <div style={maximized ? { position: 'fixed', inset: 0, zIndex: 50 } : { height: 288, marginTop: 16 }}>
+    </>}
+    {active && watching && <div className="min-h-0 flex-1" style={maximized ? { position: 'fixed', inset: 0, zIndex: 50 } : undefined}>
     <div ref={screen} className="cove-screen-container relative h-full bg-black" data-maximized={maximized}>
-      <div className="flex h-full items-center justify-center text-white/40">全屏菜单鼠标路径测试</div>
+      <div className="flex h-full items-center justify-center text-white/40">{watching} 的测试画面</div>
+      <WatchingScreenBanner key={watching} sharer={watching} onStopWatching={() => setWatching(null)} />
+      <ScreenVolumeControl volume={volume} onChange={setVolume} />
       <ScreenFullscreenControl maximized={maximized} nativeFullscreen={fullscreen}
         onToggleWindow={toggleFullscreen}
         onToggleNative={() => { void toggleNativeFullscreen(); }} />

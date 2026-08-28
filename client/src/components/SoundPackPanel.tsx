@@ -34,6 +34,7 @@ function applySoundpackOrder(packs: Soundpack[], orderedIds: string[]) {
 export function SoundPackPanel({ socket, roomId, serverURL, outputDeviceId = DEFAULT_AUDIO_DEVICE_ID, inVoice, disabled = false }: Props) {
   const [packs, setPacks] = useState<Soundpack[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<{ completed: number; total: number } | null>(null);
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<Soundpack | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -139,25 +140,71 @@ export function SoundPackPanel({ socket, roomId, serverURL, outputDeviceId = DEF
     );
   };
 
-  const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    if (!file.type.startsWith('audio/')) { alert('请选择音频文件'); return; }
-    if (file.size > 8 * 1024 * 1024) { alert('文件过大，最大支持 8MB'); return; }
-    setUploading(true);
+  const uploadSoundpack = async (file: File) => {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    let binary = '';
+    for (let index = 0; index < bytes.length; index += 8192) binary += String.fromCharCode(...bytes.slice(index, index + 8192));
+    const response = await fetch(`${serverURL}/api/soundpacks`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: file.name.replace(/\.[^.]+$/, ''), data: btoa(binary), mimeType: file.type, socketId: socket.id, roomId }),
+    });
+    if (response.ok) return;
+    let message = '上传失败';
     try {
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      let binary = '';
-      for (let index = 0; index < bytes.length; index += 8192) binary += String.fromCharCode(...bytes.slice(index, index + 8192));
-      const response = await fetch(`${serverURL}/api/soundpacks`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: file.name.replace(/\.[^.]+$/, ''), data: btoa(binary), mimeType: file.type, socketId: socket.id, roomId }),
-      });
-      if (!response.ok) { const body = await response.json(); throw new Error(body.error ?? '上传失败'); }
-    } catch (cause) {
-      alert(cause instanceof Error ? cause.message : '上传失败，请检查网络连接');
+      const body = await response.json() as { error?: string };
+      message = body.error ?? message;
+    } catch {
+      message = `上传失败（HTTP ${response.status}）`;
+    }
+    throw new Error(message);
+  };
+
+  const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const selectedFiles = Array.from(event.target.files ?? []);
+    if (selectedFiles.length === 0) return;
+
+    const validFiles: File[] = [];
+    const skipped: string[] = [];
+    for (const file of selectedFiles) {
+      if (!file.type.startsWith('audio/')) {
+        skipped.push(`${file.name}：不是音频文件`);
+      } else if (file.size > 8 * 1024 * 1024) {
+        skipped.push(`${file.name}：超过 8MB`);
+      } else {
+        validFiles.push(file);
+      }
+    }
+
+    if (validFiles.length === 0) {
+      alert(`没有可上传的音频文件。\n${skipped.join('\n')}`);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
+    }
+
+    setUploading(true);
+    setUploadProgress({ completed: 0, total: validFiles.length });
+    const failed: string[] = [];
+    try {
+      // 顺序上传可避免多个 8MB base64 请求同时占用大量内存，也不会超过单请求体积限制。
+      for (const [index, file] of validFiles.entries()) {
+        try {
+          await uploadSoundpack(file);
+        } catch (cause) {
+          failed.push(`${file.name}：${cause instanceof Error ? cause.message : '网络错误'}`);
+        }
+        setUploadProgress({ completed: index + 1, total: validFiles.length });
+      }
+
+      if (skipped.length > 0 || failed.length > 0) {
+        const succeeded = validFiles.length - failed.length;
+        const summary = [`批量上传完成：成功 ${succeeded} 个，失败 ${failed.length} 个，跳过 ${skipped.length} 个。`];
+        if (failed.length > 0) summary.push(`失败：\n${failed.join('\n')}`);
+        if (skipped.length > 0) summary.push(`跳过：\n${skipped.join('\n')}`);
+        alert(summary.join('\n'));
+      }
     } finally {
       setUploading(false);
+      setUploadProgress(null);
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
@@ -250,9 +297,9 @@ export function SoundPackPanel({ socket, roomId, serverURL, outputDeviceId = DEF
             <header className="flex items-center gap-3 border-b border-white/10 px-6 py-5">
               <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-cyan-300/10 text-cyan-200"><Volume2 size={20} /></div>
               <div className="min-w-0 flex-1"><h2 id="soundpack-title" className="text-lg font-bold text-white">房间语音包</h2><p className="text-sm text-white/40">{inVoice ? '点击后只对语音中的成员同步播放，拖动方格调整顺序' : '加入语音后才能同步播放；仍可上传和管理语音包'}</p></div>
-              <button onClick={() => fileInputRef.current?.click()} disabled={uploading || disabled} className="inline-flex items-center gap-2 rounded-xl bg-white/10 px-3.5 py-2.5 text-sm font-medium text-white/65 transition hover:bg-white/15 hover:text-white disabled:opacity-35"><Upload size={17} />{uploading ? '上传中' : '上传音频'}</button>
+              <button onClick={() => fileInputRef.current?.click()} disabled={uploading || disabled} className="inline-flex items-center gap-2 rounded-xl bg-white/10 px-3.5 py-2.5 text-sm font-medium text-white/65 transition hover:bg-white/15 hover:text-white disabled:opacity-35"><Upload size={17} />{uploading ? (uploadProgress ? `上传 ${uploadProgress.completed}/${uploadProgress.total}` : '上传中') : '上传音频'}</button>
               <button onClick={() => setOpen(false)} className="rounded-xl p-2.5 text-white/40 transition hover:bg-white/10 hover:text-white" aria-label="关闭语音包"><X size={19} /></button>
-              <input ref={fileInputRef} type="file" accept="audio/*" className="hidden" onChange={handleFileChange} />
+              <input ref={fileInputRef} type="file" accept="audio/*" multiple className="hidden" onChange={handleFileChange} />
             </header>
 
             <div className="flex items-center gap-3 border-b border-white/[0.08] bg-black/10 px-6 py-3">

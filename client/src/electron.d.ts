@@ -24,12 +24,19 @@ interface CoveApplicationAudioApi {
   onChunk(listener: (chunk: Uint8Array) => void): () => void;
 }
 
+interface CoveScreenAudioApi {
+  start(): Promise<{ ok: boolean; error?: string }>;
+  stop(): Promise<boolean>;
+  onChunk(listener: (chunk: Uint8Array) => void): () => void;
+}
+
 declare global {
   interface Window {
     coveUpdater?: CoveUpdaterApi;
     coveShell?: CoveShellApi;
     coveSecurity?: CoveSecurityApi;
     coveApplicationAudio?: CoveApplicationAudioApi;
+    coveScreenAudio?: CoveScreenAudioApi;
   }
 }
 
