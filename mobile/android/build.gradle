@@ -7,10 +7,16 @@ buildscript {
         ndkVersion = "27.1.12297006"
         kotlinVersion = "2.1.20"
     }
+    // Aliyun mirrors are for local acceleration in China only. Overseas CI
+    // (GitHub Actions) often gets 502 from them, and Gradle treats repo 5xx
+    // responses as resolution failures, so skip mirrors in CI environments.
+    def inCi = System.getenv('CI') != null || System.getenv('GITHUB_ACTIONS') != null
     repositories {
-        maven { url "https://maven.aliyun.com/repository/google" }
-        maven { url "https://maven.aliyun.com/repository/central" }
-        maven { url "https://maven.aliyun.com/repository/gradle-plugin" }
+        if (!inCi) {
+            maven { url "https://maven.aliyun.com/repository/google" }
+            maven { url "https://maven.aliyun.com/repository/central" }
+            maven { url "https://maven.aliyun.com/repository/gradle-plugin" }
+        }
         google()
         mavenCentral()
     }
@@ -21,10 +27,15 @@ buildscript {
     }
 }
 
+// buildscript and root scopes are independent; declare the CI check for each.
+def inCiRoot = System.getenv('CI') != null || System.getenv('GITHUB_ACTIONS') != null
+
 allprojects {
     repositories {
-        maven { url "https://maven.aliyun.com/repository/google" }
-        maven { url "https://maven.aliyun.com/repository/central" }
+        if (!inCiRoot) {
+            maven { url "https://maven.aliyun.com/repository/google" }
+            maven { url "https://maven.aliyun.com/repository/central" }
+        }
         google()
         mavenCentral()
     }
