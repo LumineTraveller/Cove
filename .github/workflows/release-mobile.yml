@@ -1,35 +1,31 @@
 name: Release Cove Mobile
+# 标题格式固定为 "release: Cove <标签名>"，mobile 字样由标签自带，不依赖打标签提交的信息。
+run-name: release: Cove ${{ github.ref_name }}
 
 on:
   push:
     tags:
       - 'mobile-v*.*.*'
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: '已有的手机 Release 标签，例如 mobile-v0.5.0'
-        required: true
-        type: string
 
 permissions:
   contents: write
 
 concurrency:
-  group: mobile-release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  release-mobile:
+  release-android-client:
     runs-on: ubuntu-latest
     env:
-      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      RELEASE_TAG: ${{ github.ref_name }}
       GH_TOKEN: ${{ github.token }}
 
     steps:
-      - name: Checkout release tag
+      - name: Checkout
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          ref: ${{ github.ref }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -52,7 +48,7 @@ jobs:
         run: |
           sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;27.1.12297006"
 
-      - name: Validate mobile tag and version
+      - name: Verify tag matches mobile version
         shell: bash
         run: |
           if [[ ! "$RELEASE_TAG" =~ ^mobile-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -79,21 +75,23 @@ jobs:
           npm run lint
 
       - name: Build ARM release APK
-        working-directory: mobile
-        run: npm run android:apk -- "-PreactNativeArchitectures=armeabi-v7a,arm64-v8a"
+        working-directory: mobile/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease -PreactNativeArchitectures=armeabi-v7a,arm64-v8a
 
       - name: Prepare release metadata
         working-directory: mobile
         run: npm run update:prepare -- RELEASE_NOTES.md "$RELEASE_TAG"
 
-      - name: Create or update GitHub Release
+      - name: Create GitHub release
         working-directory: mobile
         shell: bash
         run: |
           version="${RELEASE_TAG#mobile-v}"
           apk="build/updates/$RELEASE_TAG/Cove-Mobile-$version.apk"
           if [[ ! -f "$apk" ]]; then
-            echo "Missing release APK: $apk" >&2
+            echo "Missing release asset: $apk" >&2
             exit 1
           fi
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
