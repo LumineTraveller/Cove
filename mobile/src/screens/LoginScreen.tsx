@@ -1,8 +1,9 @@
 import { useState } from 'react';
 import {
+  ActivityIndicator,
   KeyboardAvoidingView,
   Platform,
-  SafeAreaView,
+  ScrollView,
   StatusBar,
   StyleSheet,
   Switch,
@@ -11,50 +12,117 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { LogIn, Server, UserRound } from 'lucide-react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { LockKeyhole, LogIn, Mail, Server, UserRound } from 'lucide-react-native';
+import type { AccountAuthRequest, AccountAuthMode } from '../accountAuth';
+import { validAccountEmail } from '../accountAuth';
 import { colors } from '../theme';
 import { httpsOrigin } from '../serverCertificate';
 import { MobileUpdateButton } from '../components/MobileUpdater';
 
 interface Props {
-  initialName?: string;
-  initialServer?: string;
   saving: boolean;
-  onSubmit: (username: string, serverURL: string, allowInvalidServerCertificate: boolean) => void;
+  error?: string | null;
+  onSubmit: (request: AccountAuthRequest) => void;
 }
 
-export function LoginScreen({ initialName = '', initialServer = '', saving, onSubmit }: Props) {
-  const [username, setUsername] = useState(initialName);
-  const [serverURL, setServerURL] = useState(initialServer);
+export function LoginScreen({ saving, error, onSubmit }: Props) {
+  const [mode, setMode] = useState<AccountAuthMode>('login');
+  const [username, setUsername] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [serverURL, setServerURL] = useState('');
   const [certificateException, setCertificateException] = useState(false);
   const canUseException = Platform.OS === 'android' && !!httpsOrigin(serverURL);
-  const submit = () => onSubmit(username, serverURL, canUseException && certificateException);
-  const canSubmit = !!username.trim() && !!serverURL.trim() && !saving;
+  const submit = () => onSubmit({
+    mode,
+    username,
+    email,
+    password,
+    serverURL,
+    allowInvalidServerCertificate: canUseException && certificateException,
+  });
+  const canSubmit = validAccountEmail(email)
+    && password.length >= 8
+    && !!serverURL.trim()
+    && (mode === 'login' || !!username.trim())
+    && !saving;
+  const publicHttp = /^http:\/\/(?!localhost(?::|\/|$)|127\.0\.0\.1(?::|\/|$))/i.test(serverURL.trim());
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={styles.safeArea} edges={['top', 'right', 'bottom', 'left']}>
       <StatusBar barStyle="light-content" backgroundColor={colors.background} />
       <KeyboardAvoidingView
         style={styles.keyboard}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
-        <View style={styles.content}>
+        <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
           <View style={styles.brandMark}><Text style={styles.brandLetter}>C</Text></View>
           <Text style={styles.title}>Cove</Text>
           <Text style={styles.subtitle}>朋友语音与屏幕共享</Text>
 
           <View style={styles.card}>
-            <Text style={styles.label}>用户名</Text>
+            <View style={styles.modePicker}>
+              {(['login', 'register'] as const).map(value => (
+                <TouchableOpacity
+                  key={value}
+                  style={[styles.modeButton, mode === value && styles.modeButtonActive]}
+                  onPress={() => setMode(value)}
+                  accessibilityRole="tab"
+                  accessibilityState={{ selected: mode === value }}
+                >
+                  <Text style={[styles.modeText, mode === value && styles.modeTextActive]}>{value === 'login' ? '登录' : '注册'}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {mode === 'register' && (
+              <>
+                <Text style={styles.label}>用户名</Text>
+                <View style={styles.inputShell}>
+                  <UserRound size={19} color={colors.textFaint} />
+                  <TextInput
+                    style={styles.input}
+                    value={username}
+                    onChangeText={setUsername}
+                    placeholder="你的名字"
+                    placeholderTextColor={colors.textFaint}
+                    autoCapitalize="none"
+                    maxLength={64}
+                  />
+                </View>
+              </>
+            )}
+
+            <Text style={[styles.label, mode === 'register' && styles.secondLabel]}>邮箱</Text>
             <View style={styles.inputShell}>
-              <UserRound size={19} color={colors.textFaint} />
+              <Mail size={19} color={colors.textFaint} />
               <TextInput
                 style={styles.input}
-                value={username}
-                onChangeText={setUsername}
-                placeholder="你的名字"
+                value={email}
+                onChangeText={setEmail}
+                placeholder="name@example.com"
                 placeholderTextColor={colors.textFaint}
                 autoCapitalize="none"
-                maxLength={64}
+                autoCorrect={false}
+                keyboardType="email-address"
+                textContentType="emailAddress"
+              />
+            </View>
+            <Text style={styles.help}>目前只检查邮箱格式，不会发送验证邮件。</Text>
+
+            <Text style={[styles.label, styles.secondLabel]}>密码</Text>
+            <View style={styles.inputShell}>
+              <LockKeyhole size={19} color={colors.textFaint} />
+              <TextInput
+                style={styles.input}
+                value={password}
+                onChangeText={setPassword}
+                placeholder="至少 8 个字符"
+                placeholderTextColor={colors.textFaint}
+                secureTextEntry
+                textContentType={mode === 'register' ? 'newPassword' : 'password'}
+                autoCapitalize="none"
               />
             </View>
 
@@ -78,6 +146,7 @@ export function LoginScreen({ initialName = '', initialServer = '', saving, onSu
               />
             </View>
             <Text style={styles.help}>填写与桌面客户端相同的 Cove 服务器地址，此项不会被隐藏。</Text>
+            {publicHttp && <Text style={styles.httpWarning}>公网 HTTP 会明文传输登录凭据，正式使用账号前应配置 HTTPS。</Text>}
             {canUseException && (
               <>
                 <View style={styles.certificateRow}>
@@ -88,18 +157,20 @@ export function LoginScreen({ initialName = '', initialServer = '', saving, onSu
               </>
             )}
 
+            {error ? <Text style={styles.error} accessibilityRole="alert">{error}</Text> : null}
+
             <TouchableOpacity
               style={[styles.submit, !canSubmit && styles.disabled]}
               disabled={!canSubmit}
               onPress={submit}
               activeOpacity={0.82}
             >
-              <LogIn size={19} color="#0f172a" />
-              <Text style={styles.submitText}>{saving ? '正在保存' : '连接服务器'}</Text>
+              {saving ? <ActivityIndicator color="#0f172a" /> : <LogIn size={19} color="#0f172a" />}
+              <Text style={styles.submitText}>{saving ? '正在验证' : mode === 'login' ? '登录 Cove' : '注册并进入'}</Text>
             </TouchableOpacity>
           </View>
           <MobileUpdateButton />
-        </View>
+        </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -110,7 +181,7 @@ const styles = StyleSheet.create({
   certificateLabel: { flex: 1, color: colors.textMuted, fontSize: 12 },
   safeArea: { flex: 1, backgroundColor: colors.background },
   keyboard: { flex: 1 },
-  content: { flex: 1, justifyContent: 'center', paddingHorizontal: 22, paddingBottom: 26 },
+  content: { flexGrow: 1, justifyContent: 'center', paddingHorizontal: 22, paddingVertical: 28 },
   brandMark: {
     width: 68, height: 68, borderRadius: 23, alignSelf: 'center', alignItems: 'center',
     justifyContent: 'center', backgroundColor: colors.cyanSoft, borderWidth: 1,
@@ -120,6 +191,11 @@ const styles = StyleSheet.create({
   title: { color: colors.text, fontSize: 32, fontWeight: '800', textAlign: 'center', marginTop: 17 },
   subtitle: { color: colors.textMuted, fontSize: 15, textAlign: 'center', marginTop: 7, marginBottom: 26 },
   card: { padding: 21, borderRadius: 25, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
+  modePicker: { flexDirection: 'row', padding: 4, marginBottom: 18, borderRadius: 13, backgroundColor: 'rgba(0,0,0,0.24)' },
+  modeButton: { flex: 1, height: 38, alignItems: 'center', justifyContent: 'center', borderRadius: 10 },
+  modeButtonActive: { backgroundColor: 'rgba(255,255,255,0.12)' },
+  modeText: { color: colors.textFaint, fontSize: 13, fontWeight: '700' },
+  modeTextActive: { color: colors.text },
   label: { color: 'rgba(244,244,245,0.62)', fontSize: 13, fontWeight: '600', marginBottom: 8, marginLeft: 2 },
   secondLabel: { marginTop: 17 },
   inputShell: {
@@ -128,6 +204,8 @@ const styles = StyleSheet.create({
   },
   input: { flex: 1, height: '100%', color: colors.text, fontSize: 14, paddingVertical: 0 },
   help: { color: colors.textFaint, fontSize: 11, lineHeight: 17, marginTop: 9, marginHorizontal: 2 },
+  httpWarning: { color: colors.red, fontSize: 11, lineHeight: 17, marginTop: 8, marginHorizontal: 2 },
+  error: { marginTop: 14, padding: 11, overflow: 'hidden', borderRadius: 12, color: colors.red, fontSize: 11, lineHeight: 16, backgroundColor: colors.redSoft },
   submit: {
     height: 50, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 9,
     borderRadius: 14, backgroundColor: '#ecfeff', marginTop: 22,

@@ -24,6 +24,7 @@ jest.mock('react-native-webrtc', () => ({
 
 import { PermissionsAndroid } from 'react-native';
 const application = (producerId: string, peerId = 'peer1') => ({ producerId, peerId, kind: 'audio', appData: { type: 'application-audio', label: 'Music' } });
+const microphone = (producerId: string, peerId = 'peer1') => ({ producerId, peerId, kind: 'audio', appData: { type: 'mic' } });
 let media: ReturnType<typeof useMobileMedia>;
 let renderer: TestRenderer.ReactTestRenderer;
 let socket: any;
@@ -79,6 +80,27 @@ test('duplicate producer notifications never create double audio', async () => {
   await act(async () => { await Promise.all([handlers.get('ms:new-producer')!(application('app1')), handlers.get('ms:new-producer')!(application('app1'))]); });
   expect(mockTransport.consume).toHaveBeenCalledTimes(1);
   expect(media.applicationAudioShares).toHaveLength(1);
+});
+
+test('sets an independent 0-200% volume on a members microphone', async () => {
+  existing = [microphone('mic1')];
+  await act(async () => media.joinVoice());
+  expect(mockConsumers.get('mic1').track._setVolume).toHaveBeenLastCalledWith(1);
+
+  await act(async () => media.setMemberVolume('peer1', 1.67));
+  expect(mockConsumers.get('mic1').track._setVolume).toHaveBeenLastCalledWith(1.67);
+  expect(media.memberVolumes.peer1).toBe(1.67);
+
+  await act(async () => media.setMemberVolume('peer1', 3));
+  expect(mockConsumers.get('mic1').track._setVolume).toHaveBeenLastCalledWith(2);
+  expect(media.memberVolumes.peer1).toBe(2);
+});
+
+test('applies a selected member volume when their microphone arrives later', async () => {
+  await act(async () => media.joinVoice());
+  await act(async () => media.setMemberVolume('peer1', 0.35));
+  await act(async () => { await handlers.get('ms:new-producer')!(microphone('mic1')); });
+  expect(mockConsumers.get('mic1').track._setVolume).toHaveBeenLastCalledWith(0.35);
 });
 
 test('application audio close does not stop the same peers screen; stopping screen leaves application audio', async () => {

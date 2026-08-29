@@ -4,13 +4,18 @@ import App from '../App';
 import { configureServerCertificate } from '../src/serverCertificate';
 
 jest.mock('lucide-react-native', () => ({ WifiOff: 'WifiOff' }));
+jest.mock('react-native-safe-area-context', () => ({
+  SafeAreaProvider: ({ children }: { children: React.ReactNode }) => children,
+  useSafeAreaInsets: () => ({ top: 0, right: 0, bottom: 0, left: 0 }),
+}));
 jest.mock('../src/screens/LoginScreen', () => ({ LoginScreen: 'LoginScreen' }));
 jest.mock('../src/screens/RoomScreen', () => ({ RoomScreen: 'RoomScreen' }));
 jest.mock('../src/screens/RoomListScreen', () => ({ RoomListScreen: 'RoomListScreen' }));
 jest.mock('../src/storage', () => ({
-  readSessionConfig: async () => ({ username: 'Alice', serverURL: 'https://example.test:51758', clientId: 'alice', allowInvalidServerCertificate: true }),
+  readSessionConfig: async () => ({ username: 'Alice', serverURL: 'https://example.test:51758', clientId: 'alice', accountToken: 'token', accountId: 'account', email: 'alice@example.test', allowInvalidServerCertificate: true }),
   clearServerConfig: jest.fn(), saveSessionConfig: jest.fn(),
 }));
+jest.mock('../src/accountAuth', () => ({ authenticateAccount: jest.fn() }));
 const mockSocket = { on: jest.fn(), off: jest.fn(), connect: jest.fn(), disconnect: jest.fn() };
 jest.mock('../src/socket', () => ({ createCoveSocket: () => mockSocket }));
 jest.mock('../src/serverCertificate', () => ({ configureServerCertificate: jest.fn() }));

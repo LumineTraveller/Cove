@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { ChevronLeft, ChevronRight, Play, Volume2 } from 'lucide-react-native';
+import { Play, Volume2 } from 'lucide-react-native';
 import Video from 'react-native-video';
 import type { Socket } from 'socket.io-client';
 import { colors } from '../theme';
@@ -12,6 +12,7 @@ interface Props {
   serverURL: string;
   ready: boolean;
   inVoice: boolean;
+  showHeading?: boolean;
 }
 
 interface Playback {
@@ -31,13 +32,11 @@ function applySoundpackOrder(packs: Soundpack[], orderedIds: string[]) {
   return [...ordered, ...byId.values()];
 }
 
-export function Soundboard({ socket, roomId, serverURL, ready, inVoice }: Props) {
+export function Soundboard({ socket, roomId, serverURL, ready, inVoice, showHeading = true }: Props) {
   const [packs, setPacks] = useState<Soundpack[]>([]);
   const [loading, setLoading] = useState(true);
   const [playback, setPlayback] = useState<Playback | null>(null);
   const [playError, setPlayError] = useState(false);
-  const [reorderingId, setReorderingId] = useState<string | null>(null);
-  const [reorderError, setReorderError] = useState(false);
   const packsRef = useRef<Soundpack[]>([]);
   const playSequence = useRef(0);
 
@@ -99,43 +98,17 @@ export function Soundboard({ socket, roomId, serverURL, ready, inVoice }: Props)
     socket.emit('soundpack:play', { soundId: sound.id, roomId });
   };
 
-  const moveSound = async (soundId: string, offset: -1 | 1) => {
-    if (!ready || reorderingId) return;
-    const previous = packsRef.current;
-    const sourceIndex = previous.findIndex(sound => sound.id === soundId);
-    const targetIndex = sourceIndex + offset;
-    if (sourceIndex < 0 || targetIndex < 0 || targetIndex >= previous.length) return;
-
-    const next = [...previous];
-    [next[sourceIndex], next[targetIndex]] = [next[targetIndex], next[sourceIndex]];
-    setPacks(next);
-    setReorderError(false);
-    setReorderingId(soundId);
-    try {
-      const result = await new Promise<{ ok: boolean; error?: string }>((resolve, reject) => {
-        socket.timeout(5_000).emit('soundpack:reorder', {
-          roomId,
-          orderedIds: next.map(sound => sound.id),
-        }, (error: Error | null, response: { ok: boolean; error?: string }) => error ? reject(error) : resolve(response));
-      });
-      if (!result.ok) throw new Error(result.error ?? '调整顺序失败');
-    } catch {
-      setPacks(previous);
-      setReorderError(true);
-    } finally {
-      setReorderingId(null);
-    }
-  };
-
   return (
     <View style={styles.card}>
-      <View style={styles.heading}>
-        <View style={styles.headingIcon}><Volume2 size={18} color={colors.cyan} /></View>
-        <View>
-          <Text style={styles.title}>语音包</Text>
-          <Text style={styles.subtitle}>{inVoice ? '点按播放，箭头调整所有成员看到的顺序' : '加入语音后才能播放语音包'}</Text>
+      {showHeading && (
+        <View style={styles.heading}>
+          <View style={styles.headingIcon}><Volume2 size={18} color={colors.cyan} /></View>
+          <View>
+            <Text style={styles.title}>语音包</Text>
+            <Text style={styles.subtitle}>{inVoice ? '点按即可在当前语音频道播放' : '加入语音后才能播放语音包'}</Text>
+          </View>
         </View>
-      </View>
+      )}
 
       {playback && (
         <Video
@@ -151,14 +124,13 @@ export function Soundboard({ socket, roomId, serverURL, ready, inVoice }: Props)
       )}
 
       {playError && <Text style={styles.playError}>播放失败，请检查语音包文件和服务器连接</Text>}
-      {reorderError && <Text style={styles.playError}>顺序调整失败，请重试</Text>}
       {loading ? (
         <View style={styles.empty}><ActivityIndicator color={colors.cyan} /><Text style={styles.emptyText}>正在加载语音包</Text></View>
       ) : packs.length === 0 ? (
         <View style={styles.empty}><Text style={styles.emptyText}>当前还没有语音包</Text></View>
       ) : (
         <View style={styles.grid}>
-          {packs.map((sound, index) => {
+          {packs.map(sound => {
             const playing = playback?.soundId === sound.id;
             return (
               <View key={sound.id} style={[styles.tile, playing && styles.tilePlaying]}>
@@ -171,12 +143,6 @@ export function Soundboard({ socket, roomId, serverURL, ready, inVoice }: Props)
                     <Text style={styles.uploader} numberOfLines={1}>{sound.uploader}</Text>
                   </View>
                 </TouchableOpacity>
-                {packs.length > 1 && (
-                  <View style={styles.reorderControls}>
-                    <TouchableOpacity disabled={!ready || index === 0 || reorderingId !== null} onPress={() => void moveSound(sound.id, -1)} style={[styles.reorderButton, (index === 0 || reorderingId !== null) && styles.reorderButtonDisabled]} accessibilityLabel={`将 ${sound.name} 前移`}><ChevronLeft size={13} color={colors.textMuted} /></TouchableOpacity>
-                    <TouchableOpacity disabled={!ready || index === packs.length - 1 || reorderingId !== null} onPress={() => void moveSound(sound.id, 1)} style={[styles.reorderButton, (index === packs.length - 1 || reorderingId !== null) && styles.reorderButtonDisabled]} accessibilityLabel={`将 ${sound.name} 后移`}><ChevronRight size={13} color={colors.textMuted} /></TouchableOpacity>
-                  </View>
-                )}
                 {playing && <View style={styles.playingLine} />}
               </View>
             );
@@ -206,8 +172,5 @@ const styles = StyleSheet.create({
   copy: { flex: 1, minWidth: 0 },
   soundName: { color: 'rgba(244,244,245,0.82)', fontSize: 11, fontWeight: '700' },
   uploader: { color: colors.textFaint, fontSize: 9, marginTop: 4 },
-  reorderControls: { flexDirection: 'row', gap: 2, paddingLeft: 2 },
-  reorderButton: { width: 23, height: 28, alignItems: 'center', justifyContent: 'center', borderRadius: 8, backgroundColor: 'rgba(255,255,255,0.07)' },
-  reorderButtonDisabled: { opacity: 0.25 },
   playingLine: { position: 'absolute', right: 0, bottom: 0, left: 0, height: 2, backgroundColor: colors.cyan },
 });

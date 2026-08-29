@@ -12,6 +12,9 @@ node_modules/
 diagnostic-build/
 .release-gitee/
 
+# Local-only release sync helper, not part of the project
+scripts/sync-release-to-gitee.ps1
+
 # Runtime and temporary data
 tmp/
 *.db

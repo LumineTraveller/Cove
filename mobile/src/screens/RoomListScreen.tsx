@@ -3,13 +3,13 @@ import {
   ActivityIndicator,
   FlatList,
   RefreshControl,
-  SafeAreaView,
   StatusBar,
   StyleSheet,
   Text,
   TouchableOpacity,
   View,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { ChevronRight, Radio, Server, Users, WifiOff } from 'lucide-react-native';
 import type { Socket } from 'socket.io-client';
 import { colors } from '../theme';
@@ -67,7 +67,7 @@ export function RoomListScreen({
   }, [socket]);
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={styles.safeArea} edges={['top', 'right', 'bottom', 'left']}>
       <StatusBar barStyle="light-content" backgroundColor={colors.background} />
       <View style={styles.header}>
         <View>

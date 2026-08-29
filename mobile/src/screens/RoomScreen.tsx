@@ -1,15 +1,16 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Modal,
-  SafeAreaView,
   ScrollView,
   StatusBar,
   StyleSheet,
   Text,
   TouchableOpacity,
   View,
+  type GestureResponderEvent,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import {
   ArrowLeft,
   AudioLines,
@@ -19,12 +20,11 @@ import {
   EyeOff,
   Expand,
   Headphones,
+  MessageCircle,
   Mic,
   MicOff,
   MonitorPlay,
-  Minus,
   PhoneOff,
-  Plus,
   ShieldAlert,
   Users,
   Volume2,
@@ -34,6 +34,7 @@ import {
 import { RTCView } from 'react-native-webrtc';
 import type { Socket } from 'socket.io-client';
 import { Soundboard } from '../components/Soundboard';
+import { ChatPanel } from '../components/ChatPanel';
 import { UserProfileModal } from '../components/UserProfileModal';
 import { loadProfileRemarks, saveProfileRemark, type ProfileRemarks } from '../profileRemarks';
 import { colors } from '../theme';
@@ -52,14 +53,68 @@ function initials(name: string) {
   return name.trim().slice(0, 2) || 'C';
 }
 
+interface InlineVolumeSliderProps {
+  value: number;
+  label: string;
+  onChange: (value: number) => void;
+}
+
+function InlineVolumeSlider({ value, label, onChange }: InlineVolumeSliderProps) {
+  const trackWidth = useRef(1);
+  const normalized = Math.max(0, Math.min(1, value));
+  const percentage = Math.round(normalized * 100);
+  const updateFromTouch = (event: GestureResponderEvent) => {
+    onChange(Math.max(0, Math.min(1, event.nativeEvent.locationX / trackWidth.current)));
+  };
+
+  return (
+    <View
+      style={styles.volumeSlider}
+      accessible
+      accessibilityRole="adjustable"
+      accessibilityLabel={label}
+      accessibilityValue={{ min: 0, max: 100, now: percentage, text: `${percentage}%` }}
+      accessibilityActions={[{ name: 'decrement', label: '降低音量' }, { name: 'increment', label: '提高音量' }]}
+      onAccessibilityAction={event => onChange(normalized + (event.nativeEvent.actionName === 'increment' ? 0.05 : -0.05))}
+      onLayout={event => { trackWidth.current = Math.max(1, event.nativeEvent.layout.width); }}
+      onStartShouldSetResponder={() => true}
+      onMoveShouldSetResponder={() => true}
+      onResponderGrant={updateFromTouch}
+      onResponderMove={updateFromTouch}
+    >
+      <View style={styles.volumeSliderRail} />
+      <View style={[styles.volumeSliderFill, { width: `${percentage}%` }]} />
+      <View style={[styles.volumeSliderThumb, { left: `${percentage}%` }]} />
+    </View>
+  );
+}
+
 export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props) {
   const [members, setMembers] = useState<RoomMember[]>([]);
   const [roomReady, setRoomReady] = useState(false);
   const [joinError, setJoinError] = useState<string | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [soundboardOpen, setSoundboardOpen] = useState(false);
   const [viewingProfile, setViewingProfile] = useState<RoomMember | null>(null);
   const [profileRemarks, setProfileRemarks] = useState<ProfileRemarks>({});
+  const screenVolumeBeforeMute = useRef(1);
   const media = useMobileMedia(socket, room.id);
+
+  const setScreenVolume = (volume: number) => {
+    const normalized = Math.max(0, Math.min(1, volume));
+    if (normalized > 0) screenVolumeBeforeMute.current = normalized;
+    media.setScreenReceiveVolume(normalized);
+  };
+
+  const toggleScreenVolumeMute = () => {
+    if (media.screenReceiveVolume > 0) {
+      screenVolumeBeforeMute.current = media.screenReceiveVolume;
+      media.setScreenReceiveVolume(0);
+    } else {
+      media.setScreenReceiveVolume(screenVolumeBeforeMute.current || 1);
+    }
+  };
 
   useEffect(() => {
     let active = true;
@@ -149,7 +204,7 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
   );
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={styles.safeArea} edges={['top', 'right', 'bottom', 'left']}>
       <StatusBar barStyle="light-content" backgroundColor={colors.background} />
       <View style={styles.header}>
         <TouchableOpacity style={styles.iconButton} onPress={onBack}><ArrowLeft size={21} color={colors.textMuted} /></TouchableOpacity>
@@ -157,10 +212,18 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
           <Text style={styles.roomName} numberOfLines={1}>{room.name}</Text>
           <Text style={styles.ownerName} numberOfLines={1}>{room.ownerName ? `房主 ${room.ownerName}` : '房间'}</Text>
         </View>
-        <View style={[styles.mediaState, media.connectionState === 'connected' && styles.mediaConnected]}>
-          {media.connectionState === 'connected'
-            ? <CheckCircle2 size={17} color={colors.green} />
-            : <Headphones size={17} color={colors.textFaint} />}
+        <View style={styles.headerActions}>
+          <TouchableOpacity style={styles.headerAction} onPress={() => setChatOpen(true)} accessibilityLabel="打开聊天">
+            <MessageCircle size={17} color={colors.cyan} />
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.headerAction} onPress={() => setSoundboardOpen(true)} accessibilityLabel="打开语音包">
+            <AudioLines size={17} color={colors.cyan} />
+          </TouchableOpacity>
+          <View style={[styles.mediaState, media.connectionState === 'connected' && styles.mediaConnected]}>
+            {media.connectionState === 'connected'
+              ? <CheckCircle2 size={17} color={colors.green} />
+              : <Headphones size={17} color={colors.textFaint} />}
+          </View>
         </View>
       </View>
 
@@ -208,11 +271,16 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
 
         {screenURL && (
           <View style={styles.screenVolumeCard}>
-            {media.screenReceiveVolume === 0 ? <VolumeX size={18} color={colors.textMuted} /> : <Volume2 size={18} color={colors.cyan} />}
+            <TouchableOpacity
+              style={styles.volumeIconButton}
+              accessibilityLabel={media.screenReceiveVolume === 0 ? '取消共享屏幕静音' : '将共享屏幕静音'}
+              onPress={toggleScreenVolumeMute}
+            >
+              {media.screenReceiveVolume === 0 ? <VolumeX size={18} color={colors.red} /> : <Volume2 size={18} color={colors.cyan} />}
+            </TouchableOpacity>
             <Text style={styles.screenVolumeLabel}>共享音量</Text>
-            <TouchableOpacity style={styles.volumeStep} onPress={() => media.setScreenReceiveVolume(media.screenReceiveVolume - 0.1)}><Minus size={16} color={colors.textMuted} /></TouchableOpacity>
+            <InlineVolumeSlider value={media.screenReceiveVolume} label="共享屏幕音量" onChange={setScreenVolume} />
             <Text style={styles.screenVolumeValue}>{Math.round(media.screenReceiveVolume * 100)}%</Text>
-            <TouchableOpacity style={styles.volumeStep} onPress={() => media.setScreenReceiveVolume(media.screenReceiveVolume + 0.1)}><Plus size={16} color={colors.textMuted} /></TouchableOpacity>
           </View>
         )}
 
@@ -229,13 +297,15 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
                 </View>
               </View>
               <View style={styles.applicationAudioControls}>
-                <TouchableOpacity accessibilityLabel={`${name}的应用音频${share.volume === 0 ? '取消静音' : '静音'}`} style={styles.volumeStep} onPress={() => media.setApplicationAudioVolume(share.producerId, share.volume === 0 ? 1 : 0)}>
-                  {share.volume === 0 ? <VolumeX size={18} color={colors.textMuted} /> : <Volume2 size={18} color={colors.cyan} />}
+                <TouchableOpacity accessibilityLabel={`${name}的应用音频${share.volume === 0 ? '取消静音' : '静音'}`} style={styles.volumeIconButton} onPress={() => media.setApplicationAudioVolume(share.producerId, share.volume === 0 ? 1 : 0)}>
+                  {share.volume === 0 ? <VolumeX size={18} color={colors.red} /> : <Volume2 size={18} color={colors.cyan} />}
                 </TouchableOpacity>
-                <Text style={styles.screenVolumeLabel}>应用音频音量</Text>
-                <TouchableOpacity accessibilityLabel={`降低${name}的应用音频音量`} style={styles.volumeStep} onPress={() => media.setApplicationAudioVolume(share.producerId, share.volume - 0.01)}><Minus size={16} color={colors.textMuted} /></TouchableOpacity>
+                <InlineVolumeSlider
+                  value={share.volume}
+                  label={`${name}的应用音频音量`}
+                  onChange={volume => media.setApplicationAudioVolume(share.producerId, volume)}
+                />
                 <Text style={styles.screenVolumeValue}>{Math.round(share.volume * 100)}%</Text>
-                <TouchableOpacity accessibilityLabel={`提高${name}的应用音频音量`} style={styles.volumeStep} onPress={() => media.setApplicationAudioVolume(share.producerId, share.volume + 0.01)}><Plus size={16} color={colors.textMuted} /></TouchableOpacity>
               </View>
             </View>
           );
@@ -249,7 +319,7 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.memberList}>
             {members.map(member => {
               const voiceMember = media.voiceMembers.find(voice => voice.socketId === member.socketId);
-              const showVoiceState = media.inVoice && !!voiceMember;
+              const showVoiceState = !!voiceMember;
               return (
                 <TouchableOpacity
                   style={styles.memberChip}
@@ -264,14 +334,15 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
                     {profileRemarks[member.userId] ? <Text style={styles.memberUsername}>{member.username}</Text> : null}
                   </View>
                   {member.isOwner && <Crown size={13} color="#fcd34d" />}
-                  {showVoiceState && voiceMember.isMuted && <MicOff size={13} color={colors.red} />}
+                  {showVoiceState && (voiceMember.isMuted
+                    ? <MicOff size={13} color={colors.red} />
+                    : <Mic size={13} color={colors.green} />)}
                 </TouchableOpacity>
               );
             })}
           </ScrollView>
         </View>
 
-        <Soundboard socket={socket} roomId={room.id} serverURL={config.serverURL} ready={roomReady} inVoice={media.inVoice} />
         <View style={styles.bottomSpacer} />
       </ScrollView>
 
@@ -312,6 +383,32 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
         </View>
       </Modal>
 
+      <ChatPanel
+        visible={chatOpen}
+        socket={socket}
+        roomId={room.id}
+        serverURL={config.serverURL}
+        username={config.username}
+        ready={roomReady}
+        onClose={() => setChatOpen(false)}
+      />
+
+      <Modal visible={soundboardOpen} animationType="slide" onRequestClose={() => setSoundboardOpen(false)}>
+        <SafeAreaView style={styles.toolModal} edges={['top', 'right', 'bottom', 'left']}>
+          <View style={styles.toolHeader}>
+            <View style={styles.toolHeaderIcon}><AudioLines size={19} color={colors.cyan} /></View>
+            <View style={styles.headerCopy}>
+              <Text style={styles.toolTitle}>语音包</Text>
+              <Text style={styles.toolSubtitle}>{media.inVoice ? '点按语音包即可在当前语音频道播放' : '加入语音后才能播放语音包'}</Text>
+            </View>
+            <TouchableOpacity style={styles.iconButton} onPress={() => setSoundboardOpen(false)} accessibilityLabel="关闭语音包"><X size={20} color={colors.textMuted} /></TouchableOpacity>
+          </View>
+          <ScrollView contentContainerStyle={styles.toolContent} showsVerticalScrollIndicator={false}>
+            <Soundboard socket={socket} roomId={room.id} serverURL={config.serverURL} ready={roomReady} inVoice={media.inVoice} showHeading={false} />
+          </ScrollView>
+        </SafeAreaView>
+      </Modal>
+
       {viewingProfile && (
         <UserProfileModal
           visible
@@ -319,6 +416,10 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
           username={viewingProfile.username}
           avatarUrl={viewingProfile.avatarUrl}
           remark={profileRemarks[viewingProfile.userId]}
+          inVoice={media.voiceMembers.some(member => member.socketId === viewingProfile.socketId)}
+          isMicOn={!media.voiceMembers.find(member => member.socketId === viewingProfile.socketId)?.isMuted}
+          volume={media.memberVolumes[viewingProfile.socketId] ?? 1}
+          onVolumeChange={volume => media.setMemberVolume(viewingProfile.socketId, volume)}
           onSaveRemark={remark => {
             saveProfileRemark(profileRemarks, viewingProfile.userId, remark)
               .then(setProfileRemarks)
@@ -340,6 +441,8 @@ const styles = StyleSheet.create({
   header: { minHeight: 66, flexDirection: 'row', alignItems: 'center', gap: 11, paddingHorizontal: 14, borderBottomWidth: 1, borderBottomColor: colors.border },
   iconButton: { width: 40, height: 40, borderRadius: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surface },
   headerCopy: { flex: 1, minWidth: 0 },
+  headerActions: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  headerAction: { width: 36, height: 36, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.cyanSoft },
   roomName: { color: colors.text, fontSize: 18, fontWeight: '700' },
   ownerName: { color: colors.textFaint, fontSize: 11, marginTop: 3 },
   mediaState: { width: 36, height: 36, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.05)' },
@@ -366,8 +469,12 @@ const styles = StyleSheet.create({
   screenActions: { flexDirection: 'row', gap: 7 },
   screenVolumeCard: { minHeight: 48, marginHorizontal: 14, marginTop: -5, marginBottom: 14, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 9, borderWidth: 1, borderColor: colors.border, borderRadius: 15, backgroundColor: colors.surface },
   screenVolumeLabel: { flex: 1, color: colors.textMuted, fontSize: 12, fontWeight: '600' },
-  screenVolumeValue: { width: 40, color: colors.text, fontSize: 11, textAlign: 'center', fontVariant: ['tabular-nums'] },
-  volumeStep: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center', borderRadius: 10, backgroundColor: 'rgba(255,255,255,0.05)' },
+  screenVolumeValue: { width: 40, color: colors.text, fontSize: 11, textAlign: 'right', fontVariant: ['tabular-nums'] },
+  volumeIconButton: { width: 34, height: 34, alignItems: 'center', justifyContent: 'center', borderRadius: 11, backgroundColor: 'rgba(255,255,255,0.05)' },
+  volumeSlider: { flex: 1, height: 32, justifyContent: 'center' },
+  volumeSliderRail: { position: 'absolute', right: 0, left: 0, height: 5, borderRadius: 3, backgroundColor: 'rgba(255,255,255,0.13)' },
+  volumeSliderFill: { position: 'absolute', left: 0, height: 5, borderRadius: 3, backgroundColor: colors.cyan },
+  volumeSliderThumb: { position: 'absolute', width: 15, height: 15, marginLeft: -7.5, borderWidth: 2, borderColor: '#ecfeff', borderRadius: 8, backgroundColor: colors.cyan },
   shareSwitcher: { paddingHorizontal: 14, paddingBottom: 12, gap: 7 },
   shareSwitchButton: { maxWidth: 150, height: 36, paddingHorizontal: 11, flexDirection: 'row', alignItems: 'center', gap: 7, borderWidth: 1, borderColor: colors.border, borderRadius: 12, backgroundColor: colors.surface },
   shareSwitchButtonActive: { borderColor: 'rgba(103,232,249,0.38)', backgroundColor: '#a5f3fc' },
@@ -399,4 +506,10 @@ const styles = StyleSheet.create({
   fullscreen: { flex: 1, backgroundColor: '#000' },
   fullscreenVideo: { flex: 1, backgroundColor: '#000' },
   closeFullscreen: { position: 'absolute', top: 18, right: 18, width: 42, height: 42, alignItems: 'center', justifyContent: 'center', borderRadius: 14, backgroundColor: 'rgba(0,0,0,0.7)' },
+  toolModal: { flex: 1, backgroundColor: colors.background },
+  toolHeader: { minHeight: 66, flexDirection: 'row', alignItems: 'center', gap: 11, paddingHorizontal: 14, borderBottomWidth: 1, borderBottomColor: colors.border },
+  toolHeaderIcon: { width: 38, height: 38, borderRadius: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.cyanSoft },
+  toolTitle: { color: colors.text, fontSize: 17, fontWeight: '800' },
+  toolSubtitle: { marginTop: 3, color: colors.textFaint, fontSize: 10 },
+  toolContent: { paddingTop: 14, paddingBottom: 28 },
 });

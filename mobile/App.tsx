@@ -1,14 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
-  Alert,
   StatusBar,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
 import { WifiOff } from 'lucide-react-native';
-import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { Socket } from 'socket.io-client';
 import { RoomListScreen } from './src/screens/RoomListScreen';
 import { RoomScreen } from './src/screens/RoomScreen';
@@ -19,14 +18,17 @@ import { colors } from './src/theme';
 import type { Room, SessionConfig } from './src/types';
 import { configureServerCertificate } from './src/serverCertificate';
 import { MobileUpdateProvider } from './src/components/MobileUpdater';
+import { authenticateAccount, type AccountAuthRequest } from './src/accountAuth';
 
 export default function App() {
-  return <MobileUpdateProvider><CoveSession /></MobileUpdateProvider>;
+  return <SafeAreaProvider><MobileUpdateProvider><CoveSession /></MobileUpdateProvider></SafeAreaProvider>;
 }
 
 function CoveSession() {
+  const insets = useSafeAreaInsets();
   const [loadingConfig, setLoadingConfig] = useState(true);
   const [savingConfig, setSavingConfig] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
   const [config, setConfig] = useState<SessionConfig | null>(null);
   const [socket, setSocket] = useState<Socket | null>(null);
   const [sessionReady, setSessionReady] = useState(false);
@@ -56,9 +58,17 @@ function CoveSession() {
         username: config.username,
         avatarUrl: null,
         clientId: config.clientId,
+        authToken: config.accountToken,
       }, (timeoutError: Error | null, response?: { ok: boolean; error?: string }) => {
         if (!active) return;
         if (timeoutError || response?.ok === false) {
+          if (response?.error?.includes('登录已失效')) {
+            setSelectedRoom(null);
+            setConfig(null);
+            setAuthError(response.error);
+            clearServerConfig().catch(() => {});
+            return;
+          }
           setConnectionError(response?.error ?? '服务器身份注册超时');
           setSessionReady(false);
           return;
@@ -96,18 +106,35 @@ function CoveSession() {
     };
   }, [config]);
 
-  const handleLogin = async (username: string, serverURL: string, allowInvalidServerCertificate: boolean) => {
+  const handleLogin = async (request: AccountAuthRequest) => {
     setSavingConfig(true);
+    setAuthError(null);
     try {
-      setConfig(await saveSessionConfig(username, serverURL, allowInvalidServerCertificate));
+      await configureServerCertificate(request.serverURL, request.allowInvalidServerCertificate);
+      const result = await authenticateAccount(request);
+      setConfig(await saveSessionConfig({
+        username: result.account.username,
+        serverURL: request.serverURL,
+        accountToken: result.token,
+        accountId: result.account.id,
+        email: result.account.email,
+        allowInvalidServerCertificate: request.allowInvalidServerCertificate,
+      }));
     } catch (cause) {
-      Alert.alert('无法保存配置', cause instanceof Error ? cause.message : String(cause));
+      setAuthError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setSavingConfig(false);
     }
   };
 
   const handleChangeServer = async () => {
+    if (config?.accountToken) {
+      fetch(`${config.serverURL}/api/auth/logout`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: config.accountToken }),
+      }).catch(() => {});
+    }
     setSelectedRoom(null);
     setConfig(null);
     setConnectionError(null);
@@ -119,27 +146,20 @@ function CoveSession() {
 
   if (loadingConfig) {
     return (
-      <SafeAreaProvider>
-        <View style={styles.splash}>
-          <StatusBar barStyle="light-content" backgroundColor={colors.background} />
-          <View style={styles.brand}><Text style={styles.brandText}>C</Text></View>
-          <ActivityIndicator color={colors.cyan} style={styles.splashSpinner} />
-        </View>
-      </SafeAreaProvider>
+      <View style={styles.splash}>
+        <StatusBar barStyle="light-content" backgroundColor={colors.background} />
+        <View style={styles.brand}><Text style={styles.brandText}>C</Text></View>
+        <ActivityIndicator color={colors.cyan} style={styles.splashSpinner} />
+      </View>
     );
   }
 
   if (!config) {
-    return (
-      <SafeAreaProvider>
-        <LoginScreen saving={savingConfig} onSubmit={handleLogin} />
-      </SafeAreaProvider>
-    );
+    return <LoginScreen saving={savingConfig} error={authError} onSubmit={handleLogin} />;
   }
 
   return (
-    <SafeAreaProvider>
-      <View style={styles.root}>
+    <View style={styles.root}>
         {socket ? (
           selectedRoom ? (
             <RoomScreen
@@ -163,13 +183,12 @@ function CoveSession() {
         )}
 
         {connectionError && (
-          <View style={styles.connectionBanner}>
+          <View style={[styles.connectionBanner, { top: insets.top + 10 }]}>
             <WifiOff size={16} color={colors.red} />
             <Text style={styles.connectionText} numberOfLines={2}>{connectionError}</Text>
           </View>
         )}
-      </View>
-    </SafeAreaProvider>
+    </View>
   );
 }
 
@@ -179,6 +198,6 @@ const styles = StyleSheet.create({
   brand: { width: 68, height: 68, borderRadius: 23, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.cyanSoft, borderWidth: 1, borderColor: 'rgba(103,232,249,0.24)' },
   brandText: { color: colors.cyan, fontSize: 31, fontWeight: '800' },
   splashSpinner: { marginTop: 20 },
-  connectionBanner: { position: 'absolute', top: 10, right: 12, left: 12, zIndex: 100, flexDirection: 'row', alignItems: 'center', gap: 9, paddingHorizontal: 13, paddingVertical: 11, borderRadius: 14, borderWidth: 1, borderColor: 'rgba(248,113,113,0.22)', backgroundColor: 'rgba(49,19,24,0.97)' },
+  connectionBanner: { position: 'absolute', right: 12, left: 12, zIndex: 100, flexDirection: 'row', alignItems: 'center', gap: 9, paddingHorizontal: 13, paddingVertical: 11, borderRadius: 14, borderWidth: 1, borderColor: 'rgba(248,113,113,0.22)', backgroundColor: 'rgba(49,19,24,0.97)' },
   connectionText: { flex: 1, color: colors.red, fontSize: 11, lineHeight: 15 },
 });

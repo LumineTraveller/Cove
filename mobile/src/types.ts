@@ -39,9 +39,21 @@ export interface Soundpack {
   canDelete: boolean;
 }
 
+export interface Message {
+  id: string;
+  roomId: string;
+  author: string;
+  content: string;
+  type?: 'chat' | 'soundpack' | 'image' | 'system';
+  timestamp: number;
+}
+
 export interface SessionConfig {
   username: string;
   serverURL: string;
   clientId: string;
+  accountToken: string;
+  accountId: string;
+  email: string;
   allowInvalidServerCertificate?: boolean;
 }

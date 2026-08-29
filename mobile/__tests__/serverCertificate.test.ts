@@ -29,9 +29,10 @@ test('native policy is awaited and never enabled for HTTP', async () => {
 });
 
 test('exception defaults off and survives restart only for the saved origin', async () => {
-  await saveSessionConfig('Alice', 'https://example.com:51758');
+  const base = { username: 'Alice', serverURL: 'https://example.com:51758', accountToken: 'token', accountId: 'account', email: 'alice@example.com' };
+  await saveSessionConfig(base);
   expect((await readSessionConfig())?.allowInvalidServerCertificate).toBe(false);
-  await saveSessionConfig('Alice', 'https://example.com:51758', true);
+  await saveSessionConfig({ ...base, allowInvalidServerCertificate: true });
   expect((await readSessionConfig())?.allowInvalidServerCertificate).toBe(true);
   await AsyncStorage.setItem('cove_server_url', 'https://example.com:51759');
   expect((await readSessionConfig())?.allowInvalidServerCertificate).toBe(false);

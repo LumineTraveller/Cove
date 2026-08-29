@@ -86,6 +86,7 @@ export function useMobileMedia(socket: Socket, roomId: string) {
   const [remoteScreen, setRemoteScreen] = useState<RemoteScreen | null>(null);
   const [availableScreens, setAvailableScreens] = useState<AvailableScreen[]>([]);
   const [applicationAudioShares, setApplicationAudioShares] = useState<ApplicationAudioShare[]>([]);
+  const [memberVolumes, setMemberVolumes] = useState<Record<string, number>>({});
   const [isWatchingScreen, setIsWatchingScreen] = useState(false);
   const [screenReceiveVolume, setScreenReceiveVolumeState] = useState(1);
   const [connectionState, setConnectionState] = useState<ConnectionState>('idle');
@@ -109,6 +110,7 @@ export function useMobileMedia(socket: Socket, roomId: string) {
   const closedProducers = useRef(new Set<string>());
   const mediaGeneration = useRef(0);
   const applicationAudioVolumes = useRef(new Map<string, number>());
+  const memberVolumesRef = useRef(new Map<string, number>());
   const inVoiceRef = useRef(false);
   const selfMutedRef = useRef(false);
   const forceMutedRef = useRef(false);
@@ -324,6 +326,9 @@ export function useMobileMedia(socket: Socket, roomId: string) {
           { producerId, socketId: peerId, label: typeof appData.label === 'string' ? appData.label : '应用', volume },
         ]);
       }
+      if (kind === 'audio' && (appData.type === 'mic' || appData.type == null)) {
+        (consumer.track as unknown as MediaStreamTrack)._setVolume(memberVolumesRef.current.get(peerId) ?? 1);
+      }
       consumer.on('trackended', () => removeConsumer(consumer.id));
       consumer.on('transportclose', () => removeConsumer(consumer.id));
       return true;
@@ -389,6 +394,18 @@ export function useMobileMedia(socket: Socket, roomId: string) {
     (entry.consumer.track as unknown as MediaStreamTrack)._setVolume(volume);
     applicationAudioVolumes.current.set(producerId, volume);
     setApplicationAudioShares(current => current.map(share => share.producerId === producerId ? { ...share, volume } : share));
+  }, []);
+
+  const setMemberVolume = useCallback((socketId: string, value: number) => {
+    if (!socketId || !Number.isFinite(value)) return;
+    const volume = Math.round(Math.max(0, Math.min(2, value)) * 100) / 100;
+    memberVolumesRef.current.set(socketId, volume);
+    setMemberVolumes(current => ({ ...current, [socketId]: volume }));
+    for (const entry of consumers.current.values()) {
+      const isMicrophone = entry.kind === 'audio' && (entry.sourceType === 'mic' || entry.sourceType == null);
+      if (entry.socketId !== socketId || !isMicrophone) continue;
+      (entry.consumer.track as unknown as MediaStreamTrack)._setVolume(volume);
+    }
   }, []);
 
   useEffect(() => {
@@ -592,6 +609,8 @@ export function useMobileMedia(socket: Socket, roomId: string) {
     availableScreens,
     applicationAudioShares,
     setApplicationAudioVolume,
+    memberVolumes,
+    setMemberVolume,
     watchingScreenPeerId: watchingScreenPeerRef.current,
     isWatchingScreen,
     screenReceiveVolume,
