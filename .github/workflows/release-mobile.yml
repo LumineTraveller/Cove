@@ -1,6 +1,6 @@
 name: Release Cove Mobile
 # 标题格式固定为 "release: Cove <标签名>"，mobile 字样由标签自带，不依赖打标签提交的信息。
-run-name: release: Cove ${{ github.ref_name }}
+run-name: "release: Cove ${{ github.ref_name }}"
 
 on:
   push:
