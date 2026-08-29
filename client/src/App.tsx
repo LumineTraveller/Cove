@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { HashRouter, Navigate, Route, Routes } from 'react-router-dom';
-import { LoaderCircle, LogIn, Server, UserRound, WifiOff } from 'lucide-react';
+import { LoaderCircle, LockKeyhole, LogIn, Mail, Server, UserRound, WifiOff } from 'lucide-react';
 import RoomList from './pages/RoomList';
 import ChatRoom from './pages/ChatRoom';
 import { UpdateCenter } from './components/UpdateCenter';
@@ -10,6 +10,7 @@ import { socket, getClientId, getServerURL, normalizeURL } from './socket';
 import type { UserProfile } from './types';
 import { ServerCertificateToggle } from './components/ServerCertificateToggle';
 import { hasServerCertificateException, saveServerCertificateException } from './serverCertificate';
+import { clearAccountSession, loginAccount, readAccountSession, registerAccount, validAccountEmail } from './accountAuth';
 
 const DEFAULT_SERVER = 'http://localhost:3001';
 type ConnectionProblem = 'timeout' | 'registration' | null;
@@ -19,14 +20,20 @@ export default function App() {
   const serverUrl = localStorage.getItem('cove_server_url') ?? '';
   const [connected, setConnected] = useState<boolean | null>(null);
   const [draftName, setDraftName] = useState('');
+  const [draftEmail, setDraftEmail] = useState('');
+  const [draftPassword, setDraftPassword] = useState('');
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [authPending, setAuthPending] = useState(false);
+  const [authError, setAuthError] = useState('');
   const [draftUrl, setDraftUrl] = useState(() => localStorage.getItem('cove_server_url') ?? DEFAULT_SERVER);
   const [allowUntrustedCertificate, setAllowUntrustedCertificate] = useState(() =>
     hasServerCertificateException(localStorage.getItem('cove_server_url') ?? DEFAULT_SERVER));
   const [editingServer, setEditingServer] = useState(false);
   const [initialConnectionPending, setInitialConnectionPending] = useState(false);
   const [connectionProblem, setConnectionProblem] = useState<ConnectionProblem>(null);
-  const needLogin = !profile.username || !serverUrl;
   const serverURL = getServerURL();
+  const accountSession = readAccountSession(serverURL);
+  const needLogin = !profile.username || !serverUrl || !accountSession;
 
   useEffect(() => {
     if (needLogin || editingServer) return;
@@ -51,7 +58,8 @@ export default function App() {
         username: currentProfile.username,
         avatarUrl: currentProfile.avatarUrl,
         clientId: getClientId(),
-      }, (error: Error | null, response?: { ok?: boolean }) => {
+        authToken: readAccountSession(serverURL)?.token,
+      }, (error: Error | null, response?: { ok?: boolean; error?: string }) => {
         if (!active) return;
         const registered = !error && response?.ok !== false;
         setConnected(registered);
@@ -62,6 +70,12 @@ export default function App() {
         } else {
           socket.disconnect();
           setInitialConnectionPending(false);
+          if (response?.error?.includes('登录已失效')) {
+            clearAccountSession();
+            clearProfile();
+            window.location.reload();
+            return;
+          }
           setConnectionProblem('registration');
           setEditingServer(true);
         }
@@ -96,18 +110,35 @@ export default function App() {
     };
   }, [editingServer, needLogin]);
 
-  const handleLogin = () => {
+  const handleLogin = async () => {
     const username = draftName.trim();
-    if (!username || !draftUrl.trim()) return;
-    persistProfile({ username, avatarUrl: null });
+    if (!validAccountEmail(draftEmail) || draftPassword.length < 8 || !draftUrl.trim() || (authMode === 'register' && !username)) return;
     const nextServerUrl = normalizeURL(draftUrl || DEFAULT_SERVER);
-    localStorage.setItem('cove_server_url', nextServerUrl);
-    saveServerCertificateException(nextServerUrl, allowUntrustedCertificate);
-    window.location.reload();
+    setAuthPending(true);
+    setAuthError('');
+    try {
+      await window.coveSecurity?.setServerCertificateException(nextServerUrl, allowUntrustedCertificate);
+      const result = authMode === 'register'
+        ? await registerAccount(nextServerUrl, draftEmail, draftPassword, username)
+        : await loginAccount(nextServerUrl, draftEmail, draftPassword);
+      persistProfile(result.profile);
+      localStorage.setItem('cove_server_url', nextServerUrl);
+      saveServerCertificateException(nextServerUrl, allowUntrustedCertificate);
+      window.location.reload();
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : '账号请求失败');
+      setAuthPending(false);
+    }
   };
 
   const handleReset = () => {
+    const session = readAccountSession(serverURL);
+    if (session) void fetch(`${serverURL}/api/auth/logout`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: session.token }), keepalive: true,
+    }).catch(() => {});
     clearProfile();
+    clearAccountSession();
     localStorage.removeItem('cove_server_url');
     saveServerCertificateException('', false);
     window.location.reload();
@@ -138,7 +169,7 @@ export default function App() {
 
   if (needLogin) {
     return (
-      <div className="flex h-full items-center justify-center bg-gradient-to-br from-zinc-950 via-black to-zinc-900">
+      <div className="flex min-h-full items-center justify-center overflow-y-auto bg-gradient-to-br from-zinc-950 via-black to-zinc-900 py-8">
         <div className="w-full max-w-sm px-6">
           <div className="mb-8 text-center">
             <div className="mb-5 inline-flex h-16 w-16 items-center justify-center rounded-3xl border border-white/15 bg-white/10 shadow-2xl backdrop-blur-xl"><span className="text-3xl font-bold text-white">C</span></div>
@@ -146,24 +177,44 @@ export default function App() {
             <p className="mt-1 text-base text-white/45">连接朋友的语音与屏幕</p>
           </div>
           <div className="flex flex-col gap-5 rounded-3xl border border-white/10 bg-white/[0.07] p-7 shadow-2xl backdrop-blur-2xl">
-            <div>
+            <div className="flex rounded-xl bg-black/25 p-1">
+              {(['login', 'register'] as const).map(mode => <button key={mode} type="button" onClick={() => { setAuthMode(mode); setAuthError(''); }} className={`flex-1 rounded-lg py-2 text-sm font-medium transition ${authMode === mode ? 'bg-white/15 text-white' : 'text-white/40 hover:text-white/65'}`}>{mode === 'login' ? '登录' : '注册'}</button>)}
+            </div>
+            {authMode === 'register' && <div>
               <label className="mb-2 block text-sm font-medium text-white/55" htmlFor="login-name">用户名</label>
               <div className="flex items-center gap-3 rounded-xl border border-white/10 bg-white/[0.07] px-4 transition focus-within:border-cyan-300/45 focus-within:ring-2 focus-within:ring-cyan-300/10">
                 <UserRound size={18} className="text-white/30" />
                 <input id="login-name" className="min-w-0 flex-1 bg-transparent py-3 text-base text-white outline-none placeholder:text-white/20" placeholder="你的名字" value={draftName} onChange={event => setDraftName(event.target.value)} autoFocus />
+              </div>
+            </div>}
+            <div>
+              <label className="mb-2 block text-sm font-medium text-white/55" htmlFor="login-email">邮箱</label>
+              <div className="flex items-center gap-3 rounded-xl border border-white/10 bg-white/[0.07] px-4 transition focus-within:border-cyan-300/45 focus-within:ring-2 focus-within:ring-cyan-300/10">
+                <Mail size={18} className="text-white/30" />
+                <input id="login-email" type="email" autoComplete="email" className="min-w-0 flex-1 bg-transparent py-3 text-base text-white outline-none placeholder:text-white/20" placeholder="name@example.com" value={draftEmail} onChange={event => setDraftEmail(event.target.value)} autoFocus={authMode === 'login'} />
+              </div>
+              <p className="mt-2 text-xs text-white/30">目前只检查邮箱格式，不会发送验证邮件。</p>
+            </div>
+            <div>
+              <label className="mb-2 block text-sm font-medium text-white/55" htmlFor="login-password">密码</label>
+              <div className="flex items-center gap-3 rounded-xl border border-white/10 bg-white/[0.07] px-4 transition focus-within:border-cyan-300/45 focus-within:ring-2 focus-within:ring-cyan-300/10">
+                <LockKeyhole size={18} className="text-white/30" />
+                <input id="login-password" type="password" autoComplete={authMode === 'register' ? 'new-password' : 'current-password'} className="min-w-0 flex-1 bg-transparent py-3 text-base text-white outline-none placeholder:text-white/20" placeholder="至少 8 个字符" value={draftPassword} onChange={event => setDraftPassword(event.target.value)} onKeyDown={event => event.key === 'Enter' && void handleLogin()} />
               </div>
             </div>
             <div>
               <label className="mb-2 block text-sm font-medium text-white/55" htmlFor="login-server">服务器地址</label>
               <div className="flex items-center gap-3 rounded-xl border border-white/10 bg-white/[0.07] px-4 transition focus-within:border-cyan-300/45 focus-within:ring-2 focus-within:ring-cyan-300/10">
                 <Server size={18} className="text-white/30" />
-                <input id="login-server" className="min-w-0 flex-1 bg-transparent py-3 font-mono text-sm text-white outline-none placeholder:text-white/20" placeholder="https://example.com:3001" value={draftUrl} onChange={event => setDraftUrl(event.target.value)} onKeyDown={event => event.key === 'Enter' && handleLogin()} />
+                <input id="login-server" className="min-w-0 flex-1 bg-transparent py-3 font-mono text-sm text-white outline-none placeholder:text-white/20" placeholder="https://example.com:3001" value={draftUrl} onChange={event => setDraftUrl(event.target.value)} onKeyDown={event => event.key === 'Enter' && void handleLogin()} />
               </div>
               <p className="mt-2 text-xs leading-relaxed text-white/30">这是连接 Cove 的必填地址，可填写你的 HTTPS 或本地服务器地址。</p>
               <p className="mt-1.5 text-xs leading-relaxed text-amber-200/45">localhost 只适用于服务器就在这台电脑上；其他用户需要填写房主提供的地址。</p>
+              {/^http:\/\/(?!localhost(?::|\/|$)|127\.0\.0\.1(?::|\/|$))/i.test(draftUrl.trim()) && <p className="mt-1.5 text-xs leading-relaxed text-red-200/65">公网 HTTP 会明文传输登录凭据，正式使用账号前应为服务器配置 HTTPS。</p>}
               <ServerCertificateToggle serverUrl={draftUrl} checked={allowUntrustedCertificate} onChange={setAllowUntrustedCertificate} />
             </div>
-            <button className="mt-1 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-white py-3 text-base font-semibold text-zinc-900 transition hover:bg-cyan-100 disabled:cursor-not-allowed disabled:opacity-25" disabled={!draftName.trim() || !draftUrl.trim()} onClick={handleLogin}><LogIn size={18} /> 进入 Cove</button>
+            {authError && <p className="rounded-xl border border-red-400/15 bg-red-500/10 px-3 py-2 text-sm text-red-200" role="alert">{authError}</p>}
+            <button className="mt-1 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-white py-3 text-base font-semibold text-zinc-900 transition hover:bg-cyan-100 disabled:cursor-not-allowed disabled:opacity-25" disabled={authPending || !validAccountEmail(draftEmail) || draftPassword.length < 8 || !draftUrl.trim() || (authMode === 'register' && !draftName.trim())} onClick={() => void handleLogin()}>{authPending ? <LoaderCircle size={18} className="animate-spin" /> : <LogIn size={18} />} {authMode === 'login' ? '登录 Cove' : '注册并进入'}</button>
           </div>
         </div>
       </div>

@@ -88,7 +88,7 @@ export function isMemberVoiceAudio(kind: string, sourceType?: string): boolean {
 }
 
 /** Only the gain path is audible; Chromium also needs a muted element to activate remote playout. */
-export function createVoiceAudioOutput(
+export function createRemoteAudioOutput(
   context: AudioContext,
   stream: MediaStream,
   volume: number,
@@ -114,6 +114,9 @@ export function createVoiceAudioOutput(
   return {
     source,
     gain,
+    setVolume(value: number) {
+      if (!closed) gain.gain.value = Number.isFinite(value) ? Math.max(0, Math.min(2, value)) : 1;
+    },
     async resume() {
       if (!closed) await Promise.all([context.resume(), activationElement.play()]);
     },

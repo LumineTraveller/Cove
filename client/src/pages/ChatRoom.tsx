@@ -304,7 +304,23 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
   const [kickConfirmMember, setKickConfirmMember] = useState<RoomMember | null>(null);
   const [kickNotice, setKickNotice] = useState<{ title: string; message: string; returnToList: boolean } | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [chatDrawerOpen, setChatDrawerOpen] = useState(true);
+  const [draggingVolumeMember, setDraggingVolumeMember] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (draggingVolumeMember === null) return;
+    const finishDrag = () => setDraggingVolumeMember(null);
+    window.addEventListener('pointerup', finishDrag);
+    window.addEventListener('pointercancel', finishDrag);
+    window.addEventListener('blur', finishDrag);
+    return () => {
+      window.removeEventListener('pointerup', finishDrag);
+      window.removeEventListener('pointercancel', finishDrag);
+      window.removeEventListener('blur', finishDrag);
+    };
+  }, [draggingVolumeMember]);
+  // 共享画面时聊天栏默认收起；只有用户主动点击右上角按钮才展开。
+  // 这样消息到达时不会把隐藏的抽屉重新带入共享画面布局。
+  const [chatDrawerOpen, setChatDrawerOpen] = useState(false);
   const [showRoomMenu, setShowRoomMenu] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
@@ -334,8 +350,15 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
   const [diagnosticsCompact, setDiagnosticsCompact] = useState(false);
 
   const rtc = useWebRTC(socket, roomId!);
+  const hasScreen = Boolean(rtc.localScreen || rtc.remoteScreen);
   const { screenContainerRef, screenMaximized, nativeFullscreen, toggleFullscreen, toggleNativeFullscreen }
     = useScreenFullscreen(Boolean(rtc.localScreen || rtc.remoteScreen));
+
+  useLayoutEffect(() => {
+    // 每次开始观看/共享都从收起状态开始；之后的消息刷新只更新内容，
+    // 不改变用户主动选择的展开状态。
+    if (hasScreen) setChatDrawerOpen(false);
+  }, [hasScreen]);
 
   const refreshApplicationAudioSources = useCallback(async () => {
     if (!window.coveApplicationAudio) {
@@ -380,7 +403,10 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
       .then((history: Message[]) => {
         if (!active) return;
         setMessages(current => {
-          const merged = new Map(history.map(message => [message.id, message]));
+          // system/soundpack 是当前会话播报，不应在离开频道后从历史中恢复。
+          // 客户端也做一次过滤，以兼容尚未升级的服务端。
+          const persistentHistory = history.filter(message => message.type !== 'system' && message.type !== 'soundpack');
+          const merged = new Map(persistentHistory.map(message => [message.id, message]));
           current.forEach(message => merged.set(message.id, message));
           return [...merged.values()].sort((left, right) => left.timestamp - right.timestamp);
         });
@@ -433,14 +459,22 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
 
   const chatHistoryReady = messagesLoaded && room?.id === roomId;
   useLayoutEffect(() => {
-    if (!chatHistoryReady || !roomId || !messagesEndRef.current) return;
+    // 隐藏的绝对定位抽屉仍在 DOM 中。对它调用 scrollIntoView 会让浏览器
+    // 尝试把屏幕外的目标滚回视口，表现为聊天区露出一条空框并把主画面向左顶。
+    // 抽屉收起时跳过滚动，用户展开时再由依赖变化把内容定位到底部。
+    if (!chatHistoryReady || !roomId || !messagesEndRef.current || (hasScreen && !chatDrawerOpen)) return;
     const isInitialScroll = initiallyScrolledRoomRef.current !== roomId;
-    messagesEndRef.current.scrollIntoView({
-      behavior: isInitialScroll ? 'auto' : 'smooth',
-      block: 'end',
-    });
+    const scrollContainer = messagesEndRef.current.parentElement;
+    if (scrollContainer) {
+      // 只滚动聊天列表本身，避免 scrollIntoView 把绝对定位的聊天抽屉
+      // 当作视口目标，连带改变共享画面的水平滚动位置。
+      scrollContainer.scrollTo({
+        top: scrollContainer.scrollHeight,
+        behavior: isInitialScroll ? 'auto' : 'smooth',
+      });
+    }
     initiallyScrolledRoomRef.current = roomId;
-  }, [chatHistoryReady, messages, roomId]);
+  }, [chatHistoryReady, messages, roomId, hasScreen, chatDrawerOpen]);
 
   useLayoutEffect(() => {
     const element = messageInputRef.current;
@@ -616,7 +650,6 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
   const voiceMemberSocketIds = new Set(rtc.voiceMembers.map(member => member.socketId));
   const sortedRoomMembers = sortRoomMembers(roomMembers, voiceMemberSocketIds, rtc.localSocketId ?? socket.id);
 
-  const hasScreen    = !!rtc.localScreen || !!rtc.remoteScreen;
   // 观看期间仅在视频内部显示当前共享提示，不改动其他共享的订阅或播放状态。
   const hasScreenBanner = rtc.inVoice && rtc.availableScreens.length > 0 && !rtc.localScreen && !rtc.remoteScreen;
   const hasApplicationAudioBanner = rtc.inVoice && !rtc.remoteScreen && (rtc.isApplicationAudioSharing || rtc.remoteApplicationAudios.length > 0);
@@ -798,7 +831,6 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
                               </span>
                               {member.isOwner && <Crown size={14} className="flex-shrink-0 text-amber-300" aria-label="房主" />}
                               {showVoiceState && voiceMuted && <MicOff size={13} className="flex-shrink-0 text-red-300/70" aria-label="麦克风已关闭" />}
-                              {showVoiceState && !isSelf && <span className="text-xs tabular-nums text-white/30">{Math.round((rtc.memberVolumes[member.socketId] ?? 1) * 100)}%</span>}
                             </div>
                             {profileRemarks[member.userId] && !isSelf && <p className="mt-0.5 truncate text-xs text-white/30">用户名：{member.username}</p>}
                             {member.isOwner && <p className="mt-0.5 text-xs text-amber-300/50">房主</p>}
@@ -835,7 +867,7 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
                           {sharingApplicationAudio && <span className="flex h-4 w-4 items-center justify-center rounded-md bg-violet-300/15 text-violet-300" title="正在共享应用音频"><AudioLines size={11} /></span>}
                         </span>
                         {!isSelf && rtc.inVoice && voiceMember ? (
-                          <div className="flex min-w-0 flex-1 items-center gap-x-2" title={`调整你听到的 ${member.username} 音量；100%为原始音量，最高200%`}>
+                          <div className="flex min-w-0 flex-1 items-center gap-x-2">
                             <button
                               type="button"
                               onClick={() => rtc.toggleMemberMute(member.socketId, voiceMember.userId)}
@@ -848,9 +880,8 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
                                 : <Volume2 size={13} />}
                             </button>
                             <div
-                              className="relative h-5 min-w-0 w-0 flex-1"
+                              className="group/volume relative h-5 min-w-0 w-0 flex-1"
                               data-testid="voice-volume-meter"
-                              title={`悬停后滚动调节 ${member.username} 的音量；100%为原始音量，最高200%`}
                               onWheel={event => {
                                 if (event.deltaY === 0) return;
                                 event.preventDefault();
@@ -888,9 +919,23 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
                                 step="1"
                                 value={Math.round((rtc.memberVolumes[member.socketId] ?? 1) * 100)}
                                 onChange={event => rtc.setMemberVolume(member.socketId, voiceMember.userId, Number(event.target.value) / 100)}
+                                onPointerDown={event => {
+                                  if (event.button !== 0) return;
+                                  setDraggingVolumeMember(member.socketId);
+                                  event.currentTarget.setPointerCapture(event.pointerId);
+                                }}
+                                onLostPointerCapture={() => setDraggingVolumeMember(null)}
                                 className="absolute inset-x-0 top-1/2 h-5 w-full -translate-y-1/2 cursor-pointer opacity-0"
                                 aria-label={`${member.username} 的接收音量（0-200%，100%为原始音量）`}
+                                aria-valuetext={`${Math.round((rtc.memberVolumes[member.socketId] ?? 1) * 100)}%`}
                               />
+                              <span
+                                aria-hidden="true"
+                                className={`pointer-events-none absolute bottom-full z-40 mb-2 -translate-x-1/2 rounded-lg border border-white/10 bg-zinc-800 px-2.5 py-1 text-sm tabular-nums text-white shadow-lg transition-opacity duration-100 ${draggingVolumeMember === member.socketId ? 'opacity-100' : 'opacity-0 group-hover/volume:opacity-100 group-focus-within/volume:opacity-100'}`}
+                                style={{ left: `${Math.round((rtc.memberVolumes[member.socketId] ?? 1) / 2 * 100)}%` }}
+                              >
+                                {Math.round((rtc.memberVolumes[member.socketId] ?? 1) * 100)}
+                              </span>
                             </div>
                           </div>
                         ) : (
@@ -949,10 +994,10 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
             ) : (
               <div className="flex items-center gap-1.5 rounded-2xl border border-white/10 bg-black/20 p-1.5">
                 <button onClick={rtc.toggleStats} className={`rounded-xl p-2 transition ${rtc.statsEnabled ? 'bg-sky-500/20 text-sky-300' : 'text-white/45 hover:bg-white/10 hover:text-white'}`} aria-label={rtc.statsEnabled ? '关闭媒体统计' : '打开媒体统计'} title="媒体统计"><Activity size={18} /></button>
-                <button onClick={rtc.toggleMute} disabled={rtc.isForceMuted || !sessionReady} className={`rounded-xl p-2 transition disabled:cursor-not-allowed ${rtc.isForceMuted || rtc.isMuted ? 'bg-red-500/20 text-red-300' : 'text-white/60 hover:bg-white/10 hover:text-white'}`} aria-label={rtc.isForceMuted ? '已被房主语音禁言' : rtc.isMuted ? '取消静音' : '静音'} title={rtc.isForceMuted ? '已被房主语音禁言' : rtc.isMuted ? '取消静音' : '静音'}>{rtc.isMuted || rtc.isForceMuted ? <MicOff size={18} /> : <Mic size={18} />}</button>
+                <button onClick={rtc.toggleMute} disabled={rtc.isForceMuted || !sessionReady} className={`rounded-xl p-2 transition disabled:cursor-not-allowed ${rtc.isForceMuted || rtc.isMuted ? 'bg-red-500/20 text-red-300' : 'text-emerald-300 hover:bg-white/10 hover:text-emerald-200'}`} aria-label={rtc.isForceMuted ? '已被房主语音禁言' : rtc.isMuted ? '取消静音' : '静音'} title={rtc.isForceMuted ? '已被房主语音禁言' : rtc.isMuted ? '取消静音' : '静音'}>{rtc.isMuted || rtc.isForceMuted ? <MicOff size={18} /> : <Mic size={18} />}</button>
                 <button onClick={!rtc.isSharing ? () => setShowScreenModal(true) : rtc.stopScreenShare} disabled={!sessionReady} className={`rounded-xl p-2 transition ${rtc.isSharing ? 'bg-amber-500/20 text-amber-300' : 'text-white/60 hover:bg-white/10 hover:text-white'}`} aria-label={rtc.isSharing ? '停止屏幕共享' : '开始屏幕共享'} title={rtc.isSharing ? '停止屏幕共享' : '开始屏幕共享'}><MonitorUp size={18} /></button>
                 <button onClick={rtc.isApplicationAudioSharing ? rtc.stopApplicationAudioShare : openApplicationAudioModal} disabled={!sessionReady} className={`rounded-xl p-2 transition ${rtc.isApplicationAudioSharing ? 'bg-violet-400/20 text-violet-200' : 'text-white/60 hover:bg-white/10 hover:text-white'}`} aria-label={rtc.isApplicationAudioSharing ? '停止应用音频共享' : '共享应用音频'} title={rtc.isApplicationAudioSharing ? `停止共享 ${rtc.applicationAudioLabel ?? '应用'} 的音频` : '共享应用音频（仅音频）'}><AudioLines size={18} /></button>
-                <button onClick={rtc.leaveVoice} className="rounded-xl p-2 text-white/45 transition hover:bg-red-500/20 hover:text-red-300" aria-label="离开语音" title="离开语音"><PhoneOff size={18} /></button>
+                <button onClick={rtc.leaveVoice} className="rounded-xl p-2 text-red-400 transition hover:bg-red-500/20 hover:text-red-200" aria-label="离开语音" title="离开语音"><PhoneOff size={18} /></button>
               </div>
             )}
             {rtc.inVoice && rtc.availableScreens.length > 0 && !rtc.localScreen && (
@@ -1050,26 +1095,16 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
               {rtc.remoteScreen ? (
                 <ScreenVolumeControl volume={rtc.screenReceiveVolume} onChange={rtc.setScreenReceiveVolume} />
               ) : rtc.localScreen && rtc.shareAudio ? (
-                <label className="absolute bottom-3 right-3 flex items-center gap-2 rounded-xl border border-white/10 bg-black/65 px-3 py-2 text-xs text-white/70 backdrop-blur-md" title="调节对方听到的共享音量">
-                  {rtc.screenShareVolume === 0 ? <VolumeX size={15} /> : <Volume2 size={15} />}
-                  <span>发送音量</span>
-                  <input
-                    type="range"
-                    min="0"
-                    max="100"
-                    step="1"
-                    value={Math.round(rtc.screenShareVolume * 100)}
-                    onChange={event => rtc.setScreenShareVolume(Number(event.target.value) / 100)}
-                    className="h-1 w-24 cursor-pointer accent-cyan-300"
-                    aria-label="共享发送音量"
-                  />
-                  <span className="w-8 text-right tabular-nums">{Math.round(rtc.screenShareVolume * 100)}%</span>
-                </label>
+                <ScreenVolumeControl
+                  volume={rtc.screenShareVolume}
+                  onChange={rtc.setScreenShareVolume}
+                  ariaLabel="共享发送音量"
+                />
               ) : null}
 
               {/* 实时统计悬浮显示（开关在语音栏） */}
               {rtc.statsEnabled && (
-                <div className={`absolute top-3 left-3 bg-black/80 backdrop-blur-md text-white text-xs px-3 py-2 rounded-xl border border-white/10 font-mono space-y-0.5 ${diagnosticsCompact ? 'min-w-[240px]' : 'min-w-[360px]'}`}>
+                <div className={`absolute top-3 left-3 z-30 bg-black/80 backdrop-blur-md text-white text-xs px-3 py-2 rounded-xl border border-white/10 font-mono space-y-0.5 ${diagnosticsCompact ? 'min-w-[240px]' : 'min-w-[360px]'}`}>
                   <div className="mb-1 flex items-center justify-between gap-3 border-b border-white/10 pb-1">
                     <span className="font-sans font-semibold text-white/90">媒体诊断 · {rtc.localScreen ? '共享方' : '观看方'}</span>
                     <div className="flex gap-1 font-sans">
@@ -1126,7 +1161,9 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
         )}
 
         {/* Messages */}
-        <div className={hasScreen ? (chatDrawerOpen ? 'absolute bottom-20 right-0 top-16 z-10 w-96 overflow-y-auto border-l border-white/10 bg-zinc-950/90 px-5 py-4 shadow-2xl backdrop-blur-xl' : 'hidden') : 'flex-1 overflow-y-auto min-h-0 px-6 py-5'}>
+        <div className={hasScreen
+          ? `absolute bottom-20 right-0 top-16 z-10 w-96 overflow-y-auto border-l border-white/10 bg-zinc-950/90 px-5 py-4 shadow-2xl backdrop-blur-xl transform transition-[transform,opacity] duration-300 ease-in-out will-change-transform motion-reduce:transition-none ${chatDrawerOpen ? 'translate-x-0 opacity-100' : 'translate-x-full opacity-0 pointer-events-none'}`
+          : 'flex-1 overflow-y-auto min-h-0 px-6 py-5'}>
           {messages.length === 0 && (
             <div className="flex flex-col items-center justify-center h-full gap-3">
               <MessageCircle size={42} className="text-white/20" />
@@ -1191,7 +1228,9 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
         </div>
 
         {/* Input */}
-        <div className={hasScreen ? (chatDrawerOpen ? 'absolute bottom-0 right-0 z-10 w-96 border-l border-t border-white/10 bg-zinc-950/95 px-4 py-3 backdrop-blur-xl' : 'hidden') : 'flex-shrink-0 px-5 py-4 border-t border-white/[0.08]'}>
+        <div className={hasScreen
+          ? `absolute bottom-0 right-0 z-10 w-96 border-l border-t border-white/10 bg-zinc-950/95 px-4 py-3 backdrop-blur-xl transform transition-[transform,opacity] duration-300 ease-in-out will-change-transform motion-reduce:transition-none ${chatDrawerOpen ? 'translate-x-0 opacity-100' : 'translate-x-full opacity-0 pointer-events-none'}`
+          : 'flex-shrink-0 px-5 py-4 border-t border-white/[0.08]'}>
           <div
             onDragEnter={handleImageDragEnter}
             onDragOver={handleImageDragOver}

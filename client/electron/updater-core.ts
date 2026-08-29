@@ -3,6 +3,7 @@ export type { UpdateState, UpdateStatus } from './update-state';
 
 export interface UpdateInfoLike {
   version: string;
+  downloadedFile?: string;
 }
 
 export interface DownloadProgressLike {
@@ -34,6 +35,7 @@ export interface UpdaterLike {
   autoDownload: boolean;
   autoInstallOnAppQuit: boolean;
   allowPrerelease: boolean;
+  disableDifferentialDownload: boolean;
   logger: LoggerLike | null;
   on(event: string, listener: (...args: any[]) => void): unknown;
   off?(event: string, listener: (...args: any[]) => void): unknown;
@@ -63,6 +65,7 @@ export interface AutoUpdaterOptions {
   startupDelayMs?: number;
   checkIntervalMs?: number;
   resolveSources?: () => Promise<UpdateSourceCandidate[]>;
+  onInstallerReady?: (info: UpdateInfoLike, source?: UpdateSourceCandidate['id']) => void;
   now?: () => number;
 }
 
@@ -96,6 +99,7 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
     startupDelayMs = DEFAULT_STARTUP_DELAY_MS,
     checkIntervalMs = DEFAULT_CHECK_INTERVAL_MS,
     resolveSources = async () => [],
+    onInstallerReady,
     now = Date.now,
   } = options;
 
@@ -164,8 +168,12 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
     deferredDownloadError = null;
     activeDownloadPromise = null;
     activeSource = source;
+    // Gitee's attachment redirect can ignore Range and return the entire EXE.
+    // Disabling multi-range requests alone still leaves single-range diffs on.
+    updater.disableDifferentialDownload = source.id === 'gitee';
     updater.setFeedURL?.({ provider: 'generic', url: source.feedUrl, useMultipleRangeRequest: false });
     logger.info(`[updater] 使用 ${source.label} 更新源 ${source.feedUrl}`);
+    logger.info(`[updater] 下载方式：${updater.disableDifferentialDownload ? '全量安装包（禁用差分）' : '优先差分，失败时全量下载'}`);
     return true;
   };
 
@@ -176,7 +184,9 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
   const onAvailable = (info: UpdateInfoLike) => {
     checking = false;
     logger.info(`[updater] 发现新版本 ${info.version}，开始后台下载`);
-    setState(stateForSource({ status: 'available', version: info.version, percent: 0, message: '发现新版本，准备下载。' }));
+    setState(stateForSource({ status: 'available', version: info.version, percent: 0,
+      message: activeSource?.id === 'gitee' ? '发现新版本，准备从 Gitee 下载完整安装包。' : '发现新版本，准备下载。',
+    }));
   };
   const onNotAvailable = (info: UpdateInfoLike) => {
     checking = false;
@@ -209,9 +219,14 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
     setWindowProgress(getWindow, -1);
     logger.info(`[updater] 版本 ${info.version} 下载完成`);
     if (disposed) return;
+    // Persist cleanup eligibility only after electron-updater has validated the
+    // package, and before the renderer can request installation.
+    try { onInstallerReady?.(info, activeSource?.id); }
+    catch (error) { logger.warn('[updater] 无法记录安装后清理任务，保留安装包', error); }
     setState(stateForSource({ status: 'downloaded', version: info.version, percent: 100,
       transferred: state.transferred, total: state.total,
-      message: '更新器已确认安装包就绪。可以立即重启安装，或退出 Cove 时安装。',
+      message: '更新器已确认安装包就绪。可以立即重启安装，或退出 Cove 时安装。' +
+        (activeSource?.id === 'gitee' ? '新版本启动成功后自动清理本次安装包缓存。' : ''),
     }));
   };
   const onCancelled = () => {

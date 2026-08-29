@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   applyAudioElementOutput,
-  createVoiceAudioOutput,
+  createRemoteAudioOutput,
   isMemberVoiceAudio,
   createMicrophoneConstraints,
   DEFAULT_AUDIO_DEVICE_ID,
@@ -81,7 +81,7 @@ test('live microphone audio enters the gain node directly, with remembered mute 
       createMediaElementSource: () => { throw new Error('A live stream must not use the element playback path'); },
     } as unknown as AudioContext;
     const activation = { pause() {} } as HTMLAudioElement;
-    const output = createVoiceAudioOutput(context, stream, volume, activation);
+    const output = createRemoteAudioOutput(context, stream, volume, activation);
     assert.equal(output.gain.gain.value, expected);
     assert.deepEqual(connections, [gain, destination]);
     assert.equal(activation.srcObject, stream);
@@ -99,12 +99,20 @@ test('voice output activates the muted stream and releases it without stopping t
   const context = { createMediaStreamSource: () => source, createGain: () => gain, destination: {}, resume: async () => { resumed++; } } as unknown as AudioContext;
   const activation = { play: async () => { played++; }, pause: () => { paused++; } } as unknown as HTMLAudioElement;
   const stream = { getTracks: () => { throw new Error('Do not stop shared incoming tracks'); } } as unknown as MediaStream;
-  const output = createVoiceAudioOutput(context, stream, 0.35, activation);
+  const output = createRemoteAudioOutput(context, stream, 0.35, activation);
   await output.resume();
   assert.equal(resumed, 1);
   assert.equal(played, 1);
+  output.setVolume(0);
+  assert.equal(gain.gain.value, 0);
+  output.setVolume(0.25);
+  assert.equal(gain.gain.value, 0.25);
+  assert.equal(activation.muted, true);
+  assert.equal(activation.volume, 0);
   output.close();
   output.close();
+  output.setVolume(1);
+  assert.equal(gain.gain.value, 0.25, 'late controls must not reactivate a closed output');
   await output.resume();
   assert.equal(paused, 1);
   assert.equal(disconnected, 2);

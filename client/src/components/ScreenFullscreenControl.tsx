@@ -27,7 +27,7 @@ export function ScreenFullscreenControl({ maximized, nativeFullscreen, onToggleW
         <button
           ref={trigger}
           onClick={onToggleNative}
-          className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-black/50 px-3 py-1.5 text-sm font-medium text-white backdrop-blur-md transition-colors hover:bg-black/70"
+          className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-black/30 px-3 py-1.5 text-sm font-medium text-white backdrop-blur-md transition-colors hover:bg-black/50"
           aria-label="退出全屏"
           title="退出全屏"
         ><Minimize2 size={16} />退出全屏</button>
@@ -62,7 +62,7 @@ export function ScreenFullscreenControl({ maximized, nativeFullscreen, onToggleW
       <button
         ref={trigger}
         onClick={onToggleWindow}
-        className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-black/50 px-3 py-1.5 text-sm font-medium text-white backdrop-blur-md transition-colors hover:bg-black/70"
+        className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-black/30 px-3 py-1.5 text-sm font-medium text-white backdrop-blur-md transition-colors hover:bg-black/50"
         aria-label={maximized ? '退出窗口全屏' : '窗口全屏'}
         aria-expanded={allowNativeFullscreen ? open : undefined}
         aria-controls={allowNativeFullscreen ? menuId : undefined}
@@ -71,7 +71,7 @@ export function ScreenFullscreenControl({ maximized, nativeFullscreen, onToggleW
         <>
           {/* 间距由可悬停的 padding 提供；margin 会留下触发 mouseleave 的空洞。 */}
           <div id={menuId} className={`absolute right-0 top-full w-44 pt-1.5 ${open ? '' : 'hidden'}`}>
-            <div className="rounded-xl border border-white/15 bg-zinc-900/95 p-1.5 shadow-2xl backdrop-blur-xl">
+            <div className="rounded-xl border border-white/15 bg-zinc-900/80 p-1.5 shadow-2xl backdrop-blur-xl">
               <button
                 ref={nativeButton}
                 onClick={() => { cancelClose(); setOpen(false); onToggleNative(); }}

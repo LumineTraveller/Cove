@@ -16,6 +16,7 @@ import { createLobbyPresenceSnapshot } from './presence';
 import { soundpackVoiceAudience } from './soundpackAudience';
 import { createVoicePresenceEvent, voicePresenceMessage, type VoicePresenceAction } from './voicePresence';
 import { summarizeRtpStat, summarizeTransportStat } from './mediaDiagnostics';
+import { AccountAuthError, createAccountStore } from './accountAuth';
 
 const app = express();
 const httpServer = createServer(app);
@@ -35,6 +36,7 @@ fs.mkdirSync(dataDir, { recursive: true });
 
 const db = new Database(dbPath);
 db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS rooms (
@@ -93,6 +95,8 @@ if (!soundpackColumns.some(column => column.name === 'sortOrder')) {
   })(existing);
 }
 
+const accounts = createAccountStore(db);
+
 // ownerId 是本地持久身份凭据，不通过 API 或 Socket 广播给其他客户端。
 const stmtGetRooms       = db.prepare('SELECT id, name, createdAt, ownerName FROM rooms ORDER BY createdAt ASC');
 const stmtGetRoom        = db.prepare('SELECT id, name, createdAt, ownerName FROM rooms WHERE id = ?');
@@ -103,7 +107,9 @@ const stmtUpdateOwnerName = db.prepare('UPDATE rooms SET ownerName = ? WHERE own
 const stmtDeleteRoom     = db.prepare('DELETE FROM rooms WHERE id = ?');
 const stmtDeleteRoomMessages = db.prepare('DELETE FROM messages WHERE roomId = ?');
 const stmtDeleteRoomMutes = db.prepare('DELETE FROM room_mutes WHERE roomId = ?');
-const stmtGetMessages    = db.prepare('SELECT * FROM messages WHERE roomId = ? ORDER BY timestamp ASC');
+// 语音加入/离开和语音包播放属于当前会话播报，不应在重新进入频道时恢复。
+// 过滤这里也能兼容升级前已经写入数据库的旧播报记录。
+const stmtGetMessages    = db.prepare("SELECT * FROM messages WHERE roomId = ? AND type NOT IN ('system', 'soundpack') ORDER BY timestamp ASC");
 const stmtInsertMsg      = db.prepare('INSERT INTO messages (id, roomId, author, content, type, timestamp) VALUES (?, ?, ?, ?, ?, ?)');
 const stmtIsRoomMuted    = db.prepare('SELECT 1 FROM room_mutes WHERE roomId = ? AND clientId = ?');
 const stmtMuteMember     = db.prepare('INSERT OR REPLACE INTO room_mutes (roomId, clientId, username, createdAt) VALUES (?, ?, ?, ?)');
@@ -115,6 +121,13 @@ const stmtInsertSoundpack = db.prepare('INSERT INTO soundpacks (id, name, filena
 const stmtUpdateSoundpackOrder = db.prepare('UPDATE soundpacks SET sortOrder = ? WHERE id = ?');
 const stmtRenameSoundpack = db.prepare('UPDATE soundpacks SET name = ? WHERE id = ?');
 const stmtDeleteSoundpack = db.prepare('DELETE FROM soundpacks WHERE id = ?');
+const migrateLegacyIdentity = db.transaction((legacyId: string, accountId: string) => {
+  db.prepare('UPDATE rooms SET ownerId = ? WHERE ownerId = ?').run(accountId, legacyId);
+  db.prepare('UPDATE soundpacks SET uploaderId = ? WHERE uploaderId = ?').run(accountId, legacyId);
+  db.prepare(`INSERT OR IGNORE INTO room_mutes (roomId, clientId, username, createdAt)
+    SELECT roomId, ?, username, createdAt FROM room_mutes WHERE clientId = ?`).run(accountId, legacyId);
+  db.prepare('DELETE FROM room_mutes WHERE clientId = ?').run(legacyId);
+});
 const reorderSoundpacks = db.transaction((orderedIds: string[]) => {
   orderedIds.forEach((id, index) => stmtUpdateSoundpackOrder.run(index, id));
 });
@@ -213,6 +226,37 @@ if (fs.existsSync(distPath)) {
 }
 
 // ── REST API ──────────────────────────────────────────────────────────────────
+
+const authResponse = (error: unknown, res: express.Response) => {
+  if (error instanceof AccountAuthError) res.status(error.status).json({ error: error.message });
+  else {
+    console.error('[auth]', error);
+    res.status(500).json({ error: '账号服务暂时不可用' });
+  }
+};
+
+app.post('/api/auth/register', async (req, res) => {
+  const { email, password, username } = req.body as { email?: unknown; password?: unknown; username?: unknown };
+  if (typeof email !== 'string' || typeof password !== 'string' || typeof username !== 'string') {
+    res.status(400).json({ error: '请填写邮箱、密码和用户名' }); return;
+  }
+  try { res.status(201).json(await accounts.register(email, password, username)); }
+  catch (error) { authResponse(error, res); }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  const { email, password } = req.body as { email?: unknown; password?: unknown };
+  if (typeof email !== 'string' || typeof password !== 'string') {
+    res.status(400).json({ error: '请填写邮箱和密码' }); return;
+  }
+  try { res.json(await accounts.login(email, password)); }
+  catch (error) { authResponse(error, res); }
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  accounts.logout(req.body?.token);
+  res.status(204).end();
+});
 
 // ── 语音包 REST ───────────────────────────────────────────────────────────────
 
@@ -515,7 +559,7 @@ function announceVoicePresence(
     type: 'system',
     timestamp: event.timestamp,
   };
-  stmtInsertMsg.run(msg.id, msg.roomId, msg.author, msg.content, msg.type, msg.timestamp);
+  // presence 播报只在当前频道会话中实时广播，不写入聊天历史。
   io.to(roomId).emit('message:new', msg);
 }
 
@@ -653,19 +697,27 @@ io.on('connection', socket => {
   };
 
   socket.on('user:register', (
-    registration: string | { username?: string; clientId?: string; avatarUrl?: unknown },
+    registration: string | { username?: string; clientId?: string; authToken?: string; avatarUrl?: unknown },
     cb?: (result: { ok: boolean; error?: string }) => void,
   ) => {
-    const username = (typeof registration === 'string' ? registration : registration?.username)?.trim();
+    const account = typeof registration === 'string' ? null : accounts.accountForToken(registration?.authToken);
+    if (typeof registration !== 'string' && registration?.authToken && !account) {
+      cb?.({ ok: false, error: '登录已失效，请重新登录' }); return;
+    }
+    const username = (account?.username ?? (typeof registration === 'string' ? registration : registration?.username))?.trim();
     const suppliedClientId = typeof registration === 'string' ? '' : registration?.clientId?.trim();
     if (!username) { cb?.({ ok: false, error: '用户名不能为空' }); return; }
 
     // 旧客户端没有 clientId 时仍可聊天，但它的身份只在本次连接内有效。
-    const clientId = suppliedClientId && suppliedClientId.length >= 16 && suppliedClientId.length <= 128
-      ? suppliedClientId
-      : `socket:${socket.id}`;
+    const clientId = account
+      ? `account:${account.id}`
+      : suppliedClientId && suppliedClientId.length >= 16 && suppliedClientId.length <= 128
+        ? suppliedClientId
+        : `socket:${socket.id}`;
+    if (account && suppliedClientId && suppliedClientId.length >= 16 && suppliedClientId.length <= 128)
+      migrateLegacyIdentity(suppliedClientId, clientId);
     userNames.set(socket.id, username.slice(0, 64));
-    userAvatars.set(socket.id, sanitizeAvatarUrl(typeof registration === 'string' ? null : registration.avatarUrl));
+    userAvatars.set(socket.id, sanitizeAvatarUrl(account?.avatarUrl ?? (typeof registration === 'string' ? null : registration.avatarUrl)));
     userClientIds.set(socket.id, clientId);
 
     // 同一设备更改用户名后，同步更新它所拥有房间的公开房主名。
@@ -684,7 +736,9 @@ io.on('connection', socket => {
     const clientId = userClientIds.get(socket.id);
     if (!username || !clientId) { cb?.({ ok: false, error: '用户尚未注册' }); return; }
     userNames.set(socket.id, username);
-    userAvatars.set(socket.id, sanitizeAvatarUrl(update.avatarUrl));
+    const avatarUrl = sanitizeAvatarUrl(update.avatarUrl);
+    userAvatars.set(socket.id, avatarUrl);
+    if (clientId.startsWith('account:')) accounts.updateProfile(clientId.slice('account:'.length), username, avatarUrl);
     const updated = stmtUpdateOwnerName.run(username, clientId, username);
     if (updated.changes > 0) io.emit('rooms:updated', stmtGetRooms.all());
     refreshProfileViews();
@@ -1245,7 +1299,7 @@ io.on('connection', socket => {
       type: 'soundpack',
       timestamp: Date.now(),
     };
-    stmtInsertMsg.run(msg.id, msg.roomId, msg.author, msg.content, msg.type, msg.timestamp);
+    // 语音包播放记录只对当前在线成员可见，离开频道后不再恢复。
     io.to(roomId).emit('message:new', msg);
     cb?.({ ok: true });
   });

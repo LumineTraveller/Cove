@@ -92,7 +92,7 @@ export function ProfileModal({ profile, serverURL, onSave, onClose, onOpenServer
           </div>
           {onReset && (
             <button onClick={onReset} className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-xl py-2.5 text-sm font-medium text-red-300/70 transition hover:bg-red-500/10 hover:text-red-200">
-              <LogOut size={16} /> 退出当前身份
+              <LogOut size={16} /> 退出账号
             </button>
           )}
         </div>

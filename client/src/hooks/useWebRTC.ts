@@ -14,7 +14,7 @@ import {
   AUDIO_OUTPUT_DEVICE_KEY,
   AudioDeviceOption,
   createMicrophoneConstraints,
-  createVoiceAudioOutput,
+  createRemoteAudioOutput,
   isMemberVoiceAudio,
   DEFAULT_AUDIO_DEVICE_ID,
   loadAudioDeviceId,
@@ -335,6 +335,8 @@ export function useWebRTC(socket: Socket, roomId: string) {
   const selfMutedRef    = useRef(false);
   const forceMutedRef   = useRef(false);
   const joiningRef      = useRef(false);
+  // 仅在已经建立语音会话后播放本地“离开”提示，避免组件卸载/重复清理时误播。
+  const voiceSessionActiveRef = useRef(false);
   const memberVolumesRef = useRef<Record<string, number>>({});
   const rememberedMemberVolumes = useRef<Record<string, number>>(loadMemberVolumes());
   // 点击远端扬声器静音后，记住静音前的音量，恢复时不把用户调好的音量重置为 100%。
@@ -355,9 +357,9 @@ export function useWebRTC(socket: Socket, roomId: string) {
   const pendingProducers    = useRef<Set<string>>(new Set());
   // 音频播放元素，按 consumerId 存储（一个人可能同时有麦克风+系统音频两路）
   const audioEls        = useRef<Map<string, HTMLAudioElement>>(new Map());
-  // 麦克风音轨直接进入 Web Audio；不要再用元素播放原始流，否则 Chromium
-  // 的 MediaStream 元素播放路径可能绕过增益，导致调音量/静音失效。
-  const memberAudioGains = useRef<Map<string, ReturnType<typeof createVoiceAudioOutput>>>(new Map());
+  // 所有远端音轨（麦克风、屏幕、应用音频）均通过各自的 Web Audio 增益播放。
+  // 激活 WebRTC 的媒体元素必须静音，避免原始流绕过增益或双路播放。
+  const remoteAudioOutputs = useRef<Map<string, ReturnType<typeof createRemoteAudioOutput>>>(new Map());
   const screenStreams    = useRef<Map<string, MediaStream>>(new Map());
   const localAudioRef   = useRef<MediaStream | null>(null);
   const rawAudioRef     = useRef<MediaStream | null>(null);
@@ -365,11 +367,6 @@ export function useWebRTC(socket: Socket, roomId: string) {
   const localScreenRef  = useRef<MediaStream | null>(null);
   const screenAudioPipeline = useRef<ApplicationAudioPipeline | null>(null);
   const screenAudioUnsubscribe = useRef<(() => void) | null>(null);
-  // Browser/dev fallback only. The packaged Windows client uses the native
-  // process-exclusion pipeline above, but keeping these refs makes the web
-  // preview path retain its existing getDisplayMedia audio behavior.
-  const screenAudioContext = useRef<AudioContext | null>(null);
-  const screenAudioGain = useRef<GainNode | null>(null);
   const applicationAudioPipeline = useRef<ApplicationAudioPipeline | null>(null);
   const applicationAudioUnsubscribe = useRef<(() => void) | null>(null);
   const availableScreensRef = useRef<Map<string, AvailableScreen>>(new Map());
@@ -409,9 +406,9 @@ export function useWebRTC(socket: Socket, roomId: string) {
     for (const [consumerId, entry] of consumers.current) {
       if (entry.socketId !== socketId || !isMemberVoiceAudio(entry.kind, entry.sourceType)) continue;
       const element = audioEls.current.get(consumerId);
-      const output = memberAudioGains.current.get(consumerId);
-      if (output) output.gain.gain.value = normalized;
-      else if (element) element.volume = Math.min(1, normalized);
+      const output = remoteAudioOutputs.current.get(consumerId);
+      if (output) output.setVolume(normalized);
+      else if (element) { element.volume = Math.min(1, normalized); element.muted = normalized === 0; }
     }
   }, []);
 
@@ -428,14 +425,18 @@ export function useWebRTC(socket: Socket, roomId: string) {
   }, [setMemberVolume]);
 
   const setScreenReceiveVolume = useCallback((volume: number) => {
-    const normalized = Math.max(0, Math.min(1, volume));
+    const normalized = Number.isFinite(volume) ? Math.max(0, Math.min(1, volume)) : 1;
     screenReceiveVolumeRef.current = normalized;
     setScreenReceiveVolumeState(normalized);
-    localStorage.setItem(SCREEN_RECEIVE_VOLUME_KEY, String(normalized));
+    try { localStorage.setItem(SCREEN_RECEIVE_VOLUME_KEY, String(normalized)); }
+    catch { /* 无法保存偏好也必须应用本次音量。 */ }
     for (const [consumerId, entry] of consumers.current) {
       if (entry.sourceType !== 'screen-audio') continue;
       const element = audioEls.current.get(consumerId);
-      if (element) element.volume = normalized;
+      if (element) {
+        element.volume = normalized;
+        element.muted = normalized === 0;
+      }
     }
   }, []);
 
@@ -445,7 +446,6 @@ export function useWebRTC(socket: Socket, roomId: string) {
     setScreenShareVolumeState(normalized);
     localStorage.setItem(SCREEN_SHARE_VOLUME_KEY, String(normalized));
     screenAudioPipeline.current?.setVolume(normalized);
-    if (screenAudioGain.current) screenAudioGain.current.gain.value = normalized;
   }, []);
 
   const setApplicationAudioShareVolume = useCallback((volume: number) => {
@@ -457,15 +457,19 @@ export function useWebRTC(socket: Socket, roomId: string) {
   }, []);
 
   const setApplicationAudioReceiveVolume = useCallback((socketId: string, volume: number) => {
-    const normalized = Math.max(0, Math.min(1, volume));
+    const normalized = Number.isFinite(volume) ? Math.max(0, Math.min(1, volume)) : 1;
     const nextVolumes = { ...applicationAudioReceiveVolumesRef.current, [socketId]: normalized };
     applicationAudioReceiveVolumesRef.current = nextVolumes;
     setApplicationAudioReceiveVolumes(nextVolumes);
-    localStorage.setItem(APPLICATION_AUDIO_RECEIVE_VOLUME_KEY, JSON.stringify(nextVolumes));
+    try { localStorage.setItem(APPLICATION_AUDIO_RECEIVE_VOLUME_KEY, JSON.stringify(nextVolumes)); }
+    catch { /* 无法保存偏好也必须应用本次音量。 */ }
     for (const [consumerId, entry] of consumers.current) {
       if (entry.socketId !== socketId || entry.sourceType !== 'application-audio') continue;
       const element = audioEls.current.get(consumerId);
-      if (element) element.volume = normalized;
+      if (element) {
+        element.volume = normalized;
+        element.muted = normalized === 0;
+      }
     }
   }, []);
 
@@ -864,30 +868,42 @@ export function useWebRTC(socket: Socket, roomId: string) {
 
   // 卸载时清理所有定时器和音频上下文
   useEffect(() => () => {
+    const shouldPlayLeaveTone = voiceSessionActiveRef.current;
+    if (shouldPlayLeaveTone) {
+      // room 导航时，父组件的清理可能晚于本 hook 的清理；在这里补发本地提示。
+      voiceSessionActiveRef.current = false;
+      playPresenceTone('leave');
+    }
     if (volumeTimer.current) clearInterval(volumeTimer.current);
     if (statsTimer.current) clearInterval(statsTimer.current);
     if (screenAnalysisTimer.current) clearInterval(screenAnalysisTimer.current);
     if (screenAnalysisVideo.current) screenAnalysisVideo.current.srcObject = null;
-    memberAudioGains.current.forEach(output => output.close());
-    memberAudioGains.current.clear();
+    remoteAudioOutputs.current.forEach(output => output.close());
+    remoteAudioOutputs.current.clear();
     audioEls.current.forEach(element => { element.pause(); element.srcObject = null; });
     audioEls.current.clear();
-    audioCtxRef.current?.close().catch(() => {});
+    const audioContext = audioCtxRef.current;
+    if (audioContext) {
+      const closeAudioContext = () => {
+        if (audioCtxRef.current === audioContext) audioCtxRef.current = null;
+        audioContext.close().catch(() => {});
+      };
+      // 最后一声提示需要完成约 250ms 的振荡，卸载时延后关闭上下文。
+      if (shouldPlayLeaveTone) setTimeout(closeAudioContext, 600);
+      else closeAudioContext();
+    }
     micProcessingContext.current?.close().catch(() => {});
     screenAudioUnsubscribe.current?.();
     screenAudioUnsubscribe.current = null;
     screenAudioPipeline.current?.close();
     screenAudioPipeline.current = null;
-    screenAudioContext.current?.close().catch(() => {});
-    screenAudioContext.current = null;
-    screenAudioGain.current = null;
     void window.coveScreenAudio?.stop();
     applicationAudioUnsubscribe.current?.();
     applicationAudioUnsubscribe.current = null;
     applicationAudioPipeline.current?.close();
     applicationAudioPipeline.current = null;
     void window.coveApplicationAudio?.stop();
-  }, []);
+  }, [playPresenceTone]);
 
   // ── 初始化 mediasoup Device + 两条 transport ────────────────────────────────
 
@@ -989,39 +1005,49 @@ export function useWebRTC(socket: Socket, roomId: string) {
       if (kind === 'audio') {
         const isVoice = isMemberVoiceAudio(kind, sourceType);
         const memberVolume = memberVolumesRef.current[peerId] ?? 1;
-        let usesVoiceOutput = false;
+        const volume = sourceType === 'screen-audio'
+          ? screenReceiveVolumeRef.current
+          : sourceType === 'application-audio'
+            ? applicationAudioReceiveVolumesRef.current[peerId] ?? 1
+            : memberVolume;
+        let usesGainOutput = false;
         if (isVoice) {
           try {
             const context = ensureAudioCtx();
-            const output = createVoiceAudioOutput(context, stream, memberVolume);
-            memberAudioGains.current.set(consumer.id, output);
-            usesVoiceOutput = true;
+            const output = createRemoteAudioOutput(context, stream, volume);
+            remoteAudioOutputs.current.set(consumer.id, output);
+            usesGainOutput = true;
             void output.resume().catch(error => {
-              console.warn('[audio] 恢复语音输出失败，等待下一次点击重试', error);
+              console.warn('[audio] 恢复远端音频输出失败，等待下一次点击重试', error);
               document.addEventListener('click', () => {
-                if (memberAudioGains.current.get(consumer.id) === output) void output.resume().catch(() => {});
+                if (remoteAudioOutputs.current.get(consumer.id) === output) void output.resume().catch(() => {});
               }, { once: true });
             });
           } catch (error) {
             console.warn('[audio] 创建远端麦克风增益失败，回退到标准音量', error);
           }
         }
-        if (!usesVoiceOutput) {
-          // 共享音频或 Web Audio 不可用时才创建元素，禁止原始麦克风流双路播放。
+        if (!usesGainOutput) {
+          // Electron 29 对按需暂停/恢复的屏幕音频通过 MediaStreamAudioSourceNode
+          // 播放并不稳定。共享音频使用实际媒体元素作为唯一可听路径；麦克风仅在
+          // Web Audio 初始化失败时进入相同的兼容回退。
           const el = new Audio();
           el.autoplay = true;
-          el.volume = sourceType === 'screen-audio'
-            ? screenReceiveVolumeRef.current
-            : sourceType === 'application-audio'
-              ? applicationAudioReceiveVolumesRef.current[peerId] ?? 1
-              : Math.min(1, memberVolume);
+          el.volume = Math.min(1, volume);
+          el.muted = volume === 0;
           el.srcObject = stream;
           audioEls.current.set(consumer.id, el);
           applyAudioElementOutput(el, selectedAudioOutputRef.current).catch(error => {
             console.warn('[audio] 远端音频切换输出设备失败，使用系统默认设备', error);
-          }).finally(() => el.play().catch(() => {
+          }).finally(() => el.play().then(() => {
+            if (sourceType === 'screen-audio')
+              console.info('[screen-audio] 播放元素已启动', { paused: el.paused, readyState: el.readyState });
+          }).catch(error => {
+            console.warn('[audio] 自动播放被阻止，等待下一次点击重试', { sourceType, error });
             const resume = () => {
-              if (audioEls.current.get(consumer.id) === el) void el.play().catch(() => {});
+              if (audioEls.current.get(consumer.id) !== el) return;
+              void el.play().catch(retryError =>
+                console.warn('[audio] 点击后仍无法播放远端音频', { sourceType, error: retryError }));
             };
             document.addEventListener('click', resume, { once: true });
           }));
@@ -1082,10 +1108,10 @@ export function useWebRTC(socket: Socket, roomId: string) {
     entry.consumer.close();
     const el = audioEls.current.get(consumerId);
     if (el) { el.pause(); el.srcObject = null; audioEls.current.delete(consumerId); }
-    const output = memberAudioGains.current.get(consumerId);
+    const output = remoteAudioOutputs.current.get(consumerId);
     if (output) {
       output.close();
-      memberAudioGains.current.delete(consumerId);
+      remoteAudioOutputs.current.delete(consumerId);
     }
     detachAnalyser(consumerId);
     if (entry.kind === 'video') {
@@ -1148,9 +1174,9 @@ export function useWebRTC(socket: Socket, roomId: string) {
         if (!isMemberVoiceAudio(entry.kind, entry.sourceType)) continue;
         const element = audioEls.current.get(consumerId);
         const volume = nextVolumes[entry.socketId] ?? 1;
-        const output = memberAudioGains.current.get(consumerId);
-        if (output) output.gain.gain.value = volume;
-        else if (element) element.volume = Math.min(1, volume);
+        const output = remoteAudioOutputs.current.get(consumerId);
+        if (output) output.setVolume(volume);
+        else if (element) { element.volume = Math.min(1, volume); element.muted = volume === 0; }
       }
       setVoiceMembers(list);
     };
@@ -1270,10 +1296,10 @@ export function useWebRTC(socket: Socket, roomId: string) {
         if (entry.socketId !== socketId) continue;
         const el = audioEls.current.get(cid);
         if (el) { el.pause(); el.srcObject = null; audioEls.current.delete(cid); }
-        const output = memberAudioGains.current.get(cid);
+        const output = remoteAudioOutputs.current.get(cid);
         if (output) {
           output.close();
-          memberAudioGains.current.delete(cid);
+          remoteAudioOutputs.current.delete(cid);
         }
         detachAnalyser(cid);
         entry.consumer.close();
@@ -1503,6 +1529,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
       attachAnalyser('local', stream, socket.id ?? 'local');
       startMeters();
 
+      voiceSessionActiveRef.current = true;
       setInVoice(true);
       socket.emit('voice:join', roomId);
 
@@ -1557,6 +1584,9 @@ export function useWebRTC(socket: Socket, roomId: string) {
   // ── 离开语音 ───────────────────────────────────────────────────────────────
 
   const leaveVoice = useCallback(() => {
+    const shouldPlayLeaveTone = voiceSessionActiveRef.current;
+    voiceSessionActiveRef.current = false;
+    if (shouldPlayLeaveTone) playPresenceTone('leave');
     joiningRef.current = false;
     setIsJoining(false);
     audioProducer.current?.close();       audioProducer.current       = null;
@@ -1577,9 +1607,6 @@ export function useWebRTC(socket: Socket, roomId: string) {
     screenAudioUnsubscribe.current = null;
     screenAudioPipeline.current?.close();
     screenAudioPipeline.current = null;
-    screenAudioContext.current?.close().catch(() => {});
-    screenAudioContext.current = null;
-    screenAudioGain.current = null;
     void window.coveScreenAudio?.stop();
     applicationAudioUnsubscribe.current?.();
     applicationAudioUnsubscribe.current = null;
@@ -1605,8 +1632,8 @@ export function useWebRTC(socket: Socket, roomId: string) {
 
     audioEls.current.forEach(el => { el.pause(); el.srcObject = null; });
     audioEls.current.clear();
-    memberAudioGains.current.forEach(output => output.close());
-    memberAudioGains.current.clear();
+    remoteAudioOutputs.current.forEach(output => output.close());
+    remoteAudioOutputs.current.clear();
     screenStreams.current.clear();
 
     // 停止音量计和统计
@@ -1633,7 +1660,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
     setIsMuted(forceMutedRef.current);
     setIsSharing(false);
     socket.emit('voice:leave', roomId);
-  }, [socket, roomId, stopMeters, clearAvailableScreens]);
+  }, [socket, roomId, stopMeters, clearAvailableScreens, playPresenceTone]);
 
   // ── 麦克风静音 ─────────────────────────────────────────────────────────────
 
@@ -1794,6 +1821,14 @@ export function useWebRTC(socket: Socket, roomId: string) {
     if (initAudio   !== undefined) setShareAudio(initAudio);
     if (initGameMode !== undefined) setScreenGameMode(initGameMode);
 
+    // System-audio sharing must use the native process-exclusion bridge so
+    // Cove's own voice and sound-pack playback can never enter the stream.
+    // There is intentionally no full-system/browser fallback.
+    if (audio && !window.coveScreenAudio) {
+      window.alert('排除 Cove 自身音频的系统音频共享仅可在 Windows 桌面版中使用。');
+      return;
+    }
+
     const initialActivity: ScreenActivity = gameMode ? 'motion' : 'active';
     let acquiredStream: MediaStream | null = null;
     try {
@@ -1801,9 +1836,9 @@ export function useWebRTC(socket: Socket, roomId: string) {
         // 桌面源保持原始尺寸，720p/1080p 由 RTP 编码缩放统一控制。
         video: { frameRate: { ideal: currentFps, max: currentFps } },
         // The native Windows bridge supplies the filtered system audio as a
-        // separate track. Do not ask Chromium for its global loopback track,
-        // which would include Cove's own playback.
-        audio: audio && !window.coveScreenAudio,
+        // separate track. Chromium's global loopback track is never requested,
+        // because it would include Cove's own playback.
+        audio: false,
       });
       acquiredStream = stream;
       const videoTrack = stream.getVideoTracks()[0];
@@ -1884,32 +1919,36 @@ export function useWebRTC(socket: Socket, roomId: string) {
       else startScreenAnalysis(stream, preset, currentFps);
 
       // Electron's global `loopback` source captures Cove's own voice and
-      // sound-pack playback as well as other desktop audio. The packaged
-      // Windows client therefore uses a native process-loopback capture in
-      // exclude mode (Cove's process tree is removed at the WASAPI level).
-      // Browser/dev builds keep the old getDisplayMedia track as a fallback.
-      if (audio && window.coveScreenAudio) {
+      // sound-pack playback as well as other desktop audio. The Windows client
+      // therefore uses only the native process-loopback capture in exclude
+      // mode (Cove's process tree is removed at the WASAPI level).
+      if (audio) {
         const bridge = window.coveScreenAudio;
+        if (!bridge) throw new Error('无法启动排除 Cove 音频的系统捕获。');
         let pipeline: ApplicationAudioPipeline | null = null;
         let unsubscribe: (() => void) | null = null;
         try {
-          pipeline = new ApplicationAudioPipeline(screenShareVolumeRef.current);
-          await pipeline.resume();
-          unsubscribe = bridge.onChunk(chunk => pipeline?.pushPcm(chunk));
+          // Keep the captured pipeline in a stable closure. Do not clear this
+          // local after transferring ownership to the ref: the IPC listener
+          // remains active for the whole share and must continue forwarding
+          // every PCM chunk to the same MediaStream destination.
+          const audioPipeline = new ApplicationAudioPipeline(screenShareVolumeRef.current);
+          pipeline = audioPipeline;
+          await audioPipeline.resume();
+          unsubscribe = bridge.onChunk(chunk => audioPipeline.pushPcm(chunk));
           const capture = await bridge.start();
           if (!capture?.ok) throw new Error(capture?.error ?? '无法启动排除 Cove 音频的系统捕获。');
 
           const ap = await sendTransport.current!.produce({
-            track: pipeline.track,
+            track: audioPipeline.track,
             codecOptions: { opusStereo: true, opusDtx: true, opusFec: true },
             encodings: [{ maxBitrate: 96_000 }],
             appData: { type: 'screen-audio' },
             disableTrackOnPause: true,
             zeroRtpOnPause: true,
           });
-          screenAudioPipeline.current = pipeline;
+          screenAudioPipeline.current = audioPipeline;
           screenAudioUnsubscribe.current = unsubscribe;
-          pipeline = null;
           unsubscribe = null;
           screenAudioProducer.current = ap;
           if (forceMutedRef.current || !screenDemandActiveRef.current) ap.pause();
@@ -1919,45 +1958,6 @@ export function useWebRTC(socket: Socket, roomId: string) {
           await bridge.stop().catch(() => false);
           console.warn('[screen share] 排除 Cove 后的系统音频发布失败:', e);
           window.alert('屏幕画面已开始共享，但系统音频发布失败。请停止共享后重试。');
-        }
-      } else if (audio) {
-        // Web preview fallback: this path is not used by the packaged
-        // Electron client, whose native bridge is always available.
-        const sysAudioTrack = stream.getAudioTracks()[0];
-        if (sysAudioTrack) {
-          try {
-            const Ctx = window.AudioContext ?? (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-            const context = new Ctx({ sampleRate: 48_000, latencyHint: 'interactive' });
-            const sourceStream = new MediaStream([sysAudioTrack]);
-            const source = context.createMediaStreamSource(sourceStream);
-            const gain = context.createGain();
-            gain.gain.value = screenShareVolumeRef.current;
-            const destination = context.createMediaStreamDestination();
-            source.connect(gain).connect(destination);
-            await context.resume();
-            screenAudioContext.current = context;
-            screenAudioGain.current = gain;
-            const outgoingAudioTrack = destination.stream.getAudioTracks()[0];
-            const ap = await sendTransport.current!.produce({
-              track: outgoingAudioTrack,
-              codecOptions: { opusStereo: true, opusDtx: true, opusFec: true },
-              encodings: [{ maxBitrate: 96_000 }],
-              appData: { type: 'screen-audio' },
-              disableTrackOnPause: true,
-              zeroRtpOnPause: true,
-            });
-            screenAudioProducer.current = ap;
-            if (forceMutedRef.current || !screenDemandActiveRef.current) ap.pause();
-          } catch (e) {
-            screenAudioContext.current?.close().catch(() => {});
-            screenAudioContext.current = null;
-            screenAudioGain.current = null;
-            console.warn('[screen share] 系统音频发布失败:', e);
-            window.alert('屏幕画面已开始共享，但系统音频发布失败。请停止共享后重试。');
-          }
-        } else {
-          console.warn('[screen share] 请求了系统音频，但未取得音频轨道');
-          window.alert('屏幕画面已开始共享，但没有取得系统音频。请确认使用支持系统音频的环境后重试。');
         }
       }
 
@@ -1983,9 +1983,6 @@ export function useWebRTC(socket: Socket, roomId: string) {
       screenAudioPipeline.current?.close();
       screenAudioPipeline.current = null;
       await window.coveScreenAudio?.stop();
-      screenAudioContext.current?.close().catch(() => {});
-      screenAudioContext.current = null;
-      screenAudioGain.current = null;
       acquiredStream?.getTracks().forEach(track => track.stop());
       if (localScreenRef.current === acquiredStream) localScreenRef.current = null;
       setLocalScreen(null);
@@ -2015,9 +2012,6 @@ export function useWebRTC(socket: Socket, roomId: string) {
     screenAudioPipeline.current?.close();
     screenAudioPipeline.current = null;
     void window.coveScreenAudio?.stop();
-    screenAudioContext.current?.close().catch(() => {});
-    screenAudioContext.current = null;
-    screenAudioGain.current = null;
     localScreenRef.current?.getTracks().forEach(t => t.stop());
     localScreenRef.current = null;
     setLocalScreen(null);

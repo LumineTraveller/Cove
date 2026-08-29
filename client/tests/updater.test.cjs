@@ -46,10 +46,12 @@ class FakeUpdater extends EventEmitter {
     this.autoDownload = false;
     this.autoInstallOnAppQuit = false;
     this.allowPrerelease = true;
+    this.disableDifferentialDownload = false;
     this.logger = null;
     this.checkCount = 0;
     this.installCalls = [];
     this.feedCalls = [];
+    this.downloadModes = [];
     this.checkErrors = [];
   }
 
@@ -62,6 +64,7 @@ class FakeUpdater extends EventEmitter {
 
   setFeedURL(options) {
     this.feedCalls.push(options);
+    this.downloadModes.push(this.disableDifferentialDownload);
   }
 
   quitAndInstall(...args) {
@@ -166,6 +169,117 @@ test('a failed primary source automatically falls back to the other release mirr
   assert.equal(h.updater.checkCount, 2);
   assert.deepEqual(h.updater.feedCalls.map(call => call.url), [giteeSource.feedUrl, githubSource.feedUrl]);
   assert.equal(h.controller.getState().sourceLabel, 'GitHub');
+  assert.deepEqual(h.updater.downloadModes, [true, false]);
+});
+
+test('Gitee uses full downloads; GitHub retains differential downloads, including fallback', async () => {
+  for (const source of [giteeSource, githubSource]) {
+    const h = createHarness({ resolveSources: async () => [source] });
+    await h.controller.checkNow();
+    assert.equal(h.updater.disableDifferentialDownload, source.id === 'gitee');
+    h.updater.emit('update-available', { version: '0.8.3' });
+    if (source.id === 'gitee') assert.match(h.controller.getState().message, /完整安装包/);
+    h.controller.dispose();
+  }
+  const h = createHarness({ resolveSources: async () => [githubSource, giteeSource] });
+  h.updater.checkErrors.push(new Error('github unavailable'));
+  await h.controller.checkNow();
+  assert.deepEqual(h.updater.downloadModes, [false, true]);
+});
+
+test('Gitee mode makes the real NSIS download branch bypass blockmaps and range downloads', async () => {
+  const { NsisUpdater } = require('electron-updater/out/NsisUpdater');
+  const h = createHarness({ resolveSources: async () => [giteeSource] });
+  await h.controller.checkNow();
+  const fileInfo = { url: new URL(giteeSource.feedUrl + 'Cove-Setup-0.8.3.exe'), info: { url: 'Cove-Setup-0.8.3.exe', sha512: 'expected-digest' } };
+  let fullDownloads = 0;
+  let differentialDownloads = 0;
+  let signatureChecks = 0;
+  const updater = {
+    executeDownload: task => task.task('test-installer.exe', { sha512: task.fileInfo.info.sha512 }),
+    differentialDownloadInstaller: async () => { differentialDownloads++; return false; },
+    httpExecutor: { download: async (url, target, options) => {
+      fullDownloads++;
+      assert.equal(url, fileInfo.url);
+      assert.equal(options.sha512, 'expected-digest', 'full download must retain checksum validation');
+    } },
+    verifySignature: async () => { signatureChecks++; return null; },
+  };
+  await NsisUpdater.prototype.doDownloadUpdate.call(updater, {
+    updateInfoAndProvider: { provider: { resolveFiles: () => [fileInfo] }, info: { version: '0.8.3' } },
+    disableDifferentialDownload: h.updater.disableDifferentialDownload,
+    disableWebInstaller: true,
+  });
+  assert.equal(fullDownloads, 1);
+  assert.equal(differentialDownloads, 0);
+  assert.equal(signatureChecks, 1);
+});
+
+test('cleanup eligibility is recorded only after installer validation and before install is offered', async () => {
+  const ready = [];
+  const h = createHarness({
+    resolveSources: async () => [giteeSource],
+    onInstallerReady: (info, source) => {
+      assert.notEqual(h.controller.getState().status, 'downloaded');
+      ready.push({ info, source });
+    },
+  });
+  await h.controller.checkNow();
+  h.updater.emit('update-available', { version: '0.8.3' });
+  h.updater.emit('download-progress', { percent: 100, transferred: 200, total: 200 });
+  assert.equal(ready.length, 0);
+  assert.equal(h.controller.installNow(), false);
+  const info = { version: '0.8.3', downloadedFile: 'verified.exe' };
+  h.updater.emit('update-downloaded', info);
+  assert.deepEqual(ready, [{ info, source: 'gitee' }]);
+  assert.equal(h.controller.installNow(), true);
+});
+
+test('a failed cleanup marker write does not break a validated update', () => {
+  const h = createHarness({ onInstallerReady: () => { throw new Error('read only'); } });
+  h.updater.emit('update-downloaded', { version: '0.8.3' });
+  assert.equal(h.controller.getState().status, 'downloaded');
+  assert.equal(h.controller.installNow(), true);
+  assert.ok(h.logs.some(entry => entry[0] === 'warn' && String(entry[1]).includes('清理任务')));
+});
+
+test('Electron adapter waits for startup cleanup before any update check and wires verified downloads', async () => {
+  const vm = require('node:vm');
+  const updater = new FakeUpdater();
+  const remembered = [];
+  let resolveCleanup;
+  let discoveries = 0;
+  const cleanup = new Promise(resolve => { resolveCleanup = resolve; });
+  const exports = {};
+  const mocks = {
+    electron: { app: { getPath: () => 'test-user-data', getVersion: () => '0.8.3' }, BrowserWindow: { getAllWindows: () => [] } },
+    'electron-updater': { autoUpdater: updater },
+    fs: { appendFileSync() {} },
+    './updater-core': { configureAutoUpdater },
+    './gitee-installer-cache': { createGiteeInstallerCache: options => {
+      assert.equal(options.installedVersion, '0.8.3');
+      return { cleanupInstalledUpdate: () => cleanup, remember: (...args) => remembered.push(args) };
+    } },
+    './update-sources': { discoverUpdateSources: async () => { discoveries++; return [giteeSource]; } },
+  };
+  vm.runInNewContext(fs.readFileSync(require.resolve('../dist-electron/updater.js'), 'utf8'), {
+    exports, require: id => mocks[id] ?? require(id),
+    process: { platform: 'win32', env: { LOCALAPPDATA: 'C:\\test-local' } },
+    console: { log() {}, warn() {}, error() {} },
+  });
+  const controller = exports.startAutoUpdater(true);
+  try {
+    const checking = controller.checkNow();
+    assert.equal(discoveries, 0);
+    assert.equal(updater.checkCount, 0);
+    resolveCleanup();
+    await checking;
+    assert.equal(discoveries, 1);
+    assert.equal(updater.checkCount, 1);
+    const info = { version: '0.8.4', downloadedFile: 'verified.exe' };
+    updater.emit('update-downloaded', info);
+    assert.deepEqual(remembered, [[info, 'gitee']]);
+  } finally { controller.dispose(); }
 });
 
 test('update events publish in-app state, progress and user-triggered install', async () => {
@@ -328,6 +442,7 @@ test('fallback waits for failed download cleanup and clears old transfer metrics
   assert.equal(h.updater.checkCount, 2);
   assert.equal(h.controller.getState().sourceLabel, 'GitHub');
   assert.equal(h.controller.getState().status, 'available');
+  assert.deepEqual(h.updater.downloadModes, [true, false]);
   assert.equal(h.controller.getState().transferred, undefined);
   assert.equal(h.controller.getState().percent, 0);
   h.updater.emit('update-downloaded', { version: '0.8.1' });

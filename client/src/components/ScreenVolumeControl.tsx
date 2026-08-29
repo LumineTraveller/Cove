@@ -1,9 +1,10 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { Volume2, VolumeX } from 'lucide-react';
 
-export function ScreenVolumeControl({ volume, onChange }: {
+export function ScreenVolumeControl({ volume, onChange, ariaLabel = '共享接收音量' }: {
   volume: number;
   onChange: (volume: number) => void;
+  ariaLabel?: string;
 }) {
   const [open, setOpen] = useState(false);
   const panelId = useId();
@@ -66,7 +67,7 @@ export function ScreenVolumeControl({ volume, onChange }: {
             requestAnimationFrame(() => slider.current?.focus());
           }
         }}
-        className="flex h-10 w-10 flex-col items-center justify-center rounded-xl border border-white/10 bg-black/35 text-white/65 backdrop-blur-md transition hover:bg-black/60 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/50"
+        className="flex h-10 w-10 flex-col items-center justify-center rounded-xl border border-white/10 bg-black/20 text-white/65 backdrop-blur-md transition hover:bg-black/45 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/50"
         aria-label="共享音量"
         aria-expanded={open}
         aria-controls={panelId}
@@ -75,7 +76,7 @@ export function ScreenVolumeControl({ volume, onChange }: {
       </button>
       {/* padding 连接按钮与上拉栏，鼠标向上移动时没有悬停断层。 */}
       <div id={panelId} className={`absolute bottom-full -right-2 w-14 pb-2 ${open ? '' : 'hidden'}`}>
-        <div className="flex flex-col items-center rounded-xl border border-white/15 bg-zinc-950/85 py-3 text-xs text-white/75 shadow-xl backdrop-blur-xl">
+        <div className="flex flex-col items-center rounded-xl border border-white/15 bg-zinc-950/70 py-3 text-xs text-white/75 shadow-xl backdrop-blur-xl">
           <span className="mb-2 tabular-nums text-cyan-100">{percent}%</span>
           {/* 旋转原生滑条兼容 Electron 29：底端 0%，顶端 100%。 */}
           <div className="relative h-32 w-8">
@@ -93,7 +94,7 @@ export function ScreenVolumeControl({ volume, onChange }: {
               }
             }}
             className="absolute left-1/2 top-1/2 m-0 h-5 w-32 -translate-x-1/2 -translate-y-1/2 -rotate-90 cursor-pointer accent-cyan-300"
-            aria-label="共享接收音量"
+            aria-label={ariaLabel}
             aria-orientation="vertical"
             aria-valuetext={`${percent}%`}
           />

@@ -51,8 +51,8 @@ export function CollapsibleMediaBanner({ kind, children, overlay = false, defaul
           requestAnimationFrame(() => collapseRef.current?.focus());
         }}
         className={`cove-media-banner-tab absolute left-0 top-1/2 z-10 flex h-14 w-8 items-center justify-center rounded-r-full border border-l-0 shadow-lg backdrop-blur-md hover:w-10 ${isAudio
-          ? 'border-violet-300/30 bg-violet-300/25 text-violet-100 hover:bg-violet-300/35'
-          : 'border-cyan-300/30 bg-cyan-300/25 text-cyan-100 hover:bg-cyan-300/35'}`}
+          ? 'border-violet-300/25 bg-violet-300/15 text-violet-100 hover:bg-violet-300/25'
+          : 'border-cyan-300/25 bg-cyan-300/15 text-cyan-100 hover:bg-cyan-300/25'}`}
         tabIndex={collapsed ? 0 : -1}
         aria-expanded={!collapsed}
         aria-controls={panelId}
