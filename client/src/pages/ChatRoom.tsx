@@ -108,10 +108,10 @@ function ScreenSettingsModal({ preset, fps, audio, gameMode, onPreset, onFps, on
         </div>
         <div>
           <p className="text-white/40 text-sm font-medium mb-2.5">传输清晰度</p>
-          <div className="flex gap-2">
+          <div className="grid grid-cols-2 gap-2">
             {(Object.keys(SCREEN_PRESETS) as ScreenPreset[]).map(p => (
               <button key={p} onClick={() => onPreset(p)}
-                className={`flex-1 py-2.5 rounded-xl text-sm font-semibold transition-colors ${preset === p ? 'bg-white text-zinc-900' : 'bg-white/10 hover:bg-white/15 text-white/60'}`}>
+                className={`py-2.5 rounded-xl text-sm font-semibold transition-colors ${preset === p ? 'bg-white text-zinc-900' : 'bg-white/10 hover:bg-white/15 text-white/60'}`}>
                 {SCREEN_PRESETS[p].label}
               </button>
             ))}

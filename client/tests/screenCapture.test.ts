@@ -55,6 +55,27 @@ test('720p turns a 2560x1600 desktop into a bounded 1152x720 RTP stream', () => 
   assert.equal(plan.bitrate, 1_400_000);
 });
 
+test('1440p keeps a 4K screen at 2560x1440 with the 2K game-mode bitrate', () => {
+  const plan = createScreenEncodingPlan({
+    preset: '1440p',
+    maxFps: 60,
+    activity: 'motion',
+    sourceWidth: 3840,
+    sourceHeight: 2160,
+  });
+
+  assert.equal(plan.outputWidth, 2560);
+  assert.equal(plan.outputHeight, 1440);
+  assert.equal(plan.scaleResolutionDownBy, 1.5);
+  assert.equal(plan.fps, 60);
+  assert.equal(plan.bitrate, 10_000_000);
+  assert.deepEqual(toScreenRtpEncoding(plan), {
+    maxBitrate: 10_000_000,
+    maxFramerate: 60,
+    scaleResolutionDownBy: 1.5,
+  });
+});
+
 test('a window below the selected preset is never enlarged', () => {
   const plan = createScreenEncodingPlan({
     preset: '1080p',

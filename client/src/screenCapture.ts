@@ -2,6 +2,7 @@ export const SCREEN_PRESETS = {
   '540p':  { label: '540p 流畅',  width: 960,  height: 540,  staticBitrate: 350_000, activeBitrate:   700_000, motionBitrate60: 1_500_000 },
   '720p':  { label: '720p 均衡',  width: 1280, height: 720,  staticBitrate: 650_000, activeBitrate: 1_400_000, motionBitrate60: 2_800_000 },
   '1080p': { label: '1080p 清晰', width: 1920, height: 1080, staticBitrate: 1_100_000, activeBitrate: 2_800_000, motionBitrate60: 6_000_000 },
+  '1440p': { label: '1440p 2K',   width: 2560, height: 1440, staticBitrate: 1_800_000, activeBitrate: 4_500_000, motionBitrate60: 10_000_000 },
 } as const;
 
 export type ScreenPreset = keyof typeof SCREEN_PRESETS;
