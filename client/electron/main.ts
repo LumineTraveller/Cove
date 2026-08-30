@@ -19,7 +19,6 @@ if (process.platform === 'win32') {
 }
 
 const isDev = !app.isPackaged;
-const isElectronUpgradePreview = app.getVersion().includes('-electron-test.');
 let updaterController: AutoUpdaterController | null = null;
 let mainWindow: BrowserWindow | null = null;
 const serverCertificatePolicy = new ServerCertificatePolicy();
@@ -176,9 +175,7 @@ app.whenReady().then(() => {
     return true;
   });
   createWindow();
-  // The isolated Electron-upgrade preview must never enter the production
-  // update channel or replace the user's stable Cove installation.
-  updaterController = startAutoUpdater(app.isPackaged && !isElectronUpgradePreview);
+  updaterController = startAutoUpdater(app.isPackaged);
 });
 
 app.on('will-quit', () => {

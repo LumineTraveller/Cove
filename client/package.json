@@ -1,6 +1,6 @@
 {
   "name": "cove-client",
-  "version": "0.9.1-electron-test.1",
+  "version": "0.9.0",
   "description": "Cove - 即时通讯客户端",
   "author": "Cove",
   "private": true,
@@ -47,12 +47,12 @@
     "wait-on": "^7.2.0"
   },
   "build": {
-    "appId": "com.cove.app.electrontest",
-    "productName": "Cove Electron Test",
+    "appId": "com.cove.app",
+    "productName": "Cove",
     "directories": {
       "output": "dist-app"
     },
-    "artifactName": "Cove-Electron-Test-Setup-${version}.${ext}",
+    "artifactName": "Cove-Setup-${version}.${ext}",
     "publish": [
       {
         "provider": "github",
