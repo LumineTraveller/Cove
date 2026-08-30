@@ -1,13 +1,14 @@
 {
   "name": "cove-client",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Cove - 即时通讯客户端",
   "author": "Cove",
   "private": true,
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
-    "electron:compile": "tsc -p electron/tsconfig.json",
+    "remote-input:build": "node electron/build-remote-input.cjs",
+    "electron:compile": "npm run remote-input:build && tsc -p electron/tsconfig.json",
     "test:updater": "npm run electron:compile && node --test tests/updater.test.cjs tests/gitee-installer-cache.test.cjs tests/server-certificate-policy.test.cjs",
     "test:connection": "tsx --test tests/connectionDeadline.test.ts",
     "test:audio-devices": "tsx --test tests/audioDevices.test.ts tests/remoteAudioPlayback.test.ts",
@@ -17,7 +18,8 @@
     "test:screen-capture": "tsx --test tests/screenCapture.test.ts",
     "test:member-ordering": "tsx --test tests/memberOrdering.test.ts",
     "test:account-auth": "tsx --test tests/accountAuth.test.ts",
-    "test": "npm run test:updater && npm run test:connection && npm run test:audio-devices && npm run test:chat-images && npm run test:chat-links && npm run test:media-diagnostics && npm run test:screen-capture && npm run test:member-ordering && npm run test:account-auth",
+    "test:remote-control": "tsx --test tests/remoteControl.test.ts",
+    "test": "npm run test:updater && npm run test:connection && npm run test:audio-devices && npm run test:chat-images && npm run test:chat-links && npm run test:media-diagnostics && npm run test:screen-capture && npm run test:member-ordering && npm run test:account-auth && npm run test:remote-control",
     "electron:dev": "npm run electron:compile && electron .",
     "build": "tsc && vite build",
     "build:electron": "npm run build && npm run electron:compile && electron-builder",
@@ -49,6 +51,8 @@
   "build": {
     "appId": "com.cove.app",
     "productName": "Cove",
+    "compression": "maximum",
+    "electronLanguages": ["zh-CN", "en-US"],
     "directories": {
       "output": "dist-app"
     },
@@ -63,11 +67,17 @@
     ],
     "files": [
       "dist/**/*",
-      "dist-electron/**/*"
+      "dist-electron/**/*",
+      "!node_modules/{react,react-dom,react-router,react-router-dom,@remix-run/router,lucide-react,mediasoup-client,socket.io-client}/**/*",
+      "!node_modules/**/*.map",
+      "!node_modules/**/*.d.{ts,mts,cts}"
     ],
     "win": {
       "icon": "build/icon.ico",
-      "target": "nsis"
+      "target": "nsis",
+      "extraResources": [
+        { "from": "build/remote-input-helper.exe", "to": "remote-input-helper.exe" }
+      ]
     },
     "mac": {
       "target": "dmg"

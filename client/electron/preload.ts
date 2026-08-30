@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { UpdateState } from './updater-core';
+import type { RemoteControlInput } from './remote-control';
 
 contextBridge.exposeInMainWorld('coveUpdater', {
   getState: (): Promise<UpdateState> => ipcRenderer.invoke('cove:update:get-state'),
@@ -20,6 +21,18 @@ contextBridge.exposeInMainWorld('coveShell', {
 contextBridge.exposeInMainWorld('coveSecurity', {
   setServerCertificateException: (serverUrl: string, enabled: boolean): Promise<string | null> =>
     ipcRenderer.invoke('cove:security:set-server-certificate-exception', serverUrl, enabled),
+});
+
+contextBridge.exposeInMainWorld('coveRemoteControl', {
+  supported: process.platform === 'win32',
+  setActive: (sessionId: string | null): Promise<boolean> => ipcRenderer.invoke('cove:remote-control:set-active', sessionId),
+  sendInput: (sessionId: string, input: RemoteControlInput): Promise<boolean> =>
+    ipcRenderer.invoke('cove:remote-control:input', sessionId, input),
+  onEmergencyStop: (listener: () => void) => {
+    const handler = () => listener();
+    ipcRenderer.on('cove:remote-control:emergency-stop', handler);
+    return () => ipcRenderer.off('cove:remote-control:emergency-stop', handler);
+  },
 });
 
 contextBridge.exposeInMainWorld('coveApplicationAudio', {

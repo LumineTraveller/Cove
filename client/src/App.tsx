@@ -60,6 +60,7 @@ export default function App() {
         clientId: getClientId(),
         authToken: readAccountSession(serverURL)?.token,
         platform: 'desktop',
+        remoteControlSupported: window.coveRemoteControl?.supported === true,
       }, (error: Error | null, response?: { ok?: boolean; error?: string }) => {
         if (!active) return;
         const registered = !error && response?.ok !== false;

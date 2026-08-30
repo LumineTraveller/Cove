@@ -538,7 +538,6 @@ export function useMobileMedia(socket: Socket, roomId: string) {
       const producer = await sendTransport.current!.produce({
         track: track as never,
         codecOptions: { opusStereo: false, opusDtx: true, opusFec: true },
-        encodings: [{ maxBitrate: 32_000 }],
         appData: { type: 'mic', client: 'android' },
       });
       audioProducer.current = producer;

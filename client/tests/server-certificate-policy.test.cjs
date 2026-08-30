@@ -40,6 +40,7 @@ test('actual main-window permission handlers allow fullscreen only for the Cove 
       loadFile() {}
     },
     Menu: { setApplicationMenu() {} },
+    globalShortcut: { register() { return true; }, unregister() {} },
     session: { defaultSession: {
       setPermissionRequestHandler: handler => { handlers.request = handler; },
       setPermissionCheckHandler: handler => { handlers.check = handler; },
@@ -54,6 +55,7 @@ test('actual main-window permission handlers allow fullscreen only for the Cove 
       if (id === 'path') return require('node:path');
       if (id === './server-certificate-policy') return { ServerCertificatePolicy };
       if (id === './application-audio') return { ApplicationAudioCaptureController: class {} };
+      if (id === './remote-control') return { RemoteInputController: class { stop() {} setActive() { return true; } send() { return true; } } };
       return {};
     },
   });

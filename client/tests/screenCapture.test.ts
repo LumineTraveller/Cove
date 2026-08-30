@@ -5,7 +5,11 @@ import {
   buildScreenCaptureConstraints,
   createScreenEncodingPlan,
   isScreenEncodingWithinPlan,
+  SCREEN_PRESETS,
   toScreenRtpEncoding,
+  withScreenEncodingPlan,
+  type ScreenActivity,
+  type ScreenPreset,
 } from '../src/screenCapture';
 
 test('game mode requests a 55-60 FPS capture range without pretending to resize the desktop source', () => {
@@ -30,10 +34,8 @@ test('1080p keeps a 16:10 source inside 1920x1080 without cropping', () => {
   assert.equal(plan.outputHeight, 1080);
   assert.ok(Math.abs(plan.scaleResolutionDownBy - (1600 / 1080)) < 0.000_001);
   assert.equal(plan.fps, 60);
-  assert.equal(plan.bitrate, 6_000_000);
   assert.equal(plan.degradationPreference, 'maintain-framerate');
   assert.deepEqual(toScreenRtpEncoding(plan), {
-    maxBitrate: 6_000_000,
     maxFramerate: 60,
     scaleResolutionDownBy: 1600 / 1080,
   });
@@ -52,10 +54,9 @@ test('720p turns a 2560x1600 desktop into a bounded 1152x720 RTP stream', () => 
   assert.equal(plan.outputHeight, 720);
   assert.ok(Math.abs(plan.scaleResolutionDownBy - (1600 / 720)) < 0.000_001);
   assert.equal(plan.fps, 30);
-  assert.equal(plan.bitrate, 1_400_000);
 });
 
-test('1440p keeps a 4K screen at 2560x1440 with the 2K game-mode bitrate', () => {
+test('1440p keeps a 4K screen at 2560x1440 and 60 FPS without a bitrate cap', () => {
   const plan = createScreenEncodingPlan({
     preset: '1440p',
     maxFps: 60,
@@ -68,9 +69,7 @@ test('1440p keeps a 4K screen at 2560x1440 with the 2K game-mode bitrate', () =>
   assert.equal(plan.outputHeight, 1440);
   assert.equal(plan.scaleResolutionDownBy, 1.5);
   assert.equal(plan.fps, 60);
-  assert.equal(plan.bitrate, 10_000_000);
   assert.deepEqual(toScreenRtpEncoding(plan), {
-    maxBitrate: 10_000_000,
     maxFramerate: 60,
     scaleResolutionDownBy: 1.5,
   });
@@ -89,7 +88,41 @@ test('a window below the selected preset is never enlarged', () => {
   assert.equal(plan.outputHeight, 800);
   assert.equal(plan.scaleResolutionDownBy, 1);
   assert.equal(plan.fps, 15);
-  assert.equal(plan.bitrate, 1_100_000);
+});
+
+test('every resolution, frame-rate choice and activity leaves bitrate to WebRTC', () => {
+  for (const preset of Object.keys(SCREEN_PRESETS) as ScreenPreset[]) {
+    for (const maxFps of [30, 60] as const) {
+      for (const activity of ['static', 'active', 'motion'] as ScreenActivity[]) {
+        const plan = createScreenEncodingPlan({ preset, maxFps, activity });
+        const encoding = toScreenRtpEncoding(plan);
+        assert.equal(Object.hasOwn(encoding, 'maxBitrate'), false, `${preset}/${maxFps}/${activity}`);
+        assert.equal(encoding.maxFramerate, activity === 'static' ? 15 : activity === 'motion' ? maxFps : 30);
+        assert.equal(encoding.scaleResolutionDownBy, 1);
+      }
+    }
+  }
+});
+
+test('runtime mode changes clear a previous cap without losing sender identity or active state', () => {
+  const original: RTCRtpSendParameters = {
+    transactionId: 'transaction-1',
+    codecs: [], headerExtensions: [], rtcp: { cname: 'screen-sender' },
+    encodings: [{ rid: 'screen', active: false, maxBitrate: 350_000, maxFramerate: 15, scaleResolutionDownBy: 4 }],
+  };
+  let parameters = original;
+  for (const activity of ['motion', 'static', 'active'] as ScreenActivity[]) {
+    const plan = createScreenEncodingPlan({ preset: '1440p', maxFps: 60, activity, sourceWidth: 3840, sourceHeight: 2160 });
+    parameters = withScreenEncodingPlan(parameters, plan);
+    assert.equal(Object.hasOwn(parameters.encodings[0], 'maxBitrate'), false);
+    assert.equal(parameters.transactionId, original.transactionId);
+    assert.equal(parameters.encodings[0].rid, 'screen');
+    assert.equal(parameters.encodings[0].active, false);
+    assert.equal(parameters.encodings[0].maxFramerate, plan.fps);
+    assert.equal(parameters.encodings[0].scaleResolutionDownBy, 1.5);
+    assert.equal(parameters.degradationPreference, plan.degradationPreference);
+  }
+  assert.equal(original.encodings[0].maxBitrate, 350_000, 'the previous parameter snapshot is not mutated');
 });
 
 test('runtime stats detect when Chromium ignored the RTP resolution limit', () => {

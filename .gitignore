@@ -35,3 +35,4 @@ Thumbs.db
 
 # Downloaded redistributable; installer script remains tracked
 server/build/vc_redist.x64.exe
+client/build/remote-input-helper.exe

@@ -1,8 +1,8 @@
 export const SCREEN_PRESETS = {
-  '540p':  { label: '540p 流畅',  width: 960,  height: 540,  staticBitrate: 350_000, activeBitrate:   700_000, motionBitrate60: 1_500_000 },
-  '720p':  { label: '720p 均衡',  width: 1280, height: 720,  staticBitrate: 650_000, activeBitrate: 1_400_000, motionBitrate60: 2_800_000 },
-  '1080p': { label: '1080p 清晰', width: 1920, height: 1080, staticBitrate: 1_100_000, activeBitrate: 2_800_000, motionBitrate60: 6_000_000 },
-  '1440p': { label: '1440p 2K',   width: 2560, height: 1440, staticBitrate: 1_800_000, activeBitrate: 4_500_000, motionBitrate60: 10_000_000 },
+  '540p':  { label: '540p 流畅',  width: 960,  height: 540 },
+  '720p':  { label: '720p 均衡',  width: 1280, height: 720 },
+  '1080p': { label: '1080p 清晰', width: 1920, height: 1080 },
+  '1440p': { label: '1440p 2K',   width: 2560, height: 1440 },
 } as const;
 
 export type ScreenPreset = keyof typeof SCREEN_PRESETS;
@@ -28,27 +28,23 @@ export interface ScreenEncodingPlan {
   outputHeight: number;
   scaleResolutionDownBy: number;
   fps: number;
-  bitrate: number;
   contentHint: 'detail' | 'motion';
   degradationPreference: RTCDegradationPreference;
 }
 
 export interface ScreenRtpEncodingParameters {
-  maxBitrate: number;
   maxFramerate: number;
   scaleResolutionDownBy: number;
 }
 
 export function screenEncodingProfile(
-  preset: ScreenPreset,
   maxFps: ScreenFps,
   activity: ScreenActivity,
 ) {
-  const profile = SCREEN_PRESETS[preset];
-  if (activity === 'static') return { fps: 15, bitrate: profile.staticBitrate };
+  if (activity === 'static') return { fps: 15 };
   if (activity === 'motion' && maxFps === 60)
-    return { fps: 60, bitrate: profile.motionBitrate60 };
-  return { fps: 30, bitrate: profile.activeBitrate };
+    return { fps: 60 };
+  return { fps: 30 };
 }
 
 function positiveDimension(value: number | undefined, fallback: number): number {
@@ -83,7 +79,7 @@ export function createScreenEncodingPlan({
   const width = positiveDimension(sourceWidth, definition.width);
   const height = positiveDimension(sourceHeight, definition.height);
   const scaleResolutionDownBy = Math.max(1, width / definition.width, height / definition.height);
-  const profile = screenEncodingProfile(preset, maxFps, activity);
+  const profile = screenEncodingProfile(maxFps, activity);
 
   return {
     preset,
@@ -93,7 +89,6 @@ export function createScreenEncodingPlan({
     outputHeight: evenFloor(height / scaleResolutionDownBy),
     scaleResolutionDownBy,
     fps: profile.fps,
-    bitrate: profile.bitrate,
     contentHint: activity === 'motion' ? 'motion' : 'detail',
     degradationPreference: activity === 'motion' ? 'maintain-framerate' : 'maintain-resolution',
   };
@@ -114,14 +109,29 @@ export function isScreenEncodingWithinPlan(
     && actualHeight <= plan.outputHeight + tolerance;
 }
 
-/** Producer 首次创建和运行中调档必须使用同一组 RTP 参数。 */
+/** 只约束帧率和尺寸，不设置应用层码率上限；实际速率由编码器和拥塞控制决定。 */
 export function toScreenRtpEncoding(
   plan: ScreenEncodingPlan,
 ): ScreenRtpEncodingParameters {
   return {
-    maxBitrate: plan.bitrate,
     maxFramerate: plan.fps,
     scaleResolutionDownBy: plan.scaleResolutionDownBy,
+  };
+}
+
+/** 调档时清除旧会话残留的码率上限，并保留 transactionId、RID 等发送参数。 */
+export function withScreenEncodingPlan(
+  parameters: RTCRtpSendParameters,
+  plan: ScreenEncodingPlan,
+): RTCRtpSendParameters {
+  return {
+    ...parameters,
+    encodings: parameters.encodings.map(encoding => {
+      const next = { ...encoding, ...toScreenRtpEncoding(plan) };
+      delete next.maxBitrate;
+      return next;
+    }),
+    degradationPreference: plan.degradationPreference,
   };
 }
 

@@ -1,7 +1,7 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
-  Activity, AppWindow, ArrowLeft, AudioLines, Crown, Ellipsis, Eye, EyeOff, Gamepad2, Hash, Headphones, ImagePlus, LoaderCircle, Maximize2, Menu, MessageCircle,
+  Activity, AppWindow, ArrowLeft, AudioLines, Crown, Ellipsis, Eye, EyeOff, Gamepad2, Hash, Headphones, ImagePlus, LoaderCircle, Maximize2, Menu, MessageCircle, MousePointer2,
   Mic, MicOff, Minimize2, Monitor, MonitorPlay, MonitorUp, PanelRightClose, PanelRightOpen, PhoneOff,
   RefreshCw, Send, Settings2, Smartphone, Trash2, UserMinus, UserRound, Volume2, VolumeX, X,
 } from 'lucide-react';
@@ -18,6 +18,7 @@ import { SoundPackPanel } from '../components/SoundPackPanel';
 import { loadProfileRemarks, saveProfileRemark } from '../profileRemarks';
 import { Room, Message, RoomMember, RoomState, UserProfile } from '../types';
 import { AudioDeviceOption, DEFAULT_AUDIO_DEVICE_ID } from '../audioDevices';
+import { normalizedVideoPoint, remoteMouseButton, type RemoteControlInput } from '../remoteControl';
 import {
   CHAT_IMAGE_MAX_BATCH,
   chatImageMimeType,
@@ -70,15 +71,122 @@ function LocalScreenVideo({ stream }: { stream: MediaStream }) {
   return <video ref={ref} autoPlay muted playsInline className="w-full h-full object-contain" />;
 }
 
-function RemoteScreenVideo({ stream }: { stream: MediaStream }) {
+function RemoteScreenVideo({ stream, controlling, onInput }: {
+  stream: MediaStream;
+  controlling: boolean;
+  onInput: (input: RemoteControlInput) => void;
+}) {
   const ref = useRef<HTMLVideoElement>(null);
+  const surfaceRef = useRef<HTMLDivElement>(null);
+  const lastMoveAt = useRef(0);
+  const pressedKeys = useRef(new Set<string>());
+  const pressedButtons = useRef(new Set<'left' | 'right' | 'middle'>());
   useEffect(() => {
     const video = ref.current;
     if (!video) return;
     video.srcObject = stream;
     video.play().catch(() => {});
   }, [stream]);
-  return <video ref={ref} autoPlay muted playsInline className="w-full h-full object-contain" />;
+  const point = (clientX: number, clientY: number) => {
+    const video = ref.current;
+    if (!video) return null;
+    return normalizedVideoPoint(clientX, clientY, video.getBoundingClientRect(), video.videoWidth, video.videoHeight);
+  };
+  const releasePressed = useCallback(() => {
+    pressedKeys.current.forEach(code => onInput({ type: 'key', code, down: false }));
+    pressedButtons.current.forEach(button => onInput({ type: 'button', button, down: false, x: 0.5, y: 0.5 }));
+    pressedKeys.current.clear();
+    pressedButtons.current.clear();
+  }, [onInput]);
+  useEffect(() => {
+    if (!controlling) releasePressed();
+    return releasePressed;
+  }, [controlling, releasePressed]);
+  return (
+    <div
+      ref={surfaceRef}
+      className={`relative h-full w-full outline-none ${controlling ? 'cursor-crosshair focus:ring-2 focus:ring-inset focus:ring-cyan-300/70' : ''}`}
+      tabIndex={controlling ? 0 : -1}
+      onPointerMove={event => {
+        if (!controlling || event.timeStamp - lastMoveAt.current < 16) return;
+        const mapped = point(event.clientX, event.clientY);
+        if (!mapped) return;
+        lastMoveAt.current = event.timeStamp;
+        onInput({ type: 'pointer', ...mapped });
+      }}
+      onPointerDown={event => {
+        if (!controlling) return;
+        const button = remoteMouseButton(event.button);
+        const mapped = point(event.clientX, event.clientY);
+        if (!button || !mapped) return;
+        event.preventDefault();
+        event.currentTarget.focus();
+        event.currentTarget.setPointerCapture(event.pointerId);
+        pressedButtons.current.add(button);
+        onInput({ type: 'button', button, down: true, ...mapped });
+      }}
+      onPointerUp={event => {
+        if (!controlling) return;
+        const button = remoteMouseButton(event.button);
+        const mapped = point(event.clientX, event.clientY);
+        if (!button || !mapped) return;
+        event.preventDefault();
+        pressedButtons.current.delete(button);
+        onInput({ type: 'button', button, down: false, ...mapped });
+      }}
+      onPointerCancel={releasePressed}
+      onLostPointerCapture={releasePressed}
+      onWheel={event => {
+        if (!controlling) return;
+        const mapped = point(event.clientX, event.clientY);
+        if (!mapped) return;
+        event.preventDefault();
+        onInput({
+          type: 'wheel',
+          deltaX: Math.max(-1200, Math.min(1200, event.deltaX)),
+          deltaY: Math.max(-1200, Math.min(1200, event.deltaY)),
+          ...mapped,
+        });
+      }}
+      onKeyDown={event => {
+        if (!controlling || event.repeat) return;
+        event.preventDefault();
+        event.stopPropagation();
+        pressedKeys.current.add(event.code);
+        onInput({ type: 'key', code: event.code, down: true });
+      }}
+      onKeyUp={event => {
+        if (!controlling) return;
+        event.preventDefault();
+        event.stopPropagation();
+        pressedKeys.current.delete(event.code);
+        onInput({ type: 'key', code: event.code, down: false });
+      }}
+      onBlur={releasePressed}
+      onContextMenu={event => { if (controlling) event.preventDefault(); }}
+    >
+      <video ref={ref} autoPlay muted playsInline className="pointer-events-none h-full w-full object-contain" />
+      {controlling && <div className="pointer-events-none absolute inset-0 border border-cyan-300/45" />}
+    </div>
+  );
+}
+
+interface IncomingRemoteControlRequest {
+  requestId: string;
+  roomId: string;
+  controllerSocketId: string;
+  controllerName: string;
+  expiresAt: number;
+}
+
+interface ActiveRemoteControlSession {
+  sessionId: string;
+  roomId: string;
+  role: 'controller' | 'sharer';
+  controllerSocketId?: string;
+  controllerName?: string;
+  sharerSocketId?: string;
+  sharerName?: string;
 }
 
 interface ScreenModalProps {
@@ -94,15 +202,15 @@ function ScreenSettingsModal({ preset, fps, audio, gameMode, onPreset, onFps, on
         <h2 className="text-white font-bold text-xl">屏幕共享设置</h2>
         <p className={`rounded-2xl border px-4 py-3 text-xs leading-relaxed ${gameMode ? 'border-amber-300/20 bg-amber-300/[0.07] text-amber-100/75' : 'border-cyan-300/10 bg-cyan-300/[0.05] text-cyan-100/65'}`}>
           {gameMode
-            ? '游戏模式不会分析画面变化，会持续使用所选传输清晰度的 60 FPS 与最高码率。网络占用会明显增加。'
-            : 'Cove 会保留屏幕原始采集画面用于高质量缩放，并把实际传输分辨率限制在所选档位内；同时根据画面变化调整帧率与码率。'}
+            ? '游戏模式不会分析画面变化，按所选清晰度以 60 FPS 为目标。不设码率上限，实际速率由网络与设备能力决定。'
+            : 'Cove 会保留原始采集画面用于高质量缩放，传输尺寸保持在所选档位内，并根据画面变化调整帧率。不设码率上限，实际速率由网络与设备能力决定。'}
         </p>
         <div>
           <p className="text-white/40 text-sm font-medium mb-2.5">传输模式</p>
           <button onClick={onGameMode} aria-pressed={gameMode}
             className={`flex w-full items-center gap-3 rounded-xl border px-4 py-3 text-left transition-colors ${gameMode ? 'border-amber-300/35 bg-amber-300/15 text-amber-100' : 'border-white/10 bg-white/[0.06] text-white/60 hover:bg-white/10'}`}>
             <span className={`flex h-9 w-9 items-center justify-center rounded-xl ${gameMode ? 'bg-amber-200 text-zinc-900' : 'bg-white/10 text-white/45'}`}><Gamepad2 size={19} /></span>
-            <span className="min-w-0 flex-1"><span className="block text-sm font-semibold">游戏模式</span><span className="mt-0.5 block text-xs opacity-60">固定最高帧率和码率，不检测画面动态</span></span>
+            <span className="min-w-0 flex-1"><span className="block text-sm font-semibold">游戏模式</span><span className="mt-0.5 block text-xs opacity-60">目标 60 FPS，不检测画面动态；所有模式均不限码率</span></span>
             <span className={`rounded-full px-2 py-1 text-xs font-semibold ${gameMode ? 'bg-amber-100/20' : 'bg-white/10'}`}>{gameMode ? '已开启' : '已关闭'}</span>
           </button>
         </div>
@@ -348,11 +456,131 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
   const [pendingGameMode, setPendingGameMode] = useState(false);
   const [showAudioDevices, setShowAudioDevices] = useState(false);
   const [diagnosticsCompact, setDiagnosticsCompact] = useState(false);
+  const [incomingRemoteControl, setIncomingRemoteControl] = useState<IncomingRemoteControlRequest | null>(null);
+  const [pendingRemoteControl, setPendingRemoteControl] = useState<{ requestId: string; expiresAt: number } | null>(null);
+  const [remoteControlSession, setRemoteControlSession] = useState<ActiveRemoteControlSession | null>(null);
+  const [remoteControlNotice, setRemoteControlNotice] = useState('');
+  const remoteControlSessionRef = useRef<ActiveRemoteControlSession | null>(null);
 
   const rtc = useWebRTC(socket, roomId!);
   const hasScreen = Boolean(rtc.localScreen || rtc.remoteScreen);
   const { screenContainerRef, screenMaximized, nativeFullscreen, toggleFullscreen, toggleNativeFullscreen }
     = useScreenFullscreen(Boolean(rtc.localScreen || rtc.remoteScreen));
+
+  useEffect(() => { remoteControlSessionRef.current = remoteControlSession; }, [remoteControlSession]);
+
+  useEffect(() => {
+    const bridge = window.coveRemoteControl;
+    const onRequested = (request: IncomingRemoteControlRequest) => {
+      if (request.roomId !== roomId) return;
+      setIncomingRemoteControl(request);
+      setRemoteControlNotice('');
+    };
+    const onRequestCancelled = ({ requestId, reason }: { requestId: string; reason?: string }) => {
+      setIncomingRemoteControl(current => current?.requestId === requestId ? null : current);
+      if (reason) setRemoteControlNotice(reason);
+    };
+    const onRequestResult = ({ requestId, accepted, error }: { requestId: string; accepted: boolean; error?: string }) => {
+      setPendingRemoteControl(current => current?.requestId === requestId ? null : current);
+      if (!accepted) setRemoteControlNotice(error ?? '远程控制请求未获批准');
+    };
+    const onStarted = async (session: ActiveRemoteControlSession) => {
+      if (session.roomId !== roomId) return;
+      setIncomingRemoteControl(null);
+      setPendingRemoteControl(null);
+      setRemoteControlNotice('');
+      if (session.role === 'sharer') {
+        const enabled = await bridge?.setActive(session.sessionId) ?? false;
+        if (!enabled) {
+          socket.emit('remote-control:stop', { sessionId: session.sessionId });
+          setRemoteControlNotice('Windows 远程输入组件不可用，控制会话已终止');
+          return;
+        }
+      }
+      setRemoteControlSession(session);
+    };
+    const onRemoteInput = ({ sessionId, input }: { sessionId: string; input: RemoteControlInput }) => {
+      const current = remoteControlSessionRef.current;
+      if (!current || current.role !== 'sharer' || current.sessionId !== sessionId) return;
+      void bridge?.sendInput(sessionId, input);
+    };
+    const onStopped = ({ sessionId, reason }: { sessionId: string; reason?: string }) => {
+      const current = remoteControlSessionRef.current;
+      if (!current || current.sessionId !== sessionId) return;
+      if (current.role === 'sharer') void bridge?.setActive(null);
+      setRemoteControlSession(null);
+      setRemoteControlNotice(reason ?? '远程控制已结束');
+    };
+    const removeEmergencyListener = bridge?.onEmergencyStop(() => {
+      const current = remoteControlSessionRef.current;
+      if (!current || current.role !== 'sharer') return;
+      socket.emit('remote-control:stop', { sessionId: current.sessionId });
+      void bridge.setActive(null);
+      setRemoteControlNotice('已通过紧急快捷键终止远程控制');
+    });
+    socket.on('remote-control:requested', onRequested);
+    socket.on('remote-control:request-cancelled', onRequestCancelled);
+    socket.on('remote-control:request-result', onRequestResult);
+    socket.on('remote-control:started', onStarted);
+    socket.on('remote-control:input', onRemoteInput);
+    socket.on('remote-control:stopped', onStopped);
+    return () => {
+      socket.off('remote-control:requested', onRequested);
+      socket.off('remote-control:request-cancelled', onRequestCancelled);
+      socket.off('remote-control:request-result', onRequestResult);
+      socket.off('remote-control:started', onStarted);
+      socket.off('remote-control:input', onRemoteInput);
+      socket.off('remote-control:stopped', onStopped);
+      removeEmergencyListener?.();
+      void bridge?.setActive(null);
+    };
+  }, [roomId]);
+
+  const requestRemoteControl = useCallback(() => {
+    if (!roomId || !rtc.remoteScreen || pendingRemoteControl || remoteControlSession) return;
+    setRemoteControlNotice('');
+    socket.timeout(5_000).emit('remote-control:request', {
+      roomId,
+      sharerSocketId: rtc.remoteScreen.socketId,
+    }, (error: Error | null, response?: { ok: boolean; requestId?: string; expiresAt?: number; error?: string }) => {
+      if (error || !response?.ok || !response.requestId || !response.expiresAt) {
+        setRemoteControlNotice(response?.error ?? '远程控制请求发送失败'); return;
+      }
+      setPendingRemoteControl({ requestId: response.requestId, expiresAt: response.expiresAt });
+    });
+  }, [pendingRemoteControl, remoteControlSession, roomId, rtc.remoteScreen]);
+
+  const respondRemoteControl = useCallback((accepted: boolean) => {
+    const request = incomingRemoteControl;
+    if (!request) return;
+    setIncomingRemoteControl(null);
+    socket.timeout(5_000).emit('remote-control:respond', {
+      requestId: request.requestId,
+      accepted,
+    }, (error: Error | null, response?: { ok: boolean; error?: string }) => {
+      if (error || !response?.ok) setRemoteControlNotice(response?.error ?? '远程控制确认失败');
+    });
+  }, [incomingRemoteControl]);
+
+  const stopRemoteControl = useCallback(() => {
+    const current = remoteControlSessionRef.current;
+    if (!current) return;
+    socket.emit('remote-control:stop', { sessionId: current.sessionId });
+    if (current.role === 'sharer') void window.coveRemoteControl?.setActive(null);
+  }, []);
+
+  const sendRemoteControlInput = useCallback((input: RemoteControlInput) => {
+    const current = remoteControlSessionRef.current;
+    if (!current || current.role !== 'controller') return;
+    socket.emit('remote-control:input', { sessionId: current.sessionId, input });
+  }, []);
+
+  useEffect(() => {
+    const current = remoteControlSession;
+    if (!current || current.role !== 'controller') return;
+    if (rtc.remoteScreen?.socketId === current.sharerSocketId) return;
+    socket.emit('remote-control:stop', { sessionId: current.sessionId });
+  }, [remoteControlSession, rtc.remoteScreen]);
 
   useLayoutEffect(() => {
     // 每次开始观看/共享都从收起状态开始；之后的消息刷新只更新内容，
@@ -649,6 +877,12 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
   // 自己始终置顶，其余成员按“语音中 > 仅在房间”排序；组内保持服务端顺序稳定。
   const voiceMemberSocketIds = new Set(rtc.voiceMembers.map(member => member.socketId));
   const sortedRoomMembers = sortRoomMembers(roomMembers, voiceMemberSocketIds, rtc.localSocketId ?? socket.id);
+  const remoteScreenMember = rtc.remoteScreen
+    ? roomMembers.find(member => member.socketId === rtc.remoteScreen!.socketId)
+    : undefined;
+  const controllingRemoteScreen = remoteControlSession?.role === 'controller'
+    && remoteControlSession.sharerSocketId === rtc.remoteScreen?.socketId;
+  const sharingUnderRemoteControl = remoteControlSession?.role === 'sharer' && !!rtc.localScreen;
 
   // 观看期间仅在视频内部显示当前共享提示，不改动其他共享的订阅或播放状态。
   const hasScreenBanner = rtc.inVoice && rtc.availableScreens.length > 0 && !rtc.localScreen && !rtc.remoteScreen;
@@ -662,6 +896,25 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
     : '等待第二个样本';
   return (
     <div className="h-full flex bg-gradient-to-br from-zinc-950 via-black to-zinc-900 overflow-hidden">
+
+      {incomingRemoteControl && (
+        <div className="fixed inset-0 z-[160] flex items-center justify-center bg-black/65 p-4 backdrop-blur-md">
+          <section className="w-full max-w-sm rounded-3xl border border-cyan-300/20 bg-zinc-900 p-7 text-white shadow-2xl" role="dialog" aria-modal="true" aria-labelledby="remote-control-request-title">
+            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-cyan-300/15 text-cyan-200"><MousePointer2 size={24} /></div>
+            <h2 id="remote-control-request-title" className="mt-4 text-center text-lg font-semibold">远程控制请求</h2>
+            <p className="mt-2 text-center text-sm leading-relaxed text-white/55">
+              <span className="font-semibold text-white">{incomingRemoteControl.controllerName}</span> 请求控制你正在共享的屏幕。
+            </p>
+            <p className="mt-3 rounded-xl border border-amber-300/15 bg-amber-300/[0.07] px-3 py-2 text-xs leading-relaxed text-amber-100/70">
+              同意后，对方可以发送鼠标和键盘输入。你可以随时点击停止，或按 Ctrl+Alt+Shift+X 紧急终止；UAC 与安全桌面不会被控制。
+            </p>
+            <div className="mt-5 flex gap-2.5">
+              <button onClick={() => respondRemoteControl(false)} className="flex-1 rounded-xl bg-white/10 py-3 font-semibold text-white/70 transition hover:bg-white/15">拒绝</button>
+              <button onClick={() => respondRemoteControl(true)} className="flex-1 rounded-xl bg-cyan-100 py-3 font-semibold text-zinc-900 transition hover:bg-white">允许本次控制</button>
+            </div>
+          </section>
+        </div>
+      )}
 
       {showScreenModal && (
         <ScreenSettingsModal
@@ -1078,11 +1331,11 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
             <div ref={screenContainerRef} className="cove-screen-container relative h-full bg-black">
               {rtc.remoteScreen ? (
                 <>
-                  <RemoteScreenVideo stream={rtc.remoteScreen.stream} />
+                  <RemoteScreenVideo stream={rtc.remoteScreen.stream} controlling={controllingRemoteScreen} onInput={sendRemoteControlInput} />
                   <WatchingScreenBanner
                     key={rtc.remoteScreen.stream.id}
                     sharer={rtc.voiceMembers.find(member => member.socketId === rtc.remoteScreen!.socketId)?.username ?? '成员'}
-                    onStopWatching={rtc.stopWatchingScreen}
+                    onStopWatching={() => { if (controllingRemoteScreen) stopRemoteControl(); rtc.stopWatchingScreen(); }}
                   />
                   <div className="absolute bottom-3 left-3 bg-black/60 backdrop-blur-md text-white text-sm px-3 py-1.5 rounded-xl font-medium border border-white/10">
                     {rtc.voiceMembers.find(m => m.socketId === rtc.remoteScreen!.socketId)?.username ?? rtc.remoteScreen.socketId} 正在共享
@@ -1096,6 +1349,33 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
                   </div>
                 </>
               ) : null}
+
+              {rtc.remoteScreen && (
+                <div className="absolute right-3 top-16 z-20 max-w-xs rounded-xl border border-white/10 bg-black/45 p-2 text-xs text-white/75 shadow-xl backdrop-blur-md">
+                  {controllingRemoteScreen ? (
+                    <button onClick={stopRemoteControl} className="inline-flex items-center gap-2 rounded-lg bg-red-500/20 px-3 py-2 font-semibold text-red-100 transition hover:bg-red-500/30">
+                      <MousePointer2 size={15} />停止远程控制
+                    </button>
+                  ) : pendingRemoteControl ? (
+                    <span className="inline-flex items-center gap-2 px-2 py-1.5 text-cyan-100/75"><LoaderCircle size={14} className="animate-spin" />等待共享者确认</span>
+                  ) : remoteScreenMember?.canReceiveRemoteControl && window.coveRemoteControl?.supported ? (
+                    <button onClick={requestRemoteControl} className="inline-flex items-center gap-2 rounded-lg bg-cyan-200 px-3 py-2 font-semibold text-zinc-900 transition hover:bg-white">
+                      <MousePointer2 size={15} />申请远程控制
+                    </button>
+                  ) : (
+                    <span className="block px-2 py-1.5 text-white/40">共享者当前客户端不支持远程控制</span>
+                  )}
+                  {!!remoteControlNotice && <p className="mt-1.5 max-w-56 px-2 text-[11px] leading-relaxed text-amber-100/70">{remoteControlNotice}</p>}
+                </div>
+              )}
+
+              {sharingUnderRemoteControl && (
+                <div className="absolute right-3 top-16 z-20 max-w-sm rounded-xl border border-amber-300/25 bg-black/60 p-3 text-xs text-white shadow-xl backdrop-blur-md">
+                  <p className="font-semibold text-amber-100"><MousePointer2 size={14} className="mr-1.5 inline" />{remoteControlSession.controllerName ?? '成员'} 正在控制你的屏幕</p>
+                  <p className="mt-1 text-white/45">按 Ctrl+Alt+Shift+X 或点击下方按钮立即终止。</p>
+                  <button onClick={stopRemoteControl} className="mt-2 rounded-lg bg-red-500/20 px-3 py-1.5 font-semibold text-red-100 transition hover:bg-red-500/30">停止控制</button>
+                </div>
+              )}
 
               {rtc.remoteScreen ? (
                 <ScreenVolumeControl volume={rtc.screenReceiveVolume} onChange={rtc.setScreenReceiveVolume} />
@@ -1137,7 +1417,7 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
                   <div>编码：<span className="text-cyan-300">{rtc.stats.codec ?? '—'}{rtc.stats.encoderImplementation ? ` · ${rtc.stats.encoderImplementation}` : rtc.stats.decoderImplementation ? ` · ${rtc.stats.decoderImplementation}` : ''}</span></div>
                   {rtc.localScreen && <div>节能编码器：<span className="text-white/70">{rtc.stats.powerEfficientEncoder == null ? '未知' : rtc.stats.powerEfficientEncoder ? '是' : '否'}</span></div>}
                   <div>RTP 媒体码率：<span className="text-cyan-300">{rtc.stats.bitrate != null ? `${rtc.stats.bitrate} kbps` : '等待第二个样本'}</span></div>
-                  {rtc.localScreen && <div>编码器目标/配置上限：<span className="text-cyan-300">{rtc.stats.targetBitrate != null ? `${rtc.stats.targetBitrate} kbps` : '浏览器未提供'} / {rtc.screenTargetBitrate ? `${Math.round(rtc.screenTargetBitrate / 1000)} kbps` : '—'}</span></div>}
+                  {rtc.localScreen && <div>编码器目标 / Cove 码率上限：<span className="text-cyan-300">{rtc.stats.targetBitrate != null ? `${rtc.stats.targetBitrate} kbps` : '浏览器未提供'} / 不设上限</span></div>}
                   {rtc.localScreen && <div>画面模式：<span className="text-cyan-300">{rtc.screenGameMode ? '游戏模式' : rtc.screenActivity === 'static' ? '自动 · 静止' : rtc.screenActivity === 'motion' ? '自动 · 动态' : '自动 · 普通操作'}</span></div>}
                   {rtc.localScreen && <div>发送可用带宽：<span className="text-cyan-300">{rtc.stats.availableBitrate != null ? `${rtc.stats.availableBitrate} kbps` : '浏览器未提供'}</span></div>}
                   <div>服务器入口/出口：<span className="text-cyan-300">{rtc.stats.serverIngressBitrate != null ? `${rtc.stats.serverIngressBitrate} kbps` : '—'} / {rtc.stats.serverEgressBitrate != null ? `${rtc.stats.serverEgressBitrate} kbps` : '—'}</span>　Score：<span className="text-cyan-300">{rtc.stats.serverScore ?? '—'}</span></div>

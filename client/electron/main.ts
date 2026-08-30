@@ -1,9 +1,10 @@
-import { app, BrowserWindow, Menu, session, desktopCapturer, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, Menu, session, desktopCapturer, globalShortcut, ipcMain, shell } from 'electron';
 import path from 'path';
 import { openUpdaterLog, startAutoUpdater } from './updater';
 import type { AutoUpdaterController, UpdateState } from './updater-core';
 import { normalizeExternalHttpUrl } from './external-links';
 import { ServerCertificatePolicy } from './server-certificate-policy';
+import { RemoteInputController, type RemoteControlInput } from './remote-control';
 import {
   ApplicationAudioCaptureController,
   listApplicationAudioSources,
@@ -27,6 +28,17 @@ const applicationAudioCapture = new ApplicationAudioCaptureController();
 // sound-pack playback. Screen sharing uses a separate native process-loopback
 // capture which excludes the Cove process tree.
 const screenAudioCapture = new ApplicationAudioCaptureController('cove:screen-audio:chunk');
+const remoteInputController = new RemoteInputController();
+const remoteStopShortcut = 'Control+Alt+Shift+X';
+
+function setRemoteStopShortcut(enabled: boolean): boolean {
+  globalShortcut.unregister(remoteStopShortcut);
+  if (!enabled) return true;
+  return globalShortcut.register(remoteStopShortcut, () => {
+    remoteInputController.stop();
+    mainWindow?.webContents.send('cove:remote-control:emergency-stop');
+  });
+}
 
 // A certificate exception is accepted only for the exact HTTPS origin chosen
 // in Cove's server settings and only inside the main application window.
@@ -126,6 +138,17 @@ app.whenReady().then(() => {
     if (event.sender !== mainWindow?.webContents) return null;
     return serverCertificatePolicy.configure(serverUrl, enabled);
   });
+  ipcMain.handle('cove:remote-control:set-active', (event, sessionId: unknown) => {
+    if (event.sender !== mainWindow?.webContents || (sessionId !== null && typeof sessionId !== 'string')) return false;
+    const enabled = remoteInputController.setActive(sessionId);
+    const shortcutReady = setRemoteStopShortcut(enabled && sessionId !== null);
+    if (enabled && !shortcutReady) remoteInputController.stop();
+    return enabled && shortcutReady;
+  });
+  ipcMain.handle('cove:remote-control:input', (event, sessionId: unknown, input: unknown) => {
+    if (event.sender !== mainWindow?.webContents || typeof sessionId !== 'string') return false;
+    return remoteInputController.send(sessionId, input as RemoteControlInput);
+  });
   ipcMain.handle('cove:update:get-state', () => updaterController?.getState() ?? unavailableUpdateState);
   ipcMain.handle('cove:update:check', () => updaterController?.checkNow() ?? unavailableUpdateState);
   ipcMain.handle('cove:update:install', () => updaterController?.installNow() ?? false);
@@ -181,6 +204,8 @@ app.whenReady().then(() => {
 app.on('will-quit', () => {
   applicationAudioCapture.stop();
   screenAudioCapture.stop();
+  remoteInputController.stop();
+  setRemoteStopShortcut(false);
   updaterController?.dispose();
 });
 

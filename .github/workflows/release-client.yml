@@ -55,8 +55,18 @@ jobs:
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
+      - name: Prepare server Visual C++ runtime
+        shell: pwsh
+        run: |
+          $runtime = "server/build/vc_redist.x64.exe"
+          Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile $runtime
+          $signature = Get-AuthenticodeSignature -FilePath $runtime
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Microsoft Corporation') {
+            throw "Visual C++ runtime signature validation failed"
+          }
+
       - name: Build Windows server release
-        run: npm run build:electron -w server
+        run: npm run build:electron -w server -- --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
@@ -69,25 +79,45 @@ jobs:
           $installer = "client/dist-app/Cove-Setup-$version.exe"
           $blockmap = "$installer.blockmap"
           $manifest = "client/dist-app/latest.yml"
-          $serverInstaller = "server/dist-app/Cove Server Setup $version.exe"
+          $serverInstaller = "server/dist-app/Cove-Server-Setup-$version.exe"
           $serverBlockmap = "$serverInstaller.blockmap"
 
           foreach ($asset in @($installer, $blockmap, $manifest, $serverInstaller, $serverBlockmap)) {
             if (-not (Test-Path -LiteralPath $asset)) {
               throw "Missing release asset: $asset"
             }
+            if ((Get-Item -LiteralPath $asset).Length -gt 100MB) {
+              throw "Release asset exceeds the Gitee sync script's 100 MB limit: $asset"
+            }
           }
 
           $tag = "${{ github.ref_name }}"
           $repo = "${{ github.repository }}"
-          if (gh release view $tag --repo $repo 2>$null) {
-            gh release upload $tag $installer $blockmap $manifest $serverInstaller $serverBlockmap --clobber --repo $repo
-            gh release edit $tag --title "Cove v$version" --notes-file RELEASE_NOTES.md --repo $repo
-          } else {
+          gh release view $tag --repo $repo --json isDraft 2>$null | Out-Null
+          if ($LASTEXITCODE -ne 0) {
             gh release create $tag `
-              $installer $blockmap $manifest $serverInstaller $serverBlockmap `
               --repo $repo `
               --verify-tag `
+              --draft `
               --title "Cove v$version" `
               --notes-file RELEASE_NOTES.md
+            if ($LASTEXITCODE -ne 0) { throw "Creating the draft release failed" }
           }
+
+          gh release upload $tag $installer $blockmap $manifest $serverInstaller $serverBlockmap --clobber --repo $repo
+          if ($LASTEXITCODE -ne 0) { throw "Uploading release assets failed" }
+          gh release edit $tag --draft=false --latest --title "Cove v$version" --notes-file RELEASE_NOTES.md --repo $repo
+          if ($LASTEXITCODE -ne 0) { throw "Publishing release failed" }
+
+          $published = gh release view $tag --repo $repo --json tagName,isDraft,isPrerelease,assets,url | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $published.isDraft -or $published.isPrerelease -or $published.tagName -ne $tag) {
+            throw "Release is not publicly published with the expected tag"
+          }
+          foreach ($asset in @($installer, $blockmap, $manifest, $serverInstaller, $serverBlockmap)) {
+            $name = Split-Path $asset -Leaf
+            $remote = @($published.assets | Where-Object name -eq $name)
+            if ($remote.Count -ne 1 -or $remote[0].size -ne (Get-Item -LiteralPath $asset).Length) {
+              throw "Published release asset is missing or has the wrong size: $name"
+            }
+          }
+          Write-Output "Verified public GitHub Release: $($published.url)"

@@ -17,6 +17,13 @@ import { soundpackVoiceAudience } from './soundpackAudience';
 import { createVoicePresenceEvent, voicePresenceMessage, type VoicePresenceAction } from './voicePresence';
 import { summarizeRtpStat, summarizeTransportStat } from './mediaDiagnostics';
 import { AccountAuthError, createAccountStore } from './accountAuth';
+import {
+  REMOTE_CONTROL_REQUEST_TTL_MS,
+  RemoteControlRegistry,
+  sanitizeRemoteControlInput,
+  type RemoteControlRequest,
+  type RemoteControlSession,
+} from './remoteControl';
 
 const app = express();
 const httpServer = createServer(app);
@@ -152,6 +159,7 @@ interface RoomMember {
   isSharingScreen: boolean;
   isSharingApplicationAudio: boolean;
   platform: ClientPlatform | null;
+  canReceiveRemoteControl: boolean;
 }
 
 // ── 语音包文件目录 ─────────────────────────────────────────────────────────────
@@ -164,6 +172,8 @@ const userNames   = new Map<string, string>();
 const userAvatars = new Map<string, string | null>();
 const userClientIds = new Map<string, string>(); // socketId → 持久客户端身份（不广播）
 const userPlatforms = new Map<string, ClientPlatform>();
+const remoteControlCapabilities = new Set<string>();
+const remoteControls = new RemoteControlRegistry();
 const voiceRooms  = new Map<string, Set<string>>(); // roomId → Set<socketId>
 const roomMembers = new Map<string, Set<string>>();  // roomId → Set<socketId>
 const selfMutedVoiceMembers = new Set<string>(); // 主动关闭麦克风的 socketId，仅在本次语音会话有效
@@ -611,6 +621,7 @@ function broadcastRoomMembers(roomId: string) {
       isSharingScreen: hasProducerType('screen'),
       isSharingApplicationAudio: hasProducerType('application-audio'),
       platform: userPlatforms.get(id) ?? null,
+      canReceiveRemoteControl: remoteControlCapabilities.has(id),
     };
   });
 
@@ -672,6 +683,43 @@ function pausePeerMicrophone(socketId: string, paused: boolean) {
   }
 }
 
+function isSharingScreen(socketId: string, roomId: string): boolean {
+  const peer = peers.get(socketId);
+  if (!peer || peer.roomId !== roomId) return false;
+  return [...peer.producers.values()].some(producer =>
+    !producer.closed && (producer.appData as Record<string, unknown>).type === 'screen');
+}
+
+function emitRemoteControlStopped(session: RemoteControlSession, reason: string) {
+  const payload = { sessionId: session.sessionId, reason };
+  io.to(session.controllerSocketId).emit('remote-control:stopped', payload);
+  io.to(session.sharerSocketId).emit('remote-control:stopped', payload);
+}
+
+function emitRemoteRequestCancelled(request: RemoteControlRequest, reason: string) {
+  io.to(request.controllerSocketId).emit('remote-control:request-result', {
+    requestId: request.requestId,
+    accepted: false,
+    error: reason,
+  });
+  io.to(request.sharerSocketId).emit('remote-control:request-cancelled', {
+    requestId: request.requestId,
+    reason,
+  });
+}
+
+function stopRemoteControlForSocket(socketId: string, reason: string) {
+  const cleared = remoteControls.clearSocket(socketId);
+  cleared.requests.forEach(request => emitRemoteRequestCancelled(request, reason));
+  cleared.sessions.forEach(session => emitRemoteControlStopped(session, reason));
+}
+
+function stopRemoteControlForRoom(roomId: string, reason: string) {
+  const cleared = remoteControls.clearRoom(roomId);
+  cleared.requests.forEach(request => emitRemoteRequestCancelled(request, reason));
+  cleared.sessions.forEach(session => emitRemoteControlStopped(session, reason));
+}
+
 // ── Socket.io ─────────────────────────────────────────────────────────────────
 
 io.on('connection', socket => {
@@ -700,7 +748,7 @@ io.on('connection', socket => {
   };
 
   socket.on('user:register', (
-    registration: string | { username?: string; clientId?: string; authToken?: string; avatarUrl?: unknown; platform?: unknown },
+    registration: string | { username?: string; clientId?: string; authToken?: string; avatarUrl?: unknown; platform?: unknown; remoteControlSupported?: unknown },
     cb?: (result: { ok: boolean; error?: string }) => void,
   ) => {
     const account = typeof registration === 'string' ? null : accounts.accountForToken(registration?.authToken);
@@ -725,6 +773,9 @@ io.on('connection', socket => {
     const platform = sanitizeClientPlatform(typeof registration === 'string' ? null : registration.platform);
     if (platform) userPlatforms.set(socket.id, platform);
     else userPlatforms.delete(socket.id);
+    if (platform === 'desktop' && typeof registration !== 'string' && registration.remoteControlSupported === true)
+      remoteControlCapabilities.add(socket.id);
+    else remoteControlCapabilities.delete(socket.id);
 
     // 同一设备更改用户名后，同步更新它所拥有房间的公开房主名。
     const updated = stmtUpdateOwnerName.run(username.slice(0, 64), clientId, username.slice(0, 64));
@@ -810,12 +861,121 @@ io.on('connection', socket => {
   });
 
   socket.on('room:leave', (roomId: string) => {
+    stopRemoteControlForSocket(socket.id, '成员已离开频道');
     handleVoiceLeave(socket.id, roomId);
     roomMembers.get(roomId)?.delete(socket.id);
     socket.leave(roomId);
     broadcastRoomMembers(roomId);
     const peer = peers.get(socket.id);
     if (peer) peer.roomId = null;
+  });
+
+  // ── Remote control ────────────────────────────────────────────────────────
+
+  socket.on('remote-control:request', (
+    { roomId, sharerSocketId }: { roomId?: string; sharerSocketId?: string },
+    cb?: (result: { ok: boolean; requestId?: string; expiresAt?: number; error?: string }) => void,
+  ) => {
+    const members = roomId ? roomMembers.get(roomId) : undefined;
+    if (!roomId || !sharerSocketId || !members?.has(socket.id) || !members.has(sharerSocketId)) {
+      cb?.({ ok: false, error: '双方必须在同一频道中' }); return;
+    }
+    if (!remoteControlCapabilities.has(socket.id) || !remoteControlCapabilities.has(sharerSocketId)) {
+      cb?.({ ok: false, error: '双方都需要使用支持远程控制的 Windows 客户端' }); return;
+    }
+    if (!isSharingScreen(sharerSocketId, roomId)) {
+      cb?.({ ok: false, error: '目标成员当前没有共享屏幕' }); return;
+    }
+    const created = remoteControls.createRequest(roomId, socket.id, sharerSocketId);
+    if (!created.ok) { cb?.({ ok: false, error: created.error }); return; }
+    const request = created.value;
+    io.to(sharerSocketId).emit('remote-control:requested', {
+      requestId: request.requestId,
+      roomId,
+      controllerSocketId: socket.id,
+      controllerName: userNames.get(socket.id) ?? '成员',
+      expiresAt: request.expiresAt,
+    });
+    setTimeout(() => {
+      const expired = remoteControls.expireRequest(request.requestId);
+      if (expired) emitRemoteRequestCancelled(expired, '远程控制请求已超时');
+    }, REMOTE_CONTROL_REQUEST_TTL_MS + 50);
+    cb?.({ ok: true, requestId: request.requestId, expiresAt: request.expiresAt });
+  });
+
+  socket.on('remote-control:respond', (
+    { requestId, accepted }: { requestId?: string; accepted?: boolean },
+    cb?: (result: { ok: boolean; error?: string }) => void,
+  ) => {
+    if (!requestId || typeof accepted !== 'boolean') { cb?.({ ok: false, error: '确认信息无效' }); return; }
+    const pending = remoteControls.getRequest(requestId);
+    if (!pending || pending.sharerSocketId !== socket.id) {
+      cb?.({ ok: false, error: '远程控制请求不存在或已过期' }); return;
+    }
+    const members = roomMembers.get(pending.roomId);
+    if (
+      !members?.has(pending.controllerSocketId)
+      || !members.has(pending.sharerSocketId)
+      || !isSharingScreen(pending.sharerSocketId, pending.roomId)
+    ) {
+      const rejected = remoteControls.respond(requestId, socket.id, false);
+      if (rejected.ok) emitRemoteRequestCancelled(rejected.value.request, '共享状态已变化，请重新申请');
+      cb?.({ ok: false, error: '共享状态已变化，请重新申请' }); return;
+    }
+    const response = remoteControls.respond(requestId, socket.id, accepted);
+    if (!response.ok) { cb?.({ ok: false, error: response.error }); return; }
+    const { request, session } = response.value;
+    if (!session) {
+      io.to(request.controllerSocketId).emit('remote-control:request-result', {
+        requestId, accepted: false, error: '共享者已拒绝远程控制',
+      });
+      cb?.({ ok: true }); return;
+    }
+    io.to(session.controllerSocketId).emit('remote-control:started', {
+      sessionId: session.sessionId,
+      roomId: session.roomId,
+      role: 'controller',
+      sharerSocketId: session.sharerSocketId,
+      sharerName: userNames.get(session.sharerSocketId) ?? '共享者',
+    });
+    io.to(session.sharerSocketId).emit('remote-control:started', {
+      sessionId: session.sessionId,
+      roomId: session.roomId,
+      role: 'sharer',
+      controllerSocketId: session.controllerSocketId,
+      controllerName: userNames.get(session.controllerSocketId) ?? '成员',
+    });
+    cb?.({ ok: true });
+  });
+
+  socket.on('remote-control:input', ({ sessionId, input }: { sessionId?: string; input?: unknown }) => {
+    if (!sessionId) return;
+    const safeInput = sanitizeRemoteControlInput(input);
+    if (!safeInput) return;
+    const session = remoteControls.authorizeInput(sessionId, socket.id);
+    if (!session) return;
+    const members = roomMembers.get(session.roomId);
+    if (!members?.has(session.controllerSocketId) || !members.has(session.sharerSocketId)
+      || !isSharingScreen(session.sharerSocketId, session.roomId)) {
+      const stopped = remoteControls.stop(session.sessionId, socket.id);
+      if (stopped.ok) emitRemoteControlStopped(stopped.value, '共享状态已变化');
+      return;
+    }
+    io.to(session.sharerSocketId).emit('remote-control:input', {
+      sessionId: session.sessionId,
+      input: safeInput,
+    });
+  });
+
+  socket.on('remote-control:stop', (
+    { sessionId }: { sessionId?: string },
+    cb?: (result: { ok: boolean; error?: string }) => void,
+  ) => {
+    if (!sessionId) { cb?.({ ok: false, error: '会话不存在' }); return; }
+    const stopped = remoteControls.stop(sessionId, socket.id);
+    if (!stopped.ok) { cb?.({ ok: false, error: stopped.error }); return; }
+    emitRemoteControlStopped(stopped.value, '远程控制已结束');
+    cb?.({ ok: true });
   });
 
   // ── 房主操作 ─────────────────────────────────────────────────────────────
@@ -876,6 +1036,7 @@ io.on('connection', socket => {
     }
 
     handleVoiceLeave(targetSocketId, roomId);
+    stopRemoteControlForSocket(targetSocketId, '成员已被移出频道');
     members.delete(targetSocketId);
     const targetSocket = io.sockets.sockets.get(targetSocketId);
     targetSocket?.leave(roomId);
@@ -897,6 +1058,7 @@ io.on('connection', socket => {
     }
 
     const members = [...(roomMembers.get(roomId) ?? new Set<string>())];
+    stopRemoteControlForRoom(roomId, '频道已被删除');
     io.to(roomId).emit('room:deleted', { roomId });
     for (const memberSocketId of members) {
       handleVoiceLeave(memberSocketId, roomId);
@@ -1016,9 +1178,9 @@ io.on('connection', socket => {
         enableUdp: true,
         enableTcp: true,
         preferUdp: true,
-        // 让 1080p 动态共享不必从 1.2 Mbps 缓慢爬升。这只是拥塞控制的
+        // 按 10 Mbps 启动，减少高分辨率共享的爬升时间。这只是拥塞控制的
         // 初始估计而不是硬限速，后续仍会按接收端反馈自动升降。
-        initialAvailableOutgoingBitrate: 4_000_000,
+        initialAvailableOutgoingBitrate: 10_000_000,
       });
 
       // 存到 peer（前两次调用对应 send/recv，按顺序）
@@ -1147,6 +1309,7 @@ io.on('connection', socket => {
           sourceType: demandType,
         });
         if (demandType === 'screen') {
+          stopRemoteControlForSocket(socket.id, '屏幕共享已结束');
           io.to(producerRoomId).emit('screen:viewers', {
             peerId: socket.id,
             viewerCount: 0,
@@ -1398,6 +1561,8 @@ io.on('connection', socket => {
     userAvatars.delete(socket.id);
     userClientIds.delete(socket.id);
     userPlatforms.delete(socket.id);
+    remoteControlCapabilities.delete(socket.id);
+    stopRemoteControlForSocket(socket.id, '成员连接已断开');
     broadcastOnlineUsers();
     removePeer(socket.id);
   });

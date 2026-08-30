@@ -61,6 +61,17 @@ test('does not receive application audio before joining voice', async () => {
   expect(media.applicationAudioShares).toEqual([]);
 });
 
+test('publishes the microphone without a fixed bitrate cap while preserving Opus options', async () => {
+  await act(async () => media.joinVoice());
+  expect(mockTransport.produce).toHaveBeenCalledTimes(1);
+  const [options] = (mockTransport.produce as jest.Mock).mock.calls[0];
+  expect(options.appData.type).toBe('mic');
+  expect(options.codecOptions).toEqual({ opusStereo: false, opusDtx: true, opusFec: true });
+  for (const encoding of options.encodings ?? []) {
+    expect(encoding).not.toHaveProperty('maxBitrate');
+  }
+});
+
 test('receives existing and new shares separately with default 100% volume', async () => {
   existing = [application('app1')];
   await act(async () => media.joinVoice());

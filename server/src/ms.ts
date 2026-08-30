@@ -42,7 +42,8 @@ const CODECS = [
   },
   {
     kind: 'video', mimeType: 'video/VP8', clockRate: 90000,
-    parameters: { 'x-google-start-bitrate': 1000 },
+    // VP8 回退也按 10 Mbps 启动（此 SDP 参数单位为 kbps），不设置码率上限。
+    parameters: { 'x-google-start-bitrate': 10_000 },
   },
   {
     kind: 'video', mimeType: 'video/H264', clockRate: 90000,

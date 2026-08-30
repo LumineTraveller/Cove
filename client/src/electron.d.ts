@@ -1,5 +1,6 @@
 import type { UpdateState } from './update';
 import type { ApplicationAudioSource } from './applicationAudio';
+import type { RemoteControlInput } from './remoteControl';
 
 interface CoveUpdaterApi {
   getState(): Promise<UpdateState>;
@@ -30,6 +31,13 @@ interface CoveScreenAudioApi {
   onChunk(listener: (chunk: Uint8Array) => void): () => void;
 }
 
+interface CoveRemoteControlApi {
+  supported: boolean;
+  setActive(sessionId: string | null): Promise<boolean>;
+  sendInput(sessionId: string, input: RemoteControlInput): Promise<boolean>;
+  onEmergencyStop(listener: () => void): () => void;
+}
+
 declare global {
   interface Window {
     coveUpdater?: CoveUpdaterApi;
@@ -37,6 +45,7 @@ declare global {
     coveSecurity?: CoveSecurityApi;
     coveApplicationAudio?: CoveApplicationAudioApi;
     coveScreenAudio?: CoveScreenAudioApi;
+    coveRemoteControl?: CoveRemoteControlApi;
   }
 }
 

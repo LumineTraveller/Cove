@@ -35,6 +35,7 @@ import {
   applyScreenCaptureConstraints,
   createScreenEncodingPlan,
   toScreenRtpEncoding,
+  withScreenEncodingPlan,
   type ScreenActivity,
   type ScreenEncodingPlan,
   type ScreenPreset,
@@ -295,7 +296,6 @@ export function useWebRTC(socket: Socket, roomId: string) {
   const [shareAudio,   setShareAudio]   = useState(false);
   const [screenGameMode, setScreenGameMode] = useState(false);
   const [screenActivity, setScreenActivity] = useState<ScreenActivity>('active');
-  const [screenTargetBitrate, setScreenTargetBitrate] = useState(0);
   const [screenEncodingPlan, setScreenEncodingPlan] = useState<ScreenEncodingPlan | null>(null);
   const [screenViewerCount, setScreenViewerCount] = useState(0);
   const [voiceMembers, setVoiceMembers] = useState<VoiceMember[]>([]);
@@ -850,7 +850,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
         preset: screenPreset,
         requestedFps: screenGameMode ? 60 : fps,
         gameMode: screenGameMode,
-        targetBitrate: screenTargetBitrate,
+        configuredMaxBitrate: null,
         encodingPlan: screenEncodingPlan,
         trackSettings: producer?.track?.getSettings() ?? null,
         senderParameters: producer?.rtpSender?.getParameters() ?? null,
@@ -864,7 +864,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
     link.download = `cove-media-diagnostics-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
     link.click();
     setTimeout(() => URL.revokeObjectURL(url), 1_000);
-  }, [fps, roomId, screenEncodingPlan, screenGameMode, screenPreset, screenTargetBitrate, socket.id]);
+  }, [fps, roomId, screenEncodingPlan, screenGameMode, screenPreset, socket.id]);
 
   // 卸载时清理所有定时器和音频上下文
   useEffect(() => () => {
@@ -1518,7 +1518,6 @@ export function useWebRTC(socket: Socket, roomId: string) {
       const producer = await sendTransport.current!.produce({
         track:   stream.getAudioTracks()[0],
         codecOptions: { opusStereo: false, opusDtx: true, opusFec: true },
-        encodings: [{ maxBitrate: 32_000 }],
         appData: { type: 'mic' },
       });
       audioProducer.current = producer;
@@ -1707,7 +1706,6 @@ export function useWebRTC(socket: Socket, roomId: string) {
     });
     screenActivityRef.current = activity;
     setScreenActivity(activity);
-    setScreenTargetBitrate(plan.bitrate);
     setScreenEncodingPlan(plan);
     if (track) {
       track.contentHint = plan.contentHint;
@@ -1728,12 +1726,9 @@ export function useWebRTC(socket: Socket, roomId: string) {
     if (!producer) return;
     if (producer.track) producer.track.contentHint = plan.contentHint;
     try {
-      const params = producer.rtpSender?.getParameters();
-      if (!params) return;
-      if (params.encodings?.[0]) {
-        Object.assign(params.encodings[0], toScreenRtpEncoding(plan));
-      }
-      params.degradationPreference = plan.degradationPreference;
+      const currentParameters = producer.rtpSender?.getParameters();
+      if (!currentParameters) return;
+      const params = withScreenEncodingPlan(currentParameters, plan);
       producer.rtpSender?.setParameters(params).then(() => {
         console.info('[media-diag] 已应用屏幕编码参数', {
           activity,
@@ -1741,7 +1736,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
           outputLimit: `${plan.outputWidth}x${plan.outputHeight}`,
           scaleResolutionDownBy: plan.scaleResolutionDownBy,
           requestedFps: plan.fps,
-          maxBitrate: plan.bitrate,
+          configuredMaxBitrate: null,
           parameters: producer.rtpSender?.getParameters(),
         });
       }).catch(error => {
@@ -1898,7 +1893,8 @@ export function useWebRTC(socket: Socket, roomId: string) {
               preferredCodec: codec?.mimeType ?? 'auto',
             },
             encodings: [toScreenRtpEncoding(initialPlan)],
-            codecOptions: { videoGoogleStartBitrate: Math.round(initialPlan.bitrate / (gameMode ? 1000 : 2000)) },
+            // 初始带宽估计（kbps），不是上限；与 SFU 启动估计一致，之后由拥塞控制调整。
+            codecOptions: { videoGoogleStartBitrate: 10_000 },
             ...(codec ? { codec } : {}),
             stopTracks: false,
             disableTrackOnPause: false,
@@ -1942,7 +1938,6 @@ export function useWebRTC(socket: Socket, roomId: string) {
           const ap = await sendTransport.current!.produce({
             track: audioPipeline.track,
             codecOptions: { opusStereo: true, opusDtx: true, opusFec: true },
-            encodings: [{ maxBitrate: 96_000 }],
             appData: { type: 'screen-audio' },
             disableTrackOnPause: true,
             zeroRtpOnPause: true,
@@ -1988,7 +1983,6 @@ export function useWebRTC(socket: Socket, roomId: string) {
       setLocalScreen(null);
       setIsSharing(false);
       setScreenEncodingPlan(null);
-      setScreenTargetBitrate(0);
       if (!(e instanceof DOMException && e.name === 'NotAllowedError'))
         window.alert(`无法开始屏幕共享：${e instanceof Error ? e.message : String(e)}`);
     }
@@ -2020,7 +2014,6 @@ export function useWebRTC(socket: Socket, roomId: string) {
     setScreenViewerCount(0);
     setScreenActivity('active');
     screenActivityRef.current = 'active';
-    setScreenTargetBitrate(0);
     setScreenEncodingPlan(null);
     videoCounterPrev.current = null;
     remoteLossPrev.current = null;
@@ -2061,7 +2054,6 @@ export function useWebRTC(socket: Socket, roomId: string) {
       const producer = await sendTransport.current!.produce({
         track: pipeline.track,
         codecOptions: { opusStereo: true, opusDtx: true, opusFec: true },
-        encodings: [{ maxBitrate: 96_000 }],
         appData: { type: 'application-audio', label: source.name, processId: source.processId },
         disableTrackOnPause: true,
         zeroRtpOnPause: true,
@@ -2087,7 +2079,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
     inVoice, isJoining, isMuted, isForceMuted, isSharing,
     screenPreset, fps, shareAudio, screenGameMode,
     isApplicationAudioSharing, applicationAudioLabel, applicationAudioShareVolume,
-    screenActivity, screenTargetBitrate, screenEncodingPlan, screenViewerCount,
+    screenActivity, screenEncodingPlan, screenViewerCount,
     voiceMembers,
     localScreen,
     remoteScreen,        // { socketId, stream: MediaStream } | null

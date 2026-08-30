@@ -36,6 +36,7 @@ export interface RoomMember {
   isSharingApplicationAudio?: boolean;
   /** 仅用于界面展示；旧客户端未上报时为空。 */
   platform?: ClientPlatform | null;
+  canReceiveRemoteControl?: boolean;
 }
 
 export interface UserProfile {
