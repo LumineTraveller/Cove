@@ -33,7 +33,13 @@ test('actual main-window permission handlers allow fullscreen only for the Cove 
   const handlers = {};
   let window;
   const electron = {
-    app: { isPackaged: true, on() {}, commandLine: { appendSwitch() {} }, whenReady: () => ({ then() {} }) },
+    app: {
+      isPackaged: true,
+      getVersion: () => '0.9.0',
+      on() {},
+      commandLine: { appendSwitch() {} },
+      whenReady: () => ({ then() {} }),
+    },
     BrowserWindow: class {
       constructor() { this.webContents = { on() {} }; window = this; }
       on() {}

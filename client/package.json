@@ -47,12 +47,12 @@
     "wait-on": "^7.2.0"
   },
   "build": {
-    "appId": "com.cove.app",
-    "productName": "Cove",
+    "appId": "com.cove.app.electrontest",
+    "productName": "Cove Electron Test",
     "directories": {
       "output": "dist-app"
     },
-    "artifactName": "Cove-Setup-${version}.${ext}",
+    "artifactName": "Cove-Electron-Test-Setup-${version}.${ext}",
     "publish": [
       {
         "provider": "github",
