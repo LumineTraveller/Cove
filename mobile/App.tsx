@@ -59,6 +59,7 @@ function CoveSession() {
         avatarUrl: null,
         clientId: config.clientId,
         authToken: config.accountToken,
+        platform: 'mobile',
       }, (timeoutError: Error | null, response?: { ok: boolean; error?: string }) => {
         if (!active) return;
         if (timeoutError || response?.ok === false) {

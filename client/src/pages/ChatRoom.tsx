@@ -2,8 +2,8 @@ import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   Activity, AppWindow, ArrowLeft, AudioLines, Crown, Ellipsis, Eye, EyeOff, Gamepad2, Hash, Headphones, ImagePlus, LoaderCircle, Maximize2, Menu, MessageCircle,
-  Mic, MicOff, Minimize2, MonitorPlay, MonitorUp, PanelRightClose, PanelRightOpen, PhoneOff,
-  RefreshCw, Send, Settings2, Trash2, UserMinus, UserRound, Volume2, VolumeX, X,
+  Mic, MicOff, Minimize2, Monitor, MonitorPlay, MonitorUp, PanelRightClose, PanelRightOpen, PhoneOff,
+  RefreshCw, Send, Settings2, Smartphone, Trash2, UserMinus, UserRound, Volume2, VolumeX, X,
 } from 'lucide-react';
 import { socket } from '../socket';
 import { useWebRTC, SCREEN_PRESETS, ScreenPreset, Fps } from '../hooks/useWebRTC';
@@ -829,6 +829,11 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
                               <span className={`min-w-0 flex-1 truncate text-base font-medium ${isSelf ? 'text-white' : 'text-white/55'}`}>
                                 {isSelf ? `${member.username}（你）` : (profileRemarks[member.userId] || member.username)}
                               </span>
+                              {member.platform === 'mobile'
+                                ? <Smartphone size={13} className="flex-shrink-0 text-cyan-100/40" aria-label="手机端" />
+                                : member.platform === 'desktop'
+                                  ? <Monitor size={13} className="flex-shrink-0 text-cyan-100/40" aria-label="电脑端" />
+                                  : null}
                               {member.isOwner && <Crown size={14} className="flex-shrink-0 text-amber-300" aria-label="房主" />}
                               {showVoiceState && voiceMuted && <MicOff size={13} className="flex-shrink-0 text-red-300/70" aria-label="麦克风已关闭" />}
                             </div>

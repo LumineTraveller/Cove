@@ -23,9 +23,11 @@ import {
   MessageCircle,
   Mic,
   MicOff,
+  Monitor,
   MonitorPlay,
   PhoneOff,
   ShieldAlert,
+  Smartphone,
   Users,
   Volume2,
   VolumeX,
@@ -334,6 +336,11 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
                     {profileRemarks[member.userId] ? <Text style={styles.memberUsername}>{member.username}</Text> : null}
                   </View>
                   {member.isOwner && <Crown size={13} color="#fcd34d" />}
+                  {member.platform === 'mobile'
+                    ? <Smartphone size={13} color={colors.textFaint} />
+                    : member.platform === 'desktop'
+                      ? <Monitor size={13} color={colors.textFaint} />
+                      : null}
                   {showVoiceState && (voiceMember.isMuted
                     ? <MicOff size={13} color={colors.red} />
                     : <Mic size={13} color={colors.green} />)}

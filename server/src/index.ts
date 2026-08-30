@@ -12,7 +12,7 @@ import {
   peers, createPeer, removePeer, getRoomProducers,
   MS_IP, MS_PORT,
 } from './ms';
-import { createLobbyPresenceSnapshot } from './presence';
+import { createLobbyPresenceSnapshot, sanitizeClientPlatform, type ClientPlatform } from './presence';
 import { soundpackVoiceAudience } from './soundpackAudience';
 import { createVoicePresenceEvent, voicePresenceMessage, type VoicePresenceAction } from './voicePresence';
 import { summarizeRtpStat, summarizeTransportStat } from './mediaDiagnostics';
@@ -151,6 +151,7 @@ interface RoomMember {
   isMuted: boolean;
   isSharingScreen: boolean;
   isSharingApplicationAudio: boolean;
+  platform: ClientPlatform | null;
 }
 
 // ── 语音包文件目录 ─────────────────────────────────────────────────────────────
@@ -162,6 +163,7 @@ fs.mkdirSync(CHAT_IMAGES_DIR, { recursive: true });
 const userNames   = new Map<string, string>();
 const userAvatars = new Map<string, string | null>();
 const userClientIds = new Map<string, string>(); // socketId → 持久客户端身份（不广播）
+const userPlatforms = new Map<string, ClientPlatform>();
 const voiceRooms  = new Map<string, Set<string>>(); // roomId → Set<socketId>
 const roomMembers = new Map<string, Set<string>>();  // roomId → Set<socketId>
 const selfMutedVoiceMembers = new Set<string>(); // 主动关闭麦克风的 socketId，仅在本次语音会话有效
@@ -608,6 +610,7 @@ function broadcastRoomMembers(roomId: string) {
       isMuted: !!clientId && isClientMuted(roomId, clientId),
       isSharingScreen: hasProducerType('screen'),
       isSharingApplicationAudio: hasProducerType('application-audio'),
+      platform: userPlatforms.get(id) ?? null,
     };
   });
 
@@ -677,7 +680,7 @@ io.on('connection', socket => {
 
   function broadcastOnlineUsers() {
     io.emit('users:online', createLobbyPresenceSnapshot(
-      userNames, userAvatars, roomMembers, voiceRooms,
+      userNames, userAvatars, roomMembers, voiceRooms, userPlatforms,
     ).onlineUsers);
   }
 
@@ -697,7 +700,7 @@ io.on('connection', socket => {
   };
 
   socket.on('user:register', (
-    registration: string | { username?: string; clientId?: string; authToken?: string; avatarUrl?: unknown },
+    registration: string | { username?: string; clientId?: string; authToken?: string; avatarUrl?: unknown; platform?: unknown },
     cb?: (result: { ok: boolean; error?: string }) => void,
   ) => {
     const account = typeof registration === 'string' ? null : accounts.accountForToken(registration?.authToken);
@@ -719,6 +722,9 @@ io.on('connection', socket => {
     userNames.set(socket.id, username.slice(0, 64));
     userAvatars.set(socket.id, sanitizeAvatarUrl(account?.avatarUrl ?? (typeof registration === 'string' ? null : registration.avatarUrl)));
     userClientIds.set(socket.id, clientId);
+    const platform = sanitizeClientPlatform(typeof registration === 'string' ? null : registration.platform);
+    if (platform) userPlatforms.set(socket.id, platform);
+    else userPlatforms.delete(socket.id);
 
     // 同一设备更改用户名后，同步更新它所拥有房间的公开房主名。
     const updated = stmtUpdateOwnerName.run(username.slice(0, 64), clientId, username.slice(0, 64));
@@ -751,7 +757,7 @@ io.on('connection', socket => {
     if (!userNames.has(socket.id)) return;
     cb?.({
       ok: true,
-      ...createLobbyPresenceSnapshot(userNames, userAvatars, roomMembers, voiceRooms),
+      ...createLobbyPresenceSnapshot(userNames, userAvatars, roomMembers, voiceRooms, userPlatforms),
     });
   });
 
@@ -1391,6 +1397,7 @@ io.on('connection', socket => {
     userNames.delete(socket.id);
     userAvatars.delete(socket.id);
     userClientIds.delete(socket.id);
+    userPlatforms.delete(socket.id);
     broadcastOnlineUsers();
     removePeer(socket.id);
   });

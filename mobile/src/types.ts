@@ -1,3 +1,5 @@
+export type ClientPlatform = 'desktop' | 'mobile';
+
 export interface Room {
   id: string;
   name: string;
@@ -12,6 +14,7 @@ export interface RoomMember {
   avatarUrl?: string | null;
   isOwner: boolean;
   isMuted: boolean;
+  platform?: ClientPlatform | null;
 }
 
 export interface RoomState {

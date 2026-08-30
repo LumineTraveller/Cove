@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Crown, Hash, Headphones, LoaderCircle, MessageCircle, Plus, Server, Settings, Users, X } from 'lucide-react';
+import { Crown, Hash, Headphones, LoaderCircle, MessageCircle, Monitor, Plus, Server, Settings, Smartphone, Users, X } from 'lucide-react';
 import { Avatar } from '../components/Avatar';
 import { ProfileModal } from '../components/ProfileModal';
 import { ServerCertificateToggle } from '../components/ServerCertificateToggle';
@@ -140,7 +140,12 @@ export default function RoomList({ profile, onProfileChange, onReset, sessionRea
             return (
               <div key={user.socketId} className="flex items-center gap-3 rounded-xl px-2 py-2 transition hover:bg-white/[0.06]">
                 <div className="relative"><Avatar username={user.username} avatarUrl={user.avatarUrl} size="sm" /><span className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-zinc-900 bg-emerald-400" /></div>
-                <span className={`truncate text-sm ${isSelf ? 'font-medium text-white' : 'text-white/60'}`}>{isSelf ? `${user.username}（你）` : user.username}</span>
+                <span className={`min-w-0 flex-1 truncate text-sm ${isSelf ? 'font-medium text-white' : 'text-white/60'}`}>{isSelf ? `${user.username}（你）` : user.username}</span>
+                {user.platform === 'mobile'
+                  ? <Smartphone size={13} className="flex-shrink-0 text-cyan-100/45" aria-label="手机端" />
+                  : user.platform === 'desktop'
+                    ? <Monitor size={13} className="flex-shrink-0 text-cyan-100/45" aria-label="电脑端" />
+                    : null}
               </div>
             );
           })}

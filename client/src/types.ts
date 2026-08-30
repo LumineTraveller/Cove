@@ -1,3 +1,5 @@
+export type ClientPlatform = 'desktop' | 'mobile';
+
 export interface Room {
   id: string;
   name: string;
@@ -32,6 +34,8 @@ export interface RoomMember {
   /** 当前成员是否正在发布屏幕或应用音频；旧服务端未提供时保持 undefined。 */
   isSharingScreen?: boolean;
   isSharingApplicationAudio?: boolean;
+  /** 仅用于界面展示；旧客户端未上报时为空。 */
+  platform?: ClientPlatform | null;
 }
 
 export interface UserProfile {
@@ -41,6 +45,7 @@ export interface UserProfile {
 
 export interface OnlineUser extends UserProfile {
   socketId: string;
+  platform?: ClientPlatform | null;
 }
 
 export interface RoomState {
