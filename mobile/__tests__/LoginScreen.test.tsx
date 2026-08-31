@@ -31,3 +31,19 @@ test('certificate switch is opt-in, resets on endpoint change, and does not appl
   expect(submit).toHaveBeenLastCalledWith(expect.objectContaining({ serverURL: 'http://host.test:51758', allowInvalidServerCertificate: false }));
   await act(async () => renderer.unmount());
 }, 20_000);
+
+test('saved server prefills address/email and resumes by token without filling a password', async () => {
+  const saved = { username: 'Alice', serverURL: 'https://one.test', email: 'alice@test.com', clientId: 'device', accountId: 'account', accountToken: 'saved-token' };
+  const resume = jest.fn(); const forget = jest.fn();
+  let renderer!: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<LoginScreen saving={false} onSubmit={jest.fn()} rememberedServers={[saved]} onResume={resume} onForget={forget} />); });
+  const inputs = renderer.root.findAllByType(TextInput);
+  expect(inputs.find(input => input.props.keyboardType === 'url')!.props.value).toBe(saved.serverURL);
+  expect(inputs.find(input => input.props.keyboardType === 'email-address')!.props.value).toBe(saved.email);
+  expect(inputs.find(input => input.props.secureTextEntry)!.props.value).toBe('');
+  await act(async () => renderer.root.findByProps({ accessibilityLabel: `继续连接 ${saved.serverURL}` }).props.onPress());
+  expect(resume).toHaveBeenCalledWith(saved);
+  await act(async () => renderer.root.findByProps({ accessibilityLabel: `忘记 ${saved.serverURL}` }).props.onPress());
+  expect(forget).toHaveBeenCalledWith(saved);
+  await act(async () => renderer.unmount());
+});

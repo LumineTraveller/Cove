@@ -295,6 +295,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
   const [fps,          setFps]          = useState<Fps>(30);
   const [shareAudio,   setShareAudio]   = useState(false);
   const [screenGameMode, setScreenGameMode] = useState(false);
+  const [screenNativeResolution, setScreenNativeResolution] = useState(false);
   const [screenActivity, setScreenActivity] = useState<ScreenActivity>('active');
   const [screenEncodingPlan, setScreenEncodingPlan] = useState<ScreenEncodingPlan | null>(null);
   const [screenViewerCount, setScreenViewerCount] = useState(0);
@@ -850,6 +851,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
         preset: screenPreset,
         requestedFps: screenGameMode ? 60 : fps,
         gameMode: screenGameMode,
+        nativeResolution: screenNativeResolution,
         configuredMaxBitrate: null,
         encodingPlan: screenEncodingPlan,
         trackSettings: producer?.track?.getSettings() ?? null,
@@ -864,7 +866,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
     link.download = `cove-media-diagnostics-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
     link.click();
     setTimeout(() => URL.revokeObjectURL(url), 1_000);
-  }, [fps, roomId, screenEncodingPlan, screenGameMode, screenPreset, socket.id]);
+  }, [fps, roomId, screenEncodingPlan, screenGameMode, screenNativeResolution, screenPreset, socket.id]);
 
   // 卸载时清理所有定时器和音频上下文
   useEffect(() => () => {
@@ -1693,6 +1695,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
     maxFps: Fps,
     activity: ScreenActivity,
     strictFrameRate = false,
+    nativeResolution = false,
   ) => {
     const producer = screenProducer.current;
     const track = producer?.track ?? localScreenRef.current?.getVideoTracks()[0];
@@ -1703,6 +1706,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
       activity,
       sourceWidth: settings?.width,
       sourceHeight: settings?.height,
+      nativeResolution,
     });
     screenActivityRef.current = activity;
     setScreenActivity(activity);
@@ -1752,7 +1756,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
    * 亮度变化。连续静止后降到 15fps；滚动/普通操作用 30fps；大面积变化时才
    * 使用用户选择的最高 60fps。采样只有约 1.4 万像素，开销远低于视频编码。
    */
-  const startScreenAnalysis = useCallback((stream: MediaStream, preset: ScreenPreset, maxFps: Fps) => {
+  const startScreenAnalysis = useCallback((stream: MediaStream, preset: ScreenPreset, maxFps: Fps, nativeResolution: boolean) => {
     stopScreenAnalysis();
     const video = document.createElement('video');
     video.muted = true;
@@ -1767,7 +1771,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
     screenAnalysisVideo.current = video;
     screenAnalysisCanvas.current = canvas;
     video.play().catch(() => {});
-    applyScreenActivity(preset, maxFps, 'active');
+    applyScreenActivity(preset, maxFps, 'active', false, nativeResolution);
 
     screenAnalysisTimer.current = setInterval(() => {
       if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
@@ -1798,23 +1802,26 @@ export function useWebRTC(socket: Socket, roomId: string) {
         // 动态画面立即升档；普通操作需连续2次；静止需连续4秒，防止频繁抖动。
         const required = next === 'motion' ? 1 : next === 'active' ? 2 : 4;
         if (activityCandidate.current.count >= required && screenActivityRef.current !== next)
-          applyScreenActivity(preset, maxFps, next);
+          applyScreenActivity(preset, maxFps, next, false, nativeResolution);
       } catch { /* 采样失败不影响共享本身 */ }
     }, 1_000);
   }, [applyScreenActivity, stopScreenAnalysis]);
 
   const startScreenShare = useCallback(async (
     initPreset?: ScreenPreset, initFps?: Fps, initAudio?: boolean, initGameMode?: boolean,
+    initNativeResolution?: boolean,
   ) => {
     if (!inVoice || isSharing) return;
     const preset     = initPreset  ?? screenPreset;
     const gameMode   = initGameMode ?? screenGameMode;
+    const nativeResolution = initNativeResolution ?? screenNativeResolution;
     const currentFps: Fps = gameMode ? 60 : (initFps ?? fps);
     const audio      = initAudio   ?? shareAudio;
     if (initPreset  !== undefined) setScreenPreset(initPreset);
     if (initFps     !== undefined || gameMode) setFps(currentFps);
     if (initAudio   !== undefined) setShareAudio(initAudio);
     if (initGameMode !== undefined) setScreenGameMode(initGameMode);
+    if (initNativeResolution !== undefined) setScreenNativeResolution(initNativeResolution);
 
     // System-audio sharing must use the native process-exclusion bridge so
     // Cove's own voice and sound-pack playback can never enter the stream.
@@ -1850,6 +1857,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
         activity: initialActivity,
         sourceWidth: trackSettings.width,
         sourceHeight: trackSettings.height,
+        nativeResolution,
       });
       console.info('[media-diag] 屏幕采集已开始', {
         requested: {
@@ -1887,6 +1895,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
               type: 'screen',
               adaptation: gameMode ? 'game' : 'content',
               preset,
+              nativeResolution,
               maxFps: currentFps,
               outputWidth: initialPlan.outputWidth,
               outputHeight: initialPlan.outputHeight,
@@ -1910,9 +1919,9 @@ export function useWebRTC(socket: Socket, roomId: string) {
       if (!producer) throw lastProduceError ?? new Error('没有可用的屏幕共享视频编码器');
       screenProducer.current = producer;
       if (!screenDemandActiveRef.current) producer.pause();
-      applyScreenActivity(preset, currentFps, initialActivity, gameMode);
+      applyScreenActivity(preset, currentFps, initialActivity, gameMode, nativeResolution);
       if (gameMode) stopScreenAnalysis();
-      else startScreenAnalysis(stream, preset, currentFps);
+      else startScreenAnalysis(stream, preset, currentFps, nativeResolution);
 
       // Electron's global `loopback` source captures Cove's own voice and
       // sound-pack playback as well as other desktop audio. The Windows client
@@ -1987,7 +1996,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
         window.alert(`无法开始屏幕共享：${e instanceof Error ? e.message : String(e)}`);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [socket, roomId, inVoice, isSharing, screenPreset, fps, shareAudio, screenGameMode, applyScreenActivity, startScreenAnalysis, stopScreenAnalysis]);
+  }, [socket, roomId, inVoice, isSharing, screenPreset, fps, shareAudio, screenGameMode, screenNativeResolution, applyScreenActivity, startScreenAnalysis, stopScreenAnalysis]);
 
   const stopScreenShare = useCallback(() => {
     stopScreenAnalysis();
@@ -2077,7 +2086,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
 
   return {
     inVoice, isJoining, isMuted, isForceMuted, isSharing,
-    screenPreset, fps, shareAudio, screenGameMode,
+    screenPreset, fps, shareAudio, screenGameMode, screenNativeResolution,
     isApplicationAudioSharing, applicationAudioLabel, applicationAudioShareVolume,
     screenActivity, screenEncodingPlan, screenViewerCount,
     voiceMembers,

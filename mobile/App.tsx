@@ -13,7 +13,7 @@ import { RoomListScreen } from './src/screens/RoomListScreen';
 import { RoomScreen } from './src/screens/RoomScreen';
 import { LoginScreen } from './src/screens/LoginScreen';
 import { createCoveSocket } from './src/socket';
-import { clearServerConfig, readSessionConfig, saveSessionConfig } from './src/storage';
+import { clearServerConfig, forgetRememberedServer, readRememberedServers, readSessionConfig, saveSessionConfig, type RememberedServer } from './src/storage';
 import { colors } from './src/theme';
 import type { Room, SessionConfig } from './src/types';
 import { configureServerCertificate } from './src/serverCertificate';
@@ -30,6 +30,7 @@ function CoveSession() {
   const [savingConfig, setSavingConfig] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [config, setConfig] = useState<SessionConfig | null>(null);
+  const [rememberedServers, setRememberedServers] = useState<RememberedServer[]>([]);
   const [socket, setSocket] = useState<Socket | null>(null);
   const [sessionReady, setSessionReady] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
@@ -37,7 +38,8 @@ function CoveSession() {
 
   useEffect(() => {
     readSessionConfig()
-      .then(setConfig)
+      .then(async saved => { setConfig(saved); setRememberedServers(await readRememberedServers()); })
+      .catch(() => setAuthError('无法读取本机登录信息，请重新登录。'))
       .finally(() => setLoadingConfig(false));
   }, []);
 
@@ -64,10 +66,11 @@ function CoveSession() {
         if (!active) return;
         if (timeoutError || response?.ok === false) {
           if (response?.error?.includes('登录已失效')) {
+            setSavingConfig(true);
             setSelectedRoom(null);
             setConfig(null);
             setAuthError(response.error);
-            clearServerConfig().catch(() => {});
+            clearServerConfig().then(readRememberedServers).then(setRememberedServers).catch(() => {}).finally(() => setSavingConfig(false));
             return;
           }
           setConnectionError(response?.error ?? '服务器身份注册超时');
@@ -129,18 +132,41 @@ function CoveSession() {
   };
 
   const handleChangeServer = async () => {
-    if (config?.accountToken) {
-      fetch(`${config.serverURL}/api/auth/logout`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: config.accountToken }),
+    if (savingConfig) return;
+    setSavingConfig(true);
+    try {
+      // Switching servers disconnects this session, but keeps its valid login token.
+      await clearServerConfig({ forgetSession: false });
+      setRememberedServers(await readRememberedServers());
+      setSelectedRoom(null);
+      setConfig(null);
+      setConnectionError(null);
+      await configureServerCertificate('', false);
+    } catch (error) { setConnectionError(error instanceof Error ? error.message : '无法保存服务器登录记录'); }
+    finally { setSavingConfig(false); }
+  };
+
+  const handleResume = async (saved: RememberedServer) => {
+    if (!saved.accountToken || savingConfig) return;
+    setSavingConfig(true); setAuthError(null);
+    try {
+      await configureServerCertificate(saved.serverURL, saved.allowInvalidServerCertificate === true);
+      setConfig(await saveSessionConfig({ ...saved, accountToken: saved.accountToken }));
+    } catch (error) { setAuthError(error instanceof Error ? error.message : '无法恢复登录'); }
+    finally { setSavingConfig(false); }
+  };
+
+  const handleForget = async (saved: RememberedServer) => {
+    if (savingConfig) return;
+    setSavingConfig(true); setAuthError(null);
+    try {
+      if (saved.accountToken) fetch(`${saved.serverURL}/api/auth/logout`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: saved.accountToken }),
       }).catch(() => {});
-    }
-    setSelectedRoom(null);
-    setConfig(null);
-    setConnectionError(null);
-    await clearServerConfig();
-    await configureServerCertificate('', false);
+      await forgetRememberedServer(saved.serverURL);
+      setRememberedServers(await readRememberedServers());
+    } catch (error) { setAuthError(error instanceof Error ? error.message : '无法移除登录记忆'); }
+    finally { setSavingConfig(false); }
   };
 
   const leaveRoom = useCallback(() => setSelectedRoom(null), []);
@@ -156,7 +182,8 @@ function CoveSession() {
   }
 
   if (!config) {
-    return <LoginScreen saving={savingConfig} error={authError} onSubmit={handleLogin} />;
+    return <LoginScreen saving={savingConfig} error={authError} onSubmit={handleLogin}
+      rememberedServers={rememberedServers} onResume={handleResume} onForget={handleForget} />;
   }
 
   return (

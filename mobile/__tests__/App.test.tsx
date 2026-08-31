@@ -2,6 +2,7 @@ import React from 'react';
 import TestRenderer, { act } from 'react-test-renderer';
 import App from '../App';
 import { configureServerCertificate } from '../src/serverCertificate';
+import { clearServerConfig } from '../src/storage';
 
 jest.mock('lucide-react-native', () => ({ WifiOff: 'WifiOff' }));
 jest.mock('react-native-safe-area-context', () => ({
@@ -14,11 +15,14 @@ jest.mock('../src/screens/RoomListScreen', () => ({ RoomListScreen: 'RoomListScr
 jest.mock('../src/storage', () => ({
   readSessionConfig: async () => ({ username: 'Alice', serverURL: 'https://example.test:51758', clientId: 'alice', accountToken: 'token', accountId: 'account', email: 'alice@example.test', allowInvalidServerCertificate: true }),
   clearServerConfig: jest.fn(), saveSessionConfig: jest.fn(),
+  readRememberedServers: async () => [], forgetRememberedServer: jest.fn(),
 }));
 jest.mock('../src/accountAuth', () => ({ authenticateAccount: jest.fn() }));
 const mockSocket = { on: jest.fn(), off: jest.fn(), connect: jest.fn(), disconnect: jest.fn() };
 jest.mock('../src/socket', () => ({ createCoveSocket: () => mockSocket }));
 jest.mock('../src/serverCertificate', () => ({ configureServerCertificate: jest.fn() }));
+
+beforeEach(() => { jest.clearAllMocks(); });
 
 test('waits for native TLS configuration before connecting the saved server', async () => {
   let configured!: () => void;
@@ -31,4 +35,17 @@ test('waits for native TLS configuration before connecting the saved server', as
   expect(mockSocket.connect).toHaveBeenCalledTimes(1);
   await act(async () => renderer.unmount());
   expect(mockSocket.disconnect).toHaveBeenCalledTimes(1);
+});
+
+test('switching servers returns to login without revoking the saved session', async () => {
+  jest.mocked(configureServerCertificate).mockResolvedValue(undefined);
+  globalThis.fetch = jest.fn();
+  let renderer!: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<App />); });
+  const roomList = renderer.root.findByType('RoomListScreen' as any);
+  await act(async () => roomList.props.onChangeServer());
+  expect(clearServerConfig).toHaveBeenCalledWith({ forgetSession: false });
+  expect(fetch).not.toHaveBeenCalled();
+  expect(renderer.root.findAllByType('LoginScreen' as any)).toHaveLength(1);
+  await act(async () => renderer.unmount());
 });

@@ -22,6 +22,7 @@ export interface AppliedScreenCaptureConstraints {
 
 export interface ScreenEncodingPlan {
   preset: ScreenPreset;
+  nativeResolution: boolean;
   sourceWidth: number;
   sourceHeight: number;
   outputWidth: number;
@@ -68,29 +69,32 @@ export function createScreenEncodingPlan({
   activity,
   sourceWidth,
   sourceHeight,
+  nativeResolution = false,
 }: {
   preset: ScreenPreset;
   maxFps: ScreenFps;
   activity: ScreenActivity;
   sourceWidth?: number;
   sourceHeight?: number;
+  nativeResolution?: boolean;
 }): ScreenEncodingPlan {
   const definition = SCREEN_PRESETS[preset];
   const width = positiveDimension(sourceWidth, definition.width);
   const height = positiveDimension(sourceHeight, definition.height);
-  const scaleResolutionDownBy = Math.max(1, width / definition.width, height / definition.height);
+  const scaleResolutionDownBy = nativeResolution ? 1 : Math.max(1, width / definition.width, height / definition.height);
   const profile = screenEncodingProfile(maxFps, activity);
 
   return {
     preset,
+    nativeResolution,
     sourceWidth: width,
     sourceHeight: height,
-    outputWidth: evenFloor(width / scaleResolutionDownBy),
-    outputHeight: evenFloor(height / scaleResolutionDownBy),
+    outputWidth: nativeResolution ? Math.round(width) : evenFloor(width / scaleResolutionDownBy),
+    outputHeight: nativeResolution ? Math.round(height) : evenFloor(height / scaleResolutionDownBy),
     scaleResolutionDownBy,
     fps: profile.fps,
     contentHint: activity === 'motion' ? 'motion' : 'detail',
-    degradationPreference: activity === 'motion' ? 'maintain-framerate' : 'maintain-resolution',
+    degradationPreference: !nativeResolution && activity === 'motion' ? 'maintain-framerate' : 'maintain-resolution',
   };
 }
 

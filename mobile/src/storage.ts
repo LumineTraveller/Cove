@@ -9,6 +9,26 @@ const CERTIFICATE_ORIGIN_KEY = 'cove_certificate_exception_origin';
 const ACCOUNT_TOKEN_KEY = 'cove_account_token';
 const ACCOUNT_ID_KEY = 'cove_account_id';
 const ACCOUNT_EMAIL_KEY = 'cove_account_email';
+const REMEMBERED_SERVERS_KEY = 'cove_remembered_servers';
+export type RememberedServer = Omit<SessionConfig, 'accountToken'> & { accountToken?: string };
+
+export async function readRememberedServers(): Promise<RememberedServer[]> {
+  try {
+    const values = JSON.parse(await AsyncStorage.getItem(REMEMBERED_SERVERS_KEY) ?? '[]');
+    return Array.isArray(values) ? values.filter(value => typeof value?.serverURL === 'string' && !!normalizeServerURL(value.serverURL) && typeof value.email === 'string' && typeof value.username === 'string' && typeof value.accountId === 'string' && typeof value.clientId === 'string') : [];
+  } catch { return []; }
+}
+
+async function rememberServer(config: SessionConfig) {
+  const previous = (await readRememberedServers()).filter(entry => entry.serverURL !== config.serverURL);
+  await AsyncStorage.setItem(REMEMBERED_SERVERS_KEY, JSON.stringify([config, ...previous].slice(0, 8)));
+}
+
+export async function forgetRememberedServer(serverURL: string) {
+  const normalized = normalizeServerURL(serverURL);
+  const previous = await readRememberedServers();
+  await AsyncStorage.setItem(REMEMBERED_SERVERS_KEY, JSON.stringify(previous.filter(entry => entry.serverURL !== normalized)));
+}
 
 export function normalizeServerURL(value: string): string {
   const trimmed = value.trim().replace(/\/+$/, '');
@@ -39,10 +59,12 @@ export async function readSessionConfig(): Promise<SessionConfig | null> {
     clientId = createClientId();
     await AsyncStorage.setItem(CLIENT_ID_KEY, clientId);
   }
-  return username && serverURL && accountToken && accountId && email ? {
+  const config = username && serverURL && accountToken && accountId && email ? {
     username, serverURL, clientId, accountToken, accountId, email,
     allowInvalidServerCertificate: !!certificateOrigin && certificateOrigin === httpsOrigin(serverURL),
   } : null;
+  if (config) await rememberServer(config);
+  return config;
 }
 
 export async function saveSessionConfig(input: {
@@ -74,10 +96,16 @@ export async function saveSessionConfig(input: {
       ? AsyncStorage.setItem(CERTIFICATE_ORIGIN_KEY, httpsOrigin(config.serverURL)!)
       : AsyncStorage.removeItem(CERTIFICATE_ORIGIN_KEY),
   ]);
+  await rememberServer(config);
   return config;
 }
 
-export async function clearServerConfig() {
+export async function clearServerConfig({ forgetSession = true }: { forgetSession?: boolean } = {}) {
+  const active = await readSessionConfig();
+  if (forgetSession && active) {
+    const history = await readRememberedServers();
+    await AsyncStorage.setItem(REMEMBERED_SERVERS_KEY, JSON.stringify(history.map(entry => entry.serverURL === active.serverURL ? { ...entry, accountToken: undefined } : entry)));
+  }
   await Promise.all([
     AsyncStorage.removeItem(USERNAME_KEY),
     AsyncStorage.removeItem(SERVER_KEY),

@@ -140,6 +140,32 @@ test('runtime stats detect when Chromium ignored the RTP resolution limit', () =
   assert.equal(isScreenEncodingWithinPlan(undefined, undefined, plan), null);
 });
 
+test('native sharing preserves a 4K source regardless of preset and content activity', () => {
+  for (const preset of Object.keys(SCREEN_PRESETS) as ScreenPreset[]) {
+    for (const activity of ['static', 'active', 'motion'] as ScreenActivity[]) {
+      const plan = createScreenEncodingPlan({ preset, maxFps: 60, activity, sourceWidth: 3840, sourceHeight: 2160, nativeResolution: true });
+      assert.equal(plan.nativeResolution, true);
+      assert.equal(plan.outputWidth, 3840);
+      assert.equal(plan.outputHeight, 2160);
+      assert.equal(plan.scaleResolutionDownBy, 1);
+      assert.equal(plan.degradationPreference, 'maintain-resolution');
+      assert.equal(plan.fps, activity === 'static' ? 15 : activity === 'active' ? 30 : 60);
+      assert.equal(toScreenRtpEncoding(plan).scaleResolutionDownBy, 1);
+      assert.equal(Object.hasOwn(toScreenRtpEncoding(plan), 'maxBitrate'), false);
+    }
+  }
+});
+
+test('turning native sharing off restores the selected preset without changing the source', () => {
+  const options = { preset: '720p' as const, maxFps: 30 as const, activity: 'active' as const, sourceWidth: 2560, sourceHeight: 1600 };
+  const native = createScreenEncodingPlan({ ...options, nativeResolution: true });
+  const scaled = createScreenEncodingPlan({ ...options, nativeResolution: false });
+  assert.deepEqual([native.outputWidth, native.outputHeight], [2560, 1600]);
+  assert.deepEqual([scaled.outputWidth, scaled.outputHeight], [1152, 720]);
+  assert.deepEqual([scaled.sourceWidth, scaled.sourceHeight], [2560, 1600]);
+  assert.equal(scaled.nativeResolution, false);
+});
+
 test('strict capture constraints fall back to ideal/max when Chromium rejects min', async () => {
   const calls: MediaTrackConstraints[] = [];
   const track = {

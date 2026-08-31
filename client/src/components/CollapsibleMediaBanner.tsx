@@ -1,11 +1,12 @@
 import { useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { AudioLines, ChevronLeft, EyeOff, MonitorPlay } from 'lucide-react';
 
-export function CollapsibleMediaBanner({ kind, children, overlay = false, defaultCollapsed = false }: {
+export function CollapsibleMediaBanner({ kind, children, overlay = false, defaultCollapsed = false, wrap = false }: {
   kind: 'screen' | 'audio';
   children: ReactNode;
   overlay?: boolean;
   defaultCollapsed?: boolean;
+  wrap?: boolean;
 }) {
   const [collapsed, setCollapsed] = useState(defaultCollapsed);
   const panelId = useId();
@@ -30,7 +31,7 @@ export function CollapsibleMediaBanner({ kind, children, overlay = false, defaul
         id={panelId}
         ref={panelRef}
         aria-hidden={collapsed}
-        className={`cove-media-banner-panel mx-5 flex min-w-0 items-center gap-3 rounded-2xl border px-4 py-3 text-sm ${overlay ? 'pointer-events-auto bg-zinc-950/90 shadow-xl backdrop-blur-xl' : ''} ${isAudio
+        className={`cove-media-banner-panel mx-5 flex min-w-0 items-center gap-3 rounded-2xl border px-4 py-3 text-sm ${wrap ? 'flex-wrap' : ''} ${overlay ? 'pointer-events-auto bg-zinc-950/90 shadow-xl backdrop-blur-xl' : ''} ${isAudio
           ? 'border-violet-300/20 bg-violet-300/[0.07] text-violet-50/85'
           : 'border-cyan-300/25 bg-gradient-to-r from-cyan-300/15 via-sky-400/10 to-transparent text-cyan-50/85'}`}
       >
@@ -65,17 +66,19 @@ export function CollapsibleMediaBanner({ kind, children, overlay = false, defaul
 }
 
 /** 只描述当前观看的共享，随观看会话挂载，默认收回到视频左侧。 */
-export function WatchingScreenBanner({ sharer, onStopWatching }: {
+export function WatchingScreenBanner({ sharer, onStopWatching, children }: {
   sharer: string;
   onStopWatching: () => void;
+  children?: ReactNode;
 }) {
   return (
-    <CollapsibleMediaBanner kind="screen" overlay defaultCollapsed>
+    <CollapsibleMediaBanner kind="screen" overlay defaultCollapsed wrap>
       <span className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl bg-cyan-200 text-zinc-900"><MonitorPlay size={20} /></span>
-      <div className="min-w-0 flex-1">
+      <div className="min-w-0 flex-1 basis-40">
         <p className="truncate text-sm font-semibold text-white" title={sharer}>正在观看 {sharer} 的屏幕共享</p>
         <p className="mt-0.5 text-xs text-cyan-50/50">停止观看后可选择其他共享</p>
       </div>
+      {children}
       <button onClick={onStopWatching} className="inline-flex flex-shrink-0 items-center gap-2 rounded-xl bg-red-500/15 px-3 py-2 text-xs font-semibold text-red-100 transition hover:bg-red-500/25">
         <EyeOff size={16} />停止观看
       </button>

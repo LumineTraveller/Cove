@@ -13,6 +13,7 @@ interface Props {
   profile: UserProfile;
   onProfileChange: (profile: UserProfile) => void;
   onReset: () => void;
+  onSwitchServer?: () => void;
   sessionReady: boolean;
   serverURL: string;
 }
@@ -24,7 +25,7 @@ interface LobbyPresenceSnapshot {
   voiceCounts: Record<string, number>;
 }
 
-export default function RoomList({ profile, onProfileChange, onReset, sessionReady, serverURL }: Props) {
+export default function RoomList({ profile, onProfileChange, onReset, onSwitchServer, sessionReady, serverURL }: Props) {
   const navigate = useNavigate();
   const [rooms, setRooms] = useState<Room[]>([]);
   const [creating, setCreating] = useState(false);
@@ -189,7 +190,7 @@ export default function RoomList({ profile, onProfileChange, onReset, sessionRea
         </div>
       )}
 
-      {showProfile && <ProfileModal profile={profile} serverURL={serverURL} onSave={onProfileChange} onClose={() => setShowProfile(false)} onOpenServerSettings={() => { setShowProfile(false); setShowSettings(true); }} onReset={onReset} />}
+      {showProfile && <ProfileModal profile={profile} serverURL={serverURL} onSave={onProfileChange} onClose={() => setShowProfile(false)} onOpenServerSettings={() => { setShowProfile(false); setShowSettings(true); }} onReset={onReset} onSwitchServer={onSwitchServer} />}
     </div>
   );
 }

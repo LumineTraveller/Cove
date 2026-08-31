@@ -12,6 +12,8 @@ import { Avatar } from '../components/Avatar';
 import { CollapsibleMediaBanner, WatchingScreenBanner } from '../components/CollapsibleMediaBanner';
 import { ScreenFullscreenControl } from '../components/ScreenFullscreenControl';
 import { ScreenVolumeControl } from '../components/ScreenVolumeControl';
+import { WatchingScreenControls } from '../components/WatchingScreenControls';
+import { MemberContextMenu } from '../components/MemberContextMenu';
 import { ProfileModal } from '../components/ProfileModal';
 import { UserProfileModal } from '../components/UserProfileModal';
 import { SoundPackPanel } from '../components/SoundPackPanel';
@@ -191,19 +193,21 @@ interface ActiveRemoteControlSession {
 
 interface ScreenModalProps {
   preset: ScreenPreset; fps: Fps; audio: boolean; gameMode: boolean;
+  nativeResolution: boolean;
+  onNativeResolution: (enabled: boolean) => void;
   onPreset: (p: ScreenPreset) => void; onFps: (f: Fps) => void;
   onAudio: () => void; onGameMode: () => void;
   onConfirm: () => void; onCancel: () => void;
 }
-function ScreenSettingsModal({ preset, fps, audio, gameMode, onPreset, onFps, onAudio, onGameMode, onConfirm, onCancel }: ScreenModalProps) {
+export function ScreenSettingsModal({ preset, fps, audio, gameMode, nativeResolution, onNativeResolution, onPreset, onFps, onAudio, onGameMode, onConfirm, onCancel }: ScreenModalProps) {
   return (
     <div className="fixed inset-0 bg-black/50 backdrop-blur-md flex items-center justify-center z-50" onClick={onCancel}>
       <div className="max-h-[90vh] w-96 overflow-y-auto rounded-3xl border border-white/15 bg-white/[0.08] p-7 shadow-2xl backdrop-blur-2xl flex flex-col gap-5" onClick={e => e.stopPropagation()}>
         <h2 className="text-white font-bold text-xl">屏幕共享设置</h2>
         <p className={`rounded-2xl border px-4 py-3 text-xs leading-relaxed ${gameMode ? 'border-amber-300/20 bg-amber-300/[0.07] text-amber-100/75' : 'border-cyan-300/10 bg-cyan-300/[0.05] text-cyan-100/65'}`}>
           {gameMode
-            ? '游戏模式不会分析画面变化，按所选清晰度以 60 FPS 为目标。不设码率上限，实际速率由网络与设备能力决定。'
-            : 'Cove 会保留原始采集画面用于高质量缩放，传输尺寸保持在所选档位内，并根据画面变化调整帧率。不设码率上限，实际速率由网络与设备能力决定。'}
+            ? `游戏模式不会分析画面变化，按${nativeResolution ? '原生分辨率' : '所选清晰度'}以 60 FPS 为目标。不设码率上限，实际速率由网络与设备能力决定。`
+            : `${nativeResolution ? '直接以采集源的原生分辨率传输，不按清晰度档位缩放' : 'Cove 会保留原始采集画面用于高质量缩放，传输尺寸保持在所选档位内'}，并根据画面变化调整帧率。不设码率上限，实际速率由网络与设备能力决定。`}
         </p>
         <div>
           <p className="text-white/40 text-sm font-medium mb-2.5">传输模式</p>
@@ -216,14 +220,23 @@ function ScreenSettingsModal({ preset, fps, audio, gameMode, onPreset, onFps, on
         </div>
         <div>
           <p className="text-white/40 text-sm font-medium mb-2.5">传输清晰度</p>
-          <div className="grid grid-cols-2 gap-2">
+          <label className="mb-3 flex cursor-pointer gap-3 rounded-xl border border-amber-300/15 bg-amber-300/[0.06] px-3.5 py-3 transition hover:bg-amber-300/[0.09]">
+            <input type="checkbox" checked={nativeResolution} onChange={event => onNativeResolution(event.target.checked)}
+              className="mt-0.5 h-4 w-4 flex-shrink-0 accent-amber-300" />
+            <span className="min-w-0">
+              <span className="flex items-center gap-1.5 text-sm font-medium text-white/70"><Monitor size={15} className="text-amber-200/70" />以原生分辨率共享</span>
+              <span className="mt-1 block text-xs leading-relaxed text-white/35">使用采集源的原始尺寸，忽略下方档位；优先保留分辨率，可能增加带宽与编码负担。</span>
+            </span>
+          </label>
+          <fieldset disabled={nativeResolution} aria-label="传输分辨率档位" className={`grid grid-cols-2 gap-2 transition-opacity ${nativeResolution ? 'opacity-40' : ''}`}>
             {(Object.keys(SCREEN_PRESETS) as ScreenPreset[]).map(p => (
               <button key={p} onClick={() => onPreset(p)}
-                className={`py-2.5 rounded-xl text-sm font-semibold transition-colors ${preset === p ? 'bg-white text-zinc-900' : 'bg-white/10 hover:bg-white/15 text-white/60'}`}>
+                disabled={nativeResolution}
+                className={`py-2.5 rounded-xl text-sm font-semibold transition-colors disabled:cursor-not-allowed ${nativeResolution ? 'bg-white/10 text-white/40' : preset === p ? 'bg-white text-zinc-900' : 'bg-white/10 hover:bg-white/15 text-white/60'}`}>
                 {SCREEN_PRESETS[p].label}
               </button>
             ))}
-          </div>
+          </fieldset>
         </div>
         <div>
           <p className="text-white/40 text-sm font-medium mb-2.5">帧率</p>
@@ -410,6 +423,12 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
   const [moderatingId, setModeratingId] = useState<string | null>(null);
   const [kickingId, setKickingId] = useState<string | null>(null);
   const [kickConfirmMember, setKickConfirmMember] = useState<RoomMember | null>(null);
+  const [memberMenu, setMemberMenu] = useState<{ socketId: string; roomId: string; x: number; y: number } | null>(null);
+  const memberMenuAnchor = useRef<HTMLButtonElement | null>(null);
+  const closeMemberMenu = useCallback((restoreFocus = false) => {
+    setMemberMenu(null);
+    if (restoreFocus && memberMenuAnchor.current?.isConnected) memberMenuAnchor.current.focus({ preventScroll: true });
+  }, []);
   const [kickNotice, setKickNotice] = useState<{ title: string; message: string; returnToList: boolean } | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [draggingVolumeMember, setDraggingVolumeMember] = useState<string | null>(null);
@@ -454,6 +473,7 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
   const [pendingFps, setPendingFps]           = useState<Fps>(30);
   const [pendingAudio, setPendingAudio]       = useState(false);
   const [pendingGameMode, setPendingGameMode] = useState(false);
+  const [pendingNativeResolution, setPendingNativeResolution] = useState(false);
   const [showAudioDevices, setShowAudioDevices] = useState(false);
   const [diagnosticsCompact, setDiagnosticsCompact] = useState(false);
   const [incomingRemoteControl, setIncomingRemoteControl] = useState<IncomingRemoteControlRequest | null>(null);
@@ -870,6 +890,13 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
     }
   }, [isOwner, room, roomId]);
 
+  const menuMember = memberMenu && memberMenu.roomId === roomId && isOwner && sessionReady && roomSynced && sidebarOpen
+    ? roomMembers.find(member => member.socketId === memberMenu.socketId && !member.isOwner && member.socketId !== socket.id)
+    : undefined;
+  useEffect(() => {
+    if (memberMenu && !menuMember) closeMemberMenu();
+  }, [memberMenu, menuMember, closeMemberMenu]);
+
   if (!room) return (
     <div className="h-full flex items-center justify-center bg-gradient-to-br from-zinc-950 via-black to-zinc-900 text-white/40">加载中…</div>
   );
@@ -919,6 +946,7 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
       {showScreenModal && (
         <ScreenSettingsModal
           preset={pendingPreset} fps={pendingFps} audio={pendingAudio} gameMode={pendingGameMode}
+          nativeResolution={pendingNativeResolution} onNativeResolution={setPendingNativeResolution}
           onPreset={setPendingPreset} onFps={setPendingFps}
           onAudio={() => setPendingAudio(a => !a)}
           onGameMode={() => setPendingGameMode(enabled => {
@@ -927,7 +955,7 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
             return next;
           })}
           onCancel={() => setShowScreenModal(false)}
-          onConfirm={() => { setShowScreenModal(false); rtc.startScreenShare(pendingPreset, pendingFps, pendingAudio, pendingGameMode); }}
+          onConfirm={() => { setShowScreenModal(false); rtc.startScreenShare(pendingPreset, pendingFps, pendingAudio, pendingGameMode, pendingNativeResolution); }}
         />
       )}
 
@@ -1002,6 +1030,12 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
         </div>
       )}
 
+      {memberMenu && menuMember && (
+        <MemberContextMenu key={menuMember.socketId} username={menuMember.username} muted={menuMember.isMuted}
+          x={memberMenu.x} y={memberMenu.y} disabled={moderatingId === menuMember.socketId || kickingId === menuMember.socketId}
+          onClose={closeMemberMenu} onToggleMute={() => { void setMemberMuted(menuMember); }}
+          onRemove={() => requestKickMember(menuMember)} />
+      )}
       {showProfile && <ProfileModal profile={profile} serverURL={serverURL} onSave={onProfileChange} onClose={() => setShowProfile(false)} />}
       {viewingProfile && (
         <UserProfileModal
@@ -1054,6 +1088,7 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
             <div className="space-y-1">
               {sortedRoomMembers.map(member => {
                 const isSelf = member.socketId === socket.id;
+                const canModerate = isOwner && !member.isOwner && !isSelf && sessionReady && roomSynced;
                 const voiceMember = rtc.voiceMembers.find(voice => voice.socketId === member.socketId);
                 const inVoice = !!voiceMember;
                 const showVoiceState = rtc.inVoice && inVoice;
@@ -1067,14 +1102,32 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
                 const sharingApplicationAudio = !!member.isSharingApplicationAudio || (isSelf && rtc.isApplicationAudioSharing)
                   || rtc.remoteApplicationAudios.some(audio => audio.socketId === member.socketId);
                 return (
-                  <div key={member.socketId} className="group rounded-xl px-2 py-2 transition-colors hover:bg-white/[0.06]">
-                    {/* 操作按钮只参与这一行的布局；电平轨道移到整行下方，避免被按钮挤窄。 */}
+                  <div key={member.socketId} className="group rounded-xl px-2 py-2 transition-colors hover:bg-white/[0.06]"
+                    onContextMenu={event => {
+                      if (!canModerate || !roomId) return;
+                      event.preventDefault(); event.stopPropagation();
+                      memberMenuAnchor.current = event.currentTarget.querySelector<HTMLButtonElement>('[data-member-profile]');
+                      setMemberMenu({ socketId: member.socketId, roomId, x: event.clientX, y: event.clientY });
+                    }}
+                    onKeyDown={event => {
+                      if (!canModerate || !roomId || !(event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10'))) return;
+                      event.preventDefault(); event.stopPropagation();
+                      const anchor = event.currentTarget.querySelector<HTMLButtonElement>('[data-member-profile]');
+                      memberMenuAnchor.current = anchor;
+                      const rect = (anchor ?? event.currentTarget).getBoundingClientRect();
+                      setMemberMenu({ socketId: member.socketId, roomId, x: rect.left, y: rect.bottom });
+                    }}>
+                    {/* 管理操作仅由右键菜单唤出，不再挤占成员信息行。 */}
                     <div className="flex items-start gap-2">
                       <div className="min-w-0 flex-1">
                         <button
+                          data-member-profile
                           onClick={() => isSelf ? setShowProfile(true) : setViewingProfile(member)}
                           className="flex w-full min-w-0 items-center gap-3 rounded-xl text-left focus:outline-none focus:ring-2 focus:ring-cyan-300/35"
-                          title={isSelf ? '打开个人名片' : `查看 ${member.username} 的主页`}
+                          title={isSelf ? '打开个人名片' : `查看 ${member.username} 的主页${canModerate ? '（右键管理成员）' : ''}`}
+                          aria-haspopup={canModerate ? 'menu' : undefined}
+                          aria-expanded={canModerate ? menuMember?.socketId === member.socketId : undefined}
+                          aria-controls={menuMember?.socketId === member.socketId ? 'member-moderation-menu' : undefined}
                         >
                           <Avatar username={member.username} avatarUrl={member.avatarUrl} size="sm" className={speaking ? 'border-green-400/60 ring-2 ring-green-400/40' : isSelf ? 'border-white/30' : 'transition group-hover:border-cyan-200/30'} />
                           <div className="min-w-0 flex-1">
@@ -1088,33 +1141,13 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
                                   ? <Monitor size={13} className="flex-shrink-0 text-cyan-100/40" aria-label="电脑端" />
                                   : null}
                               {member.isOwner && <Crown size={14} className="flex-shrink-0 text-amber-300" aria-label="房主" />}
-                              {showVoiceState && voiceMuted && <MicOff size={13} className="flex-shrink-0 text-red-300/70" aria-label="麦克风已关闭" />}
+                              {(member.isMuted || (showVoiceState && voiceMuted)) && <MicOff size={13} className="flex-shrink-0 text-red-300/70" aria-label={member.isMuted ? '已被房主禁言' : '麦克风已关闭'} />}
                             </div>
                             {profileRemarks[member.userId] && !isSelf && <p className="mt-0.5 truncate text-xs text-white/30">用户名：{member.username}</p>}
                             {member.isOwner && <p className="mt-0.5 text-xs text-amber-300/50">房主</p>}
                           </div>
                         </button>
                       </div>
-                      {isOwner && !member.isOwner && !isSelf && (
-                        <div className="mt-0.5 flex flex-shrink-0 items-center gap-1">
-                          <button
-                            onClick={() => setMemberMuted(member)}
-                            disabled={moderatingId === member.socketId || kickingId === member.socketId || !sessionReady || !roomSynced}
-                            className={`rounded-lg px-2 py-1.5 text-xs font-medium transition-colors disabled:opacity-40 ${
-                              member.isMuted
-                                ? 'bg-green-500/10 text-green-300 hover:bg-green-500/20'
-                                : 'bg-red-500/10 text-red-300 hover:bg-red-500/20'
-                            }`}
-                          >{member.isMuted ? '解禁' : '禁言'}</button>
-                          <button
-                            onClick={() => requestKickMember(member)}
-                            disabled={kickingId === member.socketId || moderatingId === member.socketId || !sessionReady || !roomSynced}
-                            className="rounded-lg bg-red-500/10 p-1.5 text-red-300 transition hover:bg-red-500/20 disabled:opacity-40"
-                            title={`将 ${member.username} 移出房间`}
-                            aria-label={`将 ${member.username} 移出房间`}
-                          ><UserMinus size={14} /></button>
-                        </div>
-                      )}
                     </div>
 
                     {showVoiceState && (
@@ -1336,7 +1369,11 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
                     key={rtc.remoteScreen.stream.id}
                     sharer={rtc.voiceMembers.find(member => member.socketId === rtc.remoteScreen!.socketId)?.username ?? '成员'}
                     onStopWatching={() => { if (controllingRemoteScreen) stopRemoteControl(); rtc.stopWatchingScreen(); }}
-                  />
+                  >
+                    <WatchingScreenControls volume={rtc.screenReceiveVolume} onVolumeChange={rtc.setScreenReceiveVolume}
+                      remoteState={controllingRemoteScreen ? 'active' : pendingRemoteControl ? 'pending' : remoteScreenMember?.canReceiveRemoteControl && window.coveRemoteControl?.supported ? 'available' : 'unsupported'}
+                      notice={remoteControlNotice} onRequestControl={requestRemoteControl} onStopControl={stopRemoteControl} />
+                  </WatchingScreenBanner>
                   <div className="absolute bottom-3 left-3 bg-black/60 backdrop-blur-md text-white text-sm px-3 py-1.5 rounded-xl font-medium border border-white/10">
                     {rtc.voiceMembers.find(m => m.socketId === rtc.remoteScreen!.socketId)?.username ?? rtc.remoteScreen.socketId} 正在共享
                   </div>
@@ -1345,29 +1382,10 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
                 <>
                   <LocalScreenVideo stream={rtc.localScreen} />
                   <div className="absolute bottom-3 left-3 bg-white/10 backdrop-blur-md text-white text-sm px-3 py-1.5 rounded-xl font-medium border border-white/15">
-                    你正在共享 · {rtc.screenViewerCount} 人观看 · {rtc.screenEncodingPlan ? `${rtc.screenEncodingPlan.outputWidth}×${rtc.screenEncodingPlan.outputHeight}` : SCREEN_PRESETS[rtc.screenPreset].label} · {rtc.screenGameMode ? '游戏模式' : `自动${rtc.screenActivity === 'static' ? '静止' : rtc.screenActivity === 'motion' ? '动态' : '操作'}`}
+                    你正在共享 · {rtc.screenViewerCount} 人观看 · {rtc.screenNativeResolution ? '原生 ' : ''}{rtc.screenEncodingPlan ? `${rtc.screenEncodingPlan.outputWidth}×${rtc.screenEncodingPlan.outputHeight}` : SCREEN_PRESETS[rtc.screenPreset].label} · {rtc.screenGameMode ? '游戏模式' : `自动${rtc.screenActivity === 'static' ? '静止' : rtc.screenActivity === 'motion' ? '动态' : '操作'}`}
                   </div>
                 </>
               ) : null}
-
-              {rtc.remoteScreen && (
-                <div className="absolute right-3 top-16 z-20 max-w-xs rounded-xl border border-white/10 bg-black/45 p-2 text-xs text-white/75 shadow-xl backdrop-blur-md">
-                  {controllingRemoteScreen ? (
-                    <button onClick={stopRemoteControl} className="inline-flex items-center gap-2 rounded-lg bg-red-500/20 px-3 py-2 font-semibold text-red-100 transition hover:bg-red-500/30">
-                      <MousePointer2 size={15} />停止远程控制
-                    </button>
-                  ) : pendingRemoteControl ? (
-                    <span className="inline-flex items-center gap-2 px-2 py-1.5 text-cyan-100/75"><LoaderCircle size={14} className="animate-spin" />等待共享者确认</span>
-                  ) : remoteScreenMember?.canReceiveRemoteControl && window.coveRemoteControl?.supported ? (
-                    <button onClick={requestRemoteControl} className="inline-flex items-center gap-2 rounded-lg bg-cyan-200 px-3 py-2 font-semibold text-zinc-900 transition hover:bg-white">
-                      <MousePointer2 size={15} />申请远程控制
-                    </button>
-                  ) : (
-                    <span className="block px-2 py-1.5 text-white/40">共享者当前客户端不支持远程控制</span>
-                  )}
-                  {!!remoteControlNotice && <p className="mt-1.5 max-w-56 px-2 text-[11px] leading-relaxed text-amber-100/70">{remoteControlNotice}</p>}
-                </div>
-              )}
 
               {sharingUnderRemoteControl && (
                 <div className="absolute right-3 top-16 z-20 max-w-sm rounded-xl border border-amber-300/25 bg-black/60 p-3 text-xs text-white shadow-xl backdrop-blur-md">
@@ -1377,9 +1395,7 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
                 </div>
               )}
 
-              {rtc.remoteScreen ? (
-                <ScreenVolumeControl volume={rtc.screenReceiveVolume} onChange={rtc.setScreenReceiveVolume} />
-              ) : rtc.localScreen && rtc.shareAudio ? (
+              {!rtc.remoteScreen && rtc.localScreen && rtc.shareAudio ? (
                 <ScreenVolumeControl
                   volume={rtc.screenShareVolume}
                   onChange={rtc.setScreenShareVolume}

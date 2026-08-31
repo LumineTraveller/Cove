@@ -13,9 +13,10 @@ interface Props {
   onClose: () => void;
   onOpenServerSettings?: () => void;
   onReset?: () => void;
+  onSwitchServer?: () => void;
 }
 
-export function ProfileModal({ profile, serverURL, onSave, onClose, onOpenServerSettings, onReset }: Props) {
+export function ProfileModal({ profile, serverURL, onSave, onClose, onOpenServerSettings, onReset, onSwitchServer }: Props) {
   const [username, setUsername] = useState(profile.username);
   const [avatarUrl, setAvatarUrl] = useState<string | null>(profile.avatarUrl);
   const [error, setError] = useState('');
@@ -95,6 +96,9 @@ export function ProfileModal({ profile, serverURL, onSave, onClose, onOpenServer
               <LogOut size={16} /> 退出账号
             </button>
           )}
+          {onSwitchServer && <button onClick={onSwitchServer} className="inline-flex w-full items-center justify-center gap-2 rounded-xl py-2.5 text-sm font-medium text-white/55 transition hover:bg-white/10 hover:text-white">
+            <Server size={16} />切换服务器（保留登录）
+          </button>}
         </div>
         <button onClick={openUpdateCenter} className="absolute bottom-2.5 right-4 rounded-lg px-2 py-1 text-[11px] font-medium tracking-wide text-white/20 transition hover:bg-cyan-300/10 hover:text-cyan-100/80 focus:outline-none focus:ring-2 focus:ring-cyan-300/40" title="检查 Cove 更新" aria-label={`Cove v${packageInfo.version}，点击检查更新`}>
           Cove v{packageInfo.version}

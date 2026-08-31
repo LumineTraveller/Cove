@@ -33,7 +33,7 @@ import {
   VolumeX,
   X,
 } from 'lucide-react-native';
-import { RTCView } from 'react-native-webrtc';
+import { ZoomableScreenVideo } from '../components/ZoomableScreenVideo';
 import type { Socket } from 'socket.io-client';
 import { Soundboard } from '../components/Soundboard';
 import { ChatPanel } from '../components/ChatPanel';
@@ -179,7 +179,7 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
   }, [media.remoteScreen, members]);
 
   const screenContent = screenURL ? (
-    <RTCView streamURL={screenURL} objectFit="contain" mirror={false} style={styles.video} />
+    <ZoomableScreenVideo key={screenURL} streamURL={screenURL} />
   ) : media.availableScreens.length > 0 ? (
     <View style={styles.shareAvailable}>
       <View style={styles.shareAvailableIcon}><MonitorPlay size={30} color="#082f49" /></View>
@@ -385,7 +385,7 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
       <Modal visible={fullscreen} animationType="fade" supportedOrientations={['portrait', 'landscape']} onRequestClose={() => setFullscreen(false)}>
         <View style={styles.fullscreen}>
           <StatusBar hidden />
-          {screenURL ? <RTCView streamURL={screenURL} objectFit="contain" mirror={false} style={styles.fullscreenVideo} /> : null}
+          {screenURL ? <ZoomableScreenVideo key={screenURL} streamURL={screenURL} /> : null}
           <TouchableOpacity style={styles.closeFullscreen} onPress={() => setFullscreen(false)}><X size={22} color={colors.text} /></TouchableOpacity>
         </View>
       </Modal>
@@ -458,7 +458,6 @@ const styles = StyleSheet.create({
   errorBanner: { flexDirection: 'row', alignItems: 'center', gap: 9, marginHorizontal: 14, marginBottom: 10, padding: 11, borderWidth: 1, borderColor: 'rgba(248,113,113,0.2)', borderRadius: 13, backgroundColor: colors.redSoft },
   errorText: { flex: 1, color: colors.red, fontSize: 11, lineHeight: 16 },
   screenStage: { position: 'relative', aspectRatio: 16 / 9, marginHorizontal: 14, marginBottom: 14, overflow: 'hidden', borderWidth: 1, borderColor: colors.border, borderRadius: 20, backgroundColor: '#020203' },
-  video: { width: '100%', height: '100%', backgroundColor: '#000' },
   screenEmpty: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 20 },
   screenEmptyIcon: { width: 58, height: 58, marginBottom: 12, borderRadius: 19, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.045)' },
   screenEmptyTitle: { color: colors.text, fontSize: 14, fontWeight: '700' },
@@ -511,7 +510,6 @@ const styles = StyleSheet.create({
   forceMutedText: { color: colors.red },
   leaveControl: { width: 52, height: 50, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.redSoft },
   fullscreen: { flex: 1, backgroundColor: '#000' },
-  fullscreenVideo: { flex: 1, backgroundColor: '#000' },
   closeFullscreen: { position: 'absolute', top: 18, right: 18, width: 42, height: 42, alignItems: 'center', justifyContent: 'center', borderRadius: 14, backgroundColor: 'rgba(0,0,0,0.7)' },
   toolModal: { flex: 1, backgroundColor: colors.background },
   toolHeader: { minHeight: 66, flexDirection: 'row', alignItems: 'center', gap: 11, paddingHorizontal: 14, borderBottomWidth: 1, borderBottomColor: colors.border },

@@ -4,8 +4,10 @@ import { createRoot } from 'react-dom/client';
 import { AudioLines, MonitorPlay } from 'lucide-react';
 import { CollapsibleMediaBanner, WatchingScreenBanner } from '../../src/components/CollapsibleMediaBanner';
 import { ScreenFullscreenControl } from '../../src/components/ScreenFullscreenControl';
-import { ScreenVolumeControl } from '../../src/components/ScreenVolumeControl';
-import { createVoiceAudioOutput } from '../../src/audioDevices';
+import { WatchingScreenControls } from '../../src/components/WatchingScreenControls';
+import { ScreenSettingsModal } from '../../src/pages/ChatRoom';
+import type { ScreenPreset } from '../../src/screenCapture';
+import { createRemoteAudioOutput as createVoiceAudioOutput } from '../../src/audioDevices';
 import { useScreenFullscreen } from '../../src/hooks/useScreenFullscreen';
 import '../../src/index.css';
 
@@ -13,12 +15,27 @@ function Fixture() {
   const [active, setActive] = useState(true);
   const [watching, setWatching] = useState<string | null>(null);
   const [volume, setVolume] = useState(1);
+  const [remoteState, setRemoteState] = useState<'available' | 'pending' | 'active'>('available');
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [nativeResolution, setNativeResolution] = useState(false);
+  const [preset, setPreset] = useState<ScreenPreset>('720p');
+  const [fps, setFps] = useState<30 | 60>(30);
+  const [audio, setAudio] = useState(false);
+  const [gameMode, setGameMode] = useState(false);
   const { screenContainerRef: screen, screenMaximized: maximized, nativeFullscreen: fullscreen,
     toggleFullscreen, toggleNativeFullscreen } = useScreenFullscreen(active && watching !== null);
   return <main className="flex h-full flex-col overflow-hidden bg-zinc-950 text-white">
     <header className="flex h-16 flex-shrink-0 items-center border-b border-white/10 px-5">媒体控件测试 · 使用真实组件
       <button data-testid="toggle-share" onClick={() => setActive(value => !value)}>切换共享状态</button>
+      <button data-testid="open-settings" onClick={() => setSettingsOpen(true)}>共享设置</button>
+      <button data-testid="approve-control" onClick={() => setRemoteState('active')}>模拟同意远控</button>
+      <output data-testid="selected-preset">{preset}</output>
     </header>
+    {settingsOpen && <ScreenSettingsModal preset={preset} fps={fps} audio={audio} gameMode={gameMode}
+      nativeResolution={nativeResolution} onNativeResolution={setNativeResolution}
+      onPreset={setPreset} onFps={setFps} onAudio={() => setAudio(value => !value)}
+      onGameMode={() => { setGameMode(value => !value); setFps(60); }}
+      onCancel={() => setSettingsOpen(false)} onConfirm={() => setSettingsOpen(false)} />}
     {!watching && <>
     <CollapsibleMediaBanner kind="screen">
       <MonitorPlay className="text-cyan-200" />
@@ -34,8 +51,10 @@ function Fixture() {
     {active && watching && <div className="min-h-0 flex-1" style={maximized ? { position: 'fixed', inset: 0, zIndex: 50 } : undefined}>
     <div ref={screen} className="cove-screen-container relative h-full bg-black" data-maximized={maximized}>
       <div className="flex h-full items-center justify-center text-white/40">{watching} 的测试画面</div>
-      <WatchingScreenBanner key={watching} sharer={watching} onStopWatching={() => setWatching(null)} />
-      <ScreenVolumeControl volume={volume} onChange={setVolume} />
+      <WatchingScreenBanner key={watching} sharer={watching} onStopWatching={() => setWatching(null)}>
+        <WatchingScreenControls volume={volume} onVolumeChange={setVolume} remoteState={remoteState}
+          onRequestControl={() => setRemoteState('pending')} onStopControl={() => setRemoteState('available')} />
+      </WatchingScreenBanner>
       <ScreenFullscreenControl maximized={maximized} nativeFullscreen={fullscreen}
         onToggleWindow={toggleFullscreen}
         onToggleNative={() => { void toggleNativeFullscreen(); }} />

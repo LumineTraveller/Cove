@@ -1,0 +1,72 @@
+// Vite must serve this checkout on port 5180. Real controls only; no room or capture.
+const { app, BrowserWindow } = require('electron');
+const fs = require('node:fs');
+const path = require('node:path');
+const assert = require('node:assert/strict');
+const artifacts = path.resolve(__dirname, '../../..', 'tmp/shared-screen-controls');
+fs.mkdirSync(artifacts, { recursive: true });
+app.commandLine.appendSwitch('user-data-dir', path.join(artifacts, 'profile'));
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+const timeout = setTimeout(() => app.exit(1), 45000);
+app.whenReady().then(async () => {
+  const win = new BrowserWindow({ width: 1100, height: 900, show: false, webPreferences: { backgroundThrottling: false, offscreen: true } });
+  win.webContents.setFrameRate(30);
+  win.webContents.on('console-message', event => { if (event.level === 'error') console.error('renderer:', event.message); });
+  const js = code => win.webContents.executeJavaScript(code);
+  const waitFor = async predicate => { for (let i = 0; i < 80; i++) { if (await predicate()) return; await delay(50); } throw new Error('Timed out waiting for UI'); };
+  const click = async selector => {
+    await js(`document.querySelector(${JSON.stringify(selector)})?.scrollIntoView({block:'center',behavior:'instant'})`);
+    await delay(80);
+    const p = await js(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); if (!e) throw new Error('Missing control'); const r=e.getBoundingClientRect(); const x=Math.round(r.x+r.width/2),y=Math.round(r.y+r.height/2);const hit=document.elementFromPoint(x,y); if(!e.contains(hit)) throw new Error('Control obscured: '+${JSON.stringify(selector)}+' hit '+hit?.outerHTML.slice(0,160));return {x,y}; })()`);
+    win.webContents.sendInputEvent({type:'mouseDown',button:'left',...p,clickCount:1});
+    win.webContents.sendInputEvent({type:'mouseUp',button:'left',...p,clickCount:1});
+    await delay(80);
+  };
+  const clickText = async text => {
+    await js(`(() => { const e = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === ${JSON.stringify(text)}); if(!e) throw new Error('Missing button'); e.dataset.testClick='next'; })()`);
+    await click('[data-test-click="next"]');
+    await js('document.querySelector("[data-test-click=next]")?.removeAttribute("data-test-click")');
+  };
+  try {
+    await win.loadURL('http://127.0.0.1:5180/tests/ui/media-controls.html');
+    await waitFor(() => js('!!document.querySelector("[data-testid=open-settings]")'));
+    await click('[data-testid="open-settings"]');
+    await clickText('1080p 清晰');
+    await click('input[type="checkbox"]');
+    assert.equal(await js('document.querySelector("input[type=checkbox]").checked'), true);
+    assert.equal(await js('[...document.querySelectorAll("fieldset button")].every(b => b.disabled)'), true);
+    await waitFor(() => js('Number(getComputedStyle(document.querySelector("fieldset")).opacity) < 0.5'));
+    await js('document.querySelector("fieldset button").click()');
+    assert.equal(await js('document.querySelector("[data-testid=selected-preset]").textContent'), '1080p');
+    fs.writeFileSync(path.join(artifacts, 'native-enabled.png'), (await win.webContents.capturePage()).toPNG());
+    await click('input[type="checkbox"]');
+    assert.equal(await js('[...document.querySelectorAll("fieldset button")].every(b => !b.disabled)'), true);
+    assert.equal(await js('document.querySelector("[data-testid=selected-preset]").textContent'), '1080p');
+    await clickText('取消');
+    await waitFor(() => js('!document.querySelector("input[type=checkbox]")'));
+    await clickText('观看 小雨');
+    await waitFor(() => js('!!document.querySelector(".cove-media-banner-panel[inert]")'));
+    assert.equal(await js('document.querySelectorAll("[aria-label=共享接收音量]").length'), 1);
+    await click('[aria-label="展开屏幕共享提示"]');
+    await delay(350);
+    assert.equal(await js('document.querySelector(".cove-media-banner-panel").contains(document.querySelector("[aria-label=共享接收音量]"))'), true);
+    assert.equal(await js('document.querySelector(".cove-media-banner-panel").contains(document.querySelector("[data-watching-screen-controls] button"))'), true);
+    await click('[aria-label="共享接收音量"]');
+    const volume = await js('Number(document.querySelector("[aria-label=共享接收音量]").value)');
+    assert.ok(volume > 20 && volume < 80, 'Volume slider can be clicked without an overlay blocking it');
+    await clickText('申请远程控制');
+    assert.equal(await js('document.querySelector("[data-watching-screen-controls]").textContent.includes("等待共享者确认")'), true);
+    await click('[data-testid="approve-control"]');
+    await clickText('停止远程控制');
+    assert.equal(await js('document.querySelector("[data-watching-screen-controls]").textContent.includes("申请远程控制")'), true);
+    fs.writeFileSync(path.join(artifacts, 'viewer-banner.png'), (await win.webContents.capturePage()).toPNG());
+    win.setContentSize(600, 720); await delay(250);
+    assert.equal(await js(`(() => { const p=document.querySelector('.cove-media-banner-panel').getBoundingClientRect(); return [...document.querySelectorAll('.cove-media-banner-panel button,.cove-media-banner-panel input')].every(e => {const r=e.getBoundingClientRect();return r.left>=p.left && r.right<=p.right && r.top>=p.top && r.bottom<=p.bottom;}); })()`), true, 'Narrow banner keeps all controls within its bounds');
+    fs.writeFileSync(path.join(artifacts, 'viewer-banner-narrow.png'), (await win.webContents.capturePage()).toPNG());
+    await click('[aria-label="收回屏幕共享提示"]'); await delay(350);
+    assert.equal(await js('document.querySelector(".cove-media-banner-panel").hasAttribute("inert")'), true);
+    assert.equal(await js('document.activeElement.getAttribute("aria-label")'), '展开屏幕共享提示');
+    console.log('PASS: native toggle disables/restores presets, selection is retained; viewer controls work inside the banner, wrap in narrow views and become inert on collapse.');
+    clearTimeout(timeout); win.destroy(); app.exit(0);
+  } catch (error) { console.error(error); fs.writeFileSync(path.join(artifacts, 'failure.png'), (await win.webContents.capturePage()).toPNG()); clearTimeout(timeout); win.destroy(); app.exit(1); }
+});

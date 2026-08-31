@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -19,20 +19,31 @@ import { validAccountEmail } from '../accountAuth';
 import { colors } from '../theme';
 import { httpsOrigin } from '../serverCertificate';
 import { MobileUpdateButton } from '../components/MobileUpdater';
+import type { RememberedServer } from '../storage';
 
 interface Props {
   saving: boolean;
   error?: string | null;
   onSubmit: (request: AccountAuthRequest) => void;
+  rememberedServers?: RememberedServer[];
+  onResume?: (server: RememberedServer) => void;
+  onForget?: (server: RememberedServer) => void;
 }
 
-export function LoginScreen({ saving, error, onSubmit }: Props) {
+export function LoginScreen({ saving, error, onSubmit, rememberedServers = [], onResume, onForget }: Props) {
   const [mode, setMode] = useState<AccountAuthMode>('login');
   const [username, setUsername] = useState('');
-  const [email, setEmail] = useState('');
+  const [email, setEmail] = useState(rememberedServers[0]?.email ?? '');
   const [password, setPassword] = useState('');
-  const [serverURL, setServerURL] = useState('');
-  const [certificateException, setCertificateException] = useState(false);
+  const [serverURL, setServerURL] = useState(rememberedServers[0]?.serverURL ?? '');
+  const [certificateException, setCertificateException] = useState(rememberedServers[0]?.allowInvalidServerCertificate === true);
+  useEffect(() => {
+    const saved = rememberedServers[0];
+    if (saved && !serverURL.trim() && !email.trim()) {
+      setServerURL(saved.serverURL); setEmail(saved.email);
+      setCertificateException(saved.allowInvalidServerCertificate === true);
+    }
+  }, [rememberedServers, serverURL, email]);
   const canUseException = Platform.OS === 'android' && !!httpsOrigin(serverURL);
   const submit = () => onSubmit({
     mode,
@@ -62,6 +73,20 @@ export function LoginScreen({ saving, error, onSubmit }: Props) {
           <Text style={styles.subtitle}>朋友语音与屏幕共享</Text>
 
           <View style={styles.card}>
+            {mode === 'login' && rememberedServers.length > 0 && <View style={styles.rememberedList}>
+              <Text style={styles.help}>记住的服务器 · 有效登录可直接恢复</Text>
+              {rememberedServers.map(saved => <View key={saved.serverURL} style={styles.rememberedRow}>
+                <TouchableOpacity style={styles.rememberedEntry} disabled={saving} onPress={() => {
+                  setServerURL(saved.serverURL); setEmail(saved.email); setPassword('');
+                  setCertificateException(saved.allowInvalidServerCertificate === true);
+                  if (saved.accountToken) onResume?.(saved);
+                }} accessibilityLabel={`${saved.accountToken ? '继续连接' : '填入账号'} ${saved.serverURL}`}>
+                  <Text style={styles.rememberedTitle} numberOfLines={1}>{saved.serverURL}</Text>
+                  <Text style={styles.help} numberOfLines={1}>{saved.email} · {saved.accountToken ? '继续连接' : '填入账号'}</Text>
+                </TouchableOpacity>
+                {onForget && <TouchableOpacity disabled={saving} onPress={() => onForget(saved)} accessibilityLabel={`忘记 ${saved.serverURL}`}><Text style={styles.forget}>忘记</Text></TouchableOpacity>}
+              </View>)}
+            </View>}
             <View style={styles.modePicker}>
               {(['login', 'register'] as const).map(value => (
                 <TouchableOpacity
@@ -177,6 +202,11 @@ export function LoginScreen({ saving, error, onSubmit }: Props) {
 }
 
 const styles = StyleSheet.create({
+  rememberedList: { marginBottom: 18, gap: 8 },
+  rememberedRow: { flexDirection: 'row', alignItems: 'center', gap: 8, padding: 10, borderRadius: 12, backgroundColor: 'rgba(0,0,0,0.2)' },
+  rememberedEntry: { flex: 1 },
+  rememberedTitle: { color: colors.textMuted, fontSize: 12 },
+  forget: { color: colors.textFaint, fontSize: 11, padding: 4 },
   certificateRow: { flexDirection: 'row', alignItems: 'center', marginTop: 12, gap: 8 },
   certificateLabel: { flex: 1, color: colors.textMuted, fontSize: 12 },
   safeArea: { flex: 1, backgroundColor: colors.background },

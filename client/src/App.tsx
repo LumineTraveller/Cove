@@ -10,22 +10,23 @@ import { socket, getClientId, getServerURL, normalizeURL } from './socket';
 import type { UserProfile } from './types';
 import { ServerCertificateToggle } from './components/ServerCertificateToggle';
 import { hasServerCertificateException, saveServerCertificateException } from './serverCertificate';
-import { clearAccountSession, loginAccount, readAccountSession, registerAccount, validAccountEmail } from './accountAuth';
+import { clearAccountSession, disconnectAccountSession, forgetRememberedLogin, loginAccount, normalizeLoginServer, readAccountSession, readRememberedLogins, registerAccount, rememberAccountSession, validAccountEmail, type RememberedLogin } from './accountAuth';
 
 const DEFAULT_SERVER = 'http://localhost:3001';
 type ConnectionProblem = 'timeout' | 'registration' | null;
 
 export default function App() {
-  const [profile, setProfile] = useState<UserProfile>(() => readProfile());
+  const [rememberedLogins, setRememberedLogins] = useState(readRememberedLogins);
+  const [profile, setProfile] = useState<UserProfile>(() => readAccountSession(getServerURL())?.profile ?? readProfile());
   const serverUrl = localStorage.getItem('cove_server_url') ?? '';
   const [connected, setConnected] = useState<boolean | null>(null);
   const [draftName, setDraftName] = useState('');
-  const [draftEmail, setDraftEmail] = useState('');
+  const [draftEmail, setDraftEmail] = useState(() => rememberedLogins.find(entry => entry.serverUrl === normalizeLoginServer(getServerURL()))?.email ?? rememberedLogins[0]?.email ?? '');
   const [draftPassword, setDraftPassword] = useState('');
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
   const [authPending, setAuthPending] = useState(false);
   const [authError, setAuthError] = useState('');
-  const [draftUrl, setDraftUrl] = useState(() => localStorage.getItem('cove_server_url') ?? DEFAULT_SERVER);
+  const [draftUrl, setDraftUrl] = useState(() => localStorage.getItem('cove_server_url') ?? rememberedLogins[0]?.serverUrl ?? DEFAULT_SERVER);
   const [allowUntrustedCertificate, setAllowUntrustedCertificate] = useState(() =>
     hasServerCertificateException(localStorage.getItem('cove_server_url') ?? DEFAULT_SERVER));
   const [editingServer, setEditingServer] = useState(false);
@@ -52,7 +53,7 @@ export default function App() {
     });
 
     const register = () => {
-      const currentProfile = readProfile();
+      const currentProfile = readAccountSession(serverURL)?.profile ?? readProfile();
       setConnected(null);
       socket.timeout(8_000).emit('user:register', {
         username: currentProfile.username,
@@ -73,7 +74,7 @@ export default function App() {
           socket.disconnect();
           setInitialConnectionPending(false);
           if (response?.error?.includes('登录已失效')) {
-            clearAccountSession();
+            clearAccountSession(serverURL);
             clearProfile();
             window.location.reload();
             return;
@@ -124,7 +125,8 @@ export default function App() {
         ? await registerAccount(nextServerUrl, draftEmail, draftPassword, username)
         : await loginAccount(nextServerUrl, draftEmail, draftPassword);
       persistProfile(result.profile);
-      localStorage.setItem('cove_server_url', nextServerUrl);
+      rememberAccountSession({ ...result.session, allowInvalidServerCertificate: allowUntrustedCertificate });
+      localStorage.setItem('cove_server_url', result.session.serverUrl);
       saveServerCertificateException(nextServerUrl, allowUntrustedCertificate);
       window.location.reload();
     } catch (error) {
@@ -140,9 +142,16 @@ export default function App() {
       body: JSON.stringify({ token: session.token }), keepalive: true,
     }).catch(() => {});
     clearProfile();
-    clearAccountSession();
-    localStorage.removeItem('cove_server_url');
+    clearAccountSession(serverURL);
     saveServerCertificateException('', false);
+    window.location.reload();
+  };
+
+  const handleSwitchServer = () => {
+    const session = readAccountSession(serverURL);
+    if (session) rememberAccountSession({ ...session, profile, allowInvalidServerCertificate: hasServerCertificateException(serverURL) });
+    socket.disconnect(); disconnectAccountSession(); clearProfile();
+    localStorage.removeItem('cove_server_url');
     window.location.reload();
   };
 
@@ -165,9 +174,38 @@ export default function App() {
 
   const handleProfileChange = useCallback((next: UserProfile) => {
     persistProfile(next);
+    const session = readAccountSession(getServerURL());
+    if (session) rememberAccountSession({ ...session, profile: next });
     setProfile(next);
     if (socket.connected) socket.emit('user:update-profile', next);
   }, []);
+
+  const useRememberedLogin = async (entry: RememberedLogin) => {
+    if (authPending) return;
+    setAuthMode('login'); setDraftUrl(entry.serverUrl); setDraftEmail(entry.email); setDraftPassword(''); setAuthError('');
+    const allow = entry.allowInvalidServerCertificate === true;
+    setAllowUntrustedCertificate(allow);
+    const saved = readAccountSession(entry.serverUrl);
+    if (!saved?.profile?.username) return;
+    setAuthPending(true);
+    try {
+      await window.coveSecurity?.setServerCertificateException(entry.serverUrl, allow);
+      rememberAccountSession(saved); persistProfile(saved.profile);
+      localStorage.setItem('cove_server_url', entry.serverUrl);
+      saveServerCertificateException(entry.serverUrl, allow);
+      window.location.reload();
+    } catch (error) { setAuthError(error instanceof Error ? error.message : '无法恢复登录'); setAuthPending(false); }
+  };
+
+  const forgetLogin = (entry: RememberedLogin) => {
+    const saved = readAccountSession(entry.serverUrl);
+    if (saved) void fetch(`${saved.serverUrl}/api/auth/logout`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: saved.token }), keepalive: true,
+    }).catch(() => {});
+    forgetRememberedLogin(entry.serverUrl);
+    setRememberedLogins(readRememberedLogins());
+  };
 
   if (needLogin) {
     return (
@@ -182,6 +220,15 @@ export default function App() {
             <div className="flex rounded-xl bg-black/25 p-1">
               {(['login', 'register'] as const).map(mode => <button key={mode} type="button" onClick={() => { setAuthMode(mode); setAuthError(''); }} className={`flex-1 rounded-lg py-2 text-sm font-medium transition ${authMode === mode ? 'bg-white/15 text-white' : 'text-white/40 hover:text-white/65'}`}>{mode === 'login' ? '登录' : '注册'}</button>)}
             </div>
+            {authMode === 'login' && rememberedLogins.length > 0 && <div className="space-y-2">
+              <p className="text-xs text-white/40">记住的服务器 · 有效登录可直接恢复</p>
+              {rememberedLogins.map(entry => <div key={entry.serverUrl} className="flex gap-2 rounded-xl border border-white/10 bg-black/15 p-2">
+                <button disabled={authPending} onClick={() => void useRememberedLogin(entry)} className="min-w-0 flex-1 px-1 text-left disabled:opacity-40">
+                  <span className="block truncate text-xs text-white/70">{entry.serverUrl}</span><span className="block truncate text-xs text-white/40">{entry.email} · {entry.token ? '继续连接' : '填入账号'}</span>
+                </button>
+                <button disabled={authPending} onClick={() => forgetLogin(entry)} className="px-1 text-xs text-white/35 hover:text-red-300" aria-label={`忘记 ${entry.serverUrl}`}>忘记</button>
+              </div>)}
+            </div>}
             {authMode === 'register' && <div>
               <label className="mb-2 block text-sm font-medium text-white/55" htmlFor="login-name">用户名</label>
               <div className="flex items-center gap-3 rounded-xl border border-white/10 bg-white/[0.07] px-4 transition focus-within:border-cyan-300/45 focus-within:ring-2 focus-within:ring-cyan-300/10">
@@ -227,7 +274,7 @@ export default function App() {
   return (
     <HashRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
       <Routes>
-        <Route path="/" element={<RoomList profile={profile} onProfileChange={handleProfileChange} onReset={handleReset} sessionReady={sessionReady} serverURL={serverURL} />} />
+        <Route path="/" element={<RoomList profile={profile} onProfileChange={handleProfileChange} onReset={handleReset} onSwitchServer={handleSwitchServer} sessionReady={sessionReady} serverURL={serverURL} />} />
         <Route path="/room/:roomId" element={<ChatRoom profile={profile} onProfileChange={handleProfileChange} sessionReady={sessionReady} serverURL={serverURL} />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
