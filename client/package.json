@@ -1,6 +1,6 @@
 {
   "name": "cove-client",
-  "version": "0.10.1",
+  "version": "0.10.2",
   "description": "Cove - 即时通讯客户端",
   "author": "Cove",
   "private": true,
@@ -19,7 +19,8 @@
     "test:member-ordering": "tsx --test tests/memberOrdering.test.ts",
     "test:account-auth": "tsx --test tests/accountAuth.test.ts",
     "test:remote-control": "tsx --test tests/remoteControl.test.ts",
-    "test": "npm run test:updater && npm run test:connection && npm run test:audio-devices && npm run test:chat-images && npm run test:chat-links && npm run test:media-diagnostics && npm run test:screen-capture && npm run test:member-ordering && npm run test:account-auth && npm run test:remote-control",
+    "test:rooms": "tsx --test tests/roomSettings.test.ts",
+    "test": "npm run test:updater && npm run test:connection && npm run test:audio-devices && npm run test:chat-images && npm run test:chat-links && npm run test:media-diagnostics && npm run test:screen-capture && npm run test:member-ordering && npm run test:account-auth && npm run test:remote-control && npm run test:rooms",
     "electron:dev": "npm run electron:compile && electron .",
     "build": "tsc && vite build",
     "build:electron": "npm run build && npm run electron:compile && electron-builder",

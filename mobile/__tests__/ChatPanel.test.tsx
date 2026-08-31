@@ -10,7 +10,10 @@ test('loads realtime messages and sends text to the current room', async () => {
   const socket = {
     on: jest.fn((event: string, listener: (...args: any[]) => void) => listeners.set(event, listener)),
     off: jest.fn(),
-    emit: jest.fn(),
+    emit: jest.fn((event: string, payload: any, callback?: (...args: any[]) => void) => {
+      if (event === 'room:history') callback?.(null, { ok: true, messages: [] });
+    }),
+    timeout: jest.fn(function(this: any) { return this; }),
   };
   globalThis.fetch = jest.fn(async () => ({ ok: true, json: async () => [] })) as jest.Mock;
   let renderer!: TestRenderer.ReactTestRenderer;

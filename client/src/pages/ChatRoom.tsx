@@ -31,6 +31,7 @@ import { parseChatText } from '../chatLinks';
 import { isScreenEncodingWithinPlan } from '../screenCapture';
 import { sortRoomMembers } from '../memberOrdering';
 import type { ApplicationAudioSource } from '../applicationAudio';
+import { updateRoomPayload } from '../roomSettings';
 
 function ChatMessageText({ content, isMe }: { content: string; isMe: boolean }) {
   const openExternal = (event: React.MouseEvent<HTMLAnchorElement>, url: string) => {
@@ -449,11 +450,23 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
   // 这样消息到达时不会把隐藏的抽屉重新带入共享画面布局。
   const [chatDrawerOpen, setChatDrawerOpen] = useState(false);
   const [showRoomMenu, setShowRoomMenu] = useState(false);
+  const [showRoomSettings, setShowRoomSettings] = useState(false);
+  const [settingsMaxMembers, setSettingsMaxMembers] = useState('');
+  const [settingsPassword, setSettingsPassword] = useState('');
+  const [passwordAction, setPasswordAction] = useState<'keep' | 'set' | 'clear'>('keep');
+  const [updatingRoomSettings, setUpdatingRoomSettings] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
   const [viewingProfile, setViewingProfile] = useState<{ userId: string; socketId: string; username: string; avatarUrl?: string | null } | null>(null);
   const [profileRemarks, setProfileRemarks] = useState(loadProfileRemarks);
   const [roomSynced, setRoomSynced] = useState(false);
+  const [joinError, setJoinError] = useState<{ message: string; code?: string } | null>(null);
+  const [joinPassword, setJoinPassword] = useState('');
+  const [joiningRoom, setJoiningRoom] = useState(false);
+  const roomPasswordRef = useRef<string | undefined>(undefined);
+  const roomSyncedRef = useRef(false);
+  const joinGenerationRef = useRef(0);
+  const joinBlockedRef = useRef(false);
   const [messagesLoaded, setMessagesLoaded] = useState(false);
   const [imageUploading, setImageUploading] = useState(false);
   const [imageDragActive, setImageDragActive] = useState(false);
@@ -639,6 +652,10 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
     setRoom(null);
     setMessages([]);
     setMessagesLoaded(false);
+    roomPasswordRef.current = undefined;
+    joinGenerationRef.current += 1;
+    joinBlockedRef.current = false;
+    setJoinPassword('');
     fetch(`${serverURL}/api/rooms/${roomId}`)
       .then(r => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -646,42 +663,73 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
       })
       .then(nextRoom => { if (active) setRoom(nextRoom); })
       .catch(() => { if (active) navigate('/'); });
-    fetch(`${serverURL}/api/rooms/${roomId}/messages`)
-      .then(r => r.json())
-      .then((history: Message[]) => {
+    return () => { active = false; };
+  }, [roomId, navigate, serverURL]);
+
+  useEffect(() => {
+    roomSyncedRef.current = roomSynced;
+  }, [roomSynced]);
+
+  useEffect(() => {
+    if (!roomId || !roomSynced) return;
+    let active = true;
+    socket.timeout(6_000).emit('room:history', { roomId }, (timeoutError: Error | null, result?: { ok: boolean; messages?: Message[] }) => {
+      const history = result?.messages ?? [];
+      if (timeoutError || !result?.ok) { if (active) setMessagesLoaded(true); return; }
         if (!active) return;
         setMessages(current => {
-          // system/soundpack 是当前会话播报，不应在离开频道后从历史中恢复。
-          // 客户端也做一次过滤，以兼容尚未升级的服务端。
           const persistentHistory = history.filter(message => message.type !== 'system' && message.type !== 'soundpack');
           const merged = new Map(persistentHistory.map(message => [message.id, message]));
           current.forEach(message => merged.set(message.id, message));
           return [...merged.values()].sort((left, right) => left.timestamp - right.timestamp);
         });
         setMessagesLoaded(true);
-      })
-      .catch(() => { if (active) setMessagesLoaded(true); });
+      });
     return () => { active = false; };
-  }, [roomId, navigate, serverURL]);
+  }, [roomId, roomSynced, serverURL]);
 
   useEffect(() => {
-    if (!roomId || !sessionReady) { setRoomSynced(false); return; }
-    const joinRoom = () => socket.emit('room:join', roomId);
-    const onNew = (msg: Message) => setMessages(prev => prev.some(current => current.id === msg.id) ? prev : [...prev, msg]);
+    if (!roomId || !sessionReady || joinBlockedRef.current) { setRoomSynced(false); setJoiningRoom(false); return; }
+    setRoomSynced(false);
+    setJoinError(null);
+    const generation = ++joinGenerationRef.current;
+    setJoiningRoom(true);
+    const payload = { roomId, ...(roomPasswordRef.current ? { password: roomPasswordRef.current } : {}) };
+    socket.timeout(5_000).emit('room:join', payload, (error: Error | null, response: { ok: boolean; error?: string; code?: string }) => {
+      if (generation !== joinGenerationRef.current || joinBlockedRef.current) return;
+      setJoiningRoom(false);
+      if (error) { setJoinError({ message: error.message }); return; }
+      if (!response?.ok) { setJoinError({ message: response?.error ?? '无法加入房间', code: response?.code }); return; }
+      setJoinError(null);
+      setRoomSynced(true);
+    });
+    return () => { if (generation === joinGenerationRef.current) setJoiningRoom(false); joinGenerationRef.current += 1; };
+  }, [roomId, sessionReady, socket]);
+
+  useEffect(() => {
+    if (!roomId) return;
+    const onNew = (msg: Message) => { if (!roomSyncedRef.current || msg.roomId !== roomId) return; setMessages(prev => prev.some(current => current.id === msg.id) ? prev : [...prev, msg]); };
     const onState = (state: RoomState) => {
       if (state.roomId !== roomId) return;
       setRoomMembers(state.members);
       setIsOwner(state.isOwner);
+      if (joinBlockedRef.current) return;
       setRoomSynced(true);
-      setRoom(current => current ? { ...current, ownerName: state.ownerName } : current);
+      setRoom(current => current ? { ...current, ownerName: state.ownerName, maxMembers: state.maxMembers, hasPassword: state.hasPassword } : current);
     };
     const onDeleted = ({ roomId: deletedRoomId }: { roomId: string }) => {
       if (deletedRoomId !== roomId) return;
+      joinBlockedRef.current = true;
+      joinGenerationRef.current += 1;
+      setJoiningRoom(false);
       rtc.leaveVoice();
       navigate('/', { replace: true });
     };
     const onKicked = ({ roomId: kickedRoomId, by }: { roomId: string; by?: string }) => {
       if (kickedRoomId !== roomId) return;
+      joinBlockedRef.current = true;
+      joinGenerationRef.current += 1;
+      setJoiningRoom(false);
       rtc.leaveVoice();
       setKickNotice({
         title: '你已被移出房间',
@@ -693,9 +741,11 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
     socket.on('room:state', onState);
     socket.on('room:deleted', onDeleted);
     socket.on('room:kicked', onKicked);
-    joinRoom();
     return () => {
-      socket.emit('room:leave', roomId);
+      if (socket.connected) socket.emit('room:leave', roomId);
+      else socket.once('connect', () => {
+        if (socket.recovered) socket.emit('room:leave', roomId);
+      });
       socket.off('message:new', onNew);
       socket.off('room:state', onState);
       socket.off('room:deleted', onDeleted);
@@ -703,7 +753,7 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
       rtc.leaveVoice();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roomId, sessionReady]);
+  }, [roomId]);
 
   const chatHistoryReady = messagesLoaded && room?.id === roomId;
   useLayoutEffect(() => {
@@ -890,6 +940,22 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
     }
   }, [isOwner, room, roomId]);
 
+  const updateRoomSettings = useCallback(() => {
+    if (!roomId || !isOwner || updatingRoomSettings) return;
+    let payload: ReturnType<typeof updateRoomPayload>;
+    try { payload = updateRoomPayload(roomId, settingsMaxMembers, passwordAction, settingsPassword); }
+    catch (error) { alert(error instanceof Error ? error.message : String(error)); return; }
+    setUpdatingRoomSettings(true);
+    socket.timeout(5_000).emit('room:update-settings', payload, (error: Error | null, response: { ok: boolean; room?: Room; error?: string }) => {
+      if (error || !response?.ok) { alert(response?.error ?? error?.message ?? '设置保存失败'); setUpdatingRoomSettings(false); return; }
+      if (response.room) setRoom(response.room);
+      setShowRoomSettings(false);
+      setSettingsPassword('');
+      setPasswordAction('keep');
+      setUpdatingRoomSettings(false);
+    });
+  }, [isOwner, roomId, settingsMaxMembers, passwordAction, settingsPassword, updatingRoomSettings]);
+
   const menuMember = memberMenu && memberMenu.roomId === roomId && isOwner && sessionReady && roomSynced && sidebarOpen
     ? roomMembers.find(member => member.socketId === memberMenu.socketId && !member.isOwner && member.socketId !== socket.id)
     : undefined;
@@ -897,8 +963,16 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
     if (memberMenu && !menuMember) closeMemberMenu();
   }, [memberMenu, menuMember, closeMemberMenu]);
 
-  if (!room) return (
-    <div className="h-full flex items-center justify-center bg-gradient-to-br from-zinc-950 via-black to-zinc-900 text-white/40">加载中…</div>
+  if (!room || !roomSynced) return (
+    <div className="flex h-full items-center justify-center bg-gradient-to-br from-zinc-950 via-black to-zinc-900 p-4">
+      <section className="w-full max-w-sm rounded-3xl border border-white/15 bg-zinc-900/95 p-7 shadow-2xl" role="dialog" aria-modal="true">
+        {!room ? <p className="text-center text-white/40">加载中…</p> : <>
+          {kickNotice && <div className="mb-4 rounded-xl border border-red-400/20 bg-red-500/10 px-3 py-2 text-sm text-red-200">{kickNotice.message}</div>}
+          <h2 className="text-xl font-bold text-white">加入「{room.name}」</h2>
+          {(() => { const needPassword = room.hasPassword || joinError?.code === 'PASSWORD_REQUIRED' || joinError?.code === 'INVALID_PASSWORD'; return <><p className="mt-2 text-sm text-white/45">{joinError?.message ?? (needPassword ? '请输入房间密码' : '正在验证加入权限…')}</p>{needPassword && <input autoFocus type="password" maxLength={128} value={joinPassword} onChange={event => setJoinPassword(event.target.value)} className="mt-5 w-full rounded-xl border border-white/10 bg-white/[0.07] px-3 py-3 text-white outline-none" placeholder="房间密码" />}<div className="mt-5 flex gap-2.5"><button onClick={() => navigate('/')} className="flex-1 rounded-xl bg-white/10 py-3 font-medium text-white/70">返回</button><button disabled={joiningRoom} onClick={() => { roomPasswordRef.current = needPassword ? joinPassword : undefined; setJoinError(null); const generation = ++joinGenerationRef.current; setJoiningRoom(true); socket.timeout(5_000).emit('room:join', { roomId, ...(roomPasswordRef.current ? { password: roomPasswordRef.current } : {}) }, (error: Error | null, response: { ok: boolean; error?: string; code?: string }) => { if (generation !== joinGenerationRef.current || joinBlockedRef.current) return; setJoiningRoom(false); if (error || !response?.ok) setJoinError({ message: response?.error ?? error?.message ?? '无法加入房间', code: response?.code }); else setRoomSynced(true); }); }} className="flex-1 rounded-xl bg-white py-3 font-semibold text-zinc-900 disabled:opacity-30">{joiningRoom ? '加入中…' : '重试'}</button></div></>; })()}
+        </>}
+      </section>
+    </div>
   );
 
   // 自己始终置顶，其余成员按“语音中 > 仅在房间”排序；组内保持服务端顺序稳定。
@@ -1036,6 +1110,18 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
           onClose={closeMemberMenu} onToggleMute={() => { void setMemberMuted(menuMember); }}
           onRemove={() => requestKickMember(menuMember)} />
       )}
+
+      {showRoomSettings && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/60 p-4 backdrop-blur-md" onMouseDown={() => setShowRoomSettings(false)}>
+          <section className="w-full max-w-sm rounded-3xl border border-white/15 bg-zinc-900/95 p-7 shadow-2xl" onMouseDown={event => event.stopPropagation()} role="dialog" aria-modal="true">
+            <h2 className="text-xl font-bold text-white">房间设置</h2>
+            <label className="mt-5 block text-sm font-medium text-white/55">人数上限<select value={settingsMaxMembers} onChange={event => setSettingsMaxMembers(event.target.value)} className="ml-3 rounded-lg border border-white/10 bg-black/30 px-2 py-1 text-white"><option value="">不限</option><option value="2">2</option><option value="5">5</option><option value="10">10</option><option value="20">20</option></select></label>
+            <label className="mt-4 block text-sm font-medium text-white/55">密码操作<select value={passwordAction} onChange={event => setPasswordAction(event.target.value as typeof passwordAction)} className="ml-3 rounded-lg border border-white/10 bg-black/30 px-2 py-1 text-white"><option value="keep">保持不变</option><option value="set">设置新密码</option><option value="clear">取消密码</option></select></label>
+            {passwordAction === 'set' && <input autoFocus type="password" maxLength={128} value={settingsPassword} onChange={event => setSettingsPassword(event.target.value)} className="mt-3 w-full rounded-xl border border-white/10 bg-white/[0.07] px-3 py-3 text-white outline-none" placeholder="新密码" />}
+            <div className="mt-6 flex gap-2.5"><button disabled={updatingRoomSettings} onClick={() => setShowRoomSettings(false)} className="flex-1 rounded-xl bg-white/10 py-3 text-white/70">取消</button><button onClick={updateRoomSettings} disabled={updatingRoomSettings || (passwordAction === 'set' && !settingsPassword)} className="flex-1 rounded-xl bg-white py-3 font-semibold text-zinc-900 disabled:opacity-30">{updatingRoomSettings ? '保存中…' : '保存'}</button></div>
+          </section>
+        </div>
+      )}
       {showProfile && <ProfileModal profile={profile} serverURL={serverURL} onSave={onProfileChange} onClose={() => setShowProfile(false)} />}
       {viewingProfile && (
         <UserProfileModal
@@ -1075,7 +1161,7 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
             {isOwner && (
               <div className="relative">
                 <button onClick={() => setShowRoomMenu(open => !open)} className="rounded-lg p-2 text-white/35 transition hover:bg-white/10 hover:text-white" aria-label="房间操作" title="房间操作"><Ellipsis size={18} /></button>
-                {showRoomMenu && <div className="absolute right-0 top-10 z-20 w-40 rounded-xl border border-white/10 bg-zinc-900 p-1.5 shadow-xl"><button onClick={() => { setShowRoomMenu(false); setConfirmDelete(true); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-red-300 transition hover:bg-red-500/10"><Trash2 size={16} /> 删除房间</button></div>}
+                {showRoomMenu && <div className="absolute right-0 top-10 z-20 w-44 rounded-xl border border-white/10 bg-zinc-900 p-1.5 shadow-xl"><button onClick={() => { setShowRoomMenu(false); setSettingsMaxMembers(room.maxMembers ? String(room.maxMembers) : ''); setShowRoomSettings(true); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-white/70 transition hover:bg-white/10"><Settings2 size={16} /> 房间设置</button><button onClick={() => { setShowRoomMenu(false); setConfirmDelete(true); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-red-300 transition hover:bg-red-500/10"><Trash2 size={16} /> 删除房间</button></div>}
               </div>
             )}
           </div>
@@ -1301,6 +1387,12 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
             {!sidebarOpen && <button onClick={() => navigate('/')} className="rounded-xl p-2 text-white/40 transition hover:bg-white/10 hover:text-white" aria-label="返回频道列表" title="返回频道列表"><ArrowLeft size={19} /></button>}
           </div>
         </header>
+
+        {!rtc.inVoice && rtc.audioDeviceError && (
+          <div role="status" className="border-b border-amber-300/10 bg-amber-300/5 px-5 py-2 text-sm text-amber-100/80">
+            {rtc.audioDeviceError}
+          </div>
+        )}
 
         {hasScreenBanner && (
           <CollapsibleMediaBanner kind="screen">

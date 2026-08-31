@@ -50,20 +50,14 @@ export function ChatPanel({ visible, socket, roomId, serverURL, username, ready,
     let active = true;
     setLoading(true);
     setLoadError(null);
-    fetch(`${serverURL}/api/rooms/${encodeURIComponent(roomId)}/messages`)
-      .then(response => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        return response.json() as Promise<Message[]>;
-      })
-      .then(history => {
-        if (active) setMessages(current => mergeMessages(current, history));
-      })
-      .catch(cause => {
-        if (active) setLoadError(`聊天记录加载失败：${cause instanceof Error ? cause.message : String(cause)}`);
-      })
-      .finally(() => { if (active) setLoading(false); });
+    socket.timeout(6000).emit('room:history', { roomId }, (timeoutError: Error | null, result?: { ok: boolean; messages?: Message[]; error?: string }) => {
+      if (!active) return;
+      if (timeoutError || !result?.ok) setLoadError(`聊天记录加载失败：${result?.error ?? '请求超时'}`);
+      else setMessages(current => mergeMessages(current, result.messages ?? []));
+      setLoading(false);
+    });
     return () => { active = false; };
-  }, [ready, roomId, serverURL]);
+  }, [ready, roomId, socket]);
 
   useEffect(() => {
     const onNew = (message: Message) => {

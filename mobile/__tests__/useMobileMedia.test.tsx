@@ -23,6 +23,7 @@ jest.mock('react-native-webrtc', () => ({
 }));
 
 import { PermissionsAndroid } from 'react-native';
+import { mediaDevices } from 'react-native-webrtc';
 const application = (producerId: string, peerId = 'peer1') => ({ producerId, peerId, kind: 'audio', appData: { type: 'application-audio', label: 'Music' } });
 const microphone = (producerId: string, peerId = 'peer1') => ({ producerId, peerId, kind: 'audio', appData: { type: 'mic' } });
 let media: ReturnType<typeof useMobileMedia>;
@@ -38,6 +39,7 @@ beforeEach(async () => {
   jest.spyOn(PermissionsAndroid, 'request').mockResolvedValue(PermissionsAndroid.RESULTS.GRANTED);
   handlers = new Map();
   socket = {
+    id: 'session1', recovered: false,
     connected: true,
     on: jest.fn((event, listener) => handlers.set(event, listener)),
     off: jest.fn((event) => handlers.delete(event)),
@@ -53,7 +55,7 @@ beforeEach(async () => {
   function Harness() { media = useMobileMedia(socket, 'room'); return null; }
   await act(async () => { renderer = TestRenderer.create(<Harness />); });
 });
-afterEach(async () => { await act(async () => renderer.unmount()); jest.restoreAllMocks(); });
+afterEach(async () => { await act(async () => renderer.unmount()); jest.restoreAllMocks(); jest.useRealTimers(); });
 
 test('does not receive application audio before joining voice', async () => {
   await act(async () => { await handlers.get('ms:new-producer')!(application('app1')); });
@@ -147,4 +149,92 @@ test('leaving voice cancels late audio subscription responses', async () => {
   expect(media.applicationAudioShares).toEqual([]);
   expect(mockConsumers.has('late')).toBe(false);
   expect(socket.emit).toHaveBeenCalledWith('ms:close-consumer', { consumerId: 'consumer-late' });
+});
+
+test('short signal outage preserves voice and mute without buffering leave', async () => {
+  jest.useFakeTimers();
+  await act(async () => media.joinVoice());
+  await act(async () => media.toggleMute());
+  socket.emit.mockClear();
+  await act(async () => { socket.connected = false; handlers.get('disconnect')!('transport close'); });
+  await act(async () => jest.advanceTimersByTime(7_499));
+  expect(media.inVoice).toBe(true);
+  expect(mockTransport.close).not.toHaveBeenCalled();
+  await act(async () => { socket.connected = true; socket.recovered = true; handlers.get('connect')!(); });
+  await act(async () => jest.advanceTimersByTime(10_000));
+  expect(media.inVoice).toBe(true);
+  expect(media.isMuted).toBe(true);
+  expect(socket.emit).not.toHaveBeenCalledWith('voice:leave', 'room');
+});
+
+test('signal timeout at 7500ms resets voice and allows another join', async () => {
+  jest.useFakeTimers();
+  await act(async () => media.joinVoice());
+  socket.emit.mockClear();
+  await act(async () => { socket.connected = false; handlers.get('disconnect')!('transport close'); });
+  await act(async () => jest.advanceTimersByTime(7_500));
+  expect(media.inVoice).toBe(false);
+  expect(media.joining).toBe(false);
+  expect(socket.emit).not.toHaveBeenCalledWith('voice:leave', 'room');
+  await act(async () => { socket.connected = true; socket.id = 'session2'; handlers.get('connect')!(); });
+  await act(async () => media.joinVoice());
+  expect(media.inVoice).toBe(true);
+});
+
+test('failed recovery with a new socket resets old transports immediately', async () => {
+  jest.useFakeTimers();
+  await act(async () => media.joinVoice());
+  await act(async () => { socket.connected = false; handlers.get('disconnect')!('transport close'); });
+  await act(async () => { socket.connected = true; socket.id = 'session2'; handlers.get('connect')!(); });
+  expect(media.inVoice).toBe(false);
+  await act(async () => media.joinVoice());
+  expect(media.inVoice).toBe(true);
+});
+
+test('persistent media failure resets join guard, transient failure does not', async () => {
+  jest.useFakeTimers();
+  await act(async () => media.joinVoice());
+  const onState = mockTransport.on.mock.calls.find(([event]) => event === 'connectionstatechange')![1];
+  await act(async () => onState('disconnected'));
+  await act(async () => jest.advanceTimersByTime(3_000));
+  await act(async () => onState('connected'));
+  await act(async () => jest.advanceTimersByTime(8_000));
+  expect(media.inVoice).toBe(true);
+  await act(async () => onState('failed'));
+  await act(async () => jest.advanceTimersByTime(7_500));
+  expect(media.inVoice).toBe(false);
+  expect(socket.emit).toHaveBeenCalledWith('voice:leave', 'room');
+  await act(async () => media.joinVoice());
+  expect(media.inVoice).toBe(true);
+});
+
+test('explicit disconnect never waits for grace', async () => {
+  await act(async () => media.joinVoice());
+  await act(async () => { socket.connected = false; handlers.get('disconnect')!('io client disconnect'); });
+  expect(media.inVoice).toBe(false);
+});
+
+test('partial transport initialization failure can retry without server reconnect', async () => {
+  mockTransport.produce.mockRejectedValueOnce(new Error('transport failed'));
+  await act(async () => media.joinVoice());
+  expect(media.inVoice).toBe(false);
+  expect(media.joining).toBe(false);
+  await act(async () => media.joinVoice());
+  expect(media.inVoice).toBe(true);
+});
+
+test('leaving during microphone acquisition cannot resurrect the old join', async () => {
+  let allow!: (result: any) => void;
+  jest.spyOn(mediaDevices, 'getUserMedia').mockImplementationOnce(() => new Promise(resolve => { allow = resolve; }));
+  const lateStream = { getAudioTracks: () => [{}], release: jest.fn() };
+  let pending!: Promise<void>;
+  await act(async () => { pending = media.joinVoice(); });
+  await act(async () => media.leaveVoice());
+  await act(async () => { allow(lateStream); await pending; });
+  expect(media.inVoice).toBe(false);
+  expect(media.joining).toBe(false);
+  expect(mockTransport.produce).not.toHaveBeenCalled();
+  expect(lateStream.release).toHaveBeenCalledWith(true);
+  await act(async () => media.joinVoice());
+  expect(media.inVoice).toBe(true);
 });

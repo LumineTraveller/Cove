@@ -10,6 +10,7 @@ import {
 } from 'react-native-webrtc';
 import type { VoiceMember } from './types';
 import { startVoiceAudioSession } from './voiceAudioSession';
+import { DisconnectGrace } from './disconnectGrace';
 
 type Transport = MsTypes.Transport;
 type Producer = MsTypes.Producer;
@@ -47,6 +48,7 @@ const CoveNative = NativeModules.CoveNative as CoveNativeModule | undefined;
 type ConnectionState = 'idle' | 'connecting' | 'connected' | 'failed';
 
 function emitAsync<T = void>(socket: Socket, event: string, data?: unknown): Promise<T> {
+  if (!socket.connected) return Promise.reject(new Error('服务器连接已断开，正在重连'));
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`${event} 请求超时`)), 15_000);
     socket.emit(event, data, (response: T | { error: string }) => {
@@ -109,6 +111,9 @@ export function useMobileMedia(socket: Socket, roomId: string) {
   const pendingProducers = useRef(new Set<string>());
   const closedProducers = useRef(new Set<string>());
   const mediaGeneration = useRef(0);
+  const joiningRef = useRef(false);
+  const voiceSocketId = useRef<string | undefined>(undefined);
+  const connectionGrace = useRef(new DisconnectGrace());
   const applicationAudioVolumes = useRef(new Map<string, number>());
   const memberVolumesRef = useRef(new Map<string, number>());
   const inVoiceRef = useRef(false);
@@ -142,6 +147,8 @@ export function useMobileMedia(socket: Socket, roomId: string) {
 
   const teardown = useCallback((notifyServer: boolean) => {
     mediaGeneration.current += 1;
+    joiningRef.current = false;
+    connectionGrace.current.clear();
     if (notifyServer && socket.connected) socket.emit('voice:leave', roomId);
 
     audioProducer.current?.close();
@@ -185,12 +192,28 @@ export function useMobileMedia(socket: Socket, roomId: string) {
     CoveNative?.stopVoiceService();
   }, [roomId, socket, clearAvailableScreens]);
 
+  const checkTransport = useCallback((key: string, state: string) => {
+    if (state === 'connected') connectionGrace.current.recover(key);
+    if (state === 'failed' || state === 'disconnected') {
+      setConnectionState('connecting');
+      connectionGrace.current.fail(key, () => {
+        teardown(true);
+        setConnectionState('failed');
+        setError('媒体连接中断超过 7.5 秒，可直接重新加入语音，无需重连服务器');
+      });
+    }
+  }, [teardown]);
+
   const setupDevice = useCallback(async () => {
     if (deviceRef.current && sendTransport.current && recvTransport.current) return;
+    const generation = mediaGeneration.current;
+    const ensureCurrent = () => { if (generation !== mediaGeneration.current) throw new Error('语音加入已取消'); };
 
     const capabilities = await emitAsync<RtpCapabilities>(socket, 'ms:capabilities');
+    ensureCurrent();
     const device = await Device.factory();
     await device.load({ routerRtpCapabilities: capabilities });
+    ensureCurrent();
     deviceRef.current = device;
 
     const sendParams = await emitAsync<Record<string, unknown>>(
@@ -198,6 +221,7 @@ export function useMobileMedia(socket: Socket, roomId: string) {
       'ms:create-transport',
       { direction: 'send' },
     );
+    ensureCurrent();
     const outgoing = device.createSendTransport(sendParams as never);
     outgoing.on('connect', ({ dtlsParameters }, resolve, reject) => {
       emitAsync(socket, 'ms:connect-transport', {
@@ -214,12 +238,10 @@ export function useMobileMedia(socket: Socket, roomId: string) {
       }).then(({ producerId }) => resolve({ id: producerId })).catch(reject);
     });
     outgoing.on('connectionstatechange', state => {
+      if (sendTransport.current !== outgoing) return;
+      checkTransport('send', state);
       if (state === 'connecting') setConnectionState('connecting');
       if (state === 'connected') setConnectionState('connected');
-      if (state === 'failed' || state === 'disconnected') {
-        setConnectionState('failed');
-        setError('媒体发送通道已中断，请重新加入语音');
-      }
     });
     sendTransport.current = outgoing;
 
@@ -228,6 +250,7 @@ export function useMobileMedia(socket: Socket, roomId: string) {
       'ms:create-transport',
       { direction: 'recv' },
     );
+    ensureCurrent();
     const incoming = device.createRecvTransport(recvParams as never);
     incoming.on('connect', ({ dtlsParameters }, resolve, reject) => {
       emitAsync(socket, 'ms:connect-transport', {
@@ -236,15 +259,13 @@ export function useMobileMedia(socket: Socket, roomId: string) {
       }).then(resolve).catch(reject);
     });
     incoming.on('connectionstatechange', state => {
+      if (recvTransport.current !== incoming) return;
+      checkTransport('recv', state);
       if (state === 'connecting') setConnectionState('connecting');
       if (state === 'connected') setConnectionState('connected');
-      if (state === 'failed' || state === 'disconnected') {
-        setConnectionState('failed');
-        setError('媒体接收通道已中断，请重新加入语音');
-      }
     });
     recvTransport.current = incoming;
-  }, [socket]);
+  }, [socket, checkTransport]);
 
   const removeConsumer = useCallback((consumerId: string, notifyServer = false) => {
     const entry = consumers.current.get(consumerId);
@@ -480,10 +501,27 @@ export function useMobileMedia(socket: Socket, roomId: string) {
       else if (!selfMutedRef.current) audioProducer.current?.resume();
       setIsMuted(muted || selfMutedRef.current);
     };
-    const onDisconnect = () => {
-      if (!inVoiceRef.current) return;
-      teardown(false);
-      setError('服务器连接已断开，请重连后再次加入语音');
+    const onDisconnect = (reason: string) => {
+      if (reason === 'io client disconnect' || reason === 'io server disconnect') {
+        teardown(false);
+        return;
+      }
+      if (!inVoiceRef.current && !joiningRef.current) return;
+      setConnectionState('connecting');
+      connectionGrace.current.fail('signal', () => {
+        teardown(false);
+        setError('服务器连接中断超过 7.5 秒，连接恢复后可直接加入语音');
+      });
+    };
+    const onConnect = () => {
+      connectionGrace.current.recover('signal');
+      if (voiceSocketId.current !== socket.id || !socket.recovered) {
+        if (inVoiceRef.current || joiningRef.current) teardown(false);
+      } else if (!inVoiceRef.current && !joiningRef.current) {
+        socket.emit('voice:leave', roomId);
+      } else if (inVoiceRef.current) {
+        setConnectionState('connected');
+      }
     };
 
     socket.on('voice:members-updated', onVoiceMembers);
@@ -494,6 +532,7 @@ export function useMobileMedia(socket: Socket, roomId: string) {
     socket.on('voice:user-left', onUserLeft);
     socket.on('room:force-muted', onForcedMute);
     socket.on('disconnect', onDisconnect);
+    socket.on('connect', onConnect);
     return () => {
       socket.off('voice:members-updated', onVoiceMembers);
       socket.off('ms:new-producer', onNewProducer);
@@ -503,13 +542,18 @@ export function useMobileMedia(socket: Socket, roomId: string) {
       socket.off('voice:user-left', onUserLeft);
       socket.off('room:force-muted', onForcedMute);
       socket.off('disconnect', onDisconnect);
+      socket.off('connect', onConnect);
     };
   }, [consumeProducer, removeConsumer, roomId, socket, stopWatchingScreen, storeAvailableScreen, removeAvailableScreen, teardown]);
 
   useEffect(() => () => teardown(false), [teardown]);
 
   const joinVoice = useCallback(async () => {
-    if (inVoiceRef.current || joining || !socket.connected) return;
+    if (inVoiceRef.current || joiningRef.current || !socket.connected) return;
+    const generation = ++mediaGeneration.current;
+    const ensureCurrent = () => { if (generation !== mediaGeneration.current) throw new Error('语音加入已取消'); };
+    voiceSocketId.current = socket.id;
+    joiningRef.current = true;
     setJoining(true);
     setConnectionState('connecting');
     setError(null);
@@ -518,6 +562,7 @@ export function useMobileMedia(socket: Socket, roomId: string) {
       if (!(await requestMicrophonePermission())) {
         throw new Error('未获得麦克风权限');
       }
+      ensureCurrent();
       // Android 14+ 要求麦克风前台服务必须在可见 Activity 内启动。
       CoveNative?.startVoiceService();
       const stream = await mediaDevices.getUserMedia({
@@ -530,8 +575,10 @@ export function useMobileMedia(socket: Socket, roomId: string) {
         },
         video: false,
       } as never);
+      if (generation !== mediaGeneration.current) { stream.release(true); ensureCurrent(); }
       microphoneStream.current = stream;
       await setupDevice();
+      ensureCurrent();
       const track = stream.getAudioTracks()[0];
       if (!track) throw new Error('没有可用的麦克风音轨');
 
@@ -540,6 +587,7 @@ export function useMobileMedia(socket: Socket, roomId: string) {
         codecOptions: { opusStereo: false, opusDtx: true, opusFec: true },
         appData: { type: 'mic', client: 'android' },
       });
+      if (generation !== mediaGeneration.current) { producer.close(); ensureCurrent(); }
       audioProducer.current = producer;
       if (forceMutedRef.current) producer.pause();
 
@@ -556,6 +604,7 @@ export function useMobileMedia(socket: Socket, roomId: string) {
         kind: string;
         appData: Record<string, unknown>;
       }[]>(socket, 'ms:get-producers');
+      ensureCurrent();
       for (const item of existing) {
         if (item.appData?.type === 'screen-audio') {
           pendingScreenAudioByPeer.current.set(item.peerId, item.producerId);
@@ -563,6 +612,7 @@ export function useMobileMedia(socket: Socket, roomId: string) {
       }
       for (const item of existing) {
         if (item.appData?.type === 'screen') {
+          ensureCurrent();
           storeAvailableScreen({
             socketId: item.peerId,
             videoProducerId: item.producerId,
@@ -571,17 +621,23 @@ export function useMobileMedia(socket: Socket, roomId: string) {
           continue;
         }
         if (item.appData?.type === 'screen-audio') continue;
+        ensureCurrent();
         await consumeProducer(item.producerId, item.peerId, item.kind, item.appData);
       }
+      ensureCurrent();
       setConnectionState('connected');
     } catch (cause) {
-      teardown(false);
+      if (generation !== mediaGeneration.current) return;
+      teardown(true);
       setConnectionState('failed');
       setError(cause instanceof Error ? `加入语音失败：${cause.message}` : '加入语音失败');
     } finally {
-      setJoining(false);
+      if (generation === mediaGeneration.current) {
+        joiningRef.current = false;
+        setJoining(false);
+      }
     }
-  }, [consumeProducer, joining, roomId, setupDevice, socket, storeAvailableScreen, teardown]);
+  }, [consumeProducer, roomId, setupDevice, socket, storeAvailableScreen, teardown]);
 
   const leaveVoice = useCallback(() => {
     teardown(true);

@@ -59,6 +59,22 @@ export function createAccountStore(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS account_sessions_account_id ON account_sessions(accountId);
   `);
 
+  // Upgrade databases created before single-session enforcement. Keep the
+  // newest credential per account; rowid makes equal timestamps deterministic.
+  db.exec(`
+    DELETE FROM account_sessions
+    WHERE rowid NOT IN (
+      SELECT rowid FROM (
+        SELECT rowid, ROW_NUMBER() OVER (
+          PARTITION BY accountId ORDER BY createdAt DESC, rowid DESC
+        ) AS sessionRank
+        FROM account_sessions
+      ) WHERE sessionRank = 1
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS account_sessions_one_per_account
+      ON account_sessions(accountId);
+  `);
+
   const getByEmail = db.prepare('SELECT * FROM accounts WHERE email = ?');
   const getById = db.prepare('SELECT * FROM accounts WHERE id = ?');
   const insertAccount = db.prepare('INSERT INTO accounts (id, email, passwordHash, passwordSalt, username, avatarUrl, createdAt) VALUES (?, ?, ?, ?, ?, NULL, ?)');
@@ -69,19 +85,23 @@ export function createAccountStore(db: Database.Database) {
     WHERE account_sessions.tokenHash = ? AND account_sessions.expiresAt > ?
   `);
   const removeSession = db.prepare('DELETE FROM account_sessions WHERE tokenHash = ?');
+  const removeAccountSessions = db.prepare('DELETE FROM account_sessions WHERE accountId = ?');
   const removeExpired = db.prepare('DELETE FROM account_sessions WHERE expiresAt <= ?');
   const updateProfile = db.prepare('UPDATE accounts SET username = ?, avatarUrl = ? WHERE id = ?');
 
   const publicAccount = (record: AccountRecord): PublicAccount => ({
     id: record.id, email: record.email, username: record.username, avatarUrl: record.avatarUrl,
   });
-  const issueSession = (accountId: string) => {
+  const issueSession = db.transaction((accountId: string) => {
     const token = randomBytes(32).toString('base64url');
     const now = Date.now();
     removeExpired.run(now);
+    // A real login replaces the account's previous credential. Reconnects do
+    // not call this path, so they keep their existing valid token.
+    removeAccountSessions.run(accountId);
     insertSession.run(tokenHash(token), accountId, now + SESSION_LIFETIME_MS, now);
     return token;
-  };
+  });
 
   return {
     async register(emailValue: string, password: string, usernameValue: string) {

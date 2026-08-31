@@ -62,7 +62,7 @@ function CoveSession() {
         clientId: config.clientId,
         authToken: config.accountToken,
         platform: 'mobile',
-      }, (timeoutError: Error | null, response?: { ok: boolean; error?: string }) => {
+      }, (timeoutError: Error | null, response?: { ok: boolean; error?: string; code?: string }) => {
         if (!active) return;
         if (timeoutError || response?.ok === false) {
           if (response?.error?.includes('登录已失效')) {
@@ -71,6 +71,16 @@ function CoveSession() {
             setConfig(null);
             setAuthError(response.error);
             clearServerConfig().then(readRememberedServers).then(setRememberedServers).catch(() => {}).finally(() => setSavingConfig(false));
+            return;
+          }
+          if (response?.code === 'SESSION_IN_USE') {
+            setSavingConfig(true);
+            setSelectedRoom(null);
+            setConfig(null);
+            setAuthError(response.error ?? '账号已在其他设备使用，请重新登录。');
+            nextSocket.disconnect();
+            clearServerConfig().then(readRememberedServers).then(setRememberedServers)
+              .catch(() => {}).finally(() => setSavingConfig(false));
             return;
           }
           setConnectionError(response?.error ?? '服务器身份注册超时');
@@ -91,10 +101,24 @@ function CoveSession() {
       setSessionReady(false);
       setConnectionError(`无法连接服务器：${cause.message}`);
     };
+    const sessionReplaced = () => {
+      if (!active) return;
+      setSavingConfig(true);
+      setSelectedRoom(null);
+      setConfig(null);
+      setAuthError('账号已在其他设备登录，本设备已退出。');
+      nextSocket.disconnect();
+      clearServerConfig()
+        .then(readRememberedServers)
+        .then(setRememberedServers)
+        .catch(() => {})
+        .finally(() => setSavingConfig(false));
+    };
 
     nextSocket.on('connect', register);
     nextSocket.on('disconnect', disconnect);
     nextSocket.on('connect_error', connectError);
+    nextSocket.on('account:session-replaced', sessionReplaced);
     setSocket(nextSocket);
     // Native HTTPS policy must be ready before HTTP polling or WSS starts.
     configureServerCertificate(config.serverURL, config.allowInvalidServerCertificate === true)
@@ -106,6 +130,7 @@ function CoveSession() {
       nextSocket.off('connect', register);
       nextSocket.off('disconnect', disconnect);
       nextSocket.off('connect_error', connectError);
+      nextSocket.off('account:session-replaced', sessionReplaced);
       nextSocket.disconnect();
     };
   }, [config]);

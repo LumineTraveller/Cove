@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { Socket } from 'socket.io-client';
 import { Device, types as MsTypes } from 'mediasoup-client';
+import { DisconnectGrace } from '../utils/disconnectGrace';
 
 type Transport       = MsTypes.Transport;
 type Producer        = MsTypes.Producer;
@@ -124,6 +125,7 @@ interface ServerMediaDiagnostics {
 
 // ── 工具：把 socket.emit 包装成 Promise ────────────────────────────────────────
 function emitAsync<T = void>(socket: Socket, event: string, data?: unknown): Promise<T> {
+  if (!socket.connected) return Promise.reject(new Error('服务器连接已断开，正在重连'));
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`${event} 超时`)), 15_000);
     socket.emit(event, data, (res: T | { error: string }) => {
@@ -336,6 +338,20 @@ export function useWebRTC(socket: Socket, roomId: string) {
   const selfMutedRef    = useRef(false);
   const forceMutedRef   = useRef(false);
   const joiningRef      = useRef(false);
+  const mediaGeneration = useRef(0);
+  const connectionGrace = useRef(new DisconnectGrace());
+  const resetVoiceRef = useRef<(notifyServer?: boolean) => void>(() => {});
+  const voiceSocketId = useRef<string>();
+
+  const checkTransport = useCallback((key: string, state: string) => {
+    if (state === 'connected') connectionGrace.current.recover(key);
+    if (state === 'failed' || state === 'disconnected') {
+      connectionGrace.current.fail(key, () => {
+        resetVoiceRef.current();
+        setAudioDeviceError('语音连接中断超过 7.5 秒，可直接重新加入语音，无需重连服务器');
+      });
+    }
+  }, []);
   // 仅在已经建立语音会话后播放本地“离开”提示，避免组件卸载/重复清理时误播。
   const voiceSessionActiveRef = useRef(false);
   const memberVolumesRef = useRef<Record<string, number>>({});
@@ -910,15 +926,20 @@ export function useWebRTC(socket: Socket, roomId: string) {
   // ── 初始化 mediasoup Device + 两条 transport ────────────────────────────────
 
   const setupDevice = useCallback(async (): Promise<boolean> => {
-    if (deviceRef.current) return true;
+    if (deviceRef.current && sendTransport.current && recvTransport.current) return true;
+    const generation = mediaGeneration.current;
+    const ensureCurrent = () => { if (generation !== mediaGeneration.current) throw new Error('语音加入已取消'); };
     try {
       const caps = await emitAsync<RtpCapabilities>(socket, 'ms:capabilities');
+      ensureCurrent();
       const device = new Device();
       await device.load({ routerRtpCapabilities: caps });
+      ensureCurrent();
       deviceRef.current = device;
 
       // ── 发送 transport ───────────────────────────────────────────────────
       const sendParams = await emitAsync<Record<string, unknown>>(socket, 'ms:create-transport', { direction: 'send' });
+      ensureCurrent();
       const st = device.createSendTransport(sendParams as never);
 
       st.on('connect', ({ dtlsParameters }, ok, err) => {
@@ -933,6 +954,8 @@ export function useWebRTC(socket: Socket, roomId: string) {
       });
 
       st.on('connectionstatechange', (state) => {
+        if (sendTransport.current !== st) return;
+        checkTransport('send', state);
         console.log(`%c[ms-client] 发送通道(send): ${state}`, 'color:#3b82f6;font-weight:bold');
         if (state === 'connected')    console.log('%c[ms-client] [OK] 发送通道已连通，麦克风/屏幕可以上行', 'color:#22c55e');
         if (state === 'failed')       console.error('[ms-client] [ERROR] 发送通道连接失败 - 连接层问题，检查 frp 端口/公网IP 配置');
@@ -943,6 +966,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
 
       // ── 接收 transport ───────────────────────────────────────────────────
       const recvParams = await emitAsync<Record<string, unknown>>(socket, 'ms:create-transport', { direction: 'recv' });
+      ensureCurrent();
       const rt = device.createRecvTransport(recvParams as never);
 
       rt.on('connect', ({ dtlsParameters }, ok, err) => {
@@ -951,6 +975,8 @@ export function useWebRTC(socket: Socket, roomId: string) {
       });
 
       rt.on('connectionstatechange', (state) => {
+        if (recvTransport.current !== rt) return;
+        checkTransport('recv', state);
         console.log(`%c[ms-client] 接收通道(recv): ${state}`, 'color:#a855f7;font-weight:bold');
         if (state === 'connected')    console.log('%c[ms-client] [OK] 接收通道已连通，可以收到别人的音视频', 'color:#22c55e');
         if (state === 'failed')       console.error('[ms-client] [ERROR] 接收通道连接失败 - 连接层问题，检查 frp 端口/公网IP 配置');
@@ -960,10 +986,15 @@ export function useWebRTC(socket: Socket, roomId: string) {
       recvTransport.current = rt;
       return true;
     } catch (e) {
+      if (generation === mediaGeneration.current) {
+        sendTransport.current?.close(); sendTransport.current = null;
+        recvTransport.current?.close(); recvTransport.current = null;
+        deviceRef.current = null;
+      }
       console.error('[mediasoup] 初始化失败:', e);
       return false;
     }
-  }, [socket]);
+  }, [socket, checkTransport]);
 
   // ── 消费一个 producer（接收对方音频/视频）──────────────────────────────────
 
@@ -979,13 +1010,16 @@ export function useWebRTC(socket: Socket, roomId: string) {
     if (consumerByProducer.current.has(producerId)) return true;
     if (pendingProducers.current.has(producerId)) return false;
     pendingProducers.current.add(producerId);
+    const generation = mediaGeneration.current;
 
     try {
       const params = await emitAsync<Record<string, unknown>>(socket, 'ms:consume', {
         producerId, rtpCapabilities: device.rtpCapabilities,
       });
 
+      if (generation !== mediaGeneration.current || rt.closed) return false;
       const consumer = await rt.consume(params as never);
+      if (generation !== mediaGeneration.current || rt.closed) { consumer.close(); return false; }
       const sourceType = typeof appData?.type === 'string' ? appData.type : undefined;
       consumers.current.set(consumer.id, { consumer, socketId: peerId, kind, producerId, sourceType });
       consumerByProducer.current.set(producerId, consumer.id);
@@ -1001,6 +1035,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
 
       // 恢复（服务端 produce 后 paused=true，必须 resume）
       await emitAsync(socket, 'ms:resume-consumer', { consumerId: consumer.id });
+      if (generation !== mediaGeneration.current || consumer.closed) { consumer.close(); return false; }
 
       const stream = new MediaStream([consumer.track]);
 
@@ -1076,7 +1111,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
       console.error('[mediasoup] consume 失败:', e);
       return false;
     } finally {
-      pendingProducers.current.delete(producerId);
+      if (generation === mediaGeneration.current) pendingProducers.current.delete(producerId);
     }
   }, [removeRemoteApplicationAudio, socket]);
 
@@ -1402,11 +1437,18 @@ export function useWebRTC(socket: Socket, roomId: string) {
   }, []);
 
   const requestMicrophone = useCallback(async (deviceId: string) => {
-    return Promise.race([
-      navigator.mediaDevices.getUserMedia({ audio: createMicrophoneConstraints(deviceId) }),
-      new Promise<MediaStream>((_, reject) =>
-        setTimeout(() => reject(new Error('getUserMedia 超时（10s）——很可能是麦克风权限被系统/应用挡住')), 10_000)),
-    ]);
+    return new Promise<MediaStream>((resolve, reject) => {
+      let expired = false;
+      const timer = setTimeout(() => {
+        expired = true;
+        reject(new Error('getUserMedia 超时（10s），请检查麦克风权限'));
+      }, 10_000);
+      navigator.mediaDevices.getUserMedia({ audio: createMicrophoneConstraints(deviceId) }).then(stream => {
+        clearTimeout(timer);
+        if (expired) stream.getTracks().forEach(track => track.stop());
+        else resolve(stream);
+      }, error => { clearTimeout(timer); reject(error); });
+    });
   }, []);
 
   const replaceMicrophone = useCallback(async (deviceId: string) => {
@@ -1473,9 +1515,13 @@ export function useWebRTC(socket: Socket, roomId: string) {
   // ── 加入语音 ───────────────────────────────────────────────────────────────
 
   const joinVoice = useCallback(async () => {
-    if (inVoice || joiningRef.current) return;
+    if (inVoice || joiningRef.current || !socket.connected) return;
+    const generation = ++mediaGeneration.current;
+    const ensureCurrent = () => { if (generation !== mediaGeneration.current) throw new Error('语音加入已取消'); };
+    voiceSocketId.current = socket.id;
     joiningRef.current = true;
     setIsJoining(true);
+    setAudioDeviceError(null);
     console.log('%c[joinVoice] 开始加入语音…', 'color:#3b82f6;font-weight:bold');
     let rawStream: MediaStream | null = null;
     let stream: MediaStream | null = null;
@@ -1483,6 +1529,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
       console.log('[joinVoice] 请求麦克风权限 getUserMedia…');
       // 超时保护：Electron 权限挂起时 getUserMedia 会永不返回，加 10s 超时把问题暴露出来
       rawStream = await requestMicrophone(selectedAudioInputRef.current);
+      ensureCurrent();
       console.log('%c[joinVoice] [OK] 已获取麦克风', 'color:#22c55e');
       const rawTrack = rawStream.getAudioTracks()[0];
       if (rawTrack) {
@@ -1499,20 +1546,19 @@ export function useWebRTC(socket: Socket, roomId: string) {
       rawAudioRef.current = rawStream;
       const processed = await createProcessedMicStream(rawStream);
       stream = processed.stream;
+      if (generation !== mediaGeneration.current) {
+        void processed.context?.close();
+        ensureCurrent();
+      }
       micProcessingContext.current = processed.context;
       localAudioRef.current = stream;
       refreshAudioDevices(false);
 
       console.log('[joinVoice] 初始化 mediasoup Device 和传输通道…');
       const ok = await setupDevice();
+      ensureCurrent();
       if (!ok) {
-        stream.getTracks().forEach(t => t.stop());
-        if (rawStream !== stream) rawStream.getTracks().forEach(t => t.stop());
-        localAudioRef.current = null;
-        rawAudioRef.current = null;
-        micProcessingContext.current?.close().catch(() => {});
-        micProcessingContext.current = null;
-        return;
+        throw new Error('媒体通道初始化失败，请重试加入语音');
       }
       console.log('%c[joinVoice] [OK] Device 就绪，开始发布音频', 'color:#22c55e');
 
@@ -1522,6 +1568,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
         codecOptions: { opusStereo: false, opusDtx: true, opusFec: true },
         appData: { type: 'mic' },
       });
+      if (generation !== mediaGeneration.current) { producer.close(); ensureCurrent(); }
       audioProducer.current = producer;
       if (forceMutedRef.current) producer.pause();
       producer.on('trackended', () => { /* 麦克风被拔 */ });
@@ -1538,12 +1585,14 @@ export function useWebRTC(socket: Socket, roomId: string) {
       const existing = await emitAsync<
         { producerId: string; peerId: string; kind: string; appData: Record<string, unknown> }[]
       >(socket, 'ms:get-producers');
+      ensureCurrent();
 
       for (const source of existing) {
         if (source.appData?.type === 'screen-audio')
           pendingScreenAudioByPeer.current.set(source.peerId, source.producerId);
       }
       for (const { producerId, peerId, kind, appData } of existing) {
+        ensureCurrent();
         if (appData?.type === 'screen') {
           storeAvailableScreen({
             socketId: peerId,
@@ -1570,21 +1619,27 @@ export function useWebRTC(socket: Socket, roomId: string) {
     } catch (e) {
       stream?.getTracks().forEach(track => track.stop());
       if (rawStream !== stream) rawStream?.getTracks().forEach(track => track.stop());
+      if (generation !== mediaGeneration.current) return;
+      resetVoiceRef.current();
       if (localAudioRef.current === stream) localAudioRef.current = null;
       rawAudioRef.current = null;
       micProcessingContext.current?.close().catch(() => {});
       micProcessingContext.current = null;
       console.error('[joinVoice] [ERROR] 失败:', e);
-      alert(`加入语音失败：\n${e instanceof Error ? e.message : String(e)}\n\n请检查麦克风权限（Windows 设置 → 隐私 → 麦克风 → 允许桌面应用访问）。`);
+      setAudioDeviceError(`加入语音失败：${e instanceof Error ? e.message : String(e)}，可直接重试。`);
     } finally {
-      joiningRef.current = false;
-      setIsJoining(false);
+      if (generation === mediaGeneration.current) {
+        joiningRef.current = false;
+        setIsJoining(false);
+      }
     }
   }, [socket, roomId, inVoice, setupDevice, consumeProducer, storeAvailableScreen, storeRemoteApplicationAudio, createProcessedMicStream, refreshAudioDevices, requestMicrophone]);
 
   // ── 离开语音 ───────────────────────────────────────────────────────────────
 
-  const leaveVoice = useCallback(() => {
+  const resetVoice = useCallback((notifyServer = true) => {
+    mediaGeneration.current += 1;
+    connectionGrace.current.clear();
     const shouldPlayLeaveTone = voiceSessionActiveRef.current;
     voiceSessionActiveRef.current = false;
     if (shouldPlayLeaveTone) playPresenceTone('leave');
@@ -1660,8 +1715,40 @@ export function useWebRTC(socket: Socket, roomId: string) {
     selfMutedRef.current = false;
     setIsMuted(forceMutedRef.current);
     setIsSharing(false);
-    socket.emit('voice:leave', roomId);
+    if (notifyServer && socket.connected) socket.emit('voice:leave', roomId);
   }, [socket, roomId, stopMeters, clearAvailableScreens, playPresenceTone]);
+  resetVoiceRef.current = resetVoice;
+  const leaveVoice = useCallback(() => resetVoice(), [resetVoice]);
+
+  useEffect(() => {
+    const onDisconnect = (reason: string) => {
+      if (reason === 'io client disconnect' || reason === 'io server disconnect') {
+        resetVoiceRef.current(false);
+        return;
+      }
+      if (!voiceSessionActiveRef.current && !joiningRef.current) return;
+      connectionGrace.current.fail('signal', () => {
+        resetVoiceRef.current(false);
+        setAudioDeviceError('服务器连接中断超过 7.5 秒，连接恢复后可直接加入语音');
+      });
+    };
+    const onConnect = () => {
+      connectionGrace.current.recover('signal');
+      if (voiceSocketId.current !== socket.id || !socket.recovered) {
+        if (voiceSessionActiveRef.current || joiningRef.current) resetVoiceRef.current(false);
+      } else if (!voiceSessionActiveRef.current && !joiningRef.current) {
+        // Local timeout/explicit leave won the race against server recovery.
+        socket.emit('voice:leave', roomId);
+      }
+    };
+    socket.on('disconnect', onDisconnect);
+    socket.on('connect', onConnect);
+    return () => {
+      socket.off('disconnect', onDisconnect);
+      socket.off('connect', onConnect);
+      connectionGrace.current.clear();
+    };
+  }, [socket, roomId]);
 
   // ── 麦克风静音 ─────────────────────────────────────────────────────────────
 

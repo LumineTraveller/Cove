@@ -62,7 +62,7 @@ export default function App() {
         authToken: readAccountSession(serverURL)?.token,
         platform: 'desktop',
         remoteControlSupported: window.coveRemoteControl?.supported === true,
-      }, (error: Error | null, response?: { ok?: boolean; error?: string }) => {
+      }, (error: Error | null, response?: { ok?: boolean; error?: string; code?: string }) => {
         if (!active) return;
         const registered = !error && response?.ok !== false;
         setConnected(registered);
@@ -79,6 +79,14 @@ export default function App() {
             window.location.reload();
             return;
           }
+          if (response?.code === 'SESSION_IN_USE') {
+            clearAccountSession(serverURL);
+            clearProfile();
+            setProfile({ username: '', avatarUrl: null });
+            setAuthError(response.error ?? '账号已在其他设备使用，请重新登录。');
+            setEditingServer(false);
+            return;
+          }
           setConnectionProblem('registration');
           setEditingServer(true);
         }
@@ -86,9 +94,20 @@ export default function App() {
     };
     const disconnect = () => active && setConnected(false);
     const connectError = () => active && setConnected(false);
+    const sessionReplaced = () => {
+      if (!active) return;
+      clearAccountSession(serverURL);
+      clearProfile();
+      socket.disconnect();
+      setProfile({ username: '', avatarUrl: null });
+      setConnected(false);
+      setAuthError('账号已在其他设备登录，本设备已退出，请重新登录。');
+      setEditingServer(false);
+    };
     socket.on('connect', register);
     socket.on('disconnect', disconnect);
     socket.on('connect_error', connectError);
+    socket.on('account:session-replaced', sessionReplaced);
     const connectToServer = async () => {
       try {
         await window.coveSecurity?.setServerCertificateException(
@@ -109,6 +128,7 @@ export default function App() {
       socket.off('connect', register);
       socket.off('disconnect', disconnect);
       socket.off('connect_error', connectError);
+      socket.off('account:session-replaced', sessionReplaced);
       socket.disconnect();
     };
   }, [editingServer, needLogin]);

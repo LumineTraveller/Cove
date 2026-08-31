@@ -8,6 +8,7 @@ import {
   Text,
   TouchableOpacity,
   View,
+  TextInput,
   type GestureResponderEvent,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -32,8 +33,10 @@ import {
   Volume2,
   VolumeX,
   X,
+  Settings,
 } from 'lucide-react-native';
 import { ZoomableScreenVideo } from '../components/ZoomableScreenVideo';
+import { ROOM_LIMIT_PRESETS, roomSettingsPayload } from '../roomSettings';
 import type { Socket } from 'socket.io-client';
 import { Soundboard } from '../components/Soundboard';
 import { ChatPanel } from '../components/ChatPanel';
@@ -92,9 +95,23 @@ function InlineVolumeSlider({ value, label, onChange }: InlineVolumeSliderProps)
 }
 
 export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props) {
+  const [roomMeta, setRoomMeta] = useState({ maxMembers: room.maxMembers, hasPassword: room.hasPassword });
   const [members, setMembers] = useState<RoomMember[]>([]);
   const [roomReady, setRoomReady] = useState(false);
   const [joinError, setJoinError] = useState<string | null>(null);
+  const [joinPassword, setJoinPassword] = useState('');
+  const [passwordPrompt, setPasswordPrompt] = useState(false);
+  const joinPasswordRef = useRef('');
+  const [joinPending, setJoinPending] = useState(false);
+  const joinGeneration = useRef(0);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsLimit, setSettingsLimit] = useState(room.maxMembers ? String(room.maxMembers) : '');
+  const [settingsPassword, setSettingsPassword] = useState('');
+  const [settingsError, setSettingsError] = useState<string | null>(null);
+  const [settingsPending, setSettingsPending] = useState(false);
+  const settingsPendingRef = useRef(false);
+  const joinPendingRef = useRef(false);
+  const joinBlockedRef = useRef(false);
   const [fullscreen, setFullscreen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
   const [soundboardOpen, setSoundboardOpen] = useState(false);
@@ -124,47 +141,92 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
     return () => { active = false; };
   }, []);
 
-  useEffect(() => {
-    if (!sessionReady) {
-      setRoomReady(false);
-      return;
-    }
-    let active = true;
+  const saveRoomSettings = (clearPassword = false) => {
+    if (!sessionReady || !roomReady || settingsPendingRef.current) return;
+    let payload: ReturnType<typeof roomSettingsPayload>;
+    try { payload = roomSettingsPayload(room.id, settingsLimit, settingsPassword, clearPassword); }
+    catch (error) { setSettingsError(error instanceof Error ? error.message : '设置无效'); return; }
+    settingsPendingRef.current = true;
+    setSettingsPending(true);
+    setSettingsError(null);
+    socket.timeout(6_000).emit('room:update-settings', payload, (error: Error | null, result?: { ok: boolean; room?: Room; error?: string }) => {
+      settingsPendingRef.current = false;
+      setSettingsPending(false);
+      if (error || !result?.ok) { setSettingsError(result?.error ?? '保存失败，请重试'); return; }
+      if (result.room) setRoomMeta({ maxMembers: result.room.maxMembers, hasPassword: result.room.hasPassword });
+      setSettingsPassword('');
+      setSettingsOpen(false);
+    });
+  };
+
+  const joinRoom = (password?: string) => {
+    if (!sessionReady || joinPendingRef.current || joinBlockedRef.current) return;
+    const generation = ++joinGeneration.current;
+    joinPendingRef.current = true;
+    setJoinPending(true);
+    if (password !== undefined) joinPasswordRef.current = password;
     socket.timeout(6_000).emit(
       'room:join',
-      room.id,
-      (timeoutError: Error | null, response?: { ok: boolean; error?: string }) => {
-        if (!active) return;
-        if (timeoutError || response?.ok === false) {
+      { roomId: room.id, ...(joinPasswordRef.current ? { password: joinPasswordRef.current } : {}) },
+      (timeoutError: Error | null, response?: { ok: boolean; error?: string; code?: string }) => {
+        if (generation !== joinGeneration.current || joinBlockedRef.current) return;
+        joinPendingRef.current = false;
+        setJoinPending(false);
+        if (timeoutError || !response?.ok) {
           setJoinError(response?.error ?? '加入房间超时');
           setRoomReady(false);
+          if (response?.code === 'PASSWORD_REQUIRED' || response?.code === 'INVALID_PASSWORD') setPasswordPrompt(true);
           return;
         }
         setJoinError(null);
+        setPasswordPrompt(false);
         setRoomReady(true);
       },
     );
-    return () => {
-      active = false;
-      media.leaveVoice();
-      socket.emit('room:leave', room.id);
-    };
+  };
+
+  useEffect(() => {
+    joinPendingRef.current = false;
+    setJoinPending(false);
+    if (!sessionReady) { joinGeneration.current += 1; setRoomReady(false); return; }
+    joinRoom();
+    return () => { joinGeneration.current += 1; joinPendingRef.current = false; };
   // Media state must not re-run the room join lifecycle.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [room.id, sessionReady, socket]);
 
+  useEffect(() => () => {
+    joinGeneration.current += 1;
+    joinPasswordRef.current = '';
+    media.leaveVoice();
+    if (socket.connected) socket.emit('room:leave', room.id);
+    else socket.once('connect', () => {
+      if (socket.recovered) socket.emit('room:leave', room.id);
+    });
+  // Only actually leaving the room tears down media, not a temporary disconnect.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [room.id, socket]);
+
   useEffect(() => {
     const onState = (state: RoomState) => {
-      if (state.roomId === room.id) setMembers(state.members);
+      if (state.roomId === room.id) {
+        setMembers(state.members);
+        setRoomMeta({ maxMembers: state.maxMembers, hasPassword: state.hasPassword });
+      }
     };
     const onDeleted = ({ roomId }: { roomId: string }) => {
-      if (roomId === room.id) onBack();
+      if (roomId === room.id) { joinBlockedRef.current = true; joinGeneration.current += 1; setRoomReady(false); onBack(); }
+    };
+    const onKicked = ({ roomId }: { roomId: string }) => {
+      if (roomId === room.id) { joinBlockedRef.current = true; joinGeneration.current += 1; setRoomReady(false); onBack(); }
     };
     socket.on('room:state', onState);
     socket.on('room:deleted', onDeleted);
+    socket.on('room:kicked', onKicked);
     return () => {
       socket.off('room:state', onState);
       socket.off('room:deleted', onDeleted);
+      socket.off('room:kicked', onKicked);
     };
   }, [onBack, room.id, socket]);
 
@@ -215,6 +277,7 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
           <Text style={styles.ownerName} numberOfLines={1}>{room.ownerName ? `房主 ${room.ownerName}` : '房间'}</Text>
         </View>
         <View style={styles.headerActions}>
+          {members.some(member => member.socketId === socket.id && member.isOwner) && <TouchableOpacity style={styles.headerAction} onPress={() => { setSettingsLimit(roomMeta.maxMembers ? String(roomMeta.maxMembers) : ''); setSettingsPassword(''); setSettingsError(null); setSettingsOpen(true); }} accessibilityLabel="房间设置"><Settings size={17} color={colors.cyan} /></TouchableOpacity>}
           <TouchableOpacity style={styles.headerAction} onPress={() => setChatOpen(true)} accessibilityLabel="打开聊天">
             <MessageCircle size={17} color={colors.cyan} />
           </TouchableOpacity>
@@ -234,6 +297,12 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
           <TouchableOpacity style={styles.errorBanner} onPress={() => { setJoinError(null); media.clearError(); }}>
             <ShieldAlert size={18} color={colors.red} />
             <Text style={styles.errorText}>{joinError ?? media.error}</Text>
+          </TouchableOpacity>
+        )}
+
+        {!roomReady && !passwordPrompt && joinError && (
+          <TouchableOpacity style={styles.submit} disabled={joinPending || !sessionReady} onPress={() => joinRoom()}>
+            <Text style={styles.submitText}>{joinPending ? '正在加入…' : '重新尝试加入房间'}</Text>
           </TouchableOpacity>
         )}
 
@@ -390,6 +459,40 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
         </View>
       </Modal>
 
+      <Modal visible={passwordPrompt && !roomReady} transparent animationType="fade" onRequestClose={onBack}>
+        <View style={styles.promptBackdrop}><View style={styles.promptCard}><Text style={styles.modalTitle}>输入房间密码</Text>{joinError && <Text style={styles.formError}>{joinError}</Text>}<TextInput value={joinPassword} onChangeText={setJoinPassword} secureTextEntry maxLength={128} autoFocus placeholder="房间密码" placeholderTextColor={colors.textFaint} style={styles.input} /><TouchableOpacity style={[styles.submit, joinPending && styles.controlDisabled]} disabled={joinPending} onPress={() => joinRoom(joinPassword)}><Text style={styles.submitText}>{joinPending ? '验证中…' : '进入房间'}</Text></TouchableOpacity><TouchableOpacity style={styles.clearPassword} disabled={joinPending} onPress={onBack}><Text style={styles.clearPasswordText}>取消并返回</Text></TouchableOpacity></View></View>
+      </Modal>
+
+      <Modal visible={settingsOpen} animationType="slide" onRequestClose={() => setSettingsOpen(false)}>
+        <SafeAreaView style={styles.toolModal} edges={['top', 'right', 'bottom', 'left']}>
+          <View style={styles.toolHeader}>
+            <Text style={styles.toolTitle}>房间设置</Text>
+            <TouchableOpacity disabled={settingsPending} onPress={() => setSettingsOpen(false)}><X size={20} color={colors.textMuted} /></TouchableOpacity>
+          </View>
+          <ScrollView contentContainerStyle={styles.toolContent} keyboardShouldPersistTaps="handled">
+            <Text style={styles.sectionSubtitle}>人数上限（含房主）</Text>
+            <View style={styles.limitPresets}>
+              {ROOM_LIMIT_PRESETS.map(value => (
+                <TouchableOpacity key={value || 'unlimited'} style={[styles.limitPreset, settingsLimit === value && styles.limitPresetActive]} disabled={settingsPending} onPress={() => setSettingsLimit(value)}>
+                  <Text style={styles.limitPresetText}>{value || '不限'}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <TextInput value={settingsLimit} onChangeText={setSettingsLimit} editable={!settingsPending} keyboardType="number-pad" placeholder="自定义人数，留空表示不限" placeholderTextColor={colors.textFaint} style={styles.input} />
+            <Text style={styles.sectionSubtitle}>新密码（留空保持不变）</Text>
+            <TextInput value={settingsPassword} onChangeText={setSettingsPassword} editable={!settingsPending} secureTextEntry maxLength={128} placeholder="保持不变" placeholderTextColor={colors.textFaint} style={styles.input} />
+            <Text style={styles.sectionSubtitle}>修改密码不影响现有成员；降低上限只限制新成员加入。</Text>
+            {settingsError && <Text style={styles.formError}>{settingsError}</Text>}
+            <TouchableOpacity style={[styles.submit, settingsPending && styles.controlDisabled]} disabled={settingsPending || !sessionReady} onPress={() => saveRoomSettings()}>
+              <Text style={styles.submitText}>{settingsPending ? '保存中…' : '保存设置'}</Text>
+            </TouchableOpacity>
+            {roomMeta.hasPassword && <TouchableOpacity style={styles.clearPassword} disabled={settingsPending || !sessionReady} onPress={() => saveRoomSettings(true)}>
+              <Text style={styles.clearPasswordText}>取消房间密码</Text>
+            </TouchableOpacity>}
+          </ScrollView>
+        </SafeAreaView>
+      </Modal>
+
       <ChatPanel
         visible={chatOpen}
         socket={socket}
@@ -440,12 +543,17 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
 }
 
 const styles = StyleSheet.create({
+  limitPresets: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  limitPreset: { borderRadius: 10, paddingHorizontal: 14, paddingVertical: 9, backgroundColor: colors.surface },
+  limitPresetActive: { backgroundColor: colors.cyanSoft },
+  limitPresetText: { color: colors.text },
   applicationAudioCard: { marginHorizontal: 14, marginBottom: 14, padding: 14, gap: 12, borderWidth: 1, borderColor: 'rgba(103,232,249,0.25)', borderRadius: 18, backgroundColor: colors.cyanSoft },
   applicationAudioHeading: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   applicationAudioCopy: { flex: 1 },
   applicationAudioControls: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   safeArea: { flex: 1, backgroundColor: colors.background },
   header: { minHeight: 66, flexDirection: 'row', alignItems: 'center', gap: 11, paddingHorizontal: 14, borderBottomWidth: 1, borderBottomColor: colors.border },
+  promptBackdrop: { flex: 1, justifyContent: 'center', padding: 22, backgroundColor: 'rgba(0,0,0,0.65)' }, promptCard: { gap: 12, padding: 20, borderRadius: 18, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border }, modalTitle: { color: colors.text, fontSize: 20, fontWeight: '800' }, input: { color: colors.text, borderWidth: 1, borderColor: colors.border, borderRadius: 12, paddingHorizontal: 13, paddingVertical: 11, backgroundColor: colors.background }, submit: { alignItems: 'center', padding: 14, borderRadius: 12, backgroundColor: colors.cyan, marginTop: 8 }, submitText: { color: '#082f49', fontWeight: '800' }, clearPassword: { alignItems: 'center', padding: 12 }, clearPasswordText: { color: colors.red, fontWeight: '700', fontSize: 12 }, formError: { color: colors.red, fontSize: 12 },
   iconButton: { width: 40, height: 40, borderRadius: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surface },
   headerCopy: { flex: 1, minWidth: 0 },
   headerActions: { flexDirection: 'row', alignItems: 'center', gap: 6 },

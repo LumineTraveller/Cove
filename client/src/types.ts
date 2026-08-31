@@ -5,6 +5,8 @@ export interface Room {
   name: string;
   createdAt: number;
   ownerName: string | null;
+  maxMembers: number | null;
+  hasPassword: boolean;
 }
 
 export interface Message {
@@ -54,4 +56,6 @@ export interface RoomState {
   ownerName: string | null;
   isOwner: boolean;
   members: RoomMember[];
+  maxMembers: number | null;
+  hasPassword: boolean;
 }

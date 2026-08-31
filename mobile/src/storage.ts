@@ -30,6 +30,13 @@ export async function forgetRememberedServer(serverURL: string) {
   await AsyncStorage.setItem(REMEMBERED_SERVERS_KEY, JSON.stringify(previous.filter(entry => entry.serverURL !== normalized)));
 }
 
+export async function forgetRememberedServerToken(serverURL: string) {
+  const normalized = normalizeServerURL(serverURL);
+  const history = await readRememberedServers();
+  await AsyncStorage.setItem(REMEMBERED_SERVERS_KEY, JSON.stringify(history.map(entry =>
+    entry.serverURL === normalized ? { ...entry, accountToken: undefined } : entry)));
+}
+
 export function normalizeServerURL(value: string): string {
   const trimmed = value.trim().replace(/\/+$/, '');
   if (!trimmed) return '';
@@ -103,8 +110,7 @@ export async function saveSessionConfig(input: {
 export async function clearServerConfig({ forgetSession = true }: { forgetSession?: boolean } = {}) {
   const active = await readSessionConfig();
   if (forgetSession && active) {
-    const history = await readRememberedServers();
-    await AsyncStorage.setItem(REMEMBERED_SERVERS_KEY, JSON.stringify(history.map(entry => entry.serverURL === active.serverURL ? { ...entry, accountToken: undefined } : entry)));
+    await forgetRememberedServerToken(active.serverURL);
   }
   await Promise.all([
     AsyncStorage.removeItem(USERNAME_KEY),

@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import ts from 'typescript';
 import * as audioDevices from '../src/audioDevices';
+import * as disconnectGrace from '../src/utils/disconnectGrace';
 
 // Exercise the actual hook callbacks/consumer setup without a room or microphone.
 // React scheduling and platform endpoints are fakes; the gain-output code is real.
@@ -48,6 +49,10 @@ function playbackHarness() {
   };
   const socket = {
     id: 'viewer',
+    connected: true,
+    on() {},
+    off() {},
+    once() {},
     emit(_event: string, data: any, callback?: Function) { callback?.(data ?? {}); },
   };
   const exports: any = {};
@@ -75,6 +80,7 @@ function playbackHarness() {
         createRemoteAudioOutput: (ctx: AudioContext, stream: MediaStream, volume: number) =>
           audioDevices.createRemoteAudioOutput(ctx, stream, volume, new FakeAudio() as unknown as HTMLAudioElement),
       };
+      if (id.includes('utils/disconnectGrace')) return disconnectGrace;
       return {};
     },
     Audio: FakeAudio,

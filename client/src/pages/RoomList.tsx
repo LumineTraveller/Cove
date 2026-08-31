@@ -7,6 +7,7 @@ import { ServerCertificateToggle } from '../components/ServerCertificateToggle';
 import { socket, normalizeURL } from '../socket';
 import { hasServerCertificateException, saveServerCertificateException } from '../serverCertificate';
 import type { OnlineUser, Room, UserProfile } from '../types';
+import { createRoomPayload } from '../roomSettings';
 import coveIcon from '../../build/icon.ico';
 
 interface Props {
@@ -30,6 +31,10 @@ export default function RoomList({ profile, onProfileChange, onReset, onSwitchSe
   const [rooms, setRooms] = useState<Room[]>([]);
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
+  const [newMaxMembers, setNewMaxMembers] = useState('');
+  const [customMaxMembers, setCustomMaxMembers] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [creatingRoom, setCreatingRoom] = useState(false);
   const [loading, setLoading] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
@@ -81,18 +86,22 @@ export default function RoomList({ profile, onProfileChange, onReset, onSwitchSe
   }, [serverURL, sessionReady]);
 
   const createRoom = async () => {
-    if (!newName.trim() || !sessionReady) return;
+    if (!newName.trim() || !sessionReady || creatingRoom) return;
+    setCreatingRoom(true);
     try {
       const result = await new Promise<{ room?: Room; error?: string }>((resolve, reject) => {
-        socket.timeout(5_000).emit('room:create', { name: newName.trim() }, (error: Error | null, response: { room?: Room; error?: string }) => error ? reject(error) : resolve(response));
+        socket.timeout(5_000).emit('room:create', createRoomPayload(newName, newMaxMembers === 'custom' ? customMaxMembers : newMaxMembers, newPassword), (error: Error | null, response: { room?: Room; error?: string }) => error ? reject(error) : resolve(response));
       });
       if (!result.room) throw new Error(result.error ?? '创建失败');
       setNewName('');
+      setNewMaxMembers('');
+      setCustomMaxMembers('');
+      setNewPassword('');
       setCreating(false);
       navigate(`/room/${result.room.id}`);
     } catch (error) {
       alert(`创建失败：${error instanceof Error ? error.message : String(error)}\n${serverURL}`);
-    }
+    } finally { setCreatingRoom(false); }
   };
 
   const saveSettings = () => {
@@ -171,8 +180,10 @@ export default function RoomList({ profile, onProfileChange, onReset, onSwitchSe
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-md" onMouseDown={() => setCreating(false)}>
           <section className="flex w-full max-w-sm flex-col gap-5 rounded-3xl border border-white/15 bg-zinc-900/95 p-7 shadow-2xl" onMouseDown={event => event.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="create-title">
             <div className="flex items-start justify-between"><div><h2 id="create-title" className="text-xl font-bold text-white">创建频道</h2><p className="mt-1 text-sm text-white/40">创建者会成为房主</p></div><button onClick={() => setCreating(false)} className="rounded-lg p-2 text-white/35 hover:bg-white/10 hover:text-white" aria-label="关闭"><X size={18} /></button></div>
-            <div><label className="mb-2 block text-sm font-medium text-white/55" htmlFor="room-name">频道名称</label><div className="flex items-center rounded-xl border border-white/10 bg-white/[0.07] px-3 focus-within:border-cyan-300/45"><Hash size={18} className="mr-2 text-white/30" /><input id="room-name" className="flex-1 bg-transparent py-3 text-base text-white outline-none placeholder:text-white/20" placeholder="general" value={newName} onChange={event => setNewName(event.target.value)} onKeyDown={event => event.key === 'Enter' && createRoom()} autoFocus /></div></div>
-            <div className="flex gap-2.5"><button className="flex-1 rounded-xl bg-white/10 py-3 font-medium text-white/70 transition hover:bg-white/15" onClick={() => { setCreating(false); setNewName(''); }}>取消</button><button className="flex-1 rounded-xl bg-white py-3 font-semibold text-zinc-900 transition hover:bg-cyan-100 disabled:opacity-25" disabled={!newName.trim() || !sessionReady} onClick={createRoom}>创建</button></div>
+             <div><label className="mb-2 block text-sm font-medium text-white/55" htmlFor="room-name">频道名称</label><div className="flex items-center rounded-xl border border-white/10 bg-white/[0.07] px-3 focus-within:border-cyan-300/45"><Hash size={18} className="mr-2 text-white/30" /><input id="room-name" className="flex-1 bg-transparent py-3 text-base text-white outline-none placeholder:text-white/20" placeholder="general" value={newName} onChange={event => setNewName(event.target.value)} onKeyDown={event => event.key === 'Enter' && createRoom()} autoFocus /></div></div>
+             <label className="block text-sm font-medium text-white/55" htmlFor="room-limit">人数上限 <select id="room-limit" value={newMaxMembers} onChange={event => setNewMaxMembers(event.target.value)} className="ml-2 rounded-lg border border-white/10 bg-black/30 px-2 py-1 text-white"><option value="">不限</option><option value="2">2</option><option value="5">5</option><option value="10">10</option><option value="20">20</option><option value="custom">自定义</option></select>{newMaxMembers === 'custom' && <input type="number" min="1" max="1000" value={customMaxMembers} className="ml-2 w-24 rounded-lg border border-white/10 bg-black/30 px-2 py-1 text-white" onChange={event => setCustomMaxMembers(event.target.value)} />}</label>
+             <label className="block text-sm font-medium text-white/55" htmlFor="room-password">密码（可选）<input id="room-password" type="password" maxLength={128} value={newPassword} onChange={event => setNewPassword(event.target.value)} className="mt-2 w-full rounded-xl border border-white/10 bg-white/[0.07] px-3 py-3 text-white outline-none" /></label>
+             <div className="flex gap-2.5"><button disabled={creatingRoom} className="flex-1 rounded-xl bg-white/10 py-3 font-medium text-white/70 transition hover:bg-white/15" onClick={() => { setCreating(false); setNewName(''); setNewMaxMembers(''); setCustomMaxMembers(''); setNewPassword(''); }}>取消</button><button className="flex-1 rounded-xl bg-white py-3 font-semibold text-zinc-900 transition hover:bg-cyan-100 disabled:opacity-25" disabled={!newName.trim() || !sessionReady || creatingRoom} onClick={createRoom}>{creatingRoom ? '创建中…' : '创建'}</button></div>
           </section>
         </div>
       )}

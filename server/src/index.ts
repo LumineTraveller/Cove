@@ -17,6 +17,8 @@ import { soundpackVoiceAudience } from './soundpackAudience';
 import { createVoicePresenceEvent, voicePresenceMessage, type VoicePresenceAction } from './voicePresence';
 import { summarizeRtpStat, summarizeTransportStat } from './mediaDiagnostics';
 import { AccountAuthError, createAccountStore } from './accountAuth';
+import { DisconnectGrace, DISCONNECT_GRACE_MS } from './disconnectGrace';
+import { RoomSettingsError, parseRoomLimit, validateRoomPassword, hashRoomPassword, verifyRoomPassword, assertRoomCapacity } from './roomSettings';
 import {
   REMOTE_CONTROL_REQUEST_TTL_MS,
   RemoteControlRegistry,
@@ -33,7 +35,15 @@ app.use(express.json({ limit: '12mb' })); // 语音包 base64 最大约 8MB 文�
 
 const io = new Server(httpServer, {
   cors: { origin: '*', methods: ['GET', 'POST'] },
+  // Keep packet offsets slightly longer than the 7.5s peer deadline. Otherwise
+  // a quiet client's last offset may expire before its recovery window ends.
+  connectionStateRecovery: { maxDisconnectionDuration: DISCONNECT_GRACE_MS * 2, skipMiddlewares: false },
 });
+const disconnectGrace = new DisconnectGrace();
+// Keep the recovery offset fresh even in a quiet voice room.
+const recoveryCheckpoint = setInterval(() => io.emit('session:checkpoint'), 2_000);
+recoveryCheckpoint.unref();
+httpServer.on('close', () => { clearInterval(recoveryCheckpoint); disconnectGrace.clear(); });
 
 // ── SQLite ────────────────────────────────────────────────────────────────────
 
@@ -87,6 +97,12 @@ if (!roomColumns.some(column => column.name === 'ownerId'))
   db.exec('ALTER TABLE rooms ADD COLUMN ownerId TEXT');
 if (!roomColumns.some(column => column.name === 'ownerName'))
   db.exec('ALTER TABLE rooms ADD COLUMN ownerName TEXT');
+if (!roomColumns.some(column => column.name === 'maxMembers'))
+  db.exec('ALTER TABLE rooms ADD COLUMN maxMembers INTEGER');
+if (!roomColumns.some(column => column.name === 'passwordHash'))
+  db.exec('ALTER TABLE rooms ADD COLUMN passwordHash TEXT');
+if (!roomColumns.some(column => column.name === 'passwordSalt'))
+  db.exec('ALTER TABLE rooms ADD COLUMN passwordSalt TEXT');
 const messageColumns = db.prepare('PRAGMA table_info(messages)').all() as { name: string }[];
 if (!messageColumns.some(column => column.name === 'type'))
   db.exec("ALTER TABLE messages ADD COLUMN type TEXT NOT NULL DEFAULT 'chat'");
@@ -105,10 +121,17 @@ if (!soundpackColumns.some(column => column.name === 'sortOrder')) {
 const accounts = createAccountStore(db);
 
 // ownerId 是本地持久身份凭据，不通过 API 或 Socket 广播给其他客户端。
-const stmtGetRooms       = db.prepare('SELECT id, name, createdAt, ownerName FROM rooms ORDER BY createdAt ASC');
-const stmtGetRoom        = db.prepare('SELECT id, name, createdAt, ownerName FROM rooms WHERE id = ?');
-const stmtGetRoomPrivate = db.prepare('SELECT id, name, createdAt, ownerId, ownerName FROM rooms WHERE id = ?');
-const stmtInsertRoom     = db.prepare('INSERT INTO rooms (id, name, createdAt, ownerId, ownerName) VALUES (?, ?, ?, ?, ?)');
+const publicRoomColumns = 'id, name, createdAt, ownerName, maxMembers, (passwordHash IS NOT NULL) AS hasPassword';
+const roomListQuery = db.prepare(`SELECT ${publicRoomColumns} FROM rooms ORDER BY createdAt ASC`);
+const roomQuery = db.prepare(`SELECT ${publicRoomColumns} FROM rooms WHERE id = ?`);
+const stmtGetRooms = { all: () => roomListQuery.all().map(row => ({ ...row as Room, hasPassword: !!(row as Room).hasPassword })) };
+const stmtGetRoom = { get: (id: string) => {
+  const row = roomQuery.get(id) as Room | undefined;
+  return row ? { ...row, hasPassword: !!row.hasPassword } : undefined;
+} };
+const stmtGetRoomPrivate = db.prepare('SELECT id, name, createdAt, ownerId, ownerName, maxMembers, passwordHash, passwordSalt FROM rooms WHERE id = ?');
+const stmtInsertRoom = db.prepare('INSERT INTO rooms (id, name, createdAt, ownerId, ownerName, maxMembers, passwordHash, passwordSalt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+const stmtUpdateRoomSettings = db.prepare('UPDATE rooms SET maxMembers = ?, passwordHash = ?, passwordSalt = ? WHERE id = ?');
 const stmtClaimRoom      = db.prepare('UPDATE rooms SET ownerId = ?, ownerName = ? WHERE id = ? AND ownerId IS NULL');
 const stmtUpdateOwnerName = db.prepare('UPDATE rooms SET ownerName = ? WHERE ownerId = ? AND ownerName IS NOT ?');
 const stmtDeleteRoom     = db.prepare('DELETE FROM rooms WHERE id = ?');
@@ -144,8 +167,8 @@ const deleteRoomData = db.transaction((roomId: string) => {
   stmtDeleteRoom.run(roomId);
 });
 
-interface Room      { id: string; name: string; createdAt: number; ownerName: string | null }
-interface PrivateRoom extends Room { ownerId: string | null }
+interface Room      { id: string; name: string; createdAt: number; ownerName: string | null; maxMembers: number | null; hasPassword: boolean }
+interface PrivateRoom extends Omit<Room, 'hasPassword'> { ownerId: string | null; passwordHash: string | null; passwordSalt: string | null }
 interface Message   { id: string; roomId: string; author: string; content: string; type: 'chat' | 'soundpack' | 'image' | 'system'; timestamp: number }
 interface SoundpackRecord { id: string; name: string; filename: string; uploader: string; uploaderId: string | null; createdAt: number; sortOrder: number }
 interface PublicSoundpack { id: string; name: string; filename: string; uploader: string; createdAt: number; sortOrder: number; canDelete: boolean }
@@ -171,6 +194,9 @@ fs.mkdirSync(CHAT_IMAGES_DIR, { recursive: true });
 const userNames   = new Map<string, string>();
 const userAvatars = new Map<string, string | null>();
 const userClientIds = new Map<string, string>(); // socketId → 持久客户端身份（不广播）
+// accountId → currently active socket. A socket that reconnects with the
+// same valid token keeps ownership; a different socket takes it over once.
+const accountSockets = new Map<string, string>();
 const userPlatforms = new Map<string, ClientPlatform>();
 const remoteControlCapabilities = new Set<string>();
 const remoteControls = new RemoteControlRegistry();
@@ -189,6 +215,50 @@ function isRoomOwner(roomId: string | undefined, socketId: string | undefined): 
   const room = stmtGetRoomPrivate.get(roomId) as PrivateRoom | undefined;
   const clientId = userClientIds.get(socketId);
   return !!room?.ownerId && !!clientId && room.ownerId === clientId;
+}
+
+function roomError(error: unknown) {
+  return error instanceof RoomSettingsError
+    ? { ok: false as const, error: error.message, code: error.code }
+    : { ok: false as const, error: '房间操作失败，请重试', code: 'INVALID_SETTINGS' };
+}
+
+const roomCreationPending = new Set<string>();
+async function createRoomForSocket(socketId: unknown, data: { name?: unknown; maxMembers?: unknown; password?: unknown } | null) {
+  if (typeof socketId !== 'string' || !io.sockets.sockets.get(socketId)?.connected || !userClientIds.has(socketId))
+    throw new RoomSettingsError('NOT_REGISTERED', '请先连接并登录');
+  if (roomCreationPending.has(socketId)) throw new RoomSettingsError('RATE_LIMITED', '正在创建，请稍候');
+  if (typeof data?.name !== 'string' || !data.name.trim() || data.name.trim().length > 80)
+    throw new RoomSettingsError('INVALID_SETTINGS', '房间名称应为 1–80 个字符');
+  const name = data.name.trim();
+  const maxMembers = parseRoomLimit(data.maxMembers);
+  const password = validateRoomPassword(data.password);
+  const ownerId = userClientIds.get(socketId)!;
+  roomCreationPending.add(socketId);
+  try {
+    const secret = await hashRoomPassword(password);
+    if (!io.sockets.sockets.get(socketId)?.connected || userClientIds.get(socketId) !== ownerId)
+      throw new RoomSettingsError('NOT_REGISTERED', '登录连接已失效，请重试');
+    const room: Room = { id: randomUUID(), name, createdAt: Date.now(), ownerName: userNames.get(socketId) ?? '', maxMembers, hasPassword: secret.passwordHash !== null };
+    stmtInsertRoom.run(room.id, room.name, room.createdAt, ownerId, room.ownerName, maxMembers, secret.passwordHash, secret.passwordSalt);
+    io.emit('rooms:updated', stmtGetRooms.all());
+    return room;
+  } finally { roomCreationPending.delete(socketId); }
+}
+
+const roomPasswordAttempts = new Map<string, { count: number; until: number }>();
+function passwordAttemptKey(clientId: string, roomId: string) {
+  const now = Date.now();
+  for (const [key, value] of roomPasswordAttempts) if (value.until <= now) roomPasswordAttempts.delete(key);
+  const key = `${clientId}:${roomId}`;
+  if ((roomPasswordAttempts.get(key)?.count ?? 0) >= 5)
+    throw new RoomSettingsError('RATE_LIMITED', '密码尝试过于频繁，请一分钟后再试');
+  if (roomPasswordAttempts.size >= 10_000 && !roomPasswordAttempts.has(key))
+    throw new RoomSettingsError('RATE_LIMITED', '请求过多，请稍后再试');
+  const current = roomPasswordAttempts.get(key) ?? { count: 0, until: now + 60_000 };
+  current.count += 1;
+  roomPasswordAttempts.set(key, current);
+  return key;
 }
 
 function toPublicSoundpack(pack: SoundpackRecord, requesterSocketId?: string, roomId?: string): PublicSoundpack {
@@ -261,7 +331,11 @@ app.post('/api/auth/login', async (req, res) => {
   if (typeof email !== 'string' || typeof password !== 'string') {
     res.status(400).json({ error: '请填写邮箱和密码' }); return;
   }
-  try { res.json(await accounts.login(email, password)); }
+  try {
+    const result = await accounts.login(email, password);
+    replaceAccountSocket(result.account.id);
+    res.json(result);
+  }
   catch (error) { authResponse(error, res); }
 });
 
@@ -318,19 +392,12 @@ app.post('/api/soundpacks', (req, res) => {
 
 app.get('/api/rooms', (_req, res) => { res.json(stmtGetRooms.all()); });
 
-app.post('/api/rooms', (req, res) => {
-  const { name, socketId } = req.body as { name?: string; socketId?: string };
-  if (!name?.trim()) { res.status(400).json({ error: 'Name required' }); return; }
-  const ownerId = socketId ? userClientIds.get(socketId) : undefined;
-  const ownerName = socketId ? userNames.get(socketId) : undefined;
-  if (!ownerId || !ownerName) {
-    res.status(401).json({ error: '请先连接并注册用户' }); return;
+app.post('/api/rooms', async (req, res) => {
+  try {
+    res.json(await createRoomForSocket(req.body?.socketId, req.body));
+  } catch (error) {
+    res.status(error instanceof RoomSettingsError && error.code === 'NOT_REGISTERED' ? 401 : 400).json(roomError(error));
   }
-  const id = Math.random().toString(36).slice(2, 9);
-  const room: Room = { id, name: name.trim(), createdAt: Date.now(), ownerName };
-  stmtInsertRoom.run(room.id, room.name, room.createdAt, ownerId, ownerName);
-  io.emit('rooms:updated', stmtGetRooms.all());
-  res.json(room);
 });
 
 app.get('/api/rooms/:id', (req, res) => {
@@ -340,6 +407,10 @@ app.get('/api/rooms/:id', (req, res) => {
 });
 
 app.get('/api/rooms/:id/messages', (req, res) => {
+  const room = stmtGetRoom.get(req.params.id);
+  if (!room) { res.status(404).json({ error: '房间不存在' }); return; }
+  // Private rooms must use the authenticated, joined Socket.IO history endpoint.
+  if (room.hasPassword) { res.status(403).json({ error: '请进入房间后读取聊天记录' }); return; }
   res.json(stmtGetMessages.all(req.params.id));
 });
 
@@ -577,8 +648,7 @@ function announceVoicePresence(
 
 function handleVoiceLeave(socketId: string, roomId: string) {
   const members = voiceRooms.get(roomId);
-  if (!members?.has(socketId)) return;
-  members.delete(socketId);
+  const wasInVoice = members?.delete(socketId);
   selfMutedVoiceMembers.delete(socketId);
   const username = userNames.get(socketId) ?? socketId;
   // 客户端异常退出、快速离开再加入时，也必须由服务端关闭旧 Producer。
@@ -593,6 +663,7 @@ function handleVoiceLeave(socketId: string, roomId: string) {
       peer.producers.delete(producerId);
     }
   }
+  if (!wasInVoice || !members) return;
   [...members].forEach(mid => io.to(mid).emit('voice:user-left', { socketId }));
   announceVoicePresence(roomId, socketId, username, 'leave', members);
   // 共享状态属于频道成员状态，即使成员不在语音中也要及时清除头像下的提示。
@@ -632,6 +703,8 @@ function broadcastRoomMembers(roomId: string) {
       roomId,
       ownerName: room.ownerName,
       isOwner: !!clientId && clientId === room.ownerId,
+      maxMembers: room.maxMembers,
+      hasPassword: !!room.passwordHash,
       members: list,
     });
   }
@@ -720,17 +793,79 @@ function stopRemoteControlForRoom(roomId: string, reason: string) {
   cleared.sessions.forEach(session => emitRemoteControlStopped(session, reason));
 }
 
+function broadcastOnlineUsers() {
+  io.emit('users:online', createLobbyPresenceSnapshot(
+    userNames, userAvatars, roomMembers, voiceRooms, userPlatforms,
+  ).onlineUsers);
+}
+
+// Shared by normal disconnect expiry and account takeover. It deliberately
+// does not depend on the Socket instance: a grace-period socket may already
+// be absent from io.sockets.sockets when the new login arrives.
+function cleanupDisconnectedPeer(socketId: string) {
+  disconnectGrace.cancel(socketId);
+  stopRemoteControlForSocket(socketId, '成员连接已断开');
+  voiceRooms.forEach((_, roomId) => handleVoiceLeave(socketId, roomId));
+  roomMembers.forEach((members, roomId) => {
+    if (!members.delete(socketId)) return;
+    broadcastRoomMembers(roomId);
+  });
+  userNames.delete(socketId);
+  userAvatars.delete(socketId);
+  userClientIds.delete(socketId);
+  userPlatforms.delete(socketId);
+  remoteControlCapabilities.delete(socketId);
+  for (const [accountId, accountSocketId] of accountSockets) {
+    if (accountSocketId === socketId) accountSockets.delete(accountId);
+  }
+  broadcastOnlineUsers();
+  removePeer(socketId);
+}
+
+function replaceAccountSocket(accountId: string) {
+  const previousSocketId = accountSockets.get(accountId);
+  if (!previousSocketId) return;
+  const previousSocket = io.sockets.sockets.get(previousSocketId);
+  if (previousSocket) previousSocket.emit('account:session-replaced');
+  cleanupDisconnectedPeer(previousSocketId);
+  previousSocket?.disconnect(true);
+  accountSockets.delete(accountId);
+}
+
 // ── Socket.io ─────────────────────────────────────────────────────────────────
 
-io.on('connection', socket => {
-  console.log(`[+] ${socket.id}`);
-  createPeer(socket.id);
-
-  function broadcastOnlineUsers() {
-    io.emit('users:online', createLobbyPresenceSnapshot(
-      userNames, userAvatars, roomMembers, voiceRooms, userPlatforms,
-    ).onlineUsers);
+// Reject expired/revoked snapshots before Socket.IO replays their buffered packets.
+const recoveryAdapter = io.of('/').adapter;
+const restoreSession = recoveryAdapter.restoreSession.bind(recoveryAdapter);
+recoveryAdapter.restoreSession = async (pid, offset) => {
+  const session = await restoreSession(pid, offset);
+  if (session) {
+    const token = (session.data as { authToken?: string })?.authToken;
+    if (!peers.has(session.sid)
+      || (token && !accounts.accountForToken(token))) {
+      // Socket.IO falls back to a fresh connection if snapshot restoration throws.
+      throw new Error('Recovery session no longer valid');
+    }
+    const allowedRooms = session.rooms.filter(roomId => roomId === session.sid || roomMembers.get(roomId)?.has(session.sid));
+    if (allowedRooms.length !== session.rooms.length) {
+      // Preserve the kick/delete notification so the client leaves its room UI,
+      // but never replay chat/media data or restore access to a revoked room.
+      session.rooms = allowedRooms;
+      session.missedPackets = session.missedPackets.filter(packet => packet[0] === 'room:kicked' || packet[0] === 'room:deleted');
+    }
   }
+  return session;
+};
+
+io.on('connection', socket => {
+  console.log(`[+] ${socket.id} recovered=${socket.recovered}`);
+  disconnectGrace.recover(socket.id);
+  if (!peers.has(socket.id)) createPeer(socket.id);
+  // A kick/deletion during the outage must not restore stale room access.
+  for (const roomId of socket.rooms) {
+    if (roomId !== socket.id && !roomMembers.get(roomId)?.has(socket.id)) socket.leave(roomId);
+  }
+  socket.emit('session:checkpoint');
 
   const sanitizeAvatarUrl = (value: unknown): string | null => {
     if (value == null || value === '') return null;
@@ -749,27 +884,52 @@ io.on('connection', socket => {
 
   socket.on('user:register', (
     registration: string | { username?: string; clientId?: string; authToken?: string; avatarUrl?: unknown; platform?: unknown; remoteControlSupported?: unknown },
-    cb?: (result: { ok: boolean; error?: string }) => void,
+    cb?: (result: { ok: boolean; error?: string; code?: string }) => void,
   ) => {
     const account = typeof registration === 'string' ? null : accounts.accountForToken(registration?.authToken);
     if (typeof registration !== 'string' && registration?.authToken && !account) {
       cb?.({ ok: false, error: '登录已失效，请重新登录' }); return;
     }
-    const username = (account?.username ?? (typeof registration === 'string' ? registration : registration?.username))?.trim();
-    const suppliedClientId = typeof registration === 'string' ? '' : registration?.clientId?.trim();
+    const boundAccountId = socket.data.accountId as string | undefined;
+    if (boundAccountId && boundAccountId !== account?.id) {
+      cb?.({ ok: false, error: '此连接已绑定其他账号，请重新连接', code: 'ACCOUNT_SWITCH_FORBIDDEN' }); return;
+    }
+    const submittedName = account?.username ?? (typeof registration === 'string' ? registration : registration?.username);
+    const username = typeof submittedName === 'string' ? submittedName.trim() : '';
+    const submittedClientId = typeof registration === 'string' ? '' : registration?.clientId;
+    const suppliedClientId = typeof submittedClientId === 'string' ? submittedClientId.trim() : '';
     if (!username) { cb?.({ ok: false, error: '用户名不能为空' }); return; }
+    if (account) {
+      const previousSocketId = accountSockets.get(account.id);
+      if (previousSocketId && previousSocketId !== socket.id) {
+        const previousSocket = io.sockets.sockets.get(previousSocketId);
+        // A second live connection with the same current token is usually an
+        // automatic reconnect racing the first one. Keep the owner stable;
+        // only a fresh REST login is allowed to replace it.
+        if (previousSocket?.connected && previousSocket.data.authToken === (registration as { authToken?: string }).authToken) {
+          cb?.({ ok: false, error: '账号已在其他设备使用，请先退出另一端', code: 'SESSION_IN_USE' }); return;
+        }
+        // A disconnected grace socket may no longer be in Socket.IO's map.
+        // Remove its state before accepting the new connection.
+        cleanupDisconnectedPeer(previousSocketId);
+        previousSocket?.disconnect(true);
+      }
+      accountSockets.set(account.id, socket.id);
+    }
 
     // 旧客户端没有 clientId 时仍可聊天，但它的身份只在本次连接内有效。
     const clientId = account
       ? `account:${account.id}`
-      : suppliedClientId && suppliedClientId.length >= 16 && suppliedClientId.length <= 128
+      : suppliedClientId && !suppliedClientId.startsWith('account:') && suppliedClientId.length >= 16 && suppliedClientId.length <= 128
         ? suppliedClientId
         : `socket:${socket.id}`;
-    if (account && suppliedClientId && suppliedClientId.length >= 16 && suppliedClientId.length <= 128)
+    if (account && suppliedClientId && !suppliedClientId.startsWith('account:') && suppliedClientId.length >= 16 && suppliedClientId.length <= 128)
       migrateLegacyIdentity(suppliedClientId, clientId);
     userNames.set(socket.id, username.slice(0, 64));
     userAvatars.set(socket.id, sanitizeAvatarUrl(account?.avatarUrl ?? (typeof registration === 'string' ? null : registration.avatarUrl)));
     userClientIds.set(socket.id, clientId);
+    socket.data.authToken = account && typeof registration !== 'string' ? registration.authToken : undefined;
+    socket.data.accountId = account?.id;
     const platform = sanitizeClientPlatform(typeof registration === 'string' ? null : registration.platform);
     if (platform) userPlatforms.set(socket.id, platform);
     else userPlatforms.delete(socket.id);
@@ -812,62 +972,109 @@ io.on('connection', socket => {
     });
   });
 
-  socket.on('room:create', (
-    { name }: { name?: string },
-    cb?: (result: { room?: Room; error?: string }) => void,
-  ) => {
-    const ownerId = userClientIds.get(socket.id);
-    const ownerName = userNames.get(socket.id);
-    if (!name?.trim()) { cb?.({ error: '请输入房间名称' }); return; }
-    if (!ownerId || !ownerName) { cb?.({ error: '用户尚未注册，请重新连接' }); return; }
-
-    const room: Room = {
-      id: Math.random().toString(36).slice(2, 9),
-      name: name.trim().slice(0, 80),
-      createdAt: Date.now(),
-      ownerName,
-    };
-    stmtInsertRoom.run(room.id, room.name, room.createdAt, ownerId, ownerName);
-    io.emit('rooms:updated', stmtGetRooms.all());
-    cb?.({ room });
+  socket.on('room:create', async (data, cb) => {
+    try { cb?.({ room: await createRoomForSocket(socket.id, data) }); }
+    catch (error) { cb?.(roomError(error)); }
   });
 
-  socket.on('room:join', (roomId: string, cb?: (result: { ok: boolean; error?: string }) => void) => {
-    let room = stmtGetRoomPrivate.get(roomId) as PrivateRoom | undefined;
-    const clientId = userClientIds.get(socket.id);
-    const username = userNames.get(socket.id);
-    if (!room || !clientId || !username) { cb?.({ ok: false, error: '房间不存在或用户尚未注册' }); return; }
-
-    // 升级前的旧房间没有 ownerId：服务端只允许首次进入者原子认领一次。
-    if (!room.ownerId) {
-      const claim = stmtClaimRoom.run(clientId, username, roomId);
-      if (claim.changes > 0) {
-        io.emit('rooms:updated', stmtGetRooms.all());
-        room = stmtGetRoomPrivate.get(roomId) as PrivateRoom;
+  let joinAttempt = 0;
+  let joinPending = false;
+  let settingsPending = false;
+  socket.on('room:join', async (data: string | { roomId?: unknown; password?: unknown }, cb) => {
+    if (joinPending) { cb?.(roomError(new RoomSettingsError('RATE_LIMITED', '正在加入，请稍候'))); return; }
+    const attempt = ++joinAttempt;
+    joinPending = true;
+    try {
+      const roomId = typeof data === 'string' ? data : data?.roomId;
+      if (typeof roomId !== 'string') throw new RoomSettingsError('ROOM_NOT_FOUND', '房间不存在');
+      const initialRoom = stmtGetRoomPrivate.get(roomId) as PrivateRoom | undefined;
+      const clientId = userClientIds.get(socket.id);
+      if (!clientId || !userNames.has(socket.id)) throw new RoomSettingsError('NOT_REGISTERED', '请先登录');
+      if (!initialRoom) throw new RoomSettingsError('ROOM_NOT_FOUND', '房间不存在');
+      const wasMember = roomMembers.get(roomId)?.has(socket.id);
+      assertRoomCapacity(roomMembers.get(roomId) ?? new Set(), socket.id, initialRoom.maxMembers);
+      let verifiedPassword = false;
+      if (!wasMember && initialRoom.ownerId !== clientId && initialRoom.passwordHash) {
+        const password = typeof data === 'string' ? undefined : data.password;
+        if (password === undefined || password === '') throw new RoomSettingsError('PASSWORD_REQUIRED', '请输入房间密码');
+        const key = passwordAttemptKey(clientId, roomId);
+        if (!initialRoom.passwordSalt || !await verifyRoomPassword(password, initialRoom.passwordHash, initialRoom.passwordSalt))
+          throw new RoomSettingsError('INVALID_PASSWORD', '房间密码错误');
+        roomPasswordAttempts.delete(key);
+        verifiedPassword = true;
       }
+      if (!socket.connected || attempt !== joinAttempt || userClientIds.get(socket.id) !== clientId)
+        throw new RoomSettingsError('NOT_REGISTERED', '连接或入房请求已失效');
+      const room = stmtGetRoomPrivate.get(roomId) as PrivateRoom | undefined;
+      if (!room) throw new RoomSettingsError('ROOM_NOT_FOUND', '房间已被删除');
+      if (verifiedPassword && (room.passwordHash !== initialRoom.passwordHash || room.passwordSalt !== initialRoom.passwordSalt))
+        throw new RoomSettingsError('PASSWORD_REQUIRED', '房间密码已更新，请重新输入');
+      // Final capacity check and reservation are synchronous, even after password hashing.
+      const members = roomMembers.get(roomId) ?? new Set<string>();
+      assertRoomCapacity(members, socket.id, room.maxMembers);
+      if (!room.ownerId) {
+        stmtClaimRoom.run(clientId, userNames.get(socket.id), roomId);
+        io.emit('rooms:updated', stmtGetRooms.all());
+      }
+      const previousRoom = peers.get(socket.id)?.roomId;
+      if (previousRoom && previousRoom !== roomId) {
+        stopRemoteControlForSocket(socket.id, '成员已切换房间');
+        handleVoiceLeave(socket.id, previousRoom);
+        roomMembers.get(previousRoom)?.delete(socket.id);
+        socket.leave(previousRoom);
+        broadcastRoomMembers(previousRoom);
+      }
+      socket.join(roomId);
+      members.add(socket.id);
+      roomMembers.set(roomId, members);
+      const peer = peers.get(socket.id);
+      if (peer) peer.roomId = roomId;
+      broadcastRoomMembers(roomId);
+      broadcastVoiceList(roomId);
+      emitForcedMuteState(socket.id, roomId);
+      cb?.({ ok: true });
+    } catch (error) { cb?.(roomError(error)); }
+    finally { joinPending = false; }
+  });
+
+  socket.on('room:history', (data: { roomId?: unknown }, cb) => {
+    const roomId = data?.roomId;
+    if (typeof roomId !== 'string' || !roomMembers.get(roomId)?.has(socket.id)) {
+      cb?.(roomError(new RoomSettingsError('FORBIDDEN', '请先进入房间'))); return;
     }
-    socket.join(roomId);
-    if (!roomMembers.has(roomId)) roomMembers.set(roomId, new Set());
-    const members = roomMembers.get(roomId)!;
-    members.add(socket.id);
-    broadcastRoomMembers(roomId);
-    // 新进入频道的客户端可能错过之前的语音广播，进入时必须补发当前完整列表。
-    broadcastVoiceList(roomId);
-    emitForcedMuteState(socket.id, roomId);
-    // Track room for mediasoup
-    const peer = peers.get(socket.id);
-    if (peer) peer.roomId = roomId;
-    cb?.({ ok: true });
+    cb?.({ ok: true, messages: stmtGetMessages.all(roomId) });
+  });
+
+  socket.on('room:update-settings', async (data: { roomId?: unknown; maxMembers?: unknown; password?: unknown }, cb) => {
+    if (settingsPending) { cb?.(roomError(new RoomSettingsError('RATE_LIMITED', '正在保存，请稍候'))); return; }
+    settingsPending = true;
+    try {
+      const roomId = data?.roomId;
+      if (typeof roomId !== 'string' || !isRoomOwner(roomId, socket.id))
+        throw new RoomSettingsError('FORBIDDEN', '只有房主可以修改房间设置');
+      const password = validateRoomPassword(data.password);
+      const requestedLimit = data.maxMembers === undefined ? undefined : parseRoomLimit(data.maxMembers);
+      const secret = password === undefined ? undefined : await hashRoomPassword(password);
+      if (!socket.connected || !isRoomOwner(roomId, socket.id)) throw new RoomSettingsError('FORBIDDEN', '房主身份已失效');
+      const current = stmtGetRoomPrivate.get(roomId) as PrivateRoom;
+      stmtUpdateRoomSettings.run(requestedLimit === undefined ? current.maxMembers : requestedLimit,
+        secret ? secret.passwordHash : current.passwordHash, secret ? secret.passwordSalt : current.passwordSalt, roomId);
+      broadcastRoomMembers(roomId);
+      io.emit('rooms:updated', stmtGetRooms.all());
+      cb?.({ ok: true, room: stmtGetRoom.get(roomId) });
+    } catch (error) { cb?.(roomError(error)); }
+    finally { settingsPending = false; }
   });
 
   socket.on('room:leave', (roomId: string) => {
+    joinAttempt += 1;
     stopRemoteControlForSocket(socket.id, '成员已离开频道');
     handleVoiceLeave(socket.id, roomId);
     roomMembers.get(roomId)?.delete(socket.id);
     socket.leave(roomId);
     broadcastRoomMembers(roomId);
     const peer = peers.get(socket.id);
-    if (peer) peer.roomId = null;
+    if (peer?.roomId === roomId) peer.roomId = null;
   });
 
   // ── Remote control ────────────────────────────────────────────────────────
@@ -1550,21 +1757,15 @@ io.on('connection', socket => {
 
   // ── Disconnect ────────────────────────────────────────────────────────────
 
-  socket.on('disconnect', () => {
-    console.log(`[-] ${socket.id}`);
-    voiceRooms.forEach((_, roomId) => handleVoiceLeave(socket.id, roomId));
-    roomMembers.forEach((members, roomId) => {
-      if (!members.delete(socket.id)) return;
-      broadcastRoomMembers(roomId);
-    });
-    userNames.delete(socket.id);
-    userAvatars.delete(socket.id);
-    userClientIds.delete(socket.id);
-    userPlatforms.delete(socket.id);
-    remoteControlCapabilities.delete(socket.id);
+  socket.on('disconnect', reason => {
+    console.log(`[-] ${socket.id} reason=${reason}`);
     stopRemoteControlForSocket(socket.id, '成员连接已断开');
-    broadcastOnlineUsers();
-    removePeer(socket.id);
+    const cleanup = () => cleanupDisconnectedPeer(socket.id);
+    if (reason === 'transport close' || reason === 'transport error' || reason === 'ping timeout') {
+      disconnectGrace.fail(socket.id, cleanup);
+    } else {
+      cleanup();
+    }
   });
 });
 
@@ -1575,8 +1776,16 @@ export async function startServer(port = 3001): Promise<number> {
   return new Promise((resolve, reject) => {
     // 显式绑定 0.0.0.0（所有 IPv4 接口），确保 frp 用 127.0.0.1 也能连上。
     // 不指定 host 时 Windows 默认只绑 IPv6(::)，导致 frp 拨 127.0.0.1 被拒绝。
-    httpServer.listen(port, '0.0.0.0', () => resolve(port)).on('error', reject);
+    httpServer.listen(port, '0.0.0.0', () => {
+      const address = httpServer.address();
+      resolve(address && typeof address !== 'string' ? address.port : port);
+    }).on('error', reject);
   });
+}
+
+export async function stopServer(): Promise<void> {
+  await new Promise<void>(resolve => io.close(() => resolve()));
+  db.close();
 }
 
 if (require.main === module) {
