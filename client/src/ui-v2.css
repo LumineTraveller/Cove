@@ -7252,6 +7252,27 @@ body .cove-window-controls button {
   touch-action: manipulation;
 }
 
+/* Content headers used to be marked as native drag regions.  On Windows a
+   drag region can win the OS-level hit test even when a sibling titlebar is
+   visually above it, which made the controls work on the login view but not
+   after the shell mounted.  Keep dragging on the dedicated titlebar strip
+   and make every routed surface explicitly non-draggable. */
+.auth-page,
+.cove-v2-page,
+.cove-shell,
+.lobby-shell,
+.workspace-header,
+.lobby-header,
+.auth-brand,
+.nav-brand,
+.chat-panel > header {
+  -webkit-app-region: no-drag !important;
+}
+.cove-window-drag-region {
+  -webkit-app-region: drag !important;
+  pointer-events: auto !important;
+}
+
 /* Keep avatar content on the same visual inset as the Cove mark.  Narrow
    rails are already centered, so the extra leading space applies only while
    a rail/card has room for its labels. */
