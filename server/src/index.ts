@@ -61,7 +61,12 @@ db.exec(`
     name TEXT NOT NULL,
     createdAt INTEGER NOT NULL,
     ownerId TEXT,
-    ownerName TEXT
+    ownerName TEXT,
+    avatarUrl TEXT,
+    backgroundTop TEXT,
+    backgroundBottom TEXT,
+    backgroundTopDark TEXT,
+    backgroundBottomDark TEXT
   );
   CREATE TABLE IF NOT EXISTS messages (
     id TEXT PRIMARY KEY,
@@ -103,6 +108,16 @@ if (!roomColumns.some(column => column.name === 'passwordHash'))
   db.exec('ALTER TABLE rooms ADD COLUMN passwordHash TEXT');
 if (!roomColumns.some(column => column.name === 'passwordSalt'))
   db.exec('ALTER TABLE rooms ADD COLUMN passwordSalt TEXT');
+if (!roomColumns.some(column => column.name === 'avatarUrl'))
+  db.exec('ALTER TABLE rooms ADD COLUMN avatarUrl TEXT');
+if (!roomColumns.some(column => column.name === 'backgroundTop'))
+  db.exec('ALTER TABLE rooms ADD COLUMN backgroundTop TEXT');
+if (!roomColumns.some(column => column.name === 'backgroundBottom'))
+  db.exec('ALTER TABLE rooms ADD COLUMN backgroundBottom TEXT');
+if (!roomColumns.some(column => column.name === 'backgroundTopDark'))
+  db.exec('ALTER TABLE rooms ADD COLUMN backgroundTopDark TEXT');
+if (!roomColumns.some(column => column.name === 'backgroundBottomDark'))
+  db.exec('ALTER TABLE rooms ADD COLUMN backgroundBottomDark TEXT');
 const messageColumns = db.prepare('PRAGMA table_info(messages)').all() as { name: string }[];
 if (!messageColumns.some(column => column.name === 'type'))
   db.exec("ALTER TABLE messages ADD COLUMN type TEXT NOT NULL DEFAULT 'chat'");
@@ -121,7 +136,7 @@ if (!soundpackColumns.some(column => column.name === 'sortOrder')) {
 const accounts = createAccountStore(db);
 
 // ownerId 是本地持久身份凭据，不通过 API 或 Socket 广播给其他客户端。
-const publicRoomColumns = 'id, name, createdAt, ownerName, maxMembers, (passwordHash IS NOT NULL) AS hasPassword';
+const publicRoomColumns = 'id, name, createdAt, ownerName, maxMembers, (passwordHash IS NOT NULL) AS hasPassword, avatarUrl, backgroundTop, backgroundBottom, backgroundTopDark, backgroundBottomDark';
 const roomListQuery = db.prepare(`SELECT ${publicRoomColumns} FROM rooms ORDER BY createdAt ASC`);
 const roomQuery = db.prepare(`SELECT ${publicRoomColumns} FROM rooms WHERE id = ?`);
 const stmtGetRooms = { all: () => roomListQuery.all().map(row => ({ ...row as Room, hasPassword: !!(row as Room).hasPassword })) };
@@ -129,17 +144,37 @@ const stmtGetRoom = { get: (id: string) => {
   const row = roomQuery.get(id) as Room | undefined;
   return row ? { ...row, hasPassword: !!row.hasPassword } : undefined;
 } };
-const stmtGetRoomPrivate = db.prepare('SELECT id, name, createdAt, ownerId, ownerName, maxMembers, passwordHash, passwordSalt FROM rooms WHERE id = ?');
-const stmtInsertRoom = db.prepare('INSERT INTO rooms (id, name, createdAt, ownerId, ownerName, maxMembers, passwordHash, passwordSalt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
-const stmtUpdateRoomSettings = db.prepare('UPDATE rooms SET maxMembers = ?, passwordHash = ?, passwordSalt = ? WHERE id = ?');
+const stmtGetRoomPrivate = db.prepare('SELECT id, name, createdAt, ownerId, ownerName, maxMembers, passwordHash, passwordSalt, avatarUrl, backgroundTop, backgroundBottom, backgroundTopDark, backgroundBottomDark FROM rooms WHERE id = ?');
+const stmtGetRoomOwners = db.prepare('SELECT id, ownerId FROM rooms');
+const stmtInsertRoom = db.prepare('INSERT INTO rooms (id, name, createdAt, ownerId, ownerName, maxMembers, passwordHash, passwordSalt, avatarUrl, backgroundTop, backgroundBottom, backgroundTopDark, backgroundBottomDark) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+const stmtUpdateRoomSettings = db.prepare('UPDATE rooms SET name = ?, maxMembers = ?, passwordHash = ?, passwordSalt = ?, avatarUrl = ?, backgroundTop = ?, backgroundBottom = ?, backgroundTopDark = ?, backgroundBottomDark = ? WHERE id = ?');
 const stmtClaimRoom      = db.prepare('UPDATE rooms SET ownerId = ?, ownerName = ? WHERE id = ? AND ownerId IS NULL');
 const stmtUpdateOwnerName = db.prepare('UPDATE rooms SET ownerName = ? WHERE ownerId = ? AND ownerName IS NOT ?');
+// 账号系统上线前，旧房主身份可能保存的是设备 clientId 而不是 accountId。
+// 登录后按房主公开昵称完成一次性迁移；已绑定 account: 身份的房间不会被改写。
+const stmtMigrateLegacyOwnersByName = db.prepare(
+  "UPDATE rooms SET ownerId = ?, ownerName = ? WHERE ownerName = ? AND ownerId IS NOT NULL AND ownerId NOT LIKE 'account:%'",
+);
 const stmtDeleteRoom     = db.prepare('DELETE FROM rooms WHERE id = ?');
 const stmtDeleteRoomMessages = db.prepare('DELETE FROM messages WHERE roomId = ?');
 const stmtDeleteRoomMutes = db.prepare('DELETE FROM room_mutes WHERE roomId = ?');
 // 语音加入/离开和语音包播放属于当前会话播报，不应在重新进入频道时恢复。
 // 过滤这里也能兼容升级前已经写入数据库的旧播报记录。
-const stmtGetMessages    = db.prepare("SELECT * FROM messages WHERE roomId = ? AND type NOT IN ('system', 'soundpack') ORDER BY timestamp ASC");
+const CHAT_HISTORY_PAGE_SIZE = 50;
+const stmtGetLatestMessagesPage = db.prepare(`
+  SELECT * FROM messages
+  WHERE roomId = ? AND type NOT IN ('system', 'soundpack')
+  ORDER BY timestamp DESC, id DESC
+  LIMIT ?
+`);
+const stmtGetOlderMessagesPage = db.prepare(`
+  SELECT * FROM messages
+  WHERE roomId = ?
+    AND type NOT IN ('system', 'soundpack')
+    AND (timestamp < ? OR (timestamp = ? AND id < ?))
+  ORDER BY timestamp DESC, id DESC
+  LIMIT ?
+`);
 const stmtInsertMsg      = db.prepare('INSERT INTO messages (id, roomId, author, content, type, timestamp) VALUES (?, ?, ?, ?, ?, ?)');
 const stmtIsRoomMuted    = db.prepare('SELECT 1 FROM room_mutes WHERE roomId = ? AND clientId = ?');
 const stmtMuteMember     = db.prepare('INSERT OR REPLACE INTO room_mutes (roomId, clientId, username, createdAt) VALUES (?, ?, ?, ?)');
@@ -167,9 +202,10 @@ const deleteRoomData = db.transaction((roomId: string) => {
   stmtDeleteRoom.run(roomId);
 });
 
-interface Room      { id: string; name: string; createdAt: number; ownerName: string | null; maxMembers: number | null; hasPassword: boolean }
+interface Room      { id: string; name: string; createdAt: number; ownerName: string | null; maxMembers: number | null; hasPassword: boolean; avatarUrl: string | null; backgroundTop: string | null; backgroundBottom: string | null; backgroundTopDark: string | null; backgroundBottomDark: string | null }
 interface PrivateRoom extends Omit<Room, 'hasPassword'> { ownerId: string | null; passwordHash: string | null; passwordSalt: string | null }
 interface Message   { id: string; roomId: string; author: string; content: string; type: 'chat' | 'soundpack' | 'image' | 'system'; timestamp: number }
+interface MessageHistoryCursor { timestamp: number; id: string }
 interface SoundpackRecord { id: string; name: string; filename: string; uploader: string; uploaderId: string | null; createdAt: number; sortOrder: number }
 interface PublicSoundpack { id: string; name: string; filename: string; uploader: string; createdAt: number; sortOrder: number; canDelete: boolean }
 interface RoomMember {
@@ -183,6 +219,39 @@ interface RoomMember {
   isSharingApplicationAudio: boolean;
   platform: ClientPlatform | null;
   canReceiveRemoteControl: boolean;
+}
+
+function isMessageHistoryCursor(value: unknown): value is MessageHistoryCursor {
+  if (!value || typeof value !== 'object') return false;
+  const cursor = value as Record<string, unknown>;
+  return Number.isSafeInteger(cursor.timestamp) &&
+    typeof cursor.id === 'string' &&
+    cursor.id.length > 0;
+}
+
+function getMessageHistory(roomId: string, before?: MessageHistoryCursor) {
+  const rows = (before
+    ? stmtGetOlderMessagesPage.all(
+      roomId,
+      before.timestamp,
+      before.timestamp,
+      before.id,
+      CHAT_HISTORY_PAGE_SIZE + 1,
+    )
+    : stmtGetLatestMessagesPage.all(
+      roomId,
+      CHAT_HISTORY_PAGE_SIZE + 1,
+    )) as Message[];
+  const hasMore = rows.length > CHAT_HISTORY_PAGE_SIZE;
+  const messages = rows.slice(0, CHAT_HISTORY_PAGE_SIZE).reverse();
+  const oldest = messages[0];
+  return {
+    messages,
+    hasMore,
+    cursor: oldest
+      ? { timestamp: oldest.timestamp, id: oldest.id }
+      : null,
+  };
 }
 
 // ── 语音包文件目录 ─────────────────────────────────────────────────────────────
@@ -223,8 +292,25 @@ function roomError(error: unknown) {
     : { ok: false as const, error: '房间操作失败，请重试', code: 'INVALID_SETTINGS' };
 }
 
+const ROOM_COLOR_RE = /^#[0-9a-f]{6}$/i;
+const DEFAULT_ROOM_COLOR = '#FFFFFF';
+const DEFAULT_ROOM_DARK_TOP = '#111827';
+const DEFAULT_ROOM_DARK_BOTTOM = '#0B1220';
+function sanitizeRoomColor(value: unknown, fallback: string | null = null): string | null {
+  if (value == null || value === '') return fallback;
+  if (typeof value !== 'string' || !ROOM_COLOR_RE.test(value.trim()))
+    throw new RoomSettingsError('INVALID_SETTINGS', '房间背景颜色必须是六位 HEX 颜色代码');
+  return value.trim().toUpperCase();
+}
+function sanitizeRoomAvatar(value: unknown, fallback: string | null = null): string | null {
+  if (value == null || value === '') return fallback;
+  if (typeof value !== 'string' || value.length > 240 * 1024 || !/^data:image\/(?:png|jpeg|webp);base64,/i.test(value))
+    throw new RoomSettingsError('INVALID_SETTINGS', '房间头像格式不受支持或文件过大');
+  return value;
+}
+
 const roomCreationPending = new Set<string>();
-async function createRoomForSocket(socketId: unknown, data: { name?: unknown; maxMembers?: unknown; password?: unknown } | null) {
+async function createRoomForSocket(socketId: unknown, data: { name?: unknown; maxMembers?: unknown; password?: unknown; avatarUrl?: unknown; backgroundTop?: unknown; backgroundBottom?: unknown; backgroundTopDark?: unknown; backgroundBottomDark?: unknown } | null) {
   if (typeof socketId !== 'string' || !io.sockets.sockets.get(socketId)?.connected || !userClientIds.has(socketId))
     throw new RoomSettingsError('NOT_REGISTERED', '请先连接并登录');
   if (roomCreationPending.has(socketId)) throw new RoomSettingsError('RATE_LIMITED', '正在创建，请稍候');
@@ -239,8 +325,16 @@ async function createRoomForSocket(socketId: unknown, data: { name?: unknown; ma
     const secret = await hashRoomPassword(password);
     if (!io.sockets.sockets.get(socketId)?.connected || userClientIds.get(socketId) !== ownerId)
       throw new RoomSettingsError('NOT_REGISTERED', '登录连接已失效，请重试');
-    const room: Room = { id: randomUUID(), name, createdAt: Date.now(), ownerName: userNames.get(socketId) ?? '', maxMembers, hasPassword: secret.passwordHash !== null };
-    stmtInsertRoom.run(room.id, room.name, room.createdAt, ownerId, room.ownerName, maxMembers, secret.passwordHash, secret.passwordSalt);
+    const room: Room = {
+      id: randomUUID(), name, createdAt: Date.now(), ownerName: userNames.get(socketId) ?? '',
+      maxMembers, hasPassword: secret.passwordHash !== null,
+      avatarUrl: sanitizeRoomAvatar(data?.avatarUrl),
+      backgroundTop: sanitizeRoomColor(data?.backgroundTop, DEFAULT_ROOM_COLOR),
+      backgroundBottom: sanitizeRoomColor(data?.backgroundBottom, DEFAULT_ROOM_COLOR),
+      backgroundTopDark: sanitizeRoomColor(data?.backgroundTopDark, DEFAULT_ROOM_DARK_TOP),
+      backgroundBottomDark: sanitizeRoomColor(data?.backgroundBottomDark, DEFAULT_ROOM_DARK_BOTTOM),
+    };
+    stmtInsertRoom.run(room.id, room.name, room.createdAt, ownerId, room.ownerName, maxMembers, secret.passwordHash, secret.passwordSalt, room.avatarUrl, room.backgroundTop, room.backgroundBottom, room.backgroundTopDark, room.backgroundBottomDark);
     io.emit('rooms:updated', stmtGetRooms.all());
     return room;
   } finally { roomCreationPending.delete(socketId); }
@@ -411,7 +505,8 @@ app.get('/api/rooms/:id/messages', (req, res) => {
   if (!room) { res.status(404).json({ error: '房间不存在' }); return; }
   // Private rooms must use the authenticated, joined Socket.IO history endpoint.
   if (room.hasPassword) { res.status(403).json({ error: '请进入房间后读取聊天记录' }); return; }
-  res.json(stmtGetMessages.all(req.params.id));
+  // Keep the legacy array response shape while avoiding an unbounded query.
+  res.json(getMessageHistory(req.params.id).messages);
 });
 
 const CHAT_IMAGE_TYPES = new Map([
@@ -701,10 +796,16 @@ function broadcastRoomMembers(roomId: string) {
     const clientId = userClientIds.get(socketId);
     io.to(socketId).emit('room:state', {
       roomId,
+      name: room.name,
       ownerName: room.ownerName,
       isOwner: !!clientId && clientId === room.ownerId,
       maxMembers: room.maxMembers,
       hasPassword: !!room.passwordHash,
+      avatarUrl: room.avatarUrl,
+      backgroundTop: room.backgroundTop,
+      backgroundBottom: room.backgroundBottom,
+      backgroundTopDark: room.backgroundTopDark,
+      backgroundBottomDark: room.backgroundBottomDark,
       members: list,
     });
   }
@@ -925,6 +1026,10 @@ io.on('connection', socket => {
         : `socket:${socket.id}`;
     if (account && suppliedClientId && !suppliedClientId.startsWith('account:') && suppliedClientId.length >= 16 && suppliedClientId.length <= 128)
       migrateLegacyIdentity(suppliedClientId, clientId);
+    if (account) {
+      const migratedOwners = stmtMigrateLegacyOwnersByName.run(clientId, username.slice(0, 64), username.slice(0, 64));
+      if (migratedOwners.changes > 0) io.emit('rooms:updated', stmtGetRooms.all());
+    }
     userNames.set(socket.id, username.slice(0, 64));
     userAvatars.set(socket.id, sanitizeAvatarUrl(account?.avatarUrl ?? (typeof registration === 'string' ? null : registration.avatarUrl)));
     userClientIds.set(socket.id, clientId);
@@ -969,6 +1074,15 @@ io.on('connection', socket => {
     cb?.({
       ok: true,
       ...createLobbyPresenceSnapshot(userNames, userAvatars, roomMembers, voiceRooms, userPlatforms),
+    });
+  });
+
+  socket.on('rooms:get', (cb?: (result: { ok: true; rooms: Array<Room & { isOwner: boolean }> }) => void) => {
+    const clientId = userClientIds.get(socket.id);
+    const owners = new Map((stmtGetRoomOwners.all() as { id: string; ownerId: string | null }[]).map(row => [row.id, row.ownerId]));
+    cb?.({
+      ok: true,
+      rooms: stmtGetRooms.all().map(room => ({ ...room, isOwner: !!clientId && owners.get(room.id) === clientId })),
     });
   });
 
@@ -1037,28 +1151,47 @@ io.on('connection', socket => {
     finally { joinPending = false; }
   });
 
-  socket.on('room:history', (data: { roomId?: unknown }, cb) => {
+  socket.on('room:history', (data: { roomId?: unknown; before?: unknown }, cb) => {
     const roomId = data?.roomId;
     if (typeof roomId !== 'string' || !roomMembers.get(roomId)?.has(socket.id)) {
       cb?.(roomError(new RoomSettingsError('FORBIDDEN', '请先进入房间'))); return;
     }
-    cb?.({ ok: true, messages: stmtGetMessages.all(roomId) });
+    if (data?.before !== undefined && data.before !== null && !isMessageHistoryCursor(data.before)) {
+      cb?.(roomError(new RoomSettingsError('INVALID_SETTINGS', '历史记录游标无效'))); return;
+    }
+    const page = getMessageHistory(
+      roomId,
+      isMessageHistoryCursor(data?.before) ? data.before : undefined,
+    );
+    cb?.({ ok: true, ...page });
   });
 
-  socket.on('room:update-settings', async (data: { roomId?: unknown; maxMembers?: unknown; password?: unknown }, cb) => {
+  socket.on('room:update-settings', async (data: { roomId?: unknown; name?: unknown; maxMembers?: unknown; password?: unknown; avatarUrl?: unknown; backgroundTop?: unknown; backgroundBottom?: unknown; backgroundTopDark?: unknown; backgroundBottomDark?: unknown }, cb) => {
     if (settingsPending) { cb?.(roomError(new RoomSettingsError('RATE_LIMITED', '正在保存，请稍候'))); return; }
     settingsPending = true;
     try {
       const roomId = data?.roomId;
       if (typeof roomId !== 'string' || !isRoomOwner(roomId, socket.id))
         throw new RoomSettingsError('FORBIDDEN', '只有房主可以修改房间设置');
+      const current = stmtGetRoomPrivate.get(roomId) as PrivateRoom | undefined;
+      if (!current) throw new RoomSettingsError('ROOM_NOT_FOUND', '房间不存在');
+      const name = data.name === undefined ? current.name : (() => {
+        if (typeof data.name !== 'string' || !data.name.trim() || data.name.trim().length > 80)
+          throw new RoomSettingsError('INVALID_SETTINGS', '房间名称应为 1–80 个字符');
+        return data.name.trim();
+      })();
       const password = validateRoomPassword(data.password);
       const requestedLimit = data.maxMembers === undefined ? undefined : parseRoomLimit(data.maxMembers);
       const secret = password === undefined ? undefined : await hashRoomPassword(password);
+      const avatarUrl = data.avatarUrl === undefined ? current.avatarUrl : sanitizeRoomAvatar(data.avatarUrl, null);
+      const backgroundTop = data.backgroundTop === undefined ? current.backgroundTop : sanitizeRoomColor(data.backgroundTop, DEFAULT_ROOM_COLOR);
+      const backgroundBottom = data.backgroundBottom === undefined ? current.backgroundBottom : sanitizeRoomColor(data.backgroundBottom, DEFAULT_ROOM_COLOR);
+      const backgroundTopDark = data.backgroundTopDark === undefined ? current.backgroundTopDark : sanitizeRoomColor(data.backgroundTopDark, DEFAULT_ROOM_DARK_TOP);
+      const backgroundBottomDark = data.backgroundBottomDark === undefined ? current.backgroundBottomDark : sanitizeRoomColor(data.backgroundBottomDark, DEFAULT_ROOM_DARK_BOTTOM);
       if (!socket.connected || !isRoomOwner(roomId, socket.id)) throw new RoomSettingsError('FORBIDDEN', '房主身份已失效');
-      const current = stmtGetRoomPrivate.get(roomId) as PrivateRoom;
-      stmtUpdateRoomSettings.run(requestedLimit === undefined ? current.maxMembers : requestedLimit,
-        secret ? secret.passwordHash : current.passwordHash, secret ? secret.passwordSalt : current.passwordSalt, roomId);
+      stmtUpdateRoomSettings.run(name, requestedLimit === undefined ? current.maxMembers : requestedLimit,
+        secret ? secret.passwordHash : current.passwordHash, secret ? secret.passwordSalt : current.passwordSalt,
+        avatarUrl, backgroundTop, backgroundBottom, backgroundTopDark, backgroundBottomDark, roomId);
       broadcastRoomMembers(roomId);
       io.emit('rooms:updated', stmtGetRooms.all());
       cb?.({ ok: true, room: stmtGetRoom.get(roomId) });
@@ -1108,6 +1241,17 @@ io.on('connection', socket => {
       if (expired) emitRemoteRequestCancelled(expired, '远程控制请求已超时');
     }, REMOTE_CONTROL_REQUEST_TTL_MS + 50);
     cb?.({ ok: true, requestId: request.requestId, expiresAt: request.expiresAt });
+  });
+
+  socket.on('remote-control:cancel', (
+    { requestId }: { requestId?: string },
+    cb?: (result: { ok: boolean; error?: string }) => void,
+  ) => {
+    if (!requestId) { cb?.({ ok: false, error: '请求不存在' }); return; }
+    const cancelled = remoteControls.cancelRequest(requestId, socket.id);
+    if (!cancelled.ok) { cb?.({ ok: false, error: cancelled.error }); return; }
+    emitRemoteRequestCancelled(cancelled.value, '远程控制请求已取消');
+    cb?.({ ok: true });
   });
 
   socket.on('remote-control:respond', (
@@ -1301,12 +1445,19 @@ io.on('connection', socket => {
 
   // ── Voice member tracking (UI only) ───────────────────────────────────────
 
-  socket.on('voice:join', (roomId: string) => {
-    if (!stmtGetRoom.get(roomId) || !roomMembers.get(roomId)?.has(socket.id)) return;
+  socket.on('voice:join', (
+    roomId: string,
+    cb?: (response: { ok: true } | { error: string }) => void,
+  ) => {
+    if (!stmtGetRoom.get(roomId) || !roomMembers.get(roomId)?.has(socket.id)) {
+      cb?.({ error: '尚未加入该频道，无法加入语音' });
+      return;
+    }
     if (!voiceRooms.has(roomId)) voiceRooms.set(roomId, new Set());
     const members = voiceRooms.get(roomId)!;
     if (members.has(socket.id)) {
       socket.emit('voice:members-updated', currentVoiceList(roomId));
+      cb?.({ ok: true });
       return;
     }
     const existing = [...members];
@@ -1325,6 +1476,29 @@ io.on('connection', socket => {
     );
 
     members.add(socket.id);
+
+    // 旧版客户端会先创建麦克风 Producer、再发送 voice:join。
+    // 这时 ms:produce 无法把新流广播给尚未登记进 voiceRooms 的发送方，
+    // 因而已经在语音中的成员不会收到这一路音频。加入语音时补发已有
+    // 麦克风 Producer，使新旧客户端都不依赖事件到达顺序。
+    const peer = peers.get(socket.id);
+    for (const producer of peer?.producers.values() ?? []) {
+      const producerAppData = producer.appData as Record<string, unknown>;
+      if (
+        producer.closed ||
+        producer.kind !== 'audio' ||
+        producerAppData.type !== 'mic'
+      ) continue;
+      for (const mid of existing) {
+        io.to(mid).emit('ms:new-producer', {
+          producerId: producer.id,
+          peerId: socket.id,
+          kind: producer.kind,
+          appData: producer.appData,
+        });
+      }
+    }
+
     announceVoicePresence(
       roomId,
       socket.id,
@@ -1334,6 +1508,7 @@ io.on('connection', socket => {
     );
     broadcastVoiceList(roomId);
     broadcastVoiceCounts();
+    cb?.({ ok: true });
   });
 
   socket.on('voice:leave', (roomId: string) => {

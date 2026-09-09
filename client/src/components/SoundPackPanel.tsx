@@ -1,13 +1,80 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
-import type { Socket } from 'socket.io-client';
-import { AlertTriangle, GripVertical, LayoutGrid, LoaderCircle, Pause, Pencil, Play, Save, Trash2, Upload, Volume2, X } from 'lucide-react';
-import { applyAudioElementOutput, DEFAULT_AUDIO_DEVICE_ID } from '../audioDevices';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type RefObject,
+} from "react";
+import { createPortal } from "react-dom";
+import type { Socket } from "socket.io-client";
+import {
+  AlertTriangle,
+  GripVertical,
+  LayoutGrid,
+  LoaderCircle,
+  Pause,
+  Pencil,
+  Play,
+  Save,
+  Star,
+  Trash2,
+  Upload,
+  Volume2,
+  X,
+} from "lucide-react";
+import {
+  applyAudioElementOutput,
+  DEFAULT_AUDIO_DEVICE_ID,
+} from "../audioDevices";
 
-interface Soundpack { id: string; name: string; filename: string; uploader: string; createdAt: number; sortOrder: number; canDelete: boolean }
-interface Props { socket: Socket; roomId: string; serverURL: string; outputDeviceId?: string; inVoice: boolean; disabled?: boolean }
+interface Soundpack {
+  id: string;
+  name: string;
+  filename: string;
+  uploader: string;
+  createdAt: number;
+  sortOrder: number;
+  canDelete: boolean;
+}
+interface Props {
+  socket: Socket;
+  roomId: string;
+  serverURL: string;
+  outputDeviceId?: string;
+  inVoice: boolean;
+  disabled?: boolean;
+  hideTrigger?: boolean;
+  defaultOpen?: boolean;
+  open?: boolean;
+  onOpen?: () => void;
+  onClose?: () => void;
+  compact?: boolean;
+  anchorRef?: RefObject<HTMLElement>;
+  quickOpen?: boolean;
+  onQuickOpen?: () => void;
+  onQuickClose?: () => void;
+}
 
-const SOUNDPACK_VOLUME_KEY = 'cove:soundpack-volume';
+const SOUNDPACK_VOLUME_KEY = "cove:soundpack-volume";
+const SOUNDPACK_FAVORITES_KEY = "cove:soundpack-favorites";
+
+function soundpackFavoritesStorageKey(serverURL: string) {
+  return `${SOUNDPACK_FAVORITES_KEY}:${encodeURIComponent(serverURL)}`;
+}
+
+function loadSoundpackFavorites(serverURL: string) {
+  try {
+    const stored = JSON.parse(
+      localStorage.getItem(soundpackFavoritesStorageKey(serverURL)) ?? "[]",
+    ) as unknown;
+    if (!Array.isArray(stored)) return [];
+    return stored
+      .filter((value): value is string => typeof value === "string")
+      .slice(0, 6);
+  } catch {
+    return [];
+  }
+}
 
 function loadSoundpackVolume() {
   try {
@@ -21,8 +88,8 @@ function loadSoundpackVolume() {
 }
 
 function applySoundpackOrder(packs: Soundpack[], orderedIds: string[]) {
-  const byId = new Map(packs.map(pack => [pack.id, pack]));
-  const ordered = orderedIds.flatMap(id => {
+  const byId = new Map(packs.map((pack) => [pack.id, pack]));
+  const ordered = orderedIds.flatMap((id) => {
     const pack = byId.get(id);
     if (!pack) return [];
     byId.delete(id);
@@ -31,36 +98,148 @@ function applySoundpackOrder(packs: Soundpack[], orderedIds: string[]) {
   return [...ordered, ...byId.values()];
 }
 
-export function SoundPackPanel({ socket, roomId, serverURL, outputDeviceId = DEFAULT_AUDIO_DEVICE_ID, inVoice, disabled = false }: Props) {
+export function SoundPackPanel({
+  socket,
+  roomId,
+  serverURL,
+  outputDeviceId = DEFAULT_AUDIO_DEVICE_ID,
+  inVoice,
+  disabled = false,
+  hideTrigger = false,
+  defaultOpen = false,
+  open: controlledOpen,
+  onOpen,
+  onClose,
+  compact = false,
+  anchorRef,
+  quickOpen: controlledQuickOpen,
+  onQuickOpen,
+  onQuickClose,
+}: Props) {
   const [packs, setPacks] = useState<Soundpack[]>([]);
   const [uploading, setUploading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState<{ completed: number; total: number } | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<{
+    completed: number;
+    total: number;
+  } | null>(null);
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<Soundpack | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [pendingRename, setPendingRename] = useState<Soundpack | null>(null);
-  const [renameValue, setRenameValue] = useState('');
+  const [renameValue, setRenameValue] = useState("");
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [draggedId, setDraggedId] = useState<string | null>(null);
   const [reordering, setReordering] = useState(false);
   const [soundpackVolume, setSoundpackVolume] = useState(loadSoundpackVolume);
-  const [open, setOpen] = useState(false);
+  const [favoriteIds, setFavoriteIds] = useState<string[]>(() =>
+    loadSoundpackFavorites(serverURL),
+  );
+  const [internalOpen, setInternalOpen] = useState(defaultOpen);
+  const [internalQuickOpen, setInternalQuickOpen] = useState(false);
+  const [popoverPosition, setPopoverPosition] = useState<{
+    left: number;
+    bottom: number;
+  } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const ownTriggerRef = useRef<HTMLButtonElement>(null);
+  const managementPopoverRef = useRef<HTMLElement>(null);
+  const quickPopoverRef = useRef<HTMLDivElement>(null);
   const soundpackVolumeRef = useRef(soundpackVolume);
   const packsRef = useRef<Soundpack[]>([]);
-  useEffect(() => { packsRef.current = packs; }, [packs]);
+  const open = controlledOpen ?? internalOpen;
+  const quickOpen = controlledQuickOpen ?? internalQuickOpen;
+  const resolvedAnchorRef = anchorRef ?? ownTriggerRef;
+  const setQuickPanelOpen = (nextOpen: boolean) => {
+    if (controlledQuickOpen === undefined) setInternalQuickOpen(nextOpen);
+    if (nextOpen) onQuickOpen?.();
+    else onQuickClose?.();
+  };
+  const setPanelOpen = (nextOpen: boolean) => {
+    if (controlledOpen === undefined) setInternalOpen(nextOpen);
+    if (nextOpen) onOpen?.();
+    else onClose?.();
+  };
+  const closePanel = () => setPanelOpen(false);
+  const openPanel = () => {
+    setQuickPanelOpen(false);
+    setPanelOpen(true);
+  };
+  useEffect(() => {
+    packsRef.current = packs;
+  }, [packs]);
+  useEffect(() => {
+    setFavoriteIds(loadSoundpackFavorites(serverURL));
+  }, [serverURL]);
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        soundpackFavoritesStorageKey(serverURL),
+        JSON.stringify(favoriteIds.slice(0, 6)),
+      );
+    } catch {
+      /* 本地存储不可用时仍保留本次会话收藏。 */
+    }
+  }, [favoriteIds, serverURL]);
+  useEffect(() => {
+    if (!compact || (!open && !quickOpen)) {
+      setPopoverPosition(null);
+      return;
+    }
+    const updatePopoverPosition = () => {
+      const anchor = resolvedAnchorRef.current;
+      if (!anchor) return;
+      const rect = anchor.getBoundingClientRect();
+      const preferredWidth = open ? 520 : 360;
+      const availableWidth = Math.max(0, window.innerWidth - 24);
+      const width = Math.min(preferredWidth, availableWidth);
+      const minCenter = 12 + width / 2;
+      const maxCenter = Math.max(minCenter, window.innerWidth - 12 - width / 2);
+      const center = Math.min(
+        maxCenter,
+        Math.max(minCenter, rect.left + rect.width / 2),
+      );
+      setPopoverPosition({
+        left: center,
+        bottom: Math.max(12, window.innerHeight - rect.top + 10),
+      });
+    };
+    updatePopoverPosition();
+    window.addEventListener("resize", updatePopoverPosition);
+    window.addEventListener("scroll", updatePopoverPosition, true);
+    return () => {
+      window.removeEventListener("resize", updatePopoverPosition);
+      window.removeEventListener("scroll", updatePopoverPosition, true);
+    };
+  }, [compact, open, quickOpen, resolvedAnchorRef]);
+  useEffect(() => {
+    if (!compact || (!open && !quickOpen)) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (
+        resolvedAnchorRef.current?.contains(target) ||
+        managementPopoverRef.current?.contains(target) ||
+        quickPopoverRef.current?.contains(target)
+      )
+        return;
+      if (open) closePanel();
+      if (quickOpen) setQuickPanelOpen(false);
+    };
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => document.removeEventListener("pointerdown", handlePointerDown);
+  }, [compact, open, quickOpen, resolvedAnchorRef]);
   useEffect(() => {
     if (!audioRef.current) return;
-    applyAudioElementOutput(audioRef.current, outputDeviceId).catch(error => {
-      console.warn('[soundpack] 切换正在播放的语音包输出设备失败', error);
+    applyAudioElementOutput(audioRef.current, outputDeviceId).catch((error) => {
+      console.warn("[soundpack] 切换正在播放的语音包输出设备失败", error);
     });
   }, [outputDeviceId]);
 
   useEffect(() => {
     if (inVoice) return;
     audioRef.current?.pause();
-    if (audioRef.current) audioRef.current.src = '';
+    if (audioRef.current) audioRef.current.src = "";
     audioRef.current = null;
     setPlayingId(null);
   }, [inVoice]);
@@ -70,88 +249,151 @@ export function SoundPackPanel({ socket, roomId, serverURL, outputDeviceId = DEF
     soundpackVolumeRef.current = normalized;
     setSoundpackVolume(normalized);
     if (audioRef.current) audioRef.current.volume = normalized / 100;
-    try { localStorage.setItem(SOUNDPACK_VOLUME_KEY, String(normalized)); } catch { /* 本地存储不可用时仍保留本次会话设置。 */ }
+    try {
+      localStorage.setItem(SOUNDPACK_VOLUME_KEY, String(normalized));
+    } catch {
+      /* 本地存储不可用时仍保留本次会话设置。 */
+    }
   };
 
   useEffect(() => {
     if (disabled || !socket.id) return;
-    fetch(`${serverURL}/api/soundpacks?socketId=${encodeURIComponent(socket.id)}&roomId=${encodeURIComponent(roomId)}`)
-      .then(response => response.json()).then((list: Soundpack[]) => setPacks(list)).catch(() => undefined);
+    fetch(
+      `${serverURL}/api/soundpacks?socketId=${encodeURIComponent(socket.id)}&roomId=${encodeURIComponent(roomId)}`,
+    )
+      .then((response) => response.json())
+      .then((list: Soundpack[]) => setPacks(list))
+      .catch(() => undefined);
   }, [serverURL, socket, roomId, disabled]);
 
-  const playSound = useCallback((soundId: string) => {
-    const sound = packsRef.current.find(pack => pack.id === soundId);
-    if (!sound) return;
-    if (audioRef.current) { audioRef.current.pause(); audioRef.current.src = ''; }
-    const audio = new Audio(`${serverURL}/sounds/${sound.filename}`);
-    audio.volume = soundpackVolumeRef.current / 100;
-    audioRef.current = audio;
-    setPlayingId(soundId);
-    applyAudioElementOutput(audio, outputDeviceId).catch(error => {
-      console.warn('[soundpack] 切换输出设备失败，使用系统默认设备', error);
-    }).finally(() => {
-      if (audioRef.current !== audio) return;
-      audio.play().catch(() => setPlayingId(null));
+  const toggleFavorite = (soundId: string) => {
+    setFavoriteIds((current) => {
+      if (current.includes(soundId))
+        return current.filter((id) => id !== soundId);
+      if (current.length >= 6) return current;
+      return [...current, soundId];
     });
-    audio.onended = () => setPlayingId(null);
-    audio.onerror = () => setPlayingId(null);
-  }, [serverURL, outputDeviceId]);
+  };
+
+  const favoritePacks = favoriteIds.flatMap((id) => {
+    const sound = packs.find((pack) => pack.id === id);
+    return sound ? [sound] : [];
+  });
+
+  const playSound = useCallback(
+    (soundId: string) => {
+      const sound = packsRef.current.find((pack) => pack.id === soundId);
+      if (!sound) return;
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current.src = "";
+      }
+      const audio = new Audio(`${serverURL}/sounds/${sound.filename}`);
+      audio.volume = soundpackVolumeRef.current / 100;
+      audioRef.current = audio;
+      setPlayingId(soundId);
+      applyAudioElementOutput(audio, outputDeviceId)
+        .catch((error) => {
+          console.warn("[soundpack] 切换输出设备失败，使用系统默认设备", error);
+        })
+        .finally(() => {
+          if (audioRef.current !== audio) return;
+          audio.play().catch(() => setPlayingId(null));
+        });
+      audio.onended = () => setPlayingId(null);
+      audio.onerror = () => setPlayingId(null);
+    },
+    [serverURL, outputDeviceId],
+  );
 
   useEffect(() => {
-    const onAdded = (sound: Soundpack) => setPacks(previous => [sound, ...previous]);
+    const onAdded = (sound: Soundpack) =>
+      setPacks((previous) => [sound, ...previous]);
     const onPlay = ({ soundId }: { soundId: string }) => {
       if (inVoice) playSound(soundId);
     };
     const onDeleted = ({ soundId }: { soundId: string }) => {
-      setPacks(previous => previous.filter(sound => sound.id !== soundId));
-      setPlayingId(current => {
+      setPacks((previous) => previous.filter((sound) => sound.id !== soundId));
+      setFavoriteIds((previous) => previous.filter((id) => id !== soundId));
+      setPlayingId((current) => {
         if (current !== soundId) return current;
         audioRef.current?.pause();
-        if (audioRef.current) audioRef.current.src = '';
+        if (audioRef.current) audioRef.current.src = "";
         return null;
       });
-      setPendingDelete(current => current?.id === soundId ? null : current);
-      setPendingRename(current => current?.id === soundId ? null : current);
+      setPendingDelete((current) => (current?.id === soundId ? null : current));
+      setPendingRename((current) => (current?.id === soundId ? null : current));
     };
-    const onRenamed = ({ soundId, name }: { soundId: string; name: string }) => {
-      setPacks(previous => previous.map(sound => sound.id === soundId ? { ...sound, name } : sound));
-      setPendingRename(current => current?.id === soundId ? { ...current, name } : current);
+    const onRenamed = ({
+      soundId,
+      name,
+    }: {
+      soundId: string;
+      name: string;
+    }) => {
+      setPacks((previous) =>
+        previous.map((sound) =>
+          sound.id === soundId ? { ...sound, name } : sound,
+        ),
+      );
+      setPendingRename((current) =>
+        current?.id === soundId ? { ...current, name } : current,
+      );
     };
     const onReordered = ({ orderedIds }: { orderedIds: string[] }) => {
-      setPacks(previous => applySoundpackOrder(previous, orderedIds));
+      setPacks((previous) => applySoundpackOrder(previous, orderedIds));
     };
-    socket.on('soundpack:added', onAdded);
-    socket.on('soundpack:play', onPlay);
-    socket.on('soundpack:deleted', onDeleted);
-    socket.on('soundpack:renamed', onRenamed);
-    socket.on('soundpack:reordered', onReordered);
-    return () => { socket.off('soundpack:added', onAdded); socket.off('soundpack:play', onPlay); socket.off('soundpack:deleted', onDeleted); socket.off('soundpack:renamed', onRenamed); socket.off('soundpack:reordered', onReordered); };
+    socket.on("soundpack:added", onAdded);
+    socket.on("soundpack:play", onPlay);
+    socket.on("soundpack:deleted", onDeleted);
+    socket.on("soundpack:renamed", onRenamed);
+    socket.on("soundpack:reordered", onReordered);
+    return () => {
+      socket.off("soundpack:added", onAdded);
+      socket.off("soundpack:play", onPlay);
+      socket.off("soundpack:deleted", onDeleted);
+      socket.off("soundpack:renamed", onRenamed);
+      socket.off("soundpack:reordered", onReordered);
+    };
   }, [socket, playSound, inVoice]);
 
   const handlePlay = (sound: Soundpack) => {
     if (disabled || !inVoice) return;
-    socket.timeout(5_000).emit(
-      'soundpack:play',
-      { soundId: sound.id, roomId },
-      (error: Error | null, result?: { ok: boolean; error?: string }) => {
-        if (error) { window.alert('语音包播放请求超时，请重试'); return; }
-        if (!result?.ok) window.alert(result?.error ?? '语音包播放失败');
-      },
-    );
+    socket
+      .timeout(5_000)
+      .emit(
+        "soundpack:play",
+        { soundId: sound.id, roomId },
+        (error: Error | null, result?: { ok: boolean; error?: string }) => {
+          if (error) {
+            window.alert("语音包播放请求超时，请重试");
+            return;
+          }
+          if (!result?.ok) window.alert(result?.error ?? "语音包播放失败");
+        },
+      );
   };
 
   const uploadSoundpack = async (file: File) => {
     const bytes = new Uint8Array(await file.arrayBuffer());
-    let binary = '';
-    for (let index = 0; index < bytes.length; index += 8192) binary += String.fromCharCode(...bytes.slice(index, index + 8192));
+    let binary = "";
+    for (let index = 0; index < bytes.length; index += 8192)
+      binary += String.fromCharCode(...bytes.slice(index, index + 8192));
     const response = await fetch(`${serverURL}/api/soundpacks`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: file.name.replace(/\.[^.]+$/, ''), data: btoa(binary), mimeType: file.type, socketId: socket.id, roomId }),
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: file.name.replace(/\.[^.]+$/, ""),
+        data: btoa(binary),
+        mimeType: file.type,
+        socketId: socket.id,
+        roomId,
+      }),
     });
     if (response.ok) return;
-    let message = '上传失败';
+    let message = "上传失败";
     try {
-      const body = await response.json() as { error?: string };
+      const body = (await response.json()) as { error?: string };
       message = body.error ?? message;
     } catch {
       message = `上传失败（HTTP ${response.status}）`;
@@ -159,14 +401,16 @@ export function SoundPackPanel({ socket, roomId, serverURL, outputDeviceId = DEF
     throw new Error(message);
   };
 
-  const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = async (
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) => {
     const selectedFiles = Array.from(event.target.files ?? []);
     if (selectedFiles.length === 0) return;
 
     const validFiles: File[] = [];
     const skipped: string[] = [];
     for (const file of selectedFiles) {
-      if (!file.type.startsWith('audio/')) {
+      if (!file.type.startsWith("audio/")) {
         skipped.push(`${file.name}：不是音频文件`);
       } else if (file.size > 8 * 1024 * 1024) {
         skipped.push(`${file.name}：超过 8MB`);
@@ -176,8 +420,8 @@ export function SoundPackPanel({ socket, roomId, serverURL, outputDeviceId = DEF
     }
 
     if (validFiles.length === 0) {
-      alert(`没有可上传的音频文件。\n${skipped.join('\n')}`);
-      if (fileInputRef.current) fileInputRef.current.value = '';
+      alert(`没有可上传的音频文件。\n${skipped.join("\n")}`);
+      if (fileInputRef.current) fileInputRef.current.value = "";
       return;
     }
 
@@ -190,41 +434,70 @@ export function SoundPackPanel({ socket, roomId, serverURL, outputDeviceId = DEF
         try {
           await uploadSoundpack(file);
         } catch (cause) {
-          failed.push(`${file.name}：${cause instanceof Error ? cause.message : '网络错误'}`);
+          failed.push(
+            `${file.name}：${cause instanceof Error ? cause.message : "网络错误"}`,
+          );
         }
         setUploadProgress({ completed: index + 1, total: validFiles.length });
       }
 
       if (skipped.length > 0 || failed.length > 0) {
         const succeeded = validFiles.length - failed.length;
-        const summary = [`批量上传完成：成功 ${succeeded} 个，失败 ${failed.length} 个，跳过 ${skipped.length} 个。`];
-        if (failed.length > 0) summary.push(`失败：\n${failed.join('\n')}`);
-        if (skipped.length > 0) summary.push(`跳过：\n${skipped.join('\n')}`);
-        alert(summary.join('\n'));
+        const summary = [
+          `批量上传完成：成功 ${succeeded} 个，失败 ${failed.length} 个，跳过 ${skipped.length} 个。`,
+        ];
+        if (failed.length > 0) summary.push(`失败：\n${failed.join("\n")}`);
+        if (skipped.length > 0) summary.push(`跳过：\n${skipped.join("\n")}`);
+        alert(summary.join("\n"));
       }
     } finally {
       setUploading(false);
       setUploadProgress(null);
-      if (fileInputRef.current) fileInputRef.current.value = '';
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
+  const deleteSoundTarget = async (target: Soundpack) => {
+    if (disabled) return;
+    setDeletingId(target.id);
+    try {
+      const result = await new Promise<{ ok: boolean; error?: string }>(
+        (resolve, reject) => {
+          socket
+            .timeout(5_000)
+            .emit(
+              "soundpack:delete",
+              { soundId: target.id, roomId },
+              (
+                error: Error | null,
+                response: { ok: boolean; error?: string },
+              ) => (error ? reject(error) : resolve(response)),
+            );
+        },
+      );
+      if (!result.ok) throw new Error(result.error ?? "删除失败");
+      setPacks((previous) =>
+        previous.filter((sound) => sound.id !== target.id),
+      );
+      setFavoriteIds((previous) =>
+        previous.filter((soundId) => soundId !== target.id),
+      );
+      setPendingDelete(null);
+      setPendingRename((current) =>
+        current?.id === target.id ? null : current,
+      );
+    } catch (cause) {
+      alert(
+        cause instanceof Error ? cause.message : "删除失败，请检查网络连接",
+      );
+    } finally {
+      setDeletingId(null);
     }
   };
 
   const deleteSound = async () => {
-    if (!pendingDelete || disabled) return;
-    const target = pendingDelete;
-    setDeletingId(target.id);
-    try {
-      const result = await new Promise<{ ok: boolean; error?: string }>((resolve, reject) => {
-        socket.timeout(5_000).emit('soundpack:delete', { soundId: target.id, roomId }, (error: Error | null, response: { ok: boolean; error?: string }) => error ? reject(error) : resolve(response));
-      });
-      if (!result.ok) throw new Error(result.error ?? '删除失败');
-      setPacks(previous => previous.filter(sound => sound.id !== target.id));
-      setPendingDelete(null);
-    } catch (cause) {
-      alert(cause instanceof Error ? cause.message : '删除失败，请检查网络连接');
-    } finally {
-      setDeletingId(null);
-    }
+    if (!pendingDelete) return;
+    await deleteSoundTarget(pendingDelete);
   };
 
   const beginRename = (sound: Soundpack) => {
@@ -237,19 +510,36 @@ export function SoundPackPanel({ socket, roomId, serverURL, outputDeviceId = DEF
     const target = pendingRename;
     setRenamingId(target.id);
     try {
-      const result = await new Promise<{ ok: boolean; error?: string; name?: string }>((resolve, reject) => {
-        socket.timeout(5_000).emit('soundpack:rename', {
-          soundId: target.id,
-          roomId,
-          name: renameValue.trim(),
-        }, (error: Error | null, response: { ok: boolean; error?: string; name?: string }) => error ? reject(error) : resolve(response));
+      const result = await new Promise<{
+        ok: boolean;
+        error?: string;
+        name?: string;
+      }>((resolve, reject) => {
+        socket.timeout(5_000).emit(
+          "soundpack:rename",
+          {
+            soundId: target.id,
+            roomId,
+            name: renameValue.trim(),
+          },
+          (
+            error: Error | null,
+            response: { ok: boolean; error?: string; name?: string },
+          ) => (error ? reject(error) : resolve(response)),
+        );
       });
-      if (!result.ok) throw new Error(result.error ?? '改名失败');
+      if (!result.ok) throw new Error(result.error ?? "改名失败");
       const nextName = result.name ?? renameValue.trim();
-      setPacks(previous => previous.map(sound => sound.id === target.id ? { ...sound, name: nextName } : sound));
+      setPacks((previous) =>
+        previous.map((sound) =>
+          sound.id === target.id ? { ...sound, name: nextName } : sound,
+        ),
+      );
       setPendingRename(null);
     } catch (cause) {
-      alert(cause instanceof Error ? cause.message : '改名失败，请检查网络连接');
+      alert(
+        cause instanceof Error ? cause.message : "改名失败，请检查网络连接",
+      );
     } finally {
       setRenamingId(null);
     }
@@ -258,8 +548,8 @@ export function SoundPackPanel({ socket, roomId, serverURL, outputDeviceId = DEF
   const reorderSound = async (sourceId: string, targetId: string) => {
     if (disabled || reordering || sourceId === targetId) return;
     const previous = packsRef.current;
-    const sourceIndex = previous.findIndex(sound => sound.id === sourceId);
-    const targetIndex = previous.findIndex(sound => sound.id === targetId);
+    const sourceIndex = previous.findIndex((sound) => sound.id === sourceId);
+    const targetIndex = previous.findIndex((sound) => sound.id === targetId);
     if (sourceIndex < 0 || targetIndex < 0) return;
 
     const next = [...previous];
@@ -268,133 +558,699 @@ export function SoundPackPanel({ socket, roomId, serverURL, outputDeviceId = DEF
     setPacks(next);
     setReordering(true);
     try {
-      const result = await new Promise<{ ok: boolean; error?: string }>((resolve, reject) => {
-        socket.timeout(5_000).emit('soundpack:reorder', {
-          roomId,
-          orderedIds: next.map(sound => sound.id),
-        }, (error: Error | null, response: { ok: boolean; error?: string }) => error ? reject(error) : resolve(response));
-      });
-      if (!result.ok) throw new Error(result.error ?? '调整顺序失败');
+      const result = await new Promise<{ ok: boolean; error?: string }>(
+        (resolve, reject) => {
+          socket.timeout(5_000).emit(
+            "soundpack:reorder",
+            {
+              roomId,
+              orderedIds: next.map((sound) => sound.id),
+            },
+            (error: Error | null, response: { ok: boolean; error?: string }) =>
+              error ? reject(error) : resolve(response),
+          );
+        },
+      );
+      if (!result.ok) throw new Error(result.error ?? "调整顺序失败");
     } catch (cause) {
       setPacks(previous);
-      alert(cause instanceof Error ? cause.message : '调整顺序失败，请检查网络连接');
+      alert(
+        cause instanceof Error ? cause.message : "调整顺序失败，请检查网络连接",
+      );
     } finally {
       setReordering(false);
     }
   };
 
-  return (
-    <>
-      <div className="flex-shrink-0 border-t border-white/[0.08] p-3">
-        <button onClick={() => setOpen(true)} disabled={disabled} className="flex w-full items-center gap-3 rounded-xl border border-white/10 bg-white/[0.06] px-3 py-2.5 text-left text-white/60 transition hover:border-cyan-300/25 hover:bg-white/10 hover:text-white focus:outline-none focus:ring-2 focus:ring-cyan-300/40 disabled:cursor-not-allowed disabled:opacity-35">
-          <LayoutGrid size={18} /><span className="flex-1 font-medium">语音包</span><span className="rounded-full bg-white/10 px-2 py-0.5 text-xs text-white/40">{packs.length}</span>
-        </button>
-      </div>
+  if (compact) {
+    const compactPopoverStyle = popoverPosition
+      ? {
+          left: `${popoverPosition.left}px`,
+          bottom: `${popoverPosition.bottom}px`,
+        }
+      : undefined;
+    return (
+      <>
+        {!hideTrigger && (
+          <div
+            className="soundpack-trigger"
+            onMouseEnter={() => setQuickPanelOpen(true)}
+            onMouseLeave={() => setQuickPanelOpen(false)}
+          >
+            <button
+              ref={ownTriggerRef}
+              type="button"
+              onClick={openPanel}
+              disabled={disabled}
+              aria-label="打开语音包"
+            >
+              <LayoutGrid size={18} />
+              <span>语音包</span>
+              <i>{packs.length}</i>
+            </button>
+          </div>
+        )}
 
-      {open && createPortal((
-        <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/65 p-6 backdrop-blur-md" onMouseDown={() => setOpen(false)}>
-          <section className="relative flex max-h-[82vh] w-full max-w-3xl flex-col overflow-hidden rounded-3xl border border-white/15 bg-zinc-900/95 shadow-2xl" onMouseDown={event => event.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="soundpack-title">
-            <header className="flex items-center gap-3 border-b border-white/10 px-6 py-5">
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-cyan-300/10 text-cyan-200"><Volume2 size={20} /></div>
-              <div className="min-w-0 flex-1"><h2 id="soundpack-title" className="text-lg font-bold text-white">房间语音包</h2><p className="text-sm text-white/40">{inVoice ? '点击后只对语音中的成员同步播放，拖动方格调整顺序' : '加入语音后才能同步播放；仍可上传和管理语音包'}</p></div>
-              <button onClick={() => fileInputRef.current?.click()} disabled={uploading || disabled} className="inline-flex items-center gap-2 rounded-xl bg-white/10 px-3.5 py-2.5 text-sm font-medium text-white/65 transition hover:bg-white/15 hover:text-white disabled:opacity-35"><Upload size={17} />{uploading ? (uploadProgress ? `上传 ${uploadProgress.completed}/${uploadProgress.total}` : '上传中') : '上传音频'}</button>
-              <button onClick={() => setOpen(false)} className="rounded-xl p-2.5 text-white/40 transition hover:bg-white/10 hover:text-white" aria-label="关闭语音包"><X size={19} /></button>
-              <input ref={fileInputRef} type="file" accept="audio/*" multiple className="hidden" onChange={handleFileChange} />
-            </header>
-
-            <div className="flex items-center gap-3 border-b border-white/[0.08] bg-black/10 px-6 py-3">
-              <Volume2 size={17} className="flex-shrink-0 text-white/45" />
-              <label htmlFor="soundpack-volume" className="whitespace-nowrap text-sm font-medium text-white/65">语音包音量</label>
-              <input
-                id="soundpack-volume"
-                type="range"
-                min="0"
-                max="100"
-                step="1"
-                value={soundpackVolume}
-                onChange={event => updateSoundpackVolume(Number(event.target.value))}
-                className="h-1.5 min-w-24 flex-1 cursor-pointer accent-cyan-300"
-                aria-label="本机语音包音量"
-              />
-              <span className="w-10 text-right text-sm tabular-nums text-cyan-100/75">{soundpackVolume}%</span>
-              <span className="hidden text-xs text-white/30 sm:inline">仅影响此设备</span>
-            </div>
-
-            <div className="overflow-y-auto p-5">
-              {packs.length === 0 ? (
-                <button onClick={() => fileInputRef.current?.click()} className="flex min-h-52 w-full flex-col items-center justify-center gap-3 rounded-2xl border border-dashed border-white/15 text-white/35 transition hover:border-cyan-300/35 hover:bg-cyan-300/[0.04] hover:text-white/70"><Upload size={28} /><span className="font-medium">上传第一个语音包</span><span className="text-sm text-white/25">最大 8MB</span></button>
+        {quickOpen && !open && popoverPosition &&
+          createPortal(
+            <div
+              ref={quickPopoverRef}
+              className="soundpack-quick-popover"
+              style={compactPopoverStyle}
+              onMouseEnter={() => setQuickPanelOpen(true)}
+              onMouseLeave={() => setQuickPanelOpen(false)}
+              role="menu"
+              aria-label="收藏语音包快捷发送"
+            >
+              <header>
+                <span className="soundpack-popover-title">
+                  <Star size={15} fill="currentColor" />
+                  收藏语音包
+                </span>
+                <small>点击发送</small>
+              </header>
+              {favoritePacks.length > 0 ? (
+                <div className="soundpack-quick-list">
+                  {favoritePacks.map((sound, index) => (
+                    <button
+                      key={sound.id}
+                      type="button"
+                      role="menuitem"
+                      onClick={() => handlePlay(sound)}
+                      disabled={disabled || !inVoice}
+                      title={inVoice ? `播放「${sound.name}」` : "请先加入语音"}
+                    >
+                      <b>{index + 1}</b>
+                      <span>{sound.name}</span>
+                      {playingId === sound.id && <Pause size={14} />}
+                    </button>
+                  ))}
+                </div>
               ) : (
-                <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-                  {packs.map(sound => {
-                    const playing = playingId === sound.id;
-                    return (
-                      <div
-                        key={sound.id}
-                        draggable={!disabled && !reordering && packs.length > 1}
-                        onDragStart={event => {
-                          setDraggedId(sound.id);
-                          event.dataTransfer.effectAllowed = 'move';
-                          event.dataTransfer.setData('text/plain', sound.id);
-                        }}
-                        onDragOver={event => {
-                          if (draggedId && draggedId !== sound.id) {
-                            event.preventDefault();
-                            event.dataTransfer.dropEffect = 'move';
+                <p className="soundpack-quick-empty">在完整语音包窗口中点击星星收藏。</p>
+              )}
+            </div>,
+            document.body,
+          )}
+
+        {open && popoverPosition &&
+          createPortal(
+            <section
+              ref={managementPopoverRef}
+              className="soundpack-management-popover"
+              style={compactPopoverStyle}
+              role="dialog"
+              aria-modal="false"
+              aria-labelledby="soundpack-management-title"
+            >
+              <header className="soundpack-management-header">
+                <div className="soundpack-management-heading">
+                  <span className="soundpack-management-icon">
+                    <Volume2 size={18} />
+                  </span>
+                  <div>
+                    <small>语音包</small>
+                    <h2 id="soundpack-management-title">房间语音包</h2>
+                  </div>
+                </div>
+                <div className="soundpack-management-actions">
+                  <button
+                    type="button"
+                    className="soundpack-upload-button"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={uploading || disabled}
+                  >
+                    {uploading ? (
+                      <LoaderCircle size={15} className="animate-spin" />
+                    ) : (
+                      <Upload size={15} />
+                    )}
+                    <span>{uploading ? "上传中" : "上传"}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="soundpack-close-button"
+                    onClick={closePanel}
+                    aria-label="关闭语音包"
+                  >
+                    <X size={18} />
+                  </button>
+                </div>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="audio/*"
+                  multiple
+                  hidden
+                  onChange={handleFileChange}
+                />
+              </header>
+
+              <div className="soundpack-volume-row">
+                <Volume2 size={16} />
+                <label htmlFor="soundpack-volume-compact">音量</label>
+                <input
+                  id="soundpack-volume-compact"
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="1"
+                  value={soundpackVolume}
+                  onChange={(event) =>
+                    updateSoundpackVolume(Number(event.target.value))
+                  }
+                  aria-label="语音包音量"
+                />
+                <output>{soundpackVolume}%</output>
+              </div>
+
+              <div className="soundpack-management-list">
+                <div className="soundpack-list-heading">
+                  <b>全部语音包</b>
+                  <span>{packs.length} 个</span>
+                </div>
+                {packs.length > 0 ? (
+                  <div className="soundpack-items">
+                    {packs.map((sound) => {
+                      const playing = playingId === sound.id;
+                      const favoriteIndex = favoriteIds.indexOf(sound.id);
+                      return (
+                        <div
+                          key={sound.id}
+                          className={`soundpack-item ${playing ? "playing" : ""} ${draggedId === sound.id ? "dragged" : ""}`}
+                          role="button"
+                          tabIndex={disabled || !inVoice ? -1 : 0}
+                          aria-disabled={disabled || !inVoice}
+                          title={
+                            inVoice
+                              ? sound.canDelete
+                                ? "点击播放，拖动排序，右键编辑"
+                                : "点击播放，拖动排序"
+                              : "请先加入语音"
                           }
-                        }}
-                        onDrop={event => {
-                          event.preventDefault();
-                          const sourceId = event.dataTransfer.getData('text/plain') || draggedId;
-                          setDraggedId(null);
-                          if (sourceId) void reorderSound(sourceId, sound.id);
-                        }}
-                        onDragEnd={() => setDraggedId(null)}
-                        className={`group relative min-h-20 ${packs.length > 1 && !disabled ? 'cursor-grab active:cursor-grabbing' : ''} ${draggedId === sound.id ? 'opacity-45' : ''}`}
-                      >
-                        <button onClick={() => handlePlay(sound)} disabled={disabled || !inVoice} className={`relative h-full min-h-20 w-full overflow-hidden rounded-2xl border px-4 py-3 text-left transition-all focus:outline-none focus:ring-2 focus:ring-cyan-300/50 disabled:cursor-not-allowed disabled:opacity-35 ${sound.canDelete ? 'pr-20' : ''} ${playing ? 'border-cyan-300/50 bg-cyan-300/15 text-cyan-100 shadow-lg shadow-cyan-950/30' : 'border-white/[0.07] bg-white/[0.055] text-white/75 hover:-translate-y-0.5 hover:border-cyan-300/25 hover:bg-white/10 hover:text-white'}`} title={inVoice ? '只对语音中的成员同步播放' : '请先加入语音'}>
-                          <span className="flex items-start gap-3"><span className={`mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-xl ${playing ? 'bg-cyan-200 text-zinc-900' : 'bg-white/10 text-white/45 group-hover:bg-cyan-300/10 group-hover:text-cyan-100'}`}>{playing ? <Pause size={15} /> : <Play size={15} fill="currentColor" />}</span><span className="min-w-0"><span className="block truncate text-sm font-semibold">{sound.name}</span><span className="mt-1 block truncate text-xs text-white/30">{sound.uploader}</span></span></span>
-                          {playing && <span className="absolute inset-x-0 bottom-0 h-0.5 animate-pulse bg-cyan-300" />}
-                        </button>
-                        {sound.canDelete && (
-                          <div className="absolute right-2 top-2 z-10 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-                            <button onClick={() => beginRename(sound)} disabled={disabled || renamingId === sound.id} className="rounded-lg bg-zinc-900/80 p-2 text-white/45 backdrop-blur transition hover:bg-cyan-500/20 hover:text-cyan-200 focus:outline-none focus:ring-2 focus:ring-cyan-300/40 disabled:opacity-30" aria-label={`重命名语音包 ${sound.name}`} title="重命名"><Pencil size={15} /></button>
-                            <button onClick={() => setPendingDelete(sound)} disabled={disabled || deletingId === sound.id} className="rounded-lg bg-zinc-900/80 p-2 text-white/45 backdrop-blur transition hover:bg-red-500/20 hover:text-red-300 focus:outline-none focus:ring-2 focus:ring-red-300/40 disabled:opacity-30" aria-label={`删除语音包 ${sound.name}`} title="删除">{deletingId === sound.id ? <LoaderCircle size={15} className="animate-spin" /> : <Trash2 size={15} />}</button>
+                          onClick={() => handlePlay(sound)}
+                          onKeyDown={(event) => {
+                            if (event.key !== "Enter" && event.key !== " ") return;
+                            event.preventDefault();
+                            handlePlay(sound);
+                          }}
+                          onContextMenu={(event) => {
+                            event.preventDefault();
+                            if (sound.canDelete && !disabled) beginRename(sound);
+                          }}
+                          draggable={!disabled && !reordering && packs.length > 1}
+                          onDragStart={(event) => {
+                            setDraggedId(sound.id);
+                            event.dataTransfer.effectAllowed = "move";
+                            event.dataTransfer.setData("text/plain", sound.id);
+                          }}
+                          onDragOver={(event) => {
+                            if (draggedId && draggedId !== sound.id) {
+                              event.preventDefault();
+                              event.dataTransfer.dropEffect = "move";
+                            }
+                          }}
+                          onDrop={(event) => {
+                            event.preventDefault();
+                            const sourceId =
+                              event.dataTransfer.getData("text/plain") ||
+                              draggedId;
+                            setDraggedId(null);
+                            if (sourceId) void reorderSound(sourceId, sound.id);
+                          }}
+                          onDragEnd={() => setDraggedId(null)}
+                        >
+                          <div className="soundpack-item-copy">
+                            <b>{sound.name}</b>
+                            <small>{sound.uploader}</small>
                           </div>
-                        )}
-                        {packs.length > 1 && (
-                          <span className="pointer-events-none absolute bottom-2 right-2 z-10 rounded-lg bg-zinc-950/65 p-1 text-white/25 opacity-0 backdrop-blur transition-opacity group-hover:opacity-100" aria-hidden="true"><GripVertical size={14} /></span>
-                        )}
+                          <button
+                            type="button"
+                            className={`soundpack-favorite-button ${favoriteIndex >= 0 ? "active" : ""}`}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              toggleFavorite(sound.id);
+                            }}
+                            onPointerDown={(event) => event.stopPropagation()}
+                            onDragStart={(event) => {
+                              event.preventDefault();
+                              event.stopPropagation();
+                            }}
+                            onContextMenu={(event) => {
+                              event.preventDefault();
+                              event.stopPropagation();
+                            }}
+                            disabled={favoriteIndex < 0 && favoriteIds.length >= 6}
+                            aria-label={
+                              favoriteIndex >= 0
+                                ? `取消收藏 ${sound.name}`
+                                : `收藏 ${sound.name}`
+                            }
+                            aria-pressed={favoriteIndex >= 0}
+                            title={
+                              favoriteIndex >= 0
+                                ? `取消收藏（快捷位 ${favoriteIndex + 1}）`
+                                : favoriteIds.length >= 6
+                                  ? "最多收藏 6 个语音包"
+                                  : "收藏语音包"
+                            }
+                          >
+                            <Star
+                              size={16}
+                              fill={favoriteIndex >= 0 ? "currentColor" : "none"}
+                            />
+                            {favoriteIndex >= 0 && <i>{favoriteIndex + 1}</i>}
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    className="soundpack-empty-button"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={uploading || disabled}
+                  >
+                    <Upload size={20} />
+                    <span>上传第一个语音包</span>
+                  </button>
+                )}
+              </div>
+
+              {pendingRename && (
+                <div className="soundpack-edit-layer">
+                  <form
+                    className="soundpack-edit-dialog"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void renameSound();
+                    }}
+                  >
+                    <div className="soundpack-edit-dialog-heading">
+                      <Pencil size={17} />
+                      <div>
+                        <b>编辑语音包</b>
+                        <small>只修改成员看到的名称</small>
                       </div>
-                    );
-                  })}
-                  <button onClick={() => fileInputRef.current?.click()} disabled={uploading || disabled} className="flex min-h-20 items-center justify-center gap-2 rounded-2xl border border-dashed border-white/15 text-sm font-medium text-white/35 transition hover:border-cyan-300/35 hover:bg-cyan-300/[0.04] hover:text-cyan-100 disabled:opacity-35">{uploading ? <LoaderCircle size={18} className="animate-spin" /> : <Upload size={18} />} 上传</button>
+                    </div>
+                    <input
+                      autoFocus
+                      maxLength={64}
+                      value={renameValue}
+                      onChange={(event) => setRenameValue(event.target.value)}
+                      placeholder="语音包名称"
+                    />
+                    <div className="soundpack-edit-actions">
+                      <button
+                        type="button"
+                        className="plain"
+                        onClick={() => setPendingRename(null)}
+                        disabled={renamingId === pendingRename.id || deletingId === pendingRename.id}
+                      >
+                        取消
+                      </button>
+                      <button
+                        type="button"
+                        className="danger"
+                        onClick={() => {
+                          const target = pendingRename;
+                          if (
+                            deletingId === target.id ||
+                            !window.confirm(`确定删除“${target.name}”吗？`)
+                          )
+                            return;
+                          void deleteSoundTarget(target);
+                        }}
+                        disabled={deletingId === pendingRename.id}
+                      >
+                        {deletingId === pendingRename.id ? (
+                          <LoaderCircle size={15} className="animate-spin" />
+                        ) : (
+                          <Trash2 size={15} />
+                        )}
+                        删除
+                      </button>
+                      <button
+                        type="submit"
+                        className="primary"
+                        disabled={renamingId === pendingRename.id || !renameValue.trim()}
+                      >
+                        {renamingId === pendingRename.id ? (
+                          <LoaderCircle size={15} className="animate-spin" />
+                        ) : (
+                          <Save size={15} />
+                        )}
+                        保存
+                      </button>
+                    </div>
+                  </form>
                 </div>
               )}
-            </div>
-            {pendingRename && (
-              <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/70 p-6 backdrop-blur-sm">
-                <form className="w-full max-w-sm rounded-3xl border border-cyan-300/20 bg-zinc-900 p-6 shadow-2xl" onSubmit={event => { event.preventDefault(); renameSound(); }}>
-                  <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-cyan-300/10 text-cyan-200"><Pencil size={21} /></div>
-                  <h3 className="mt-4 text-lg font-bold text-white">重命名语音包</h3>
-                  <p className="mt-1 text-sm text-white/40">音频文件不会改变，只更新所有成员看到的名称。</p>
-                  <input autoFocus maxLength={64} value={renameValue} onChange={event => setRenameValue(event.target.value)} className="mt-4 w-full rounded-xl border border-white/10 bg-black/25 px-4 py-3 text-white outline-none transition placeholder:text-white/20 focus:border-cyan-300/40 focus:ring-2 focus:ring-cyan-300/15" placeholder="语音包名称" />
-                  <div className="mt-5 flex gap-2.5"><button type="button" onClick={() => setPendingRename(null)} disabled={renamingId === pendingRename.id} className="flex-1 rounded-xl bg-white/10 py-2.5 font-medium text-white/70 transition hover:bg-white/15 disabled:opacity-35">取消</button><button type="submit" disabled={renamingId === pendingRename.id || !renameValue.trim()} className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl bg-cyan-200 py-2.5 font-semibold text-zinc-900 transition hover:bg-cyan-100 disabled:opacity-40">{renamingId === pendingRename.id ? <LoaderCircle size={17} className="animate-spin" /> : <Save size={17} />}保存</button></div>
-                </form>
-              </div>
-            )}
-            {pendingDelete && (
-              <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/70 p-6 backdrop-blur-sm">
-                <div className="w-full max-w-sm rounded-3xl border border-red-400/20 bg-zinc-900 p-6 shadow-2xl" role="alertdialog" aria-modal="true" aria-labelledby="delete-sound-title">
-                  <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-red-500/15 text-red-300"><AlertTriangle size={21} /></div>
-                  <h3 id="delete-sound-title" className="mt-4 text-lg font-bold text-white">删除“{pendingDelete.name}”？</h3>
-                  <p className="mt-2 text-sm leading-relaxed text-white/45">音频文件会从服务器永久删除，所有在线成员的语音包列表也会同步更新。</p>
-                  <div className="mt-5 flex gap-2.5"><button onClick={() => setPendingDelete(null)} disabled={deletingId === pendingDelete.id} className="flex-1 rounded-xl bg-white/10 py-2.5 font-medium text-white/70 transition hover:bg-white/15 disabled:opacity-35">取消</button><button onClick={deleteSound} disabled={deletingId === pendingDelete.id} className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl bg-red-500 py-2.5 font-semibold text-white transition hover:bg-red-400 disabled:opacity-50">{deletingId === pendingDelete.id ? <LoaderCircle size={17} className="animate-spin" /> : <Trash2 size={17} />}确认删除</button></div>
-                </div>
-              </div>
-            )}
-          </section>
+            </section>,
+            document.body,
+          )}
+      </>
+    );
+  }
+
+  return (
+    <>
+      {!hideTrigger && (
+        <div className="flex-shrink-0 border-t border-white/[0.08] p-3">
+          <button
+            onClick={() => setPanelOpen(true)}
+            disabled={disabled}
+            className="flex w-full items-center gap-3 rounded-xl border border-white/10 bg-white/[0.06] px-3 py-2.5 text-left text-white/60 transition hover:border-cyan-300/25 hover:bg-white/10 hover:text-white focus:outline-none focus:ring-2 focus:ring-cyan-300/40 disabled:cursor-not-allowed disabled:opacity-35"
+          >
+            <LayoutGrid size={18} />
+            <span className="flex-1 font-medium">语音包</span>
+            <span className="rounded-full bg-white/10 px-2 py-0.5 text-xs text-white/40">
+              {packs.length}
+            </span>
+          </button>
         </div>
-      ), document.body)}
+      )}
+
+      {open &&
+        createPortal(
+          <div
+            className="fixed inset-0 z-[90] flex items-center justify-center bg-black/65 p-6 backdrop-blur-md"
+            onMouseDown={closePanel}
+          >
+            <section
+              className="relative flex max-h-[82vh] w-full max-w-3xl flex-col overflow-hidden rounded-3xl border border-white/15 bg-zinc-900/95 shadow-2xl"
+              onMouseDown={(event) => event.stopPropagation()}
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="soundpack-title"
+            >
+              <header className="flex items-center gap-3 border-b border-white/10 px-6 py-5">
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-cyan-300/10 text-cyan-200">
+                  <Volume2 size={20} />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <h2
+                    id="soundpack-title"
+                    className="text-lg font-bold text-white"
+                  >
+                    房间语音包
+                  </h2>
+                  <p className="text-sm text-white/40">
+                    {inVoice
+                      ? "点击后只对语音中的成员同步播放，拖动方格调整顺序"
+                      : "加入语音后才能同步播放；仍可上传和管理语音包"}
+                  </p>
+                </div>
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={uploading || disabled}
+                  className="inline-flex items-center gap-2 rounded-xl bg-white/10 px-3.5 py-2.5 text-sm font-medium text-white/65 transition hover:bg-white/15 hover:text-white disabled:opacity-35"
+                >
+                  <Upload size={17} />
+                  {uploading
+                    ? uploadProgress
+                      ? `上传 ${uploadProgress.completed}/${uploadProgress.total}`
+                      : "上传中"
+                    : "上传音频"}
+                </button>
+                <button
+                  onClick={closePanel}
+                  className="rounded-xl p-2.5 text-white/40 transition hover:bg-white/10 hover:text-white"
+                  aria-label="关闭语音包"
+                >
+                  <X size={19} />
+                </button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="audio/*"
+                  multiple
+                  className="hidden"
+                  onChange={handleFileChange}
+                />
+              </header>
+
+              <div className="flex items-center gap-3 border-b border-white/[0.08] bg-black/10 px-6 py-3">
+                <Volume2 size={17} className="flex-shrink-0 text-white/45" />
+                <label
+                  htmlFor="soundpack-volume"
+                  className="whitespace-nowrap text-sm font-medium text-white/65"
+                >
+                  语音包音量
+                </label>
+                <input
+                  id="soundpack-volume"
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="1"
+                  value={soundpackVolume}
+                  onChange={(event) =>
+                    updateSoundpackVolume(Number(event.target.value))
+                  }
+                  className="h-1.5 min-w-24 flex-1 cursor-pointer accent-cyan-300"
+                  aria-label="本机语音包音量"
+                />
+                <span className="w-10 text-right text-sm tabular-nums text-cyan-100/75">
+                  {soundpackVolume}%
+                </span>
+                <span className="hidden text-xs text-white/30 sm:inline">
+                  仅影响此设备
+                </span>
+              </div>
+
+              <div className="overflow-y-auto p-5">
+                {packs.length === 0 ? (
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    className="flex min-h-52 w-full flex-col items-center justify-center gap-3 rounded-2xl border border-dashed border-white/15 text-white/35 transition hover:border-cyan-300/35 hover:bg-cyan-300/[0.04] hover:text-white/70"
+                  >
+                    <Upload size={28} />
+                    <span className="font-medium">上传第一个语音包</span>
+                    <span className="text-sm text-white/25">最大 8MB</span>
+                  </button>
+                ) : (
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                    {packs.map((sound) => {
+                      const playing = playingId === sound.id;
+                      return (
+                        <div
+                          key={sound.id}
+                          draggable={
+                            !disabled && !reordering && packs.length > 1
+                          }
+                          onDragStart={(event) => {
+                            setDraggedId(sound.id);
+                            event.dataTransfer.effectAllowed = "move";
+                            event.dataTransfer.setData("text/plain", sound.id);
+                          }}
+                          onDragOver={(event) => {
+                            if (draggedId && draggedId !== sound.id) {
+                              event.preventDefault();
+                              event.dataTransfer.dropEffect = "move";
+                            }
+                          }}
+                          onDrop={(event) => {
+                            event.preventDefault();
+                            const sourceId =
+                              event.dataTransfer.getData("text/plain") ||
+                              draggedId;
+                            setDraggedId(null);
+                            if (sourceId) void reorderSound(sourceId, sound.id);
+                          }}
+                          onDragEnd={() => setDraggedId(null)}
+                          className={`group relative min-h-20 ${packs.length > 1 && !disabled ? "cursor-grab active:cursor-grabbing" : ""} ${draggedId === sound.id ? "opacity-45" : ""}`}
+                        >
+                          <button
+                            onClick={() => handlePlay(sound)}
+                            disabled={disabled || !inVoice}
+                            className={`relative h-full min-h-20 w-full overflow-hidden rounded-2xl border px-4 py-3 text-left transition-all focus:outline-none focus:ring-2 focus:ring-cyan-300/50 disabled:cursor-not-allowed disabled:opacity-35 ${sound.canDelete ? "pr-20" : ""} ${playing ? "border-cyan-300/50 bg-cyan-300/15 text-cyan-100 shadow-lg shadow-cyan-950/30" : "border-white/[0.07] bg-white/[0.055] text-white/75 hover:-translate-y-0.5 hover:border-cyan-300/25 hover:bg-white/10 hover:text-white"}`}
+                            title={
+                              inVoice
+                                ? "只对语音中的成员同步播放"
+                                : "请先加入语音"
+                            }
+                          >
+                            <span className="flex items-start gap-3">
+                              <span
+                                className={`mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-xl ${playing ? "bg-cyan-200 text-zinc-900" : "bg-white/10 text-white/45 group-hover:bg-cyan-300/10 group-hover:text-cyan-100"}`}
+                              >
+                                {playing ? (
+                                  <Pause size={15} />
+                                ) : (
+                                  <Play size={15} fill="currentColor" />
+                                )}
+                              </span>
+                              <span className="min-w-0">
+                                <span className="block truncate text-sm font-semibold">
+                                  {sound.name}
+                                </span>
+                                <span className="mt-1 block truncate text-xs text-white/30">
+                                  {sound.uploader}
+                                </span>
+                              </span>
+                            </span>
+                            {playing && (
+                              <span className="absolute inset-x-0 bottom-0 h-0.5 animate-pulse bg-cyan-300" />
+                            )}
+                          </button>
+                          {sound.canDelete && (
+                            <div className="absolute right-2 top-2 z-10 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+                              <button
+                                onClick={() => beginRename(sound)}
+                                disabled={disabled || renamingId === sound.id}
+                                className="rounded-lg bg-zinc-900/80 p-2 text-white/45 backdrop-blur transition hover:bg-cyan-500/20 hover:text-cyan-200 focus:outline-none focus:ring-2 focus:ring-cyan-300/40 disabled:opacity-30"
+                                aria-label={`重命名语音包 ${sound.name}`}
+                                title="重命名"
+                              >
+                                <Pencil size={15} />
+                              </button>
+                              <button
+                                onClick={() => setPendingDelete(sound)}
+                                disabled={disabled || deletingId === sound.id}
+                                className="rounded-lg bg-zinc-900/80 p-2 text-white/45 backdrop-blur transition hover:bg-red-500/20 hover:text-red-300 focus:outline-none focus:ring-2 focus:ring-red-300/40 disabled:opacity-30"
+                                aria-label={`删除语音包 ${sound.name}`}
+                                title="删除"
+                              >
+                                {deletingId === sound.id ? (
+                                  <LoaderCircle
+                                    size={15}
+                                    className="animate-spin"
+                                  />
+                                ) : (
+                                  <Trash2 size={15} />
+                                )}
+                              </button>
+                            </div>
+                          )}
+                          {packs.length > 1 && (
+                            <span
+                              className="pointer-events-none absolute bottom-2 right-2 z-10 rounded-lg bg-zinc-950/65 p-1 text-white/25 opacity-0 backdrop-blur transition-opacity group-hover:opacity-100"
+                              aria-hidden="true"
+                            >
+                              <GripVertical size={14} />
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={uploading || disabled}
+                      className="flex min-h-20 items-center justify-center gap-2 rounded-2xl border border-dashed border-white/15 text-sm font-medium text-white/35 transition hover:border-cyan-300/35 hover:bg-cyan-300/[0.04] hover:text-cyan-100 disabled:opacity-35"
+                    >
+                      {uploading ? (
+                        <LoaderCircle size={18} className="animate-spin" />
+                      ) : (
+                        <Upload size={18} />
+                      )}{" "}
+                      上传
+                    </button>
+                  </div>
+                )}
+              </div>
+              {pendingRename && (
+                <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/70 p-6 backdrop-blur-sm">
+                  <form
+                    className="w-full max-w-sm rounded-3xl border border-cyan-300/20 bg-zinc-900 p-6 shadow-2xl"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      renameSound();
+                    }}
+                  >
+                    <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-cyan-300/10 text-cyan-200">
+                      <Pencil size={21} />
+                    </div>
+                    <h3 className="mt-4 text-lg font-bold text-white">
+                      重命名语音包
+                    </h3>
+                    <p className="mt-1 text-sm text-white/40">
+                      音频文件不会改变，只更新所有成员看到的名称。
+                    </p>
+                    <input
+                      autoFocus
+                      maxLength={64}
+                      value={renameValue}
+                      onChange={(event) => setRenameValue(event.target.value)}
+                      className="mt-4 w-full rounded-xl border border-white/10 bg-black/25 px-4 py-3 text-white outline-none transition placeholder:text-white/20 focus:border-cyan-300/40 focus:ring-2 focus:ring-cyan-300/15"
+                      placeholder="语音包名称"
+                    />
+                    <div className="mt-5 flex gap-2.5">
+                      <button
+                        type="button"
+                        onClick={() => setPendingRename(null)}
+                        disabled={renamingId === pendingRename.id}
+                        className="flex-1 rounded-xl bg-white/10 py-2.5 font-medium text-white/70 transition hover:bg-white/15 disabled:opacity-35"
+                      >
+                        取消
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={
+                          renamingId === pendingRename.id || !renameValue.trim()
+                        }
+                        className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl bg-cyan-200 py-2.5 font-semibold text-zinc-900 transition hover:bg-cyan-100 disabled:opacity-40"
+                      >
+                        {renamingId === pendingRename.id ? (
+                          <LoaderCircle size={17} className="animate-spin" />
+                        ) : (
+                          <Save size={17} />
+                        )}
+                        保存
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              )}
+              {pendingDelete && (
+                <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/70 p-6 backdrop-blur-sm">
+                  <div
+                    className="w-full max-w-sm rounded-3xl border border-red-400/20 bg-zinc-900 p-6 shadow-2xl"
+                    role="alertdialog"
+                    aria-modal="true"
+                    aria-labelledby="delete-sound-title"
+                  >
+                    <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-red-500/15 text-red-300">
+                      <AlertTriangle size={21} />
+                    </div>
+                    <h3
+                      id="delete-sound-title"
+                      className="mt-4 text-lg font-bold text-white"
+                    >
+                      删除“{pendingDelete.name}”？
+                    </h3>
+                    <p className="mt-2 text-sm leading-relaxed text-white/45">
+                      音频文件会从服务器永久删除，所有在线成员的语音包列表也会同步更新。
+                    </p>
+                    <div className="mt-5 flex gap-2.5">
+                      <button
+                        onClick={() => setPendingDelete(null)}
+                        disabled={deletingId === pendingDelete.id}
+                        className="flex-1 rounded-xl bg-white/10 py-2.5 font-medium text-white/70 transition hover:bg-white/15 disabled:opacity-35"
+                      >
+                        取消
+                      </button>
+                      <button
+                        onClick={deleteSound}
+                        disabled={deletingId === pendingDelete.id}
+                        className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl bg-red-500 py-2.5 font-semibold text-white transition hover:bg-red-400 disabled:opacity-50"
+                      >
+                        {deletingId === pendingDelete.id ? (
+                          <LoaderCircle size={17} className="animate-spin" />
+                        ) : (
+                          <Trash2 size={17} />
+                        )}
+                        确认删除
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </section>
+          </div>,
+          document.body,
+        )}
     </>
   );
 }

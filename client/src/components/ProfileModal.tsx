@@ -42,8 +42,8 @@ export function ProfileModal({ profile, serverURL, onSave, onClose, onOpenServer
   };
 
   return (
-    <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/65 p-4 backdrop-blur-md" onMouseDown={onClose}>
-      <section className="relative w-full max-w-md overflow-hidden rounded-3xl border border-white/15 bg-zinc-900/95 shadow-2xl" onMouseDown={event => event.stopPropagation()} aria-modal="true" role="dialog" aria-labelledby="profile-title">
+    <div className="profile-modal-v2-scrim" onMouseDown={onClose}>
+      <section className="profile-modal-v2" onMouseDown={event => event.stopPropagation()} aria-modal="true" role="dialog" aria-labelledby="profile-title">
         <div className="relative h-28 bg-gradient-to-br from-cyan-400/25 via-sky-500/10 to-violet-500/20">
           <button onClick={onClose} className="absolute right-4 top-4 rounded-xl bg-black/25 p-2 text-white/60 transition hover:bg-black/40 hover:text-white focus:outline-none focus:ring-2 focus:ring-cyan-300" aria-label="关闭个人名片">
             <X size={18} />
@@ -69,12 +69,12 @@ export function ProfileModal({ profile, serverURL, onSave, onClose, onOpenServer
           <p className="mt-1 text-sm text-white/40">头像保存在本机，并同步给当前服务器上的在线成员。</p>
 
           <label className="mt-5 block text-sm font-medium text-white/55" htmlFor="profile-name">用户名</label>
-          <div className="mt-2 flex items-center gap-3 rounded-xl border border-white/10 bg-white/[0.06] px-4 focus-within:border-cyan-300/50 focus-within:ring-2 focus-within:ring-cyan-300/10">
+          <div className="profile-name-field mt-2 flex items-center gap-3 rounded-xl border border-white/10 bg-white/[0.06] px-4 focus-within:border-cyan-300/50 focus-within:ring-2 focus-within:ring-cyan-300/10">
             <UserRound size={18} className="text-white/35" />
-            <input id="profile-name" value={username} onChange={event => setUsername(event.target.value)} maxLength={64} className="min-w-0 flex-1 bg-transparent py-3 text-white outline-none placeholder:text-white/20" placeholder="你的名字" />
+            <input id="profile-name" value={username} onChange={event => setUsername(event.target.value)} maxLength={64} className="profile-name-input min-w-0 flex-1 bg-transparent py-3 text-white outline-none placeholder:text-white/20" placeholder="你的名字" />
           </div>
 
-          <div className="mt-4 rounded-xl border border-white/[0.08] bg-black/20 px-4 py-3">
+          <div className="profile-server-card mt-4 rounded-xl border border-white/[0.08] bg-black/20 px-4 py-3">
             <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-white/30"><Server size={14} /> 当前服务器</div>
             <p className="mt-1.5 truncate font-mono text-sm text-white/60" title={serverURL}>{serverURL}</p>
           </div>

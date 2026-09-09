@@ -14,6 +14,19 @@ interface CoveShellApi {
   openExternal(url: string): Promise<boolean>;
 }
 
+interface CoveWindowApi {
+  minimize(): Promise<boolean>;
+  toggleMaximize(): Promise<boolean>;
+  isMaximized(): Promise<boolean>;
+  close(): Promise<boolean>;
+  onState(listener: (maximized: boolean) => void): () => void;
+}
+
+interface CoveClipboardApi {
+  writeText(value: string): Promise<boolean>;
+  writeImage(value: Uint8Array): Promise<boolean>;
+}
+
 interface CoveSecurityApi {
   setServerCertificateException(serverUrl: string, enabled: boolean): Promise<string | null>;
 }
@@ -31,6 +44,12 @@ interface CoveScreenAudioApi {
   onChunk(listener: (chunk: Uint8Array) => void): () => void;
 }
 
+interface CoveSystemAudioApi {
+  start(): Promise<{ ok: boolean; error?: string }>;
+  stop(): Promise<boolean>;
+  onChunk(listener: (chunk: Uint8Array) => void): () => void;
+}
+
 interface CoveRemoteControlApi {
   supported: boolean;
   setActive(sessionId: string | null): Promise<boolean>;
@@ -42,9 +61,12 @@ declare global {
   interface Window {
     coveUpdater?: CoveUpdaterApi;
     coveShell?: CoveShellApi;
+    coveWindow?: CoveWindowApi;
+    coveClipboard?: CoveClipboardApi;
     coveSecurity?: CoveSecurityApi;
     coveApplicationAudio?: CoveApplicationAudioApi;
     coveScreenAudio?: CoveScreenAudioApi;
+    coveSystemAudio?: CoveSystemAudioApi;
     coveRemoteControl?: CoveRemoteControlApi;
   }
 }

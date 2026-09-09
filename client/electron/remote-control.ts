@@ -61,7 +61,7 @@ export class RemoteInputController {
       : path.join(app.getAppPath(), 'build', 'remote-input-helper.exe');
     if (!fs.existsSync(executable)) return false;
     try {
-      const helper = spawn(executable, [], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+      const helper = spawn(executable, [String(process.pid)], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
       helper.on('exit', () => { if (this.helper === helper) this.helper = null; });
       helper.on('error', () => { if (this.helper === helper) this.helper = null; });
       this.helper = helper;

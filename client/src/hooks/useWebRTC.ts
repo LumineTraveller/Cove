@@ -1,13 +1,13 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
-import { Socket } from 'socket.io-client';
-import { Device, types as MsTypes } from 'mediasoup-client';
-import { DisconnectGrace } from '../utils/disconnectGrace';
+import { useEffect, useRef, useState, useCallback } from "react";
+import { Socket } from "socket.io-client";
+import { Device, types as MsTypes } from "mediasoup-client";
+import { DisconnectGrace } from "../utils/disconnectGrace";
 
-type Transport       = MsTypes.Transport;
-type Producer        = MsTypes.Producer;
-type Consumer        = MsTypes.Consumer;
+type Transport = MsTypes.Transport;
+type Producer = MsTypes.Producer;
+type Consumer = MsTypes.Consumer;
 type RtpCapabilities = MsTypes.RtpCapabilities;
-import { VoiceMember } from '../types';
+import { VoiceMember } from "../types";
 import {
   applyAudioContextOutput,
   applyAudioElementOutput,
@@ -19,9 +19,10 @@ import {
   isMemberVoiceAudio,
   DEFAULT_AUDIO_DEVICE_ID,
   loadAudioDeviceId,
+  normalizeMicrophoneDeviceId,
   saveAudioDeviceId,
   toAudioDeviceOptions,
-} from '../audioDevices';
+} from "../audioDevices";
 import {
   intervalLossPercent,
   mediaDiagnosticSessionKey,
@@ -31,7 +32,7 @@ import {
   type RtcVideoCounterSample,
   videoCounterRates,
   videoCounterSample,
-} from '../mediaDiagnostics';
+} from "../mediaDiagnostics";
 import {
   applyScreenCaptureConstraints,
   createScreenEncodingPlan,
@@ -40,15 +41,18 @@ import {
   type ScreenActivity,
   type ScreenEncodingPlan,
   type ScreenPreset,
-} from '../screenCapture';
-import { ApplicationAudioPipeline, type ApplicationAudioSource } from '../applicationAudio';
+} from "../screenCapture";
+import {
+  ApplicationAudioPipeline,
+  type ApplicationAudioSource,
+} from "../applicationAudio";
 
-export { SCREEN_PRESETS } from '../screenCapture';
-export type { ScreenPreset } from '../screenCapture';
+export { SCREEN_PRESETS } from "../screenCapture";
+export type { ScreenPreset } from "../screenCapture";
 export type Fps = 30 | 60;
 
 export interface MediaStats {
-  role: 'sender' | 'receiver' | 'idle';
+  role: "sender" | "receiver" | "idle";
   rtt: number | null;
   fps: number | null;
   trackFps: number | null;
@@ -91,21 +95,46 @@ export interface MediaStats {
 }
 
 const EMPTY_STATS: MediaStats = {
-  role: 'idle', rtt: null, fps: null,
-  trackFps: null, captureFps: null, encodeFps: null, sendFps: null,
-  receiveFps: null, decodeFps: null,
-  loss: null, remoteLoss: null, bitrate: null, targetBitrate: null,
-  availableBitrate: null, retransmitBitrate: null,
-  jitter: null, width: null, height: null, trackWidth: null, trackHeight: null,
-  droppedFrames: null, encodeTimeMs: null, decodeTimeMs: null, averageQp: null,
-  nackPerSecond: null, pliPerSecond: null, firPerSecond: null,
-  qualityLimitation: null, qualityLimitationCpuSeconds: null,
+  role: "idle",
+  rtt: null,
+  fps: null,
+  trackFps: null,
+  captureFps: null,
+  encodeFps: null,
+  sendFps: null,
+  receiveFps: null,
+  decodeFps: null,
+  loss: null,
+  remoteLoss: null,
+  bitrate: null,
+  targetBitrate: null,
+  availableBitrate: null,
+  retransmitBitrate: null,
+  jitter: null,
+  width: null,
+  height: null,
+  trackWidth: null,
+  trackHeight: null,
+  droppedFrames: null,
+  encodeTimeMs: null,
+  decodeTimeMs: null,
+  averageQp: null,
+  nackPerSecond: null,
+  pliPerSecond: null,
+  firPerSecond: null,
+  qualityLimitation: null,
+  qualityLimitationCpuSeconds: null,
   qualityLimitationBandwidthSeconds: null,
-  protocol: null, codec: null,
-  encoderImplementation: null, decoderImplementation: null,
-  powerEfficientEncoder: null, powerEfficientDecoder: null,
+  protocol: null,
+  codec: null,
+  encoderImplementation: null,
+  decoderImplementation: null,
+  powerEfficientEncoder: null,
+  powerEfficientDecoder: null,
   displaySurface: null,
-  serverIngressBitrate: null, serverEgressBitrate: null, serverScore: null,
+  serverIngressBitrate: null,
+  serverEgressBitrate: null,
+  serverScore: null,
 };
 
 interface ServerRtpDiagnostic {
@@ -114,31 +143,82 @@ interface ServerRtpDiagnostic {
 }
 
 interface ServerMediaDiagnostics {
-  role: 'sender' | 'receiver' | 'idle';
+  role: "sender" | "receiver" | "idle";
   transports: {
     send?: { rtpRecvBitrateKbps: number | null } | null;
     receive?: { rtpSendBitrateKbps: number | null } | null;
   };
   producers: { stats: ServerRtpDiagnostic[]; score: { score?: number }[] }[];
-  consumers: { stats: ServerRtpDiagnostic[]; score: { score?: number; producerScore?: number } }[];
+  consumers: {
+    stats: ServerRtpDiagnostic[];
+    score: { score?: number; producerScore?: number };
+  }[];
 }
 
 // ── 工具：把 socket.emit 包装成 Promise ────────────────────────────────────────
-function emitAsync<T = void>(socket: Socket, event: string, data?: unknown): Promise<T> {
-  if (!socket.connected) return Promise.reject(new Error('服务器连接已断开，正在重连'));
+function emitAsync<T = void>(
+  socket: Socket,
+  event: string,
+  data?: unknown,
+): Promise<T> {
+  if (!socket.connected)
+    return Promise.reject(new Error("服务器连接已断开，正在重连"));
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`${event} 超时`)), 15_000);
     socket.emit(event, data, (res: T | { error: string }) => {
       clearTimeout(timer);
-      if (res && typeof res === 'object' && 'error' in (res as object))
+      if (res && typeof res === "object" && "error" in (res as object))
         reject(new Error((res as { error: string }).error));
-      else
-        resolve(res as T);
+      else resolve(res as T);
     });
   });
 }
 
-interface RemoteScreen { socketId: string; stream: MediaStream }
+function isMissingSsrcError(error: unknown): boolean {
+  return /no a=ssrc lines found/i.test(
+    error instanceof Error ? error.message : String(error),
+  );
+}
+
+function waitForMediaTrackWarmup(track: MediaStreamTrack): Promise<void> {
+  if (track.readyState === "ended")
+    return Promise.reject(new Error("媒体轨道在发布前已经结束"));
+  return new Promise((resolve) => {
+    // Two frames are enough for Chromium to attach the capture source to the
+    // sender. The timeout also covers background/throttled Electron windows.
+    if (typeof requestAnimationFrame === "function") {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        resolve();
+      };
+      const timeout = setTimeout(finish, 250);
+      requestAnimationFrame(() => requestAnimationFrame(finish));
+    } else {
+      setTimeout(resolve, 80);
+    }
+  });
+}
+
+async function produceWithSsrcRetry<T>(produce: () => Promise<T>): Promise<T> {
+  try {
+    return await produce();
+  } catch (error) {
+    if (!isMissingSsrcError(error)) throw error;
+    // mediasoup-client parses the local SDP immediately after createOffer().
+    // A newly-created display/audio track can need one renderer turn before
+    // that SDP contains its SSRC. Retry only this known transient failure.
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    return produce();
+  }
+}
+
+interface RemoteScreen {
+  socketId: string;
+  stream: MediaStream;
+}
 interface AvailableScreen {
   socketId: string;
   videoProducerId: string;
@@ -152,13 +232,20 @@ interface RemoteApplicationAudio {
 interface ProcessedMicrophone {
   stream: MediaStream;
   context: AudioContext | null;
+  gain: GainNode | null;
 }
 
-const MEMBER_VOLUME_KEY = 'cove_member_volumes_v1';
-const SCREEN_RECEIVE_VOLUME_KEY = 'cove_screen_receive_volume_v1';
-const SCREEN_SHARE_VOLUME_KEY = 'cove_screen_share_volume_v1';
-const APPLICATION_AUDIO_SHARE_VOLUME_KEY = 'cove_application_audio_share_volume_v1';
-const APPLICATION_AUDIO_RECEIVE_VOLUME_KEY = 'cove_application_audio_receive_volume_v1';
+const MEMBER_VOLUME_KEY = "cove_member_volumes_v1";
+const SCREEN_RECEIVE_VOLUME_KEY = "cove_screen_receive_volume_v1";
+const SCREEN_SHARE_VOLUME_KEY = "cove_screen_share_volume_v1";
+const APPLICATION_AUDIO_SHARE_VOLUME_KEY =
+  "cove_application_audio_share_volume_v1";
+const APPLICATION_AUDIO_RECEIVE_VOLUME_KEY =
+  "cove_application_audio_receive_volume_v1";
+const MICROPHONE_VOLUME_KEY = "cove_microphone_volume_v1";
+const MASTER_OUTPUT_VOLUME_KEY = "cove_master_output_volume_v1";
+// 与旧版麦克风处理链保持一致的基础增益；用户音量设置在此基础上调整。
+const MICROPHONE_BASE_GAIN = 0.92;
 
 // Chromium 的系统降噪负责处理连续噪声；这个轻量自适应噪声门只在用户不说话时
 // 继续衰减残留底噪，让 Opus DTX 能真正进入静音状态。门限会缓慢跟随本机噪声底，
@@ -230,32 +317,38 @@ class CoveMicNoiseGate extends AudioWorkletProcessor {
 registerProcessor('cove-mic-noise-gate', CoveMicNoiseGate);
 `;
 
-async function createMicNoiseGate(context: AudioContext): Promise<AudioWorkletNode | null> {
+async function createMicNoiseGate(
+  context: AudioContext,
+): Promise<AudioWorkletNode | null> {
   if (!context.audioWorklet) return null;
-  const moduleUrl = URL.createObjectURL(new Blob([MIC_NOISE_GATE_WORKLET], { type: 'text/javascript' }));
+  const moduleUrl = URL.createObjectURL(
+    new Blob([MIC_NOISE_GATE_WORKLET], { type: "text/javascript" }),
+  );
   try {
     await context.audioWorklet.addModule(moduleUrl);
-    return new AudioWorkletNode(context, 'cove-mic-noise-gate', {
+    return new AudioWorkletNode(context, "cove-mic-noise-gate", {
       numberOfInputs: 1,
       numberOfOutputs: 1,
       outputChannelCount: [1],
       channelCount: 1,
-      channelCountMode: 'explicit',
+      channelCountMode: "explicit",
     });
   } catch (error) {
-    console.warn('[mic] 自适应降噪模块不可用，继续使用系统降噪', error);
+    console.warn("[mic] 自适应降噪模块不可用，继续使用系统降噪", error);
     return null;
   } finally {
     URL.revokeObjectURL(moduleUrl);
   }
 }
 
-function loadNumber(key: string, fallback: number) {
+function loadNumber(key: string, fallback: number, maximum = 1) {
   try {
     const stored = localStorage.getItem(key);
     if (stored === null) return fallback;
     const value = Number(stored);
-    return Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : fallback;
+    return Number.isFinite(value)
+      ? Math.max(0, Math.min(maximum, value))
+      : fallback;
   } catch {
     return fallback;
   }
@@ -263,58 +356,102 @@ function loadNumber(key: string, fallback: number) {
 
 function loadMemberVolumes(): Record<string, number> {
   try {
-    const parsed = JSON.parse(localStorage.getItem(MEMBER_VOLUME_KEY) ?? '{}') as Record<string, unknown>;
-    return Object.fromEntries(Object.entries(parsed).flatMap(([key, value]) =>
-      typeof value === 'number' && Number.isFinite(value)
-        ? [[key, Math.max(0, Math.min(2, value))]]
-        : []));
+    const parsed = JSON.parse(
+      localStorage.getItem(MEMBER_VOLUME_KEY) ?? "{}",
+    ) as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.entries(parsed).flatMap(([key, value]) =>
+        typeof value === "number" && Number.isFinite(value)
+          ? [[key, Math.max(0, Math.min(2, value))]]
+          : [],
+      ),
+    );
   } catch {
     return {};
   }
 }
 
-function loadVolumeMap(key: string): Record<string, number> {
+function loadVolumeMap(key: string, maximum = 1): Record<string, number> {
   try {
-    const parsed = JSON.parse(localStorage.getItem(key) ?? '{}') as Record<string, unknown>;
-    return Object.fromEntries(Object.entries(parsed).flatMap(([entryKey, value]) =>
-      typeof value === 'number' && Number.isFinite(value)
-        ? [[entryKey, Math.max(0, Math.min(1, value))]]
-        : []));
+    const parsed = JSON.parse(localStorage.getItem(key) ?? "{}") as Record<
+      string,
+      unknown
+    >;
+    return Object.fromEntries(
+      Object.entries(parsed).flatMap(([entryKey, value]) =>
+        typeof value === "number" && Number.isFinite(value)
+          ? [[entryKey, Math.max(0, Math.min(maximum, value))]]
+          : [],
+      ),
+    );
   } catch {
     return {};
   }
 }
 
 export function useWebRTC(socket: Socket, roomId: string) {
-  const [inVoice,      setInVoice]      = useState(false);
-  const [isJoining,    setIsJoining]    = useState(false);
-  const [isMuted,      setIsMuted]      = useState(false);
+  const [inVoice, setInVoice] = useState(false);
+  const [isJoining, setIsJoining] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
   const [isForceMuted, setIsForceMuted] = useState(false);
-  const [isSharing,    setIsSharing]    = useState(false);
-  const [isApplicationAudioSharing, setIsApplicationAudioSharing] = useState(false);
-  const [applicationAudioLabel, setApplicationAudioLabel] = useState<string | null>(null);
-  const [screenPreset, setScreenPreset] = useState<ScreenPreset>('720p');
-  const [fps,          setFps]          = useState<Fps>(30);
-  const [shareAudio,   setShareAudio]   = useState(false);
+  const [isSharing, setIsSharing] = useState(false);
+  const [isApplicationAudioSharing, setIsApplicationAudioSharing] =
+    useState(false);
+  const [applicationAudioLabel, setApplicationAudioLabel] = useState<
+    string | null
+  >(null);
+  const [screenPreset, setScreenPreset] = useState<ScreenPreset>("720p");
+  const [fps, setFps] = useState<Fps>(30);
+  const [shareAudio, setShareAudio] = useState(false);
   const [screenGameMode, setScreenGameMode] = useState(false);
   const [screenNativeResolution, setScreenNativeResolution] = useState(false);
-  const [screenActivity, setScreenActivity] = useState<ScreenActivity>('active');
-  const [screenEncodingPlan, setScreenEncodingPlan] = useState<ScreenEncodingPlan | null>(null);
+  const [screenActivity, setScreenActivity] =
+    useState<ScreenActivity>("active");
+  const [screenEncodingPlan, setScreenEncodingPlan] =
+    useState<ScreenEncodingPlan | null>(null);
   const [screenViewerCount, setScreenViewerCount] = useState(0);
   const [voiceMembers, setVoiceMembers] = useState<VoiceMember[]>([]);
-  const [localScreen,  setLocalScreen]  = useState<MediaStream | null>(null);
+  const [localScreen, setLocalScreen] = useState<MediaStream | null>(null);
   const [remoteScreen, setRemoteScreen] = useState<RemoteScreen | null>(null);
-  const [availableScreens, setAvailableScreens] = useState<AvailableScreen[]>([]);
-  const [remoteApplicationAudios, setRemoteApplicationAudios] = useState<RemoteApplicationAudio[]>([]);
-  const [watchingScreenPeer, setWatchingScreenPeer] = useState<string | null>(null);
-  const [screenReceiveVolume, setScreenReceiveVolumeState] = useState(() => loadNumber(SCREEN_RECEIVE_VOLUME_KEY, 1));
-  const [screenShareVolume, setScreenShareVolumeState] = useState(() => loadNumber(SCREEN_SHARE_VOLUME_KEY, 1));
-  const [applicationAudioShareVolume, setApplicationAudioShareVolumeState] = useState(() => loadNumber(APPLICATION_AUDIO_SHARE_VOLUME_KEY, 1));
-  const [applicationAudioReceiveVolumes, setApplicationAudioReceiveVolumes] = useState<Record<string, number>>(() => loadVolumeMap(APPLICATION_AUDIO_RECEIVE_VOLUME_KEY));
-  const [audioInputDevices, setAudioInputDevices] = useState<AudioDeviceOption[]>([]);
-  const [audioOutputDevices, setAudioOutputDevices] = useState<AudioDeviceOption[]>([]);
-  const [selectedAudioInputId, setSelectedAudioInputId] = useState(() => loadAudioDeviceId(AUDIO_INPUT_DEVICE_KEY));
-  const [selectedAudioOutputId, setSelectedAudioOutputId] = useState(() => loadAudioDeviceId(AUDIO_OUTPUT_DEVICE_KEY));
+  const [availableScreens, setAvailableScreens] = useState<AvailableScreen[]>(
+    [],
+  );
+  const [remoteApplicationAudios, setRemoteApplicationAudios] = useState<
+    RemoteApplicationAudio[]
+  >([]);
+  const [watchingScreenPeer, setWatchingScreenPeer] = useState<string | null>(
+    null,
+  );
+  const [screenReceiveVolume, setScreenReceiveVolumeState] = useState(() =>
+    loadNumber(SCREEN_RECEIVE_VOLUME_KEY, 1, 2),
+  );
+  const [screenShareVolume, setScreenShareVolumeState] = useState(() =>
+    loadNumber(SCREEN_SHARE_VOLUME_KEY, 1, 2),
+  );
+  const [applicationAudioShareVolume, setApplicationAudioShareVolumeState] =
+    useState(() => loadNumber(APPLICATION_AUDIO_SHARE_VOLUME_KEY, 1, 2));
+  const [applicationAudioReceiveVolumes, setApplicationAudioReceiveVolumes] =
+    useState<Record<string, number>>(() =>
+      loadVolumeMap(APPLICATION_AUDIO_RECEIVE_VOLUME_KEY, 2),
+    );
+  const [microphoneVolume, setMicrophoneVolumeState] = useState(() =>
+    loadNumber(MICROPHONE_VOLUME_KEY, 1, 2),
+  );
+  const [masterOutputVolume, setMasterOutputVolumeState] = useState(() =>
+    loadNumber(MASTER_OUTPUT_VOLUME_KEY, 1, 2),
+  );
+  const [audioInputDevices, setAudioInputDevices] = useState<
+    AudioDeviceOption[]
+  >([]);
+  const [audioOutputDevices, setAudioOutputDevices] = useState<
+    AudioDeviceOption[]
+  >([]);
+  const [selectedAudioInputId, setSelectedAudioInputId] = useState(() =>
+    normalizeMicrophoneDeviceId(loadAudioDeviceId(AUDIO_INPUT_DEVICE_KEY)),
+  );
+  const [selectedAudioOutputId, setSelectedAudioOutputId] = useState(() =>
+    loadAudioDeviceId(AUDIO_OUTPUT_DEVICE_KEY),
+  );
   const [audioDevicesRefreshing, setAudioDevicesRefreshing] = useState(false);
   const [audioInputSwitching, setAudioInputSwitching] = useState(false);
   const [audioDeviceError, setAudioDeviceError] = useState<string | null>(null);
@@ -323,39 +460,46 @@ export function useWebRTC(socket: Socket, roomId: string) {
   const [statsEnabled, setStatsEnabled] = useState(false);
   const [stats, setStats] = useState<MediaStats>(EMPTY_STATS);
   // 每个人说话音量 0~1（key = socketId）
-  const [speakingLevels, setSpeakingLevels] = useState<Record<string, number>>({});
+  const [speakingLevels, setSpeakingLevels] = useState<Record<string, number>>(
+    {},
+  );
   // 本机针对每位远端成员的麦克风播放增益，1 = 100% 原始音量，2 = 200%。
-  const [memberVolumes, setMemberVolumes] = useState<Record<string, number>>({});
+  const [memberVolumes, setMemberVolumes] = useState<Record<string, number>>(
+    {},
+  );
 
   // mediasoup-client 实例
-  const deviceRef       = useRef<Device | null>(null);
-  const sendTransport   = useRef<Transport | null>(null);
-  const recvTransport   = useRef<Transport | null>(null);
-  const audioProducer   = useRef<Producer | null>(null);
-  const screenProducer  = useRef<Producer | null>(null);
+  const deviceRef = useRef<Device | null>(null);
+  const sendTransport = useRef<Transport | null>(null);
+  const recvTransport = useRef<Transport | null>(null);
+  const audioProducer = useRef<Producer | null>(null);
+  const screenProducer = useRef<Producer | null>(null);
   const screenAudioProducer = useRef<Producer | null>(null); // 共享屏幕时的系统音频
   const applicationAudioProducer = useRef<Producer | null>(null);
-  const selfMutedRef    = useRef(false);
-  const forceMutedRef   = useRef(false);
-  const joiningRef      = useRef(false);
+  const selfMutedRef = useRef(false);
+  const forceMutedRef = useRef(false);
+  const joiningRef = useRef(false);
   const mediaGeneration = useRef(0);
   const connectionGrace = useRef(new DisconnectGrace());
   const resetVoiceRef = useRef<(notifyServer?: boolean) => void>(() => {});
   const voiceSocketId = useRef<string>();
 
   const checkTransport = useCallback((key: string, state: string) => {
-    if (state === 'connected') connectionGrace.current.recover(key);
-    if (state === 'failed' || state === 'disconnected') {
+    if (state === "connected") connectionGrace.current.recover(key);
+    if (state === "failed" || state === "disconnected") {
       connectionGrace.current.fail(key, () => {
         resetVoiceRef.current();
-        setAudioDeviceError('语音连接中断超过 7.5 秒，可直接重新加入语音，无需重连服务器');
+        setAudioDeviceError(
+          "语音连接中断超过 7.5 秒，可直接重新加入语音，无需重连服务器",
+        );
       });
     }
   }, []);
   // 仅在已经建立语音会话后播放本地“离开”提示，避免组件卸载/重复清理时误播。
   const voiceSessionActiveRef = useRef(false);
   const memberVolumesRef = useRef<Record<string, number>>({});
-  const rememberedMemberVolumes = useRef<Record<string, number>>(loadMemberVolumes());
+  const rememberedMemberVolumes =
+    useRef<Record<string, number>>(loadMemberVolumes());
   // 点击远端扬声器静音后，记住静音前的音量，恢复时不把用户调好的音量重置为 100%。
   const memberMuteRestoreVolumes = useRef<Record<string, number>>({});
   const voiceMembersRef = useRef<VoiceMember[]>([]);
@@ -363,94 +507,203 @@ export function useWebRTC(socket: Socket, roomId: string) {
   const screenReceiveVolumeRef = useRef(screenReceiveVolume);
   const screenShareVolumeRef = useRef(screenShareVolume);
   const applicationAudioShareVolumeRef = useRef(applicationAudioShareVolume);
-  const applicationAudioReceiveVolumesRef = useRef(applicationAudioReceiveVolumes);
+  const applicationAudioReceiveVolumesRef = useRef(
+    applicationAudioReceiveVolumes,
+  );
   const remoteApplicationAudiosRef = useRef<RemoteApplicationAudio[]>([]);
   const selectedAudioInputRef = useRef(selectedAudioInputId);
   const selectedAudioOutputRef = useRef(selectedAudioOutputId);
   // consumerId → { consumer, socketId, kind, sourceType }
-  const consumers       = useRef<Map<string, { consumer: Consumer; socketId: string; kind: string; producerId: string; sourceType?: string }>>(new Map());
+  const consumers = useRef<
+    Map<
+      string,
+      {
+        consumer: Consumer;
+        socketId: string;
+        kind: string;
+        producerId: string;
+        sourceType?: string;
+      }
+    >
+  >(new Map());
   // 同一个 producer 只允许创建一个 consumer；同时记录进行中的请求以避免信令竞态。
   const consumerByProducer = useRef<Map<string, string>>(new Map());
-  const pendingProducers    = useRef<Set<string>>(new Set());
+  const pendingProducers = useRef<Set<string>>(new Set());
   // 音频播放元素，按 consumerId 存储（一个人可能同时有麦克风+系统音频两路）
-  const audioEls        = useRef<Map<string, HTMLAudioElement>>(new Map());
+  const audioEls = useRef<Map<string, HTMLAudioElement>>(new Map());
   // 所有远端音轨（麦克风、屏幕、应用音频）均通过各自的 Web Audio 增益播放。
   // 激活 WebRTC 的媒体元素必须静音，避免原始流绕过增益或双路播放。
-  const remoteAudioOutputs = useRef<Map<string, ReturnType<typeof createRemoteAudioOutput>>>(new Map());
-  const screenStreams    = useRef<Map<string, MediaStream>>(new Map());
-  const localAudioRef   = useRef<MediaStream | null>(null);
-  const rawAudioRef     = useRef<MediaStream | null>(null);
+  const remoteAudioOutputs = useRef<
+    Map<string, ReturnType<typeof createRemoteAudioOutput>>
+  >(new Map());
+  const screenStreams = useRef<Map<string, MediaStream>>(new Map());
+  const localAudioRef = useRef<MediaStream | null>(null);
+  const rawAudioRef = useRef<MediaStream | null>(null);
   const micProcessingContext = useRef<AudioContext | null>(null);
-  const localScreenRef  = useRef<MediaStream | null>(null);
+  const micProcessingGain = useRef<GainNode | null>(null);
+  const microphoneVolumeRef = useRef(microphoneVolume);
+  const masterOutputVolumeRef = useRef(masterOutputVolume);
+  const masterOutputGain = useRef<GainNode | null>(null);
+  const localScreenRef = useRef<MediaStream | null>(null);
   const screenAudioPipeline = useRef<ApplicationAudioPipeline | null>(null);
   const screenAudioUnsubscribe = useRef<(() => void) | null>(null);
-  const applicationAudioPipeline = useRef<ApplicationAudioPipeline | null>(null);
+  const applicationAudioPipeline = useRef<ApplicationAudioPipeline | null>(
+    null,
+  );
   const applicationAudioUnsubscribe = useRef<(() => void) | null>(null);
+  const applicationAudioStop = useRef<(() => Promise<boolean>) | null>(null);
   const availableScreensRef = useRef<Map<string, AvailableScreen>>(new Map());
   const pendingScreenAudioByPeer = useRef<Map<string, string>>(new Map());
   const watchingScreenPeerRef = useRef<string | null>(null);
   const screenDemandActiveRef = useRef(false);
-  const screenAnalysisTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const screenAnalysisTimer = useRef<ReturnType<typeof setInterval> | null>(
+    null,
+  );
   const screenAnalysisVideo = useRef<HTMLVideoElement | null>(null);
   const screenAnalysisCanvas = useRef<HTMLCanvasElement | null>(null);
   const previousScreenSample = useRef<Uint8ClampedArray | null>(null);
-  const activityCandidate = useRef<{ value: ScreenActivity; count: number }>({ value: 'active', count: 0 });
-  const screenActivityRef = useRef<ScreenActivity>('active');
+  const activityCandidate = useRef<{ value: ScreenActivity; count: number }>({
+    value: "active",
+    count: 0,
+  });
+  const screenActivityRef = useRef<ScreenActivity>("active");
 
   // 音量分析（Web Audio）
-  const audioCtxRef     = useRef<AudioContext | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
   // key = consumerId 或 'local'；value = { analyser, data, socketId }
-  const analysers       = useRef<Map<string, { analyser: AnalyserNode; data: Uint8Array<ArrayBuffer>; socketId: string }>>(new Map());
-  const volumeTimer     = useRef<ReturnType<typeof setInterval> | null>(null);
-  const statsTimer      = useRef<ReturnType<typeof setInterval> | null>(null);
+  const analysers = useRef<
+    Map<
+      string,
+      {
+        analyser: AnalyserNode;
+        data: Uint8Array<ArrayBuffer>;
+        socketId: string;
+      }
+    >
+  >(new Map());
+  const volumeTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const statsTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const statsEnabledRef = useRef(false);
   const statsCollecting = useRef(false);
   const videoCounterPrev = useRef<RtcVideoCounterSample | null>(null);
-  const receiveLossPrev = useRef<{ lost: number; packets: number } | null>(null);
+  const receiveLossPrev = useRef<{ lost: number; packets: number } | null>(
+    null,
+  );
   const remoteLossPrev = useRef<{ lost: number; packets: number } | null>(null);
-  const diagnosticHistory = useRef<{ timestamp: string; stats: MediaStats; trackSettings: MediaTrackSettings | null }[]>([]);
+  const diagnosticHistory = useRef<
+    {
+      timestamp: string;
+      stats: MediaStats;
+      trackSettings: MediaTrackSettings | null;
+    }[]
+  >([]);
 
-  const setMemberVolume = useCallback((socketId: string, userId: string, volume: number) => {
-    // 1.0 = 100% 原始音量，2.0 = 200%（两倍增益）。
-    const normalized = Number.isFinite(volume) ? Math.max(0, Math.min(2, volume)) : 1;
-    memberVolumesRef.current = { ...memberVolumesRef.current, [socketId]: normalized };
-    setMemberVolumes(memberVolumesRef.current);
-    if (userId) {
-      rememberedMemberVolumes.current = { ...rememberedMemberVolumes.current, [userId]: normalized };
-      try { localStorage.setItem(MEMBER_VOLUME_KEY, JSON.stringify(rememberedMemberVolumes.current)); }
-      catch { /* 存储不可用不应阻断本次音量调整。 */ }
-    }
-    for (const [consumerId, entry] of consumers.current) {
-      if (entry.socketId !== socketId || !isMemberVoiceAudio(entry.kind, entry.sourceType)) continue;
-      const element = audioEls.current.get(consumerId);
-      const output = remoteAudioOutputs.current.get(consumerId);
-      if (output) output.setVolume(normalized);
-      else if (element) { element.volume = Math.min(1, normalized); element.muted = normalized === 0; }
-    }
-  }, []);
+  const setMemberVolume = useCallback(
+    (socketId: string, userId: string, volume: number) => {
+      // 1.0 = 100% 原始音量，2.0 = 200%（两倍增益）。
+      const normalized = Number.isFinite(volume)
+        ? Math.max(0, Math.min(2, volume))
+        : 1;
+      memberVolumesRef.current = {
+        ...memberVolumesRef.current,
+        [socketId]: normalized,
+      };
+      setMemberVolumes(memberVolumesRef.current);
+      if (userId) {
+        rememberedMemberVolumes.current = {
+          ...rememberedMemberVolumes.current,
+          [userId]: normalized,
+        };
+        try {
+          localStorage.setItem(
+            MEMBER_VOLUME_KEY,
+            JSON.stringify(rememberedMemberVolumes.current),
+          );
+        } catch {
+          /* 存储不可用不应阻断本次音量调整。 */
+        }
+      }
+      for (const [consumerId, entry] of consumers.current) {
+        if (
+          entry.socketId !== socketId ||
+          !isMemberVoiceAudio(entry.kind, entry.sourceType)
+        )
+          continue;
+        const element = audioEls.current.get(consumerId);
+        const output = remoteAudioOutputs.current.get(consumerId);
+        if (output) output.setVolume(normalized);
+        else if (element) {
+          element.volume = Math.min(1, normalized);
+          element.muted = normalized === 0;
+        }
+      }
+    },
+    [],
+  );
 
-  const toggleMemberMute = useCallback((socketId: string, userId: string) => {
-    const current = memberVolumesRef.current[socketId] ?? 1;
-    if (current === 0) {
-      const restored = memberMuteRestoreVolumes.current[userId] ?? 1;
-      delete memberMuteRestoreVolumes.current[userId];
-      setMemberVolume(socketId, userId, restored);
-    } else {
-      if (userId) memberMuteRestoreVolumes.current[userId] = current;
-      setMemberVolume(socketId, userId, 0);
+  const toggleMemberMute = useCallback(
+    (socketId: string, userId: string) => {
+      const current = memberVolumesRef.current[socketId] ?? 1;
+      if (current === 0) {
+        const restored = memberMuteRestoreVolumes.current[userId] ?? 1;
+        delete memberMuteRestoreVolumes.current[userId];
+        setMemberVolume(socketId, userId, restored);
+      } else {
+        if (userId) memberMuteRestoreVolumes.current[userId] = current;
+        setMemberVolume(socketId, userId, 0);
+      }
+    },
+    [setMemberVolume],
+  );
+
+  const promoteRemoteAudio = (
+    consumerId: string,
+    entry: { consumer: Consumer },
+    volume: number,
+  ) => {
+    const activationElement = audioEls.current.get(consumerId);
+    if (!activationElement || remoteAudioOutputs.current.has(consumerId))
+      return;
+    try {
+      const context = ensureAudioCtx();
+      const output = createRemoteAudioOutput(
+        context,
+        new MediaStream([entry.consumer.track]),
+        volume,
+        activationElement,
+        masterOutputGain.current ?? context.destination,
+      );
+      activationElement.muted = true;
+      activationElement.volume = 0;
+      remoteAudioOutputs.current.set(consumerId, output);
+      void output.resume().catch(() => {});
+    } catch (error) {
+      console.warn("[audio] 无法启用增强音量，继续使用标准音量", error);
     }
-  }, [setMemberVolume]);
+  };
 
   const setScreenReceiveVolume = useCallback((volume: number) => {
-    const normalized = Number.isFinite(volume) ? Math.max(0, Math.min(1, volume)) : 1;
+    const normalized = Number.isFinite(volume)
+      ? Math.max(0, Math.min(2, volume))
+      : 1;
     screenReceiveVolumeRef.current = normalized;
     setScreenReceiveVolumeState(normalized);
-    try { localStorage.setItem(SCREEN_RECEIVE_VOLUME_KEY, String(normalized)); }
-    catch { /* 无法保存偏好也必须应用本次音量。 */ }
+    try {
+      localStorage.setItem(SCREEN_RECEIVE_VOLUME_KEY, String(normalized));
+    } catch {
+      /* 无法保存偏好也必须应用本次音量。 */
+    }
     for (const [consumerId, entry] of consumers.current) {
-      if (entry.sourceType !== 'screen-audio') continue;
+      if (entry.sourceType !== "screen-audio") continue;
       const element = audioEls.current.get(consumerId);
-      if (element) {
+      const output = remoteAudioOutputs.current.get(consumerId);
+      if (normalized > 1 && element && !output) {
+        promoteRemoteAudio(consumerId, entry, normalized);
+        continue;
+      }
+      if (output) {
+        output.setVolume(normalized);
+      } else if (element) {
         element.volume = normalized;
         element.muted = normalized === 0;
       }
@@ -458,7 +711,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
   }, []);
 
   const setScreenShareVolume = useCallback((volume: number) => {
-    const normalized = Math.max(0, Math.min(1, volume));
+    const normalized = Math.max(0, Math.min(2, volume));
     screenShareVolumeRef.current = normalized;
     setScreenShareVolumeState(normalized);
     localStorage.setItem(SCREEN_SHARE_VOLUME_KEY, String(normalized));
@@ -466,57 +719,135 @@ export function useWebRTC(socket: Socket, roomId: string) {
   }, []);
 
   const setApplicationAudioShareVolume = useCallback((volume: number) => {
-    const normalized = Math.max(0, Math.min(1, volume));
+    const normalized = Math.max(0, Math.min(2, volume));
     applicationAudioShareVolumeRef.current = normalized;
     setApplicationAudioShareVolumeState(normalized);
-    localStorage.setItem(APPLICATION_AUDIO_SHARE_VOLUME_KEY, String(normalized));
+    localStorage.setItem(
+      APPLICATION_AUDIO_SHARE_VOLUME_KEY,
+      String(normalized),
+    );
     applicationAudioPipeline.current?.setVolume(normalized);
   }, []);
 
-  const setApplicationAudioReceiveVolume = useCallback((socketId: string, volume: number) => {
-    const normalized = Number.isFinite(volume) ? Math.max(0, Math.min(1, volume)) : 1;
-    const nextVolumes = { ...applicationAudioReceiveVolumesRef.current, [socketId]: normalized };
-    applicationAudioReceiveVolumesRef.current = nextVolumes;
-    setApplicationAudioReceiveVolumes(nextVolumes);
-    try { localStorage.setItem(APPLICATION_AUDIO_RECEIVE_VOLUME_KEY, JSON.stringify(nextVolumes)); }
-    catch { /* 无法保存偏好也必须应用本次音量。 */ }
-    for (const [consumerId, entry] of consumers.current) {
-      if (entry.socketId !== socketId || entry.sourceType !== 'application-audio') continue;
-      const element = audioEls.current.get(consumerId);
-      if (element) {
-        element.volume = normalized;
-        element.muted = normalized === 0;
+  const setApplicationAudioReceiveVolume = useCallback(
+    (socketId: string, volume: number) => {
+      const normalized = Number.isFinite(volume)
+        ? Math.max(0, Math.min(2, volume))
+        : 1;
+      const nextVolumes = {
+        ...applicationAudioReceiveVolumesRef.current,
+        [socketId]: normalized,
+      };
+      applicationAudioReceiveVolumesRef.current = nextVolumes;
+      setApplicationAudioReceiveVolumes(nextVolumes);
+      try {
+        localStorage.setItem(
+          APPLICATION_AUDIO_RECEIVE_VOLUME_KEY,
+          JSON.stringify(nextVolumes),
+        );
+      } catch {
+        /* 无法保存偏好也必须应用本次音量。 */
       }
+      for (const [consumerId, entry] of consumers.current) {
+        if (
+          entry.socketId !== socketId ||
+          entry.sourceType !== "application-audio"
+        )
+          continue;
+        const element = audioEls.current.get(consumerId);
+        const output = remoteAudioOutputs.current.get(consumerId);
+        if (normalized > 1 && element && !output) {
+          promoteRemoteAudio(consumerId, entry, normalized);
+          continue;
+        }
+        if (output) {
+          output.setVolume(normalized);
+        } else if (element) {
+          element.volume = normalized;
+          element.muted = normalized === 0;
+        }
+      }
+    },
+    [],
+  );
+
+  const setMicrophoneVolume = useCallback((volume: number) => {
+    const normalized = Number.isFinite(volume)
+      ? Math.max(0, Math.min(2, volume))
+      : 1;
+    microphoneVolumeRef.current = normalized;
+    setMicrophoneVolumeState(normalized);
+    try {
+      localStorage.setItem(MICROPHONE_VOLUME_KEY, String(normalized));
+    } catch {
+      /* 保留本次会话设置。 */
     }
+    if (micProcessingGain.current)
+      micProcessingGain.current.gain.value =
+        MICROPHONE_BASE_GAIN * normalized;
   }, []);
 
-  const publishRemoteApplicationAudios = useCallback((next: RemoteApplicationAudio[]) => {
-    remoteApplicationAudiosRef.current = next;
-    setRemoteApplicationAudios(next);
+  const setMasterOutputVolume = useCallback((volume: number) => {
+    const normalized = Number.isFinite(volume)
+      ? Math.max(0, Math.min(2, volume))
+      : 1;
+    masterOutputVolumeRef.current = normalized;
+    setMasterOutputVolumeState(normalized);
+    try {
+      localStorage.setItem(MASTER_OUTPUT_VOLUME_KEY, String(normalized));
+    } catch {
+      /* 保留本次会话设置。 */
+    }
+    if (masterOutputGain.current)
+      masterOutputGain.current.gain.value = normalized;
+    audioEls.current.forEach((element) => {
+      element.volume = Math.min(1, normalized);
+      element.muted = normalized === 0;
+    });
   }, []);
 
-  const storeRemoteApplicationAudio = useCallback((value: RemoteApplicationAudio) => {
-    const next = [
-      ...remoteApplicationAudiosRef.current.filter(item => item.socketId !== value.socketId),
-      value,
-    ];
-    publishRemoteApplicationAudios(next);
-  }, [publishRemoteApplicationAudios]);
+  const publishRemoteApplicationAudios = useCallback(
+    (next: RemoteApplicationAudio[]) => {
+      remoteApplicationAudiosRef.current = next;
+      setRemoteApplicationAudios(next);
+    },
+    [],
+  );
 
-  const removeRemoteApplicationAudio = useCallback((socketId: string, producerId?: string) => {
-    const next = remoteApplicationAudiosRef.current.filter(item =>
-      item.socketId !== socketId || (producerId !== undefined && item.producerId !== producerId));
-    if (next.length !== remoteApplicationAudiosRef.current.length)
+  const storeRemoteApplicationAudio = useCallback(
+    (value: RemoteApplicationAudio) => {
+      const next = [
+        ...remoteApplicationAudiosRef.current.filter(
+          (item) => item.socketId !== value.socketId,
+        ),
+        value,
+      ];
       publishRemoteApplicationAudios(next);
-  }, [publishRemoteApplicationAudios]);
+    },
+    [publishRemoteApplicationAudios],
+  );
+
+  const removeRemoteApplicationAudio = useCallback(
+    (socketId: string, producerId?: string) => {
+      const next = remoteApplicationAudiosRef.current.filter(
+        (item) =>
+          item.socketId !== socketId ||
+          (producerId !== undefined && item.producerId !== producerId),
+      );
+      if (next.length !== remoteApplicationAudiosRef.current.length)
+        publishRemoteApplicationAudios(next);
+    },
+    [publishRemoteApplicationAudios],
+  );
 
   const clearRemoteApplicationAudios = useCallback(() => {
-    if (remoteApplicationAudiosRef.current.length) publishRemoteApplicationAudios([]);
+    if (remoteApplicationAudiosRef.current.length)
+      publishRemoteApplicationAudios([]);
   }, [publishRemoteApplicationAudios]);
 
   const refreshAudioDevices = useCallback(async (requestPermission = false) => {
     if (!navigator.mediaDevices?.enumerateDevices) {
-      setAudioDeviceError('当前环境无法读取音频设备。');
+      setAudioDeviceError("当前环境无法读取音频设备。");
       return;
     }
     setAudioDevicesRefreshing(true);
@@ -524,15 +855,33 @@ export function useWebRTC(socket: Socket, roomId: string) {
     let permissionStream: MediaStream | null = null;
     try {
       if (requestPermission && !rawAudioRef.current) {
-        permissionStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        permissionStream = await navigator.mediaDevices.getUserMedia({
+          audio: true,
+        });
       }
       const devices = await navigator.mediaDevices.enumerateDevices();
-      setAudioInputDevices(toAudioDeviceOptions(devices, 'audioinput'));
-      setAudioOutputDevices(toAudioDeviceOptions(devices, 'audiooutput'));
+      const inputDevices = toAudioDeviceOptions(devices, "audioinput").filter(
+        (device) => device.deviceId !== "communications",
+      );
+      setAudioInputDevices(inputDevices);
+      setAudioOutputDevices(toAudioDeviceOptions(devices, "audiooutput"));
+      // 单麦克风机器使用 Windows 默认采集端点。部分 Realtek 驱动在通过
+      // Chromium 的实体 deviceId 精确打开时会返回 live 音轨，但样本几乎
+      // 全为零；旧版正常工作的路径使用的正是系统默认端点。
+      if (
+        inputDevices.length === 1 &&
+        selectedAudioInputRef.current === inputDevices[0].deviceId
+      ) {
+        selectedAudioInputRef.current = DEFAULT_AUDIO_DEVICE_ID;
+        setSelectedAudioInputId(DEFAULT_AUDIO_DEVICE_ID);
+        saveAudioDeviceId(AUDIO_INPUT_DEVICE_KEY, DEFAULT_AUDIO_DEVICE_ID);
+      }
     } catch (error) {
-      setAudioDeviceError(error instanceof Error ? error.message : '读取音频设备失败。');
+      setAudioDeviceError(
+        error instanceof Error ? error.message : "读取音频设备失败。",
+      );
     } finally {
-      permissionStream?.getTracks().forEach(track => track.stop());
+      permissionStream?.getTracks().forEach((track) => track.stop());
       setAudioDevicesRefreshing(false);
     }
   }, []);
@@ -541,9 +890,12 @@ export function useWebRTC(socket: Socket, roomId: string) {
     refreshAudioDevices(false);
     const mediaDevices = navigator.mediaDevices;
     if (!mediaDevices?.addEventListener) return;
-    const onDeviceChange = () => { refreshAudioDevices(false); };
-    mediaDevices.addEventListener('devicechange', onDeviceChange);
-    return () => mediaDevices.removeEventListener('devicechange', onDeviceChange);
+    const onDeviceChange = () => {
+      refreshAudioDevices(false);
+    };
+    mediaDevices.addEventListener("devicechange", onDeviceChange);
+    return () =>
+      mediaDevices.removeEventListener("devicechange", onDeviceChange);
   }, [refreshAudioDevices]);
 
   const selectAudioOutput = useCallback(async (deviceId: string) => {
@@ -554,75 +906,113 @@ export function useWebRTC(socket: Socket, roomId: string) {
     setAudioDeviceError(null);
 
     const changes: Promise<boolean>[] = [];
-    audioEls.current.forEach(element => {
+    audioEls.current.forEach((element) => {
       changes.push(applyAudioElementOutput(element, nextDeviceId));
     });
-    if (audioCtxRef.current) changes.push(applyAudioContextOutput(audioCtxRef.current, nextDeviceId));
+    if (audioCtxRef.current)
+      changes.push(applyAudioContextOutput(audioCtxRef.current, nextDeviceId));
     const results = await Promise.allSettled(changes);
-    const rejected = results.find(result => result.status === 'rejected');
-    if (rejected?.status === 'rejected') {
+    const rejected = results.find((result) => result.status === "rejected");
+    if (rejected?.status === "rejected") {
       const reason = rejected.reason;
-      setAudioDeviceError(`切换扬声器失败：${reason instanceof Error ? reason.message : String(reason)}`);
+      setAudioDeviceError(
+        `切换扬声器失败：${reason instanceof Error ? reason.message : String(reason)}`,
+      );
     }
   }, []);
 
   // ── 音量分析工具 ──────────────────────────────────────────────────────────────
   const ensureAudioCtx = useCallback(() => {
     if (!audioCtxRef.current) {
-      const Ctx = window.AudioContext ?? (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const Ctx =
+        window.AudioContext ??
+        (window as unknown as { webkitAudioContext: typeof AudioContext })
+          .webkitAudioContext;
       audioCtxRef.current = new Ctx();
-      applyAudioContextOutput(audioCtxRef.current, selectedAudioOutputRef.current).catch(error => {
-        console.warn('[audio] 提示音切换输出设备失败', error);
+      masterOutputGain.current = audioCtxRef.current.createGain();
+      masterOutputGain.current.gain.value = masterOutputVolumeRef.current;
+      masterOutputGain.current.connect(audioCtxRef.current.destination);
+      applyAudioContextOutput(
+        audioCtxRef.current,
+        selectedAudioOutputRef.current,
+      ).catch((error) => {
+        console.warn("[audio] 提示音切换输出设备失败", error);
       });
     }
     return audioCtxRef.current;
   }, []);
 
-  const playPresenceTone = useCallback((action: 'join' | 'leave') => {
-    try {
-      const context = ensureAudioCtx();
-      context.resume().catch(() => {});
-      const frequencies = action === 'join' ? [523.25, 659.25] : [493.88, 392.0];
-      const start = context.currentTime;
-      frequencies.forEach((frequency, index) => {
-        const oscillator = context.createOscillator();
-        const gain = context.createGain();
-        const noteStart = start + index * 0.11;
-        oscillator.type = 'sine';
-        oscillator.frequency.value = frequency;
-        gain.gain.setValueAtTime(0.0001, noteStart);
-        gain.gain.exponentialRampToValueAtTime(0.13, noteStart + 0.012);
-        gain.gain.exponentialRampToValueAtTime(0.0001, noteStart + 0.13);
-        oscillator.connect(gain).connect(context.destination);
-        oscillator.start(noteStart);
-        oscillator.stop(noteStart + 0.14);
-      });
-    } catch { /* 音效失败不影响语音 */ }
-  }, [ensureAudioCtx]);
+  const playPresenceTone = useCallback(
+    (action: "join" | "leave") => {
+      try {
+        const context = ensureAudioCtx();
+        context.resume().catch(() => {});
+        const frequencies =
+          action === "join" ? [523.25, 659.25] : [493.88, 392.0];
+        const start = context.currentTime;
+        frequencies.forEach((frequency, index) => {
+          const oscillator = context.createOscillator();
+          const gain = context.createGain();
+          const noteStart = start + index * 0.11;
+          oscillator.type = "sine";
+          oscillator.frequency.value = frequency;
+          gain.gain.setValueAtTime(0.0001, noteStart);
+          gain.gain.exponentialRampToValueAtTime(0.13, noteStart + 0.012);
+          gain.gain.exponentialRampToValueAtTime(0.0001, noteStart + 0.13);
+          oscillator
+            .connect(gain)
+            .connect(masterOutputGain.current ?? context.destination);
+          oscillator.start(noteStart);
+          oscillator.stop(noteStart + 0.14);
+        });
+      } catch {
+        /* 音效失败不影响语音 */
+      }
+    },
+    [ensureAudioCtx],
+  );
 
-  const attachAnalyser = (key: string, stream: MediaStream, socketId: string) => {
+  const attachAnalyser = (
+    key: string,
+    stream: MediaStream,
+    socketId: string,
+  ) => {
     try {
       const ctx = ensureAudioCtx();
       const src = ctx.createMediaStreamSource(stream);
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 512;
       src.connect(analyser); // 不连到 destination，避免重复播放
-      analysers.current.set(key, { analyser, data: new Uint8Array(new ArrayBuffer(analyser.frequencyBinCount)), socketId });
-    } catch { /* ignore */ }
+      analysers.current.set(key, {
+        analyser,
+        data: new Uint8Array(new ArrayBuffer(analyser.frequencyBinCount)),
+        socketId,
+      });
+    } catch {
+      /* ignore */
+    }
   };
 
-  const detachAnalyser = (key: string) => { analysers.current.delete(key); };
+  const detachAnalyser = (key: string) => {
+    analysers.current.delete(key);
+  };
 
   // 音量计：每 100ms 计算每路音频的 RMS，聚合到 socketId → 0~1
   const startMeters = useCallback(() => {
     if (volumeTimer.current) return;
     volumeTimer.current = setInterval(() => {
-      if (analysers.current.size === 0) { setSpeakingLevels({}); return; }
+      if (analysers.current.size === 0) {
+        setSpeakingLevels({});
+        return;
+      }
       const levels: Record<string, number> = {};
       analysers.current.forEach(({ analyser, data, socketId }) => {
         analyser.getByteTimeDomainData(data);
         let sum = 0;
-        for (let i = 0; i < data.length; i++) { const v = (data[i] - 128) / 128; sum += v * v; }
+        for (let i = 0; i < data.length; i++) {
+          const v = (data[i] - 128) / 128;
+          sum += v * v;
+        }
         const rms = Math.sqrt(sum / data.length);
         const level = Math.min(1, rms * 3); // 放大便于观察
         levels[socketId] = Math.max(levels[socketId] ?? 0, level);
@@ -632,7 +1022,10 @@ export function useWebRTC(socket: Socket, roomId: string) {
   }, []);
 
   const stopMeters = useCallback(() => {
-    if (volumeTimer.current) { clearInterval(volumeTimer.current); volumeTimer.current = null; }
+    if (volumeTimer.current) {
+      clearInterval(volumeTimer.current);
+      volumeTimer.current = null;
+    }
     setSpeakingLevels({});
   }, []);
 
@@ -645,7 +1038,10 @@ export function useWebRTC(socket: Socket, roomId: string) {
     const sendingProducerId = screenProducer.current?.id ?? null;
     const sendingScreen = Boolean(sendingProducerId);
     const watchedPeerId = watchingScreenPeerRef.current;
-    const capturedSessionKey = mediaDiagnosticSessionKey(sendingProducerId, watchedPeerId);
+    const capturedSessionKey = mediaDiagnosticSessionKey(
+      sendingProducerId,
+      watchedPeerId,
+    );
     if (!statsEnabledRef.current || !capturedSessionKey) {
       videoCounterPrev.current = null;
       receiveLossPrev.current = null;
@@ -654,27 +1050,44 @@ export function useWebRTC(socket: Socket, roomId: string) {
       statsCollecting.current = false;
       return;
     }
-    next.role = sendingScreen ? 'sender' : watchedPeerId ? 'receiver' : 'idle';
+    next.role = sendingScreen ? "sender" : watchedPeerId ? "receiver" : "idle";
 
     try {
       const selectedTransport = sendingScreen
         ? sendTransport.current
-        : watchedPeerId ? recvTransport.current : null;
+        : watchedPeerId
+          ? recvTransport.current
+          : null;
       if (selectedTransport) {
         const report = await selectedTransport.getStats();
         const pairs: RtcStat[] = [];
-        report.forEach(stat => {
+        report.forEach((stat) => {
           const value = stat as unknown as RtcStat;
-          if (value.type === 'candidate-pair' && (!value.state || value.state === 'succeeded')) pairs.push(value);
+          if (
+            value.type === "candidate-pair" &&
+            (!value.state || value.state === "succeeded")
+          )
+            pairs.push(value);
         });
-        const pair = pairs.find(value => value.nominated === true || value.selected === true) ?? pairs[0];
+        const pair =
+          pairs.find(
+            (value) => value.nominated === true || value.selected === true,
+          ) ?? pairs[0];
         if (pair) {
-          if (typeof pair.currentRoundTripTime === 'number')
+          if (typeof pair.currentRoundTripTime === "number")
             next.rtt = Math.round(pair.currentRoundTripTime * 1_000);
-          if (sendingScreen && typeof pair.availableOutgoingBitrate === 'number')
-            next.availableBitrate = Math.round(pair.availableOutgoingBitrate / 1_000);
-          const candidate = report.get(String(pair.localCandidateId ?? '')) as unknown as RtcStat | undefined;
-          if (candidate?.protocol) next.protocol = String(candidate.protocol).toUpperCase();
+          if (
+            sendingScreen &&
+            typeof pair.availableOutgoingBitrate === "number"
+          )
+            next.availableBitrate = Math.round(
+              pair.availableOutgoingBitrate / 1_000,
+            );
+          const candidate = report.get(
+            String(pair.localCandidateId ?? ""),
+          ) as unknown as RtcStat | undefined;
+          if (candidate?.protocol)
+            next.protocol = String(candidate.protocol).toUpperCase();
         }
       }
 
@@ -685,7 +1098,8 @@ export function useWebRTC(socket: Socket, roomId: string) {
         videoTrack = screenProducer.current.track ?? null;
       } else {
         for (const { consumer, kind, socketId } of consumers.current.values()) {
-          if (kind !== 'video' || (watchedPeerId && socketId !== watchedPeerId)) continue;
+          if (kind !== "video" || (watchedPeerId && socketId !== watchedPeerId))
+            continue;
           videoReport = await consumer.getStats();
           videoTrack = consumer.track ?? null;
           break;
@@ -694,7 +1108,10 @@ export function useWebRTC(socket: Socket, roomId: string) {
 
       if (videoTrack) {
         const settings = videoTrack.getSettings();
-        next.trackFps = typeof settings.frameRate === 'number' ? Math.round(settings.frameRate * 10) / 10 : null;
+        next.trackFps =
+          typeof settings.frameRate === "number"
+            ? Math.round(settings.frameRate * 10) / 10
+            : null;
         next.trackWidth = settings.width ?? null;
         next.trackHeight = settings.height ?? null;
         next.displaySurface = settings.displaySurface ?? null;
@@ -703,45 +1120,78 @@ export function useWebRTC(socket: Socket, roomId: string) {
       let rtpStat: RtcStat | undefined;
       let remoteInbound: RtcStat | undefined;
       let mediaSource: RtcStat | undefined;
-      videoReport?.forEach(stat => {
+      videoReport?.forEach((stat) => {
         const value = stat as unknown as RtcStat;
-        const isVideo = !value.kind || value.kind === 'video' || value.mediaType === 'video';
-        if (sendingScreen && value.type === 'outbound-rtp' && value.isRemote !== true && isVideo) rtpStat = value;
-        if (!sendingScreen && value.type === 'inbound-rtp' && value.isRemote !== true && isVideo) rtpStat = value;
-        if (value.type === 'remote-inbound-rtp' && isVideo) remoteInbound = value;
-        if (value.type === 'media-source' && isVideo) mediaSource = value;
+        const isVideo =
+          !value.kind || value.kind === "video" || value.mediaType === "video";
+        if (
+          sendingScreen &&
+          value.type === "outbound-rtp" &&
+          value.isRemote !== true &&
+          isVideo
+        )
+          rtpStat = value;
+        if (
+          !sendingScreen &&
+          value.type === "inbound-rtp" &&
+          value.isRemote !== true &&
+          isVideo
+        )
+          rtpStat = value;
+        if (value.type === "remote-inbound-rtp" && isVideo)
+          remoteInbound = value;
+        if (value.type === "media-source" && isVideo) mediaSource = value;
       });
 
       if (rtpStat && videoReport) {
         if (rtpStat.mediaSourceId) {
-          const linkedSource = videoReport.get(String(rtpStat.mediaSourceId)) as unknown as RtcStat | undefined;
+          const linkedSource = videoReport.get(
+            String(rtpStat.mediaSourceId),
+          ) as unknown as RtcStat | undefined;
           if (linkedSource) mediaSource = linkedSource;
         }
         const counterStat: RtcStat = {
           ...rtpStat,
-          id: `${String(rtpStat.id ?? '')}:${String(mediaSource?.id ?? '')}`,
-          framesCaptured: statNumber(mediaSource, 'frames', statNumber(rtpStat, 'framesCaptured')),
+          id: `${String(rtpStat.id ?? "")}:${String(mediaSource?.id ?? "")}`,
+          framesCaptured: statNumber(
+            mediaSource,
+            "frames",
+            statNumber(rtpStat, "framesCaptured"),
+          ),
         };
         const sample = videoCounterSample(counterStat);
         const rates = videoCounterRates(sample, videoCounterPrev.current);
         videoCounterPrev.current = sample;
 
-        const sourceReportedFps = typeof mediaSource?.framesPerSecond === 'number'
-          ? Math.round(mediaSource.framesPerSecond * 10) / 10 : null;
-        const rtpReportedFps = typeof rtpStat.framesPerSecond === 'number'
-          ? Math.round(rtpStat.framesPerSecond * 10) / 10 : null;
-        const hasCaptureCounter = typeof mediaSource?.frames === 'number'
-          || typeof rtpStat.framesCaptured === 'number';
-        next.captureFps = hasCaptureCounter ? rates.captureFps ?? sourceReportedFps : sourceReportedFps;
-        next.encodeFps = typeof rtpStat.framesEncoded === 'number' ? rates.encodeFps : null;
-        next.sendFps = typeof rtpStat.framesSent === 'number' ? rates.sendFps : null;
-        next.receiveFps = typeof rtpStat.framesReceived === 'number' ? rates.receiveFps : null;
-        next.decodeFps = typeof rtpStat.framesDecoded === 'number'
-          ? rates.decodeFps ?? (!sendingScreen ? rtpReportedFps : null)
-          : !sendingScreen ? rtpReportedFps : null;
+        const sourceReportedFps =
+          typeof mediaSource?.framesPerSecond === "number"
+            ? Math.round(mediaSource.framesPerSecond * 10) / 10
+            : null;
+        const rtpReportedFps =
+          typeof rtpStat.framesPerSecond === "number"
+            ? Math.round(rtpStat.framesPerSecond * 10) / 10
+            : null;
+        const hasCaptureCounter =
+          typeof mediaSource?.frames === "number" ||
+          typeof rtpStat.framesCaptured === "number";
+        next.captureFps = hasCaptureCounter
+          ? (rates.captureFps ?? sourceReportedFps)
+          : sourceReportedFps;
+        next.encodeFps =
+          typeof rtpStat.framesEncoded === "number" ? rates.encodeFps : null;
+        next.sendFps =
+          typeof rtpStat.framesSent === "number" ? rates.sendFps : null;
+        next.receiveFps =
+          typeof rtpStat.framesReceived === "number" ? rates.receiveFps : null;
+        next.decodeFps =
+          typeof rtpStat.framesDecoded === "number"
+            ? (rates.decodeFps ?? (!sendingScreen ? rtpReportedFps : null))
+            : !sendingScreen
+              ? rtpReportedFps
+              : null;
         next.fps = sendingScreen
-          ? next.sendFps ?? next.encodeFps ?? rtpReportedFps
-          : next.decodeFps ?? next.receiveFps ?? rtpReportedFps;
+          ? (next.sendFps ?? next.encodeFps ?? rtpReportedFps)
+          : (next.decodeFps ?? next.receiveFps ?? rtpReportedFps);
         next.bitrate = rates.bitrateKbps;
         next.retransmitBitrate = rates.retransmitKbps;
         next.encodeTimeMs = rates.encodeTimeMs;
@@ -750,89 +1200,142 @@ export function useWebRTC(socket: Socket, roomId: string) {
         next.nackPerSecond = rates.nackPerSecond;
         next.pliPerSecond = rates.pliPerSecond;
         next.firPerSecond = rates.firPerSecond;
-        next.droppedFrames = typeof rtpStat.framesDropped === 'number' ? rates.droppedFps : null;
-        next.width = typeof rtpStat.frameWidth === 'number' ? rtpStat.frameWidth : null;
-        next.height = typeof rtpStat.frameHeight === 'number' ? rtpStat.frameHeight : null;
-        next.targetBitrate = typeof rtpStat.targetBitrate === 'number'
-          ? Math.round(rtpStat.targetBitrate / 1_000) : null;
-        next.qualityLimitation = typeof rtpStat.qualityLimitationReason === 'string'
-          ? rtpStat.qualityLimitationReason : null;
-        const durations = rtpStat.qualityLimitationDurations as RtcStat | undefined;
-        next.qualityLimitationCpuSeconds = typeof durations?.cpu === 'number'
-          ? Math.round(durations.cpu * 10) / 10 : null;
-        next.qualityLimitationBandwidthSeconds = typeof durations?.bandwidth === 'number'
-          ? Math.round(durations.bandwidth * 10) / 10 : null;
-        next.encoderImplementation = typeof rtpStat.encoderImplementation === 'string'
-          ? rtpStat.encoderImplementation : null;
-        next.decoderImplementation = typeof rtpStat.decoderImplementation === 'string'
-          ? rtpStat.decoderImplementation : null;
-        next.powerEfficientEncoder = typeof rtpStat.powerEfficientEncoder === 'boolean'
-          ? rtpStat.powerEfficientEncoder : null;
-        next.powerEfficientDecoder = typeof rtpStat.powerEfficientDecoder === 'boolean'
-          ? rtpStat.powerEfficientDecoder : null;
+        next.droppedFrames =
+          typeof rtpStat.framesDropped === "number" ? rates.droppedFps : null;
+        next.width =
+          typeof rtpStat.frameWidth === "number" ? rtpStat.frameWidth : null;
+        next.height =
+          typeof rtpStat.frameHeight === "number" ? rtpStat.frameHeight : null;
+        next.targetBitrate =
+          typeof rtpStat.targetBitrate === "number"
+            ? Math.round(rtpStat.targetBitrate / 1_000)
+            : null;
+        next.qualityLimitation =
+          typeof rtpStat.qualityLimitationReason === "string"
+            ? rtpStat.qualityLimitationReason
+            : null;
+        const durations = rtpStat.qualityLimitationDurations as
+          | RtcStat
+          | undefined;
+        next.qualityLimitationCpuSeconds =
+          typeof durations?.cpu === "number"
+            ? Math.round(durations.cpu * 10) / 10
+            : null;
+        next.qualityLimitationBandwidthSeconds =
+          typeof durations?.bandwidth === "number"
+            ? Math.round(durations.bandwidth * 10) / 10
+            : null;
+        next.encoderImplementation =
+          typeof rtpStat.encoderImplementation === "string"
+            ? rtpStat.encoderImplementation
+            : null;
+        next.decoderImplementation =
+          typeof rtpStat.decoderImplementation === "string"
+            ? rtpStat.decoderImplementation
+            : null;
+        next.powerEfficientEncoder =
+          typeof rtpStat.powerEfficientEncoder === "boolean"
+            ? rtpStat.powerEfficientEncoder
+            : null;
+        next.powerEfficientDecoder =
+          typeof rtpStat.powerEfficientDecoder === "boolean"
+            ? rtpStat.powerEfficientDecoder
+            : null;
         if (rtpStat.codecId) {
-          const codec = videoReport.get(String(rtpStat.codecId)) as unknown as RtcStat | undefined;
-          if (codec?.mimeType) next.codec = String(codec.mimeType).replace(/^video\//i, '').toUpperCase();
+          const codec = videoReport.get(String(rtpStat.codecId)) as unknown as
+            | RtcStat
+            | undefined;
+          if (codec?.mimeType)
+            next.codec = String(codec.mimeType)
+              .replace(/^video\//i, "")
+              .toUpperCase();
         }
 
         if (sendingScreen && remoteInbound) {
-          const lost = statNumber(remoteInbound, 'packetsLost');
-          next.remoteLoss = intervalLossPercent(lost, sample.packets, remoteLossPrev.current, true);
+          const lost = statNumber(remoteInbound, "packetsLost");
+          next.remoteLoss = intervalLossPercent(
+            lost,
+            sample.packets,
+            remoteLossPrev.current,
+            true,
+          );
           remoteLossPrev.current = { lost, packets: sample.packets };
-          if (typeof remoteInbound.roundTripTime === 'number')
+          if (typeof remoteInbound.roundTripTime === "number")
             next.rtt = Math.round(remoteInbound.roundTripTime * 1_000);
-          if (typeof remoteInbound.jitter === 'number')
+          if (typeof remoteInbound.jitter === "number")
             next.jitter = Math.round(remoteInbound.jitter * 1_000);
         } else if (!sendingScreen) {
-          const lost = statNumber(rtpStat, 'packetsLost');
-          const received = statNumber(rtpStat, 'packetsReceived');
-          next.loss = intervalLossPercent(lost, received, receiveLossPrev.current);
+          const lost = statNumber(rtpStat, "packetsLost");
+          const received = statNumber(rtpStat, "packetsReceived");
+          next.loss = intervalLossPercent(
+            lost,
+            received,
+            receiveLossPrev.current,
+          );
           receiveLossPrev.current = { lost, packets: received };
-          if (typeof rtpStat.jitter === 'number') next.jitter = Math.round(rtpStat.jitter * 1_000);
+          if (typeof rtpStat.jitter === "number")
+            next.jitter = Math.round(rtpStat.jitter * 1_000);
         }
       }
 
-      const serverSnapshot = await new Promise<ServerMediaDiagnostics | null>(resolve => {
-        socket.timeout(1_500).emit(
-          'ms:media-diagnostics', {},
-          (error: Error | null, value: ServerMediaDiagnostics) => resolve(error ? null : value),
-        );
-      });
-      if (serverSnapshot?.role === 'sender') {
+      const serverSnapshot = await new Promise<ServerMediaDiagnostics | null>(
+        (resolve) => {
+          socket
+            .timeout(1_500)
+            .emit(
+              "ms:media-diagnostics",
+              {},
+              (error: Error | null, value: ServerMediaDiagnostics) =>
+                resolve(error ? null : value),
+            );
+        },
+      );
+      if (serverSnapshot?.role === "sender") {
         const producer = serverSnapshot.producers[0];
-        next.serverIngressBitrate = producer?.stats[0]?.bitrateKbps
-          ?? serverSnapshot.transports.send?.rtpRecvBitrateKbps ?? null;
-        next.serverScore = producer?.stats[0]?.score
-          ?? producer?.score?.[0]?.score ?? null;
-      } else if (serverSnapshot?.role === 'receiver') {
+        next.serverIngressBitrate =
+          producer?.stats[0]?.bitrateKbps ??
+          serverSnapshot.transports.send?.rtpRecvBitrateKbps ??
+          null;
+        next.serverScore =
+          producer?.stats[0]?.score ?? producer?.score?.[0]?.score ?? null;
+      } else if (serverSnapshot?.role === "receiver") {
         const consumer = serverSnapshot.consumers[0];
-        next.serverEgressBitrate = consumer?.stats[0]?.bitrateKbps
-          ?? serverSnapshot.transports.receive?.rtpSendBitrateKbps ?? null;
-        next.serverScore = consumer?.stats[0]?.score
-          ?? consumer?.score?.score ?? null;
+        next.serverEgressBitrate =
+          consumer?.stats[0]?.bitrateKbps ??
+          serverSnapshot.transports.receive?.rtpSendBitrateKbps ??
+          null;
+        next.serverScore =
+          consumer?.stats[0]?.score ?? consumer?.score?.score ?? null;
       }
 
       const currentSessionKey = mediaDiagnosticSessionKey(
         screenProducer.current?.id ?? null,
         watchingScreenPeerRef.current,
       );
-      if (!shouldAcceptMediaDiagnosticSample(
-        statsEnabledRef.current,
-        capturedSessionKey,
-        currentSessionKey,
-      )) {
+      if (
+        !shouldAcceptMediaDiagnosticSample(
+          statsEnabledRef.current,
+          capturedSessionKey,
+          currentSessionKey,
+        )
+      ) {
         setStats(EMPTY_STATS);
         return;
       }
 
       const trackSettings = videoTrack?.getSettings() ?? null;
-      const diagnosticEntry = { timestamp: new Date().toISOString(), stats: next, trackSettings };
+      const diagnosticEntry = {
+        timestamp: new Date().toISOString(),
+        stats: next,
+        trackSettings,
+      };
       // 仅在内存中保留最近 600 个样本，只有手动点击导出才保存文件。
       diagnosticHistory.current.push(diagnosticEntry);
-      if (diagnosticHistory.current.length > 600) diagnosticHistory.current.shift();
+      if (diagnosticHistory.current.length > 600)
+        diagnosticHistory.current.shift();
       setStats(next);
     } catch (error) {
-      console.warn('[media-diag] 采集客户端媒体统计失败', error);
+      console.warn("[media-diag] 采集客户端媒体统计失败", error);
     } finally {
       statsCollecting.current = false;
     }
@@ -840,13 +1343,19 @@ export function useWebRTC(socket: Socket, roomId: string) {
 
   // stats 开关：打开时每秒采集一次
   const toggleStats = useCallback(() => {
-    setStatsEnabled(prev => {
+    setStatsEnabled((prev) => {
       const next = !prev;
       statsEnabledRef.current = next;
       if (next) {
-        if (!statsTimer.current) statsTimer.current = setInterval(() => { collectStats(); }, 1000);
+        if (!statsTimer.current)
+          statsTimer.current = setInterval(() => {
+            collectStats();
+          }, 1000);
       } else {
-        if (statsTimer.current) { clearInterval(statsTimer.current); statsTimer.current = null; }
+        if (statsTimer.current) {
+          clearInterval(statsTimer.current);
+          statsTimer.current = null;
+        }
         receiveLossPrev.current = null;
         remoteLossPrev.current = null;
         videoCounterPrev.current = null;
@@ -875,60 +1384,91 @@ export function useWebRTC(socket: Socket, roomId: string) {
       },
       samples: diagnosticHistory.current,
     };
-    const text = JSON.stringify(payload, (_key, value) => typeof value === 'bigint' ? Number(value) : value, 2);
-    const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
-    const link = document.createElement('a');
+    const text = JSON.stringify(
+      payload,
+      (_key, value) => (typeof value === "bigint" ? Number(value) : value),
+      2,
+    );
+    const url = URL.createObjectURL(
+      new Blob([text], { type: "application/json" }),
+    );
+    const link = document.createElement("a");
     link.href = url;
-    link.download = `cove-media-diagnostics-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+    link.download = `cove-media-diagnostics-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
     link.click();
     setTimeout(() => URL.revokeObjectURL(url), 1_000);
-  }, [fps, roomId, screenEncodingPlan, screenGameMode, screenNativeResolution, screenPreset, socket.id]);
+  }, [
+    fps,
+    roomId,
+    screenEncodingPlan,
+    screenGameMode,
+    screenNativeResolution,
+    screenPreset,
+    socket.id,
+  ]);
 
   // 卸载时清理所有定时器和音频上下文
-  useEffect(() => () => {
-    const shouldPlayLeaveTone = voiceSessionActiveRef.current;
-    if (shouldPlayLeaveTone) {
-      // room 导航时，父组件的清理可能晚于本 hook 的清理；在这里补发本地提示。
-      voiceSessionActiveRef.current = false;
-      playPresenceTone('leave');
-    }
-    if (volumeTimer.current) clearInterval(volumeTimer.current);
-    if (statsTimer.current) clearInterval(statsTimer.current);
-    if (screenAnalysisTimer.current) clearInterval(screenAnalysisTimer.current);
-    if (screenAnalysisVideo.current) screenAnalysisVideo.current.srcObject = null;
-    remoteAudioOutputs.current.forEach(output => output.close());
-    remoteAudioOutputs.current.clear();
-    audioEls.current.forEach(element => { element.pause(); element.srcObject = null; });
-    audioEls.current.clear();
-    const audioContext = audioCtxRef.current;
-    if (audioContext) {
-      const closeAudioContext = () => {
-        if (audioCtxRef.current === audioContext) audioCtxRef.current = null;
-        audioContext.close().catch(() => {});
-      };
-      // 最后一声提示需要完成约 250ms 的振荡，卸载时延后关闭上下文。
-      if (shouldPlayLeaveTone) setTimeout(closeAudioContext, 600);
-      else closeAudioContext();
-    }
-    micProcessingContext.current?.close().catch(() => {});
-    screenAudioUnsubscribe.current?.();
-    screenAudioUnsubscribe.current = null;
-    screenAudioPipeline.current?.close();
-    screenAudioPipeline.current = null;
-    void window.coveScreenAudio?.stop();
-    applicationAudioUnsubscribe.current?.();
-    applicationAudioUnsubscribe.current = null;
-    applicationAudioPipeline.current?.close();
-    applicationAudioPipeline.current = null;
-    void window.coveApplicationAudio?.stop();
-  }, [playPresenceTone]);
+  useEffect(
+    () => () => {
+      const shouldPlayLeaveTone = voiceSessionActiveRef.current;
+      if (shouldPlayLeaveTone) {
+        // room 导航时，父组件的清理可能晚于本 hook 的清理；在这里补发本地提示。
+        voiceSessionActiveRef.current = false;
+        playPresenceTone("leave");
+      }
+      if (volumeTimer.current) clearInterval(volumeTimer.current);
+      if (statsTimer.current) clearInterval(statsTimer.current);
+      if (screenAnalysisTimer.current)
+        clearInterval(screenAnalysisTimer.current);
+      if (screenAnalysisVideo.current)
+        screenAnalysisVideo.current.srcObject = null;
+      remoteAudioOutputs.current.forEach((output) => output.close());
+      remoteAudioOutputs.current.clear();
+      audioEls.current.forEach((element) => {
+        element.pause();
+        element.srcObject = null;
+      });
+      audioEls.current.clear();
+      const audioContext = audioCtxRef.current;
+      if (audioContext) {
+        const closeAudioContext = () => {
+          if (audioCtxRef.current === audioContext) audioCtxRef.current = null;
+          if (masterOutputGain.current?.context === audioContext)
+            masterOutputGain.current = null;
+          audioContext.close().catch(() => {});
+        };
+        // 最后一声提示需要完成约 250ms 的振荡，卸载时延后关闭上下文。
+        if (shouldPlayLeaveTone) setTimeout(closeAudioContext, 600);
+        else closeAudioContext();
+      }
+      micProcessingContext.current?.close().catch(() => {});
+      screenAudioUnsubscribe.current?.();
+      screenAudioUnsubscribe.current = null;
+      screenAudioPipeline.current?.close();
+      screenAudioPipeline.current = null;
+      void window.coveScreenAudio?.stop();
+      applicationAudioUnsubscribe.current?.();
+      applicationAudioUnsubscribe.current = null;
+      applicationAudioPipeline.current?.close();
+      applicationAudioPipeline.current = null;
+      void applicationAudioStop.current?.();
+      applicationAudioStop.current = null;
+      void window.coveApplicationAudio?.stop();
+      void window.coveSystemAudio?.stop();
+    },
+    [playPresenceTone],
+  );
 
   // ── 初始化 mediasoup Device + 两条 transport ────────────────────────────────
 
   const setupDevice = useCallback(async (): Promise<boolean> => {
-    if (deviceRef.current && sendTransport.current && recvTransport.current) return true;
+    if (deviceRef.current && sendTransport.current && recvTransport.current)
+      return true;
     const generation = mediaGeneration.current;
-    const ensureCurrent = () => { if (generation !== mediaGeneration.current) throw new Error('语音加入已取消'); };
+    const ensureCurrent = () => {
+      if (generation !== mediaGeneration.current)
+        throw new Error("语音加入已取消");
+    };
     try {
       const caps = await emitAsync<RtpCapabilities>(socket, 'ms:capabilities');
       ensureCurrent();
@@ -938,261 +1478,419 @@ export function useWebRTC(socket: Socket, roomId: string) {
       deviceRef.current = device;
 
       // ── 发送 transport ───────────────────────────────────────────────────
-      const sendParams = await emitAsync<Record<string, unknown>>(socket, 'ms:create-transport', { direction: 'send' });
+      const sendParams = await emitAsync<Record<string, unknown>>(
+        socket,
+        "ms:create-transport",
+        { direction: "send" },
+      );
       ensureCurrent();
       const st = device.createSendTransport(sendParams as never);
 
-      st.on('connect', ({ dtlsParameters }, ok, err) => {
-        emitAsync(socket, 'ms:connect-transport', { transportId: st.id, dtlsParameters })
-          .then(ok).catch(err);
+      st.on("connect", ({ dtlsParameters }, ok, err) => {
+        emitAsync(socket, "ms:connect-transport", {
+          transportId: st.id,
+          dtlsParameters,
+        })
+          .then(ok)
+          .catch(err);
       });
 
-      st.on('produce', ({ kind, rtpParameters, appData }, ok, err) => {
-        emitAsync<{ producerId: string }>(socket, 'ms:produce', {
-          transportId: st.id, kind, rtpParameters, appData,
-        }).then(({ producerId }) => ok({ id: producerId })).catch(err);
+      st.on("produce", ({ kind, rtpParameters, appData }, ok, err) => {
+        emitAsync<{ producerId: string }>(socket, "ms:produce", {
+          transportId: st.id,
+          kind,
+          rtpParameters,
+          appData,
+        })
+          .then(({ producerId }) => ok({ id: producerId }))
+          .catch(err);
       });
 
-      st.on('connectionstatechange', (state) => {
+      st.on("connectionstatechange", (state) => {
         if (sendTransport.current !== st) return;
-        checkTransport('send', state);
-        console.log(`%c[ms-client] 发送通道(send): ${state}`, 'color:#3b82f6;font-weight:bold');
-        if (state === 'connected')    console.log('%c[ms-client] [OK] 发送通道已连通，麦克风/屏幕可以上行', 'color:#22c55e');
-        if (state === 'failed')       console.error('[ms-client] [ERROR] 发送通道连接失败 - 连接层问题，检查 frp 端口/公网IP 配置');
-        if (state === 'disconnected') console.warn('[ms-client] [WARN] 发送通道断开（网络抖动？）');
+        checkTransport("send", state);
+        console.log(
+          `%c[ms-client] 发送通道(send): ${state}`,
+          "color:#3b82f6;font-weight:bold",
+        );
+        if (state === "connected")
+          console.log(
+            "%c[ms-client] [OK] 发送通道已连通，麦克风/屏幕可以上行",
+            "color:#22c55e",
+          );
+        if (state === "failed")
+          console.error(
+            "[ms-client] [ERROR] 发送通道连接失败 - 连接层问题，检查 frp 端口/公网IP 配置",
+          );
+        if (state === "disconnected")
+          console.warn("[ms-client] [WARN] 发送通道断开（网络抖动？）");
       });
 
       sendTransport.current = st;
 
       // ── 接收 transport ───────────────────────────────────────────────────
-      const recvParams = await emitAsync<Record<string, unknown>>(socket, 'ms:create-transport', { direction: 'recv' });
+      const recvParams = await emitAsync<Record<string, unknown>>(
+        socket,
+        "ms:create-transport",
+        { direction: "recv" },
+      );
       ensureCurrent();
       const rt = device.createRecvTransport(recvParams as never);
 
-      rt.on('connect', ({ dtlsParameters }, ok, err) => {
-        emitAsync(socket, 'ms:connect-transport', { transportId: rt.id, dtlsParameters })
-          .then(ok).catch(err);
+      rt.on("connect", ({ dtlsParameters }, ok, err) => {
+        emitAsync(socket, "ms:connect-transport", {
+          transportId: rt.id,
+          dtlsParameters,
+        })
+          .then(ok)
+          .catch(err);
       });
 
-      rt.on('connectionstatechange', (state) => {
+      rt.on("connectionstatechange", (state) => {
         if (recvTransport.current !== rt) return;
-        checkTransport('recv', state);
-        console.log(`%c[ms-client] 接收通道(recv): ${state}`, 'color:#a855f7;font-weight:bold');
-        if (state === 'connected')    console.log('%c[ms-client] [OK] 接收通道已连通，可以收到别人的音视频', 'color:#22c55e');
-        if (state === 'failed')       console.error('[ms-client] [ERROR] 接收通道连接失败 - 连接层问题，检查 frp 端口/公网IP 配置');
-        if (state === 'disconnected') console.warn('[ms-client] [WARN] 接收通道断开（网络抖动？）');
+        checkTransport("recv", state);
+        console.log(
+          `%c[ms-client] 接收通道(recv): ${state}`,
+          "color:#a855f7;font-weight:bold",
+        );
+        if (state === "connected")
+          console.log(
+            "%c[ms-client] [OK] 接收通道已连通，可以收到别人的音视频",
+            "color:#22c55e",
+          );
+        if (state === "failed")
+          console.error(
+            "[ms-client] [ERROR] 接收通道连接失败 - 连接层问题，检查 frp 端口/公网IP 配置",
+          );
+        if (state === "disconnected")
+          console.warn("[ms-client] [WARN] 接收通道断开（网络抖动？）");
       });
 
       recvTransport.current = rt;
       return true;
     } catch (e) {
       if (generation === mediaGeneration.current) {
-        sendTransport.current?.close(); sendTransport.current = null;
-        recvTransport.current?.close(); recvTransport.current = null;
+        sendTransport.current?.close();
+        sendTransport.current = null;
+        recvTransport.current?.close();
+        recvTransport.current = null;
         deviceRef.current = null;
       }
-      console.error('[mediasoup] 初始化失败:', e);
+      console.error("[mediasoup] 初始化失败:", e);
       return false;
     }
   }, [socket, checkTransport]);
 
   // ── 消费一个 producer（接收对方音频/视频）──────────────────────────────────
 
-  const consumeProducer = useCallback(async (
-    producerId: string,
-    peerId: string,
-    kind: string,
-    appData: Record<string, unknown>,
-  ): Promise<boolean> => {
-    const device = deviceRef.current;
-    const rt     = recvTransport.current;
-    if (!device || !rt) return false;
-    if (consumerByProducer.current.has(producerId)) return true;
-    if (pendingProducers.current.has(producerId)) return false;
-    pendingProducers.current.add(producerId);
-    const generation = mediaGeneration.current;
+  const consumeProducer = useCallback(
+    async (
+      producerId: string,
+      peerId: string,
+      kind: string,
+      appData: Record<string, unknown>,
+    ): Promise<boolean> => {
+      const device = deviceRef.current;
+      const rt = recvTransport.current;
+      if (!device || !rt) return false;
+      if (consumerByProducer.current.has(producerId)) return true;
+      if (pendingProducers.current.has(producerId)) return false;
+      pendingProducers.current.add(producerId);
+      const generation = mediaGeneration.current;
 
-    try {
-      const params = await emitAsync<Record<string, unknown>>(socket, 'ms:consume', {
-        producerId, rtpCapabilities: device.rtpCapabilities,
-      });
+      try {
+        const params = await emitAsync<Record<string, unknown>>(
+          socket,
+          'ms:consume',
+          {
+            producerId,
+            rtpCapabilities: device.rtpCapabilities,
+          },
+        );
 
-      if (generation !== mediaGeneration.current || rt.closed) return false;
-      const consumer = await rt.consume(params as never);
-      if (generation !== mediaGeneration.current || rt.closed) { consumer.close(); return false; }
-      const sourceType = typeof appData?.type === 'string' ? appData.type : undefined;
-      consumers.current.set(consumer.id, { consumer, socketId: peerId, kind, producerId, sourceType });
-      consumerByProducer.current.set(producerId, consumer.id);
-      console.log(`%c[ms-client] 开始接收 ${kind} 流，来自 ${peerId}`, 'color:#06b6d4');
+        if (generation !== mediaGeneration.current || rt.closed) return false;
+        const consumer = await rt.consume(params as never);
+        if (generation !== mediaGeneration.current || rt.closed) {
+          consumer.close();
+          return false;
+        }
+        const sourceType =
+          typeof appData?.type === "string" ? appData.type : undefined;
+        consumers.current.set(consumer.id, {
+          consumer,
+          socketId: peerId,
+          kind,
+          producerId,
+          sourceType,
+        });
+        consumerByProducer.current.set(producerId, consumer.id);
+        console.log(
+          `%c[ms-client] 开始接收 ${kind} 流，来自 ${peerId}`,
+          "color:#06b6d4",
+        );
 
-      // 给 FRP UDP 的轻微抖动留出约 80ms 缓冲。0 会过度追求延迟，容易产生爆音。
-      if (kind === 'audio') {
-        try {
-          const receiver = consumer.rtpReceiver as (RTCRtpReceiver & { playoutDelayHint?: number }) | undefined;
-          if (receiver && 'playoutDelayHint' in receiver) receiver.playoutDelayHint = 0.08;
-        } catch { /* ignore */ }
-      }
-
-      // 恢复（服务端 produce 后 paused=true，必须 resume）
-      await emitAsync(socket, 'ms:resume-consumer', { consumerId: consumer.id });
-      if (generation !== mediaGeneration.current || consumer.closed) { consumer.close(); return false; }
-
-      const stream = new MediaStream([consumer.track]);
-
-      if (kind === 'audio') {
-        const isVoice = isMemberVoiceAudio(kind, sourceType);
-        const memberVolume = memberVolumesRef.current[peerId] ?? 1;
-        const volume = sourceType === 'screen-audio'
-          ? screenReceiveVolumeRef.current
-          : sourceType === 'application-audio'
-            ? applicationAudioReceiveVolumesRef.current[peerId] ?? 1
-            : memberVolume;
-        let usesGainOutput = false;
-        if (isVoice) {
+        // 给 FRP UDP 的轻微抖动留出约 80ms 缓冲。0 会过度追求延迟，容易产生爆音。
+        if (kind === "audio") {
           try {
-            const context = ensureAudioCtx();
-            const output = createRemoteAudioOutput(context, stream, volume);
-            remoteAudioOutputs.current.set(consumer.id, output);
-            usesGainOutput = true;
-            void output.resume().catch(error => {
-              console.warn('[audio] 恢复远端音频输出失败，等待下一次点击重试', error);
-              document.addEventListener('click', () => {
-                if (remoteAudioOutputs.current.get(consumer.id) === output) void output.resume().catch(() => {});
-              }, { once: true });
-            });
-          } catch (error) {
-            console.warn('[audio] 创建远端麦克风增益失败，回退到标准音量', error);
+            const receiver = consumer.rtpReceiver as
+              | (RTCRtpReceiver & { playoutDelayHint?: number })
+              | undefined;
+            if (receiver && "playoutDelayHint" in receiver)
+              receiver.playoutDelayHint = 0.08;
+          } catch {
+            /* ignore */
           }
         }
-        if (!usesGainOutput) {
-          // Electron 29 对按需暂停/恢复的屏幕音频通过 MediaStreamAudioSourceNode
-          // 播放并不稳定。共享音频使用实际媒体元素作为唯一可听路径；麦克风仅在
-          // Web Audio 初始化失败时进入相同的兼容回退。
-          const el = new Audio();
-          el.autoplay = true;
-          el.volume = Math.min(1, volume);
-          el.muted = volume === 0;
-          el.srcObject = stream;
-          audioEls.current.set(consumer.id, el);
-          applyAudioElementOutput(el, selectedAudioOutputRef.current).catch(error => {
-            console.warn('[audio] 远端音频切换输出设备失败，使用系统默认设备', error);
-          }).finally(() => el.play().then(() => {
-            if (sourceType === 'screen-audio')
-              console.info('[screen-audio] 播放元素已启动', { paused: el.paused, readyState: el.readyState });
-          }).catch(error => {
-            console.warn('[audio] 自动播放被阻止，等待下一次点击重试', { sourceType, error });
-            const resume = () => {
-              if (audioEls.current.get(consumer.id) !== el) return;
-              void el.play().catch(retryError =>
-                console.warn('[audio] 点击后仍无法播放远端音频', { sourceType, error: retryError }));
-            };
-            document.addEventListener('click', resume, { once: true });
-          }));
-        }
-        // 只对麦克风音频做音量分析（系统音频不计入"说话"）
-        if (appData?.type !== 'screen-audio' && appData?.type !== 'application-audio') {
-          attachAnalyser(consumer.id, stream, peerId);
-          startMeters();
-        }
-      } else if (kind === 'video') {
-        // appData.type === 'screen'
-        screenStreams.current.set(peerId, stream);
-        setRemoteScreen({ socketId: peerId, stream });
-      }
 
-      consumer.on('trackended', () => {
-        if (kind === 'video')
-          setRemoteScreen(p => p?.socketId === peerId ? null : p);
-        if (sourceType === 'application-audio')
-          removeRemoteApplicationAudio(peerId, producerId);
-      });
-      return true;
-    } catch (e) {
-      console.error('[mediasoup] consume 失败:', e);
-      return false;
-    } finally {
-      if (generation === mediaGeneration.current) pendingProducers.current.delete(producerId);
-    }
-  }, [removeRemoteApplicationAudio, socket]);
+        // 恢复（服务端 produce 后 paused=true，必须 resume）
+        await emitAsync(socket, "ms:resume-consumer", {
+          consumerId: consumer.id,
+        });
+        if (generation !== mediaGeneration.current || consumer.closed) {
+          consumer.close();
+          return false;
+        }
+
+        const stream = new MediaStream([consumer.track]);
+
+        if (kind === "audio") {
+          const isVoice = isMemberVoiceAudio(kind, sourceType);
+          const memberVolume = memberVolumesRef.current[peerId] ?? 1;
+          const volume =
+            sourceType === "screen-audio"
+              ? screenReceiveVolumeRef.current
+              : sourceType === "application-audio"
+                ? (applicationAudioReceiveVolumesRef.current[peerId] ?? 1)
+                : memberVolume;
+          let usesGainOutput = false;
+          if (isVoice) {
+            try {
+              const context = ensureAudioCtx();
+              const output = createRemoteAudioOutput(
+                context,
+                stream,
+                volume,
+                new Audio(),
+                masterOutputGain.current ?? context.destination,
+              );
+              remoteAudioOutputs.current.set(consumer.id, output);
+              usesGainOutput = true;
+              void output.resume().catch((error) => {
+                console.warn(
+                  "[audio] 恢复远端音频输出失败，等待下一次点击重试",
+                  error,
+                );
+                document.addEventListener(
+                  "click",
+                  () => {
+                    if (remoteAudioOutputs.current.get(consumer.id) === output)
+                      void output.resume().catch(() => {});
+                  },
+                  { once: true },
+                );
+              });
+            } catch (error) {
+              console.warn(
+                "[audio] 创建远端音频增益失败，回退到标准音量",
+                error,
+              );
+            }
+          }
+          if (!usesGainOutput) {
+            // Electron 29 对按需暂停/恢复的屏幕音频通过 MediaStreamAudioSourceNode
+            // 播放并不稳定。共享音频使用实际媒体元素作为唯一可听路径；麦克风仅在
+            // Web Audio 初始化失败时进入相同的兼容回退。
+            const el = new Audio();
+            el.autoplay = true;
+            el.volume = Math.min(1, volume);
+            el.muted = volume === 0;
+            el.srcObject = stream;
+            audioEls.current.set(consumer.id, el);
+            applyAudioElementOutput(el, selectedAudioOutputRef.current)
+              .catch((error) => {
+                console.warn(
+                  "[audio] 远端音频切换输出设备失败，使用系统默认设备",
+                  error,
+                );
+              })
+              .finally(() =>
+                el
+                  .play()
+                  .then(() => {
+                    if (sourceType === "screen-audio")
+                      console.info("[screen-audio] 播放元素已启动", {
+                        paused: el.paused,
+                        readyState: el.readyState,
+                      });
+                  })
+                  .catch((error) => {
+                    console.warn("[audio] 自动播放被阻止，等待下一次点击重试", {
+                      sourceType,
+                      error,
+                    });
+                    const resume = () => {
+                      if (audioEls.current.get(consumer.id) !== el) return;
+                      void el.play().catch((retryError) =>
+                        console.warn("[audio] 点击后仍无法播放远端音频", {
+                          sourceType,
+                          error: retryError,
+                        }),
+                      );
+                    };
+                    document.addEventListener("click", resume, { once: true });
+                  }),
+              );
+          }
+          // 只对麦克风音频做音量分析（系统音频不计入"说话"）
+          if (
+            appData?.type !== "screen-audio" &&
+            appData?.type !== "application-audio"
+          ) {
+            attachAnalyser(consumer.id, stream, peerId);
+            startMeters();
+          }
+        } else if (kind === "video") {
+          // appData.type === 'screen'
+          screenStreams.current.set(peerId, stream);
+          setRemoteScreen({ socketId: peerId, stream });
+        }
+
+        consumer.on("trackended", () => {
+          if (kind === "video")
+            setRemoteScreen((p) => (p?.socketId === peerId ? null : p));
+          if (sourceType === "application-audio")
+            removeRemoteApplicationAudio(peerId, producerId);
+        });
+        return true;
+      } catch (e) {
+        console.error("[mediasoup] consume 失败:", e);
+        return false;
+      } finally {
+        if (generation === mediaGeneration.current)
+          pendingProducers.current.delete(producerId);
+      }
+    },
+    [removeRemoteApplicationAudio, socket],
+  );
 
   const publishAvailableScreens = useCallback(() => {
     setAvailableScreens([...availableScreensRef.current.values()]);
   }, []);
 
-  const storeAvailableScreen = useCallback((value: AvailableScreen) => {
-    availableScreensRef.current.set(value.socketId, value);
-    publishAvailableScreens();
-  }, [publishAvailableScreens]);
+  const storeAvailableScreen = useCallback(
+    (value: AvailableScreen) => {
+      availableScreensRef.current.set(value.socketId, value);
+      publishAvailableScreens();
+    },
+    [publishAvailableScreens],
+  );
 
-  const removeAvailableScreen = useCallback((socketId: string, videoProducerId?: string) => {
-    const current = availableScreensRef.current.get(socketId);
-    if (!current || (videoProducerId && current.videoProducerId !== videoProducerId)) return;
-    availableScreensRef.current.delete(socketId);
-    publishAvailableScreens();
-  }, [publishAvailableScreens]);
+  const removeAvailableScreen = useCallback(
+    (socketId: string, videoProducerId?: string) => {
+      const current = availableScreensRef.current.get(socketId);
+      if (
+        !current ||
+        (videoProducerId && current.videoProducerId !== videoProducerId)
+      )
+        return;
+      availableScreensRef.current.delete(socketId);
+      publishAvailableScreens();
+    },
+    [publishAvailableScreens],
+  );
 
   const clearAvailableScreens = useCallback(() => {
     availableScreensRef.current.clear();
     publishAvailableScreens();
   }, [publishAvailableScreens]);
 
-  const closeLocalConsumer = useCallback((consumerId: string, notifyServer: boolean) => {
-    const entry = consumers.current.get(consumerId);
-    if (!entry) return;
-    consumers.current.delete(consumerId);
-    consumerByProducer.current.delete(entry.producerId);
-    if (notifyServer) socket.emit('ms:close-consumer', { consumerId });
-    entry.consumer.close();
-    const el = audioEls.current.get(consumerId);
-    if (el) { el.pause(); el.srcObject = null; audioEls.current.delete(consumerId); }
-    const output = remoteAudioOutputs.current.get(consumerId);
-    if (output) {
-      output.close();
-      remoteAudioOutputs.current.delete(consumerId);
-    }
-    detachAnalyser(consumerId);
-    if (entry.kind === 'video') {
-      screenStreams.current.delete(entry.socketId);
-      setRemoteScreen(current => current?.socketId === entry.socketId ? null : current);
-    }
-  }, [socket]);
+  const closeLocalConsumer = useCallback(
+    (consumerId: string, notifyServer: boolean) => {
+      const entry = consumers.current.get(consumerId);
+      if (!entry) return;
+      consumers.current.delete(consumerId);
+      consumerByProducer.current.delete(entry.producerId);
+      if (notifyServer) socket.emit('ms:close-consumer', { consumerId });
+      entry.consumer.close();
+      const el = audioEls.current.get(consumerId);
+      if (el) {
+        el.pause();
+        el.srcObject = null;
+        audioEls.current.delete(consumerId);
+      }
+      const output = remoteAudioOutputs.current.get(consumerId);
+      if (output) {
+        output.close();
+        remoteAudioOutputs.current.delete(consumerId);
+      }
+      detachAnalyser(consumerId);
+      if (entry.kind === "video") {
+        screenStreams.current.delete(entry.socketId);
+        setRemoteScreen((current) =>
+          current?.socketId === entry.socketId ? null : current,
+        );
+      }
+    },
+    [socket],
+  );
 
   const stopWatchingScreen = useCallback(() => {
     const peerId = watchingScreenPeerRef.current;
     if (!peerId) return;
     for (const [consumerId, entry] of [...consumers.current]) {
-      if (entry.socketId !== peerId || (entry.sourceType !== 'screen' && entry.sourceType !== 'screen-audio')) continue;
+      if (
+        entry.socketId !== peerId ||
+        (entry.sourceType !== "screen" && entry.sourceType !== "screen-audio")
+      )
+        continue;
       closeLocalConsumer(consumerId, true);
     }
     watchingScreenPeerRef.current = null;
     setWatchingScreenPeer(null);
-    setRemoteScreen(current => current?.socketId === peerId ? null : current);
+    setRemoteScreen((current) =>
+      current?.socketId === peerId ? null : current,
+    );
     videoCounterPrev.current = null;
     receiveLossPrev.current = null;
     if (!screenProducer.current) setStats(EMPTY_STATS);
   }, [closeLocalConsumer]);
 
-  const watchScreen = useCallback(async (socketId?: string) => {
-    const source = socketId
-      ? availableScreensRef.current.get(socketId)
-      : availableScreensRef.current.values().next().value as AvailableScreen | undefined;
-    if (!source || watchingScreenPeerRef.current === source.socketId) return;
-    if (watchingScreenPeerRef.current) stopWatchingScreen();
+  const watchScreen = useCallback(
+    async (socketId?: string) => {
+      const source = socketId
+        ? availableScreensRef.current.get(socketId)
+        : (availableScreensRef.current.values().next().value as
+            | AvailableScreen
+            | undefined);
+      if (!source || watchingScreenPeerRef.current === source.socketId) return;
+      if (watchingScreenPeerRef.current) stopWatchingScreen();
 
-    watchingScreenPeerRef.current = source.socketId;
-    setWatchingScreenPeer(source.socketId);
-    videoCounterPrev.current = null;
-    receiveLossPrev.current = null;
-    const videoOk = await consumeProducer(source.videoProducerId, source.socketId, 'video', { type: 'screen' });
-    if (!videoOk) {
-      watchingScreenPeerRef.current = null;
-      setWatchingScreenPeer(null);
-      return;
-    }
-    const latest = availableScreensRef.current.get(source.socketId);
-    if (latest?.audioProducerId)
-      await consumeProducer(latest.audioProducerId, source.socketId, 'audio', { type: 'screen-audio' });
-  }, [consumeProducer, stopWatchingScreen]);
+      watchingScreenPeerRef.current = source.socketId;
+      setWatchingScreenPeer(source.socketId);
+      videoCounterPrev.current = null;
+      receiveLossPrev.current = null;
+      const videoOk = await consumeProducer(
+        source.videoProducerId,
+        source.socketId,
+        "video",
+        { type: "screen" },
+      );
+      if (!videoOk) {
+        watchingScreenPeerRef.current = null;
+        setWatchingScreenPeer(null);
+        return;
+      }
+      const latest = availableScreensRef.current.get(source.socketId);
+      if (latest?.audioProducerId)
+        await consumeProducer(
+          latest.audioProducerId,
+          source.socketId,
+          "audio",
+          { type: "screen-audio" },
+        );
+    },
+    [consumeProducer, stopWatchingScreen],
+  );
 
   // ── Socket 事件 ────────────────────────────────────────────────────────────
 
@@ -1201,9 +1899,10 @@ export function useWebRTC(socket: Socket, roomId: string) {
       voiceMembersRef.current = list;
       const nextVolumes: Record<string, number> = {};
       for (const member of list) {
-        nextVolumes[member.socketId] = rememberedMemberVolumes.current[member.userId]
-          ?? memberVolumesRef.current[member.socketId]
-          ?? 1;
+        nextVolumes[member.socketId] =
+          rememberedMemberVolumes.current[member.userId] ??
+          memberVolumesRef.current[member.socketId] ??
+          1;
       }
       memberVolumesRef.current = nextVolumes;
       setMemberVolumes(nextVolumes);
@@ -1213,27 +1912,47 @@ export function useWebRTC(socket: Socket, roomId: string) {
         const volume = nextVolumes[entry.socketId] ?? 1;
         const output = remoteAudioOutputs.current.get(consumerId);
         if (output) output.setVolume(volume);
-        else if (element) { element.volume = Math.min(1, volume); element.muted = volume === 0; }
+        else if (element) {
+          element.volume = Math.min(1, volume);
+          element.muted = volume === 0;
+        }
       }
       setVoiceMembers(list);
     };
 
-    const onVoicePresence = ({ eventId, action }: { eventId?: string; action: 'join' | 'leave' }) => {
+    const onVoicePresence = ({
+      eventId,
+      action,
+    }: {
+      eventId?: string;
+      action: "join" | "leave";
+    }) => {
       if (!deviceRef.current) return;
       if (eventId) {
         if (seenVoicePresenceEvents.current.includes(eventId)) return;
-        seenVoicePresenceEvents.current = [...seenVoicePresenceEvents.current.slice(-63), eventId];
+        seenVoicePresenceEvents.current = [
+          ...seenVoicePresenceEvents.current.slice(-63),
+          eventId,
+        ];
       }
       playPresenceTone(action);
     };
 
     // 服务端通知：有新的 producer（有人加入语音或开始共享）
     const onNewProducer = async ({
-      producerId, peerId, kind, appData,
-    }: { producerId: string; peerId: string; kind: string; appData: Record<string, unknown> }) => {
+      producerId,
+      peerId,
+      kind,
+      appData,
+    }: {
+      producerId: string;
+      peerId: string;
+      kind: string;
+      appData: Record<string, unknown>;
+    }) => {
       if (!deviceRef.current) return; // 尚未加入语音时不建立媒体订阅
       const sourceType = appData?.type;
-      if (sourceType === 'screen') {
+      if (sourceType === "screen") {
         storeAvailableScreen({
           socketId: peerId,
           videoProducerId: producerId,
@@ -1241,7 +1960,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
         });
         return;
       }
-      if (sourceType === 'screen-audio') {
+      if (sourceType === "screen-audio") {
         pendingScreenAudioByPeer.current.set(peerId, producerId);
         const current = availableScreensRef.current.get(peerId);
         if (current)
@@ -1250,13 +1969,21 @@ export function useWebRTC(socket: Socket, roomId: string) {
           await consumeProducer(producerId, peerId, kind, appData);
         return;
       }
-      if (sourceType === 'application-audio') {
-        const consumed = await consumeProducer(producerId, peerId, kind, appData);
+      if (sourceType === "application-audio") {
+        const consumed = await consumeProducer(
+          producerId,
+          peerId,
+          kind,
+          appData,
+        );
         if (consumed) {
           storeRemoteApplicationAudio({
             socketId: peerId,
             producerId,
-            label: typeof appData?.label === 'string' && appData.label.trim() ? appData.label : '应用',
+            label:
+              typeof appData?.label === "string" && appData.label.trim()
+                ? appData.label
+                : "应用",
           });
         }
         return;
@@ -1269,22 +1996,28 @@ export function useWebRTC(socket: Socket, roomId: string) {
       const entry = consumers.current.get(consumerId);
       if (!entry) return;
       closeLocalConsumer(consumerId, false);
-      if (entry.sourceType === 'screen') {
+      if (entry.sourceType === "screen") {
         watchingScreenPeerRef.current = null;
         setWatchingScreenPeer(null);
         videoCounterPrev.current = null;
         receiveLossPrev.current = null;
         if (!screenProducer.current) setStats(EMPTY_STATS);
       }
-      if (entry.sourceType === 'application-audio')
+      if (entry.sourceType === "application-audio")
         removeRemoteApplicationAudio(entry.socketId, entry.producerId);
     };
 
     // 未观看的客户端没有 Consumer，也必须在分享结束时移除“观看共享”入口。
     const onProducerClosed = ({
-      producerId, peerId, sourceType,
-    }: { producerId: string; peerId: string; sourceType: 'screen' | 'screen-audio' }) => {
-      if (sourceType === 'screen-audio') {
+      producerId,
+      peerId,
+      sourceType,
+    }: {
+      producerId: string;
+      peerId: string;
+      sourceType: "screen" | "screen-audio";
+    }) => {
+      if (sourceType === "screen-audio") {
         if (pendingScreenAudioByPeer.current.get(peerId) === producerId)
           pendingScreenAudioByPeer.current.delete(peerId);
         const current = availableScreensRef.current.get(peerId);
@@ -1296,34 +2029,56 @@ export function useWebRTC(socket: Socket, roomId: string) {
       if (watchingScreenPeerRef.current === peerId) stopWatchingScreen();
     };
 
-    const onScreenViewers = ({ peerId, viewerCount }: { peerId: string; viewerCount: number }) => {
+    const onScreenViewers = ({
+      peerId,
+      viewerCount,
+    }: {
+      peerId: string;
+      viewerCount: number;
+    }) => {
       if (peerId === socket.id) setScreenViewerCount(viewerCount);
     };
 
-    const onScreenDemand = ({ sourceType, active, viewerCount }:
-      { sourceType: 'screen' | 'screen-audio'; active: boolean; viewerCount: number }) => {
-      if (sourceType === 'screen') {
+    const onScreenDemand = ({
+      sourceType,
+      active,
+      viewerCount,
+    }: {
+      sourceType: "screen" | "screen-audio";
+      active: boolean;
+      viewerCount: number;
+    }) => {
+      if (sourceType === "screen") {
         screenDemandActiveRef.current = active;
         setScreenViewerCount(viewerCount);
         const producer = screenProducer.current;
         if (active) {
           producer?.resume();
-          if (producer?.track && producer.appData?.adaptation === 'game') {
+          if (producer?.track && producer.appData?.adaptation === "game") {
             void applyScreenCaptureConstraints(producer.track, {
               fps: 60,
               strictFrameRate: true,
-            }).then(result => {
-              console.info('[media-diag] 观看恢复后重新应用游戏模式采集约束', {
-                mode: result.mode,
-                constraints: result.constraints,
-                settings: producer.track?.getSettings(),
+            })
+              .then((result) => {
+                console.info(
+                  "[media-diag] 观看恢复后重新应用游戏模式采集约束",
+                  {
+                    mode: result.mode,
+                    constraints: result.constraints,
+                    settings: producer.track?.getSettings(),
+                  },
+                );
+              })
+              .catch((error) => {
+                console.warn(
+                  "[media-diag] 观看恢复后重新应用采集约束失败",
+                  error,
+                );
               });
-            }).catch(error => {
-              console.warn('[media-diag] 观看恢复后重新应用采集约束失败', error);
-            });
           }
         } else producer?.pause();
-      } else if (active && !forceMutedRef.current) screenAudioProducer.current?.resume();
+      } else if (active && !forceMutedRef.current)
+        screenAudioProducer.current?.resume();
       else screenAudioProducer.current?.pause();
     };
 
@@ -1332,7 +2087,11 @@ export function useWebRTC(socket: Socket, roomId: string) {
       for (const [cid, entry] of consumers.current) {
         if (entry.socketId !== socketId) continue;
         const el = audioEls.current.get(cid);
-        if (el) { el.pause(); el.srcObject = null; audioEls.current.delete(cid); }
+        if (el) {
+          el.pause();
+          el.srcObject = null;
+          audioEls.current.delete(cid);
+        }
         const output = remoteAudioOutputs.current.get(cid);
         if (output) {
           output.close();
@@ -1344,7 +2103,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
         consumers.current.delete(cid);
       }
       screenStreams.current.delete(socketId);
-      setRemoteScreen(p => p?.socketId === socketId ? null : p);
+      setRemoteScreen((p) => (p?.socketId === socketId ? null : p));
       pendingScreenAudioByPeer.current.delete(socketId);
       removeAvailableScreen(socketId);
       removeRemoteApplicationAudio(socketId);
@@ -1357,32 +2116,49 @@ export function useWebRTC(socket: Socket, roomId: string) {
       }
     };
 
-    socket.on('voice:members-updated', onVoiceMembers);
-    socket.on('voice:presence',        onVoicePresence);
-    socket.on('ms:new-producer',       onNewProducer);
-    socket.on('ms:consumer-closed',    onConsumerClosed);
-    socket.on('ms:producer-closed',    onProducerClosed);
-    socket.on('screen:viewers',        onScreenViewers);
-    socket.on('screen:demand',         onScreenDemand);
-    socket.on('voice:user-left',       onUserLeft);
+    socket.on("voice:members-updated", onVoiceMembers);
+    socket.on("voice:presence", onVoicePresence);
+    socket.on("ms:new-producer", onNewProducer);
+    socket.on("ms:consumer-closed", onConsumerClosed);
+    socket.on("ms:producer-closed", onProducerClosed);
+    socket.on("screen:viewers", onScreenViewers);
+    socket.on("screen:demand", onScreenDemand);
+    socket.on("voice:user-left", onUserLeft);
 
     return () => {
-      socket.off('voice:members-updated', onVoiceMembers);
-      socket.off('voice:presence',        onVoicePresence);
-      socket.off('ms:new-producer',       onNewProducer);
-      socket.off('ms:consumer-closed',    onConsumerClosed);
-      socket.off('ms:producer-closed',    onProducerClosed);
-      socket.off('screen:viewers',        onScreenViewers);
-      socket.off('screen:demand',         onScreenDemand);
-      socket.off('voice:user-left',       onUserLeft);
+      socket.off("voice:members-updated", onVoiceMembers);
+      socket.off("voice:presence", onVoicePresence);
+      socket.off("ms:new-producer", onNewProducer);
+      socket.off("ms:consumer-closed", onConsumerClosed);
+      socket.off("ms:producer-closed", onProducerClosed);
+      socket.off("screen:viewers", onScreenViewers);
+      socket.off("screen:demand", onScreenDemand);
+      socket.off("voice:user-left", onUserLeft);
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [socket, inVoice, consumeProducer, closeLocalConsumer, stopWatchingScreen, storeAvailableScreen, removeAvailableScreen, playPresenceTone, storeRemoteApplicationAudio, removeRemoteApplicationAudio]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    socket,
+    inVoice,
+    consumeProducer,
+    closeLocalConsumer,
+    stopWatchingScreen,
+    storeAvailableScreen,
+    removeAvailableScreen,
+    playPresenceTone,
+    storeRemoteApplicationAudio,
+    removeRemoteApplicationAudio,
+  ]);
 
   // 房主禁言与成员自己静音是两层独立状态。解除房主禁言时，只在成员原本没有
   // 自己静音的情况下恢复麦克风，避免意外打开用户主动关闭的音频。
   useEffect(() => {
-    const onForcedMute = ({ roomId: targetRoomId, muted }: { roomId: string; muted: boolean }) => {
+    const onForcedMute = ({
+      roomId: targetRoomId,
+      muted,
+    }: {
+      roomId: string;
+      muted: boolean;
+    }) => {
       if (targetRoomId !== roomId) return;
       forceMutedRef.current = muted;
       setIsForceMuted(muted);
@@ -1392,150 +2168,204 @@ export function useWebRTC(socket: Socket, roomId: string) {
         applicationAudioProducer.current?.pause();
       } else {
         if (!selfMutedRef.current) audioProducer.current?.resume();
-        if (screenDemandActiveRef.current) screenAudioProducer.current?.resume();
+        if (screenDemandActiveRef.current)
+          screenAudioProducer.current?.resume();
         applicationAudioProducer.current?.resume();
       }
       setIsMuted(muted || selfMutedRef.current);
     };
-    socket.on('room:force-muted', onForcedMute);
-    return () => { socket.off('room:force-muted', onForcedMute); };
+    socket.on("room:force-muted", onForcedMute);
+    return () => {
+      socket.off("room:force-muted", onForcedMute);
+    };
   }, [socket, roomId]);
 
-  const createProcessedMicStream = useCallback(async (rawStream: MediaStream): Promise<ProcessedMicrophone> => {
-    if (!/Windows/i.test(navigator.userAgent)) return { stream: rawStream, context: null };
-    const Ctx = window.AudioContext ?? (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-    const context = new Ctx({ sampleRate: 48_000, latencyHint: 'interactive' });
-    const source = context.createMediaStreamSource(rawStream);
-    const highPass = context.createBiquadFilter();
-    highPass.type = 'highpass';
-    highPass.frequency.value = 72;
-    highPass.Q.value = 0.7;
+  const createProcessedMicStream = useCallback(
+    async (rawStream: MediaStream): Promise<ProcessedMicrophone> => {
+      if (!/Windows/i.test(navigator.userAgent))
+        return { stream: rawStream, context: null, gain: null };
+      const Ctx =
+        window.AudioContext ??
+        (window as unknown as { webkitAudioContext: typeof AudioContext })
+          .webkitAudioContext;
+      const context = new Ctx({
+        sampleRate: 48_000,
+        latencyHint: "interactive",
+      });
+      const source = context.createMediaStreamSource(rawStream);
+      const highPass = context.createBiquadFilter();
+      highPass.type = "highpass";
+      highPass.frequency.value = 72;
+      highPass.Q.value = 0.7;
 
-    let tail: AudioNode = highPass;
-    source.connect(highPass);
-    // 中国电网基频为50Hz，常见电流嗡声还会出现在100/150Hz谐波。
-    for (const frequency of [50, 100, 150]) {
-      const notch = context.createBiquadFilter();
-      notch.type = 'notch';
-      notch.frequency.value = frequency;
-      notch.Q.value = frequency === 50 ? 18 : 24;
-      tail.connect(notch);
-      tail = notch;
-    }
+      let tail: AudioNode = highPass;
+      source.connect(highPass);
+      // 中国电网基频为50Hz，常见电流嗡声还会出现在100/150Hz谐波。
+      for (const frequency of [50, 100, 150]) {
+        const notch = context.createBiquadFilter();
+        notch.type = "notch";
+        notch.frequency.value = frequency;
+        notch.Q.value = frequency === 50 ? 18 : 24;
+        tail.connect(notch);
+        tail = notch;
+      }
 
-    const noiseGate = await createMicNoiseGate(context);
-    const outputGain = context.createGain();
-    outputGain.gain.value = 0.92;
-    const destination = context.createMediaStreamDestination();
-    destination.channelCount = 1;
-    if (noiseGate) tail.connect(noiseGate).connect(outputGain).connect(destination);
-    else tail.connect(outputGain).connect(destination);
-    await context.resume();
-    const processedTrack = destination.stream.getAudioTracks()[0];
-    if (processedTrack) processedTrack.contentHint = 'speech';
-    return { stream: destination.stream, context };
-  }, []);
+      const noiseGate = await createMicNoiseGate(context);
+      const outputGain = context.createGain();
+      outputGain.gain.value = MICROPHONE_BASE_GAIN * microphoneVolumeRef.current;
+      const destination = context.createMediaStreamDestination();
+      destination.channelCount = 1;
+      if (noiseGate)
+        tail.connect(noiseGate).connect(outputGain).connect(destination);
+      else tail.connect(outputGain).connect(destination);
+      await context.resume();
+      const processedTrack = destination.stream.getAudioTracks()[0];
+      // 某些 Electron/Chromium 版本在 AudioContext 没有真正进入 running
+      // 状态时仍会返回一条 live 但无数据的 destination 音轨。回退到原始
+      // getUserMedia 音轨，确保加入语音至少能正常发送麦克风。
+      if (!processedTrack || context.state !== "running") {
+        await context.close().catch(() => {});
+        return { stream: rawStream, context: null, gain: null };
+      }
+      processedTrack.enabled = true;
+      processedTrack.contentHint = "speech";
+      return { stream: destination.stream, context, gain: outputGain };
+    },
+    [],
+  );
 
   const requestMicrophone = useCallback(async (deviceId: string) => {
     return new Promise<MediaStream>((resolve, reject) => {
       let expired = false;
       const timer = setTimeout(() => {
         expired = true;
-        reject(new Error('getUserMedia 超时（10s），请检查麦克风权限'));
+        reject(new Error("getUserMedia 超时（10s），请检查麦克风权限"));
       }, 10_000);
-      navigator.mediaDevices.getUserMedia({ audio: createMicrophoneConstraints(deviceId) }).then(stream => {
-        clearTimeout(timer);
-        if (expired) stream.getTracks().forEach(track => track.stop());
-        else resolve(stream);
-      }, error => { clearTimeout(timer); reject(error); });
+      navigator.mediaDevices
+        .getUserMedia({ audio: createMicrophoneConstraints(deviceId) })
+        .then(
+          (stream) => {
+            clearTimeout(timer);
+            if (expired) stream.getTracks().forEach((track) => track.stop());
+            else resolve(stream);
+          },
+          (error) => {
+            clearTimeout(timer);
+            reject(error);
+          },
+        );
     });
   }, []);
 
-  const replaceMicrophone = useCallback(async (deviceId: string) => {
-    const producer = audioProducer.current;
-    if (!producer) return;
+  const replaceMicrophone = useCallback(
+    async (deviceId: string) => {
+      const producer = audioProducer.current;
+      if (!producer) return;
 
-    let nextRaw: MediaStream | null = null;
-    let nextProcessed: ProcessedMicrophone | null = null;
-    try {
-      nextRaw = await requestMicrophone(deviceId);
-      nextProcessed = await createProcessedMicStream(nextRaw);
-      const nextTrack = nextProcessed.stream.getAudioTracks()[0];
-      if (!nextTrack) throw new Error('选择的设备没有提供音频轨道');
-      nextTrack.contentHint = 'speech';
-      await producer.replaceTrack({ track: nextTrack });
+      let nextRaw: MediaStream | null = null;
+      let nextProcessed: ProcessedMicrophone | null = null;
+      try {
+        nextRaw = await requestMicrophone(deviceId);
+        nextProcessed = await createProcessedMicStream(nextRaw);
+        // Producer 直接使用 getUserMedia 原始轨道。Electron 的 Web Audio
+        // MediaStreamDestination 偶尔会保持 live 但输出全静音；处理后的轨道
+        // 仅用于本地电平显示，不能再阻断真实麦克风上行。
+        const nextTrack = nextRaw.getAudioTracks()[0];
+        if (!nextTrack) throw new Error("选择的设备没有提供音频轨道");
+        nextTrack.contentHint = "speech";
+        await producer.replaceTrack({ track: nextTrack });
 
-      const previousRaw = rawAudioRef.current;
-      const previousProcessed = localAudioRef.current;
-      const previousContext = micProcessingContext.current;
-      rawAudioRef.current = nextRaw;
-      localAudioRef.current = nextProcessed.stream;
-      micProcessingContext.current = nextProcessed.context;
+        const previousRaw = rawAudioRef.current;
+        const previousProcessed = localAudioRef.current;
+        const previousContext = micProcessingContext.current;
+        rawAudioRef.current = nextRaw;
+        localAudioRef.current = nextProcessed.stream;
+        micProcessingContext.current = nextProcessed.context;
+        micProcessingGain.current = nextProcessed.gain;
 
-      detachAnalyser('local');
-      attachAnalyser('local', nextProcessed.stream, socket.id ?? 'local');
-      previousProcessed?.getTracks().forEach(track => track.stop());
-      if (previousRaw && previousRaw !== previousProcessed)
-        previousRaw.getTracks().forEach(track => track.stop());
-      previousContext?.close().catch(() => {});
-      refreshAudioDevices(false);
-    } catch (error) {
-      nextProcessed?.stream.getTracks().forEach(track => track.stop());
-      if (nextRaw && nextRaw !== nextProcessed?.stream)
-        nextRaw.getTracks().forEach(track => track.stop());
-      nextProcessed?.context?.close().catch(() => {});
-      throw error;
-    }
-  }, [createProcessedMicStream, refreshAudioDevices, requestMicrophone, socket.id]);
+        detachAnalyser("local");
+        attachAnalyser("local", nextProcessed.stream, socket.id ?? "local");
+        previousProcessed?.getTracks().forEach((track) => track.stop());
+        if (previousRaw && previousRaw !== previousProcessed)
+          previousRaw.getTracks().forEach((track) => track.stop());
+        previousContext?.close().catch(() => {});
+        refreshAudioDevices(false);
+      } catch (error) {
+        nextProcessed?.stream.getTracks().forEach((track) => track.stop());
+        if (nextRaw && nextRaw !== nextProcessed?.stream)
+          nextRaw.getTracks().forEach((track) => track.stop());
+        nextProcessed?.context?.close().catch(() => {});
+        throw error;
+      }
+    },
+    [
+      createProcessedMicStream,
+      refreshAudioDevices,
+      requestMicrophone,
+      socket.id,
+    ],
+  );
 
-  const selectAudioInput = useCallback(async (deviceId: string) => {
-    const nextDeviceId = deviceId || DEFAULT_AUDIO_DEVICE_ID;
-    const previousDeviceId = selectedAudioInputRef.current;
-    if (nextDeviceId === previousDeviceId) return;
+  const selectAudioInput = useCallback(
+    async (deviceId: string) => {
+      const nextDeviceId = normalizeMicrophoneDeviceId(deviceId);
+      const previousDeviceId = selectedAudioInputRef.current;
+      if (nextDeviceId === previousDeviceId) return;
 
-    selectedAudioInputRef.current = nextDeviceId;
-    setSelectedAudioInputId(nextDeviceId);
-    saveAudioDeviceId(AUDIO_INPUT_DEVICE_KEY, nextDeviceId);
-    setAudioDeviceError(null);
-    if (!inVoice || !audioProducer.current) return;
+      selectedAudioInputRef.current = nextDeviceId;
+      setSelectedAudioInputId(nextDeviceId);
+      saveAudioDeviceId(AUDIO_INPUT_DEVICE_KEY, nextDeviceId);
+      setAudioDeviceError(null);
+      if (!inVoice || !audioProducer.current) return;
 
-    setAudioInputSwitching(true);
-    try {
-      await replaceMicrophone(nextDeviceId);
-    } catch (error) {
-      selectedAudioInputRef.current = previousDeviceId;
-      setSelectedAudioInputId(previousDeviceId);
-      saveAudioDeviceId(AUDIO_INPUT_DEVICE_KEY, previousDeviceId);
-      setAudioDeviceError(`切换麦克风失败：${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      setAudioInputSwitching(false);
-    }
-  }, [inVoice, replaceMicrophone]);
+      setAudioInputSwitching(true);
+      try {
+        await replaceMicrophone(nextDeviceId);
+      } catch (error) {
+        selectedAudioInputRef.current = previousDeviceId;
+        setSelectedAudioInputId(previousDeviceId);
+        saveAudioDeviceId(AUDIO_INPUT_DEVICE_KEY, previousDeviceId);
+        setAudioDeviceError(
+          `切换麦克风失败：${error instanceof Error ? error.message : String(error)}`,
+        );
+      } finally {
+        setAudioInputSwitching(false);
+      }
+    },
+    [inVoice, replaceMicrophone],
+  );
 
   // ── 加入语音 ───────────────────────────────────────────────────────────────
 
   const joinVoice = useCallback(async () => {
-    if (inVoice || joiningRef.current || !socket.connected) return;
+    if (voiceSessionActiveRef.current || joiningRef.current || !socket.connected)
+      return;
     const generation = ++mediaGeneration.current;
-    const ensureCurrent = () => { if (generation !== mediaGeneration.current) throw new Error('语音加入已取消'); };
+    const ensureCurrent = () => {
+      if (generation !== mediaGeneration.current)
+        throw new Error("语音加入已取消");
+    };
     voiceSocketId.current = socket.id;
     joiningRef.current = true;
     setIsJoining(true);
     setAudioDeviceError(null);
-    console.log('%c[joinVoice] 开始加入语音…', 'color:#3b82f6;font-weight:bold');
+    console.log(
+      "%c[joinVoice] 开始加入语音…",
+      "color:#3b82f6;font-weight:bold",
+    );
     let rawStream: MediaStream | null = null;
     let stream: MediaStream | null = null;
     try {
-      console.log('[joinVoice] 请求麦克风权限 getUserMedia…');
+      console.log("[joinVoice] 请求麦克风权限 getUserMedia…");
       // 超时保护：Electron 权限挂起时 getUserMedia 会永不返回，加 10s 超时把问题暴露出来
       rawStream = await requestMicrophone(selectedAudioInputRef.current);
       ensureCurrent();
-      console.log('%c[joinVoice] [OK] 已获取麦克风', 'color:#22c55e');
+      console.log("%c[joinVoice] [OK] 已获取麦克风", "color:#22c55e");
       const rawTrack = rawStream.getAudioTracks()[0];
       if (rawTrack) {
-        rawTrack.contentHint = 'speech';
+        rawTrack.contentHint = "speech";
         const settings = rawTrack.getSettings();
-        console.info('[mic] 实际采集处理', {
+        console.info("[mic] 实际采集处理", {
           echoCancellation: settings.echoCancellation,
           noiseSuppression: settings.noiseSuppression,
           autoGainControl: settings.autoGainControl,
@@ -1551,49 +2381,119 @@ export function useWebRTC(socket: Socket, roomId: string) {
         ensureCurrent();
       }
       micProcessingContext.current = processed.context;
+      micProcessingGain.current = processed.gain;
       localAudioRef.current = stream;
       refreshAudioDevices(false);
 
-      console.log('[joinVoice] 初始化 mediasoup Device 和传输通道…');
+      console.log("[joinVoice] 初始化 mediasoup Device 和传输通道…");
       const ok = await setupDevice();
       ensureCurrent();
       if (!ok) {
-        throw new Error('媒体通道初始化失败，请重试加入语音');
+        throw new Error("媒体通道初始化失败，请重试加入语音");
       }
-      console.log('%c[joinVoice] [OK] Device 就绪，开始发布音频', 'color:#22c55e');
+      console.log(
+        "%c[joinVoice] [OK] Device 就绪，开始发布音频",
+        "color:#22c55e",
+      );
+
+      // 直接发布原始采集轨道。处理流继续供本地音量计使用；这样即使
+      // AudioContext destination 在 Electron 中静默，远端仍能收到麦克风。
+      const microphoneTrack = rawStream.getAudioTracks()[0];
+      if (!microphoneTrack || microphoneTrack.readyState !== "live") {
+        throw new Error("麦克风音轨未就绪，请检查输入设备");
+      }
+      microphoneTrack.enabled = true;
+
+      // 先登记为语音成员，再发布麦克风。
+      // 服务端只会把新 Producer 广播给当前已在 voiceRooms 中的成员；
+      // 如果先 produce、后 voice:join，其他成员就永远收不到这一路麦克风。
+      // 新服务端会返回 ACK，但已部署的旧服务端只处理事件、不调用回调。
+      // Socket.IO 会保持同一连接上的事件顺序，因此先发送 voice:join 再
+      // produce 即可消除广播竞态，同时不能等待 ACK，否则旧服务端会在
+      // 15 秒后被误判为加入失败并触发整套语音清理。
+      socket.emit("voice:join", roomId);
 
       // 发布音频（标记 type:mic 以区分系统音频）
       const producer = await sendTransport.current!.produce({
-        track:   stream.getAudioTracks()[0],
+        track: microphoneTrack,
         codecOptions: { opusStereo: false, opusDtx: true, opusFec: true },
-        appData: { type: 'mic' },
+        appData: { type: "mic" },
       });
-      if (generation !== mediaGeneration.current) { producer.close(); ensureCurrent(); }
+      if (generation !== mediaGeneration.current) {
+        producer.close();
+        ensureCurrent();
+      }
       audioProducer.current = producer;
       if (forceMutedRef.current) producer.pause();
-      producer.on('trackended', () => { /* 麦克风被拔 */ });
+
+      // 输出一组可直接从启动终端读取的上行统计，后续无需再猜测音轨
+      // 是否真正进入 WebRTC sender。
+      setTimeout(async () => {
+        if (audioProducer.current !== producer || producer.closed) return;
+        try {
+          const report = await producer.getStats();
+          const outbound = [...report.values()]
+            .filter((stat) => stat.type === "outbound-rtp")
+            .map((stat) => ({
+              kind: stat.kind ?? stat.mediaType,
+              bytesSent: stat.bytesSent ?? null,
+              packetsSent: stat.packetsSent ?? null,
+              totalAudioEnergy: stat.totalAudioEnergy ?? null,
+            }));
+          const sources = [...report.values()]
+            .filter((stat) => stat.type === "media-source")
+            .map((stat) => ({
+              audioLevel: stat.audioLevel ?? null,
+              totalAudioEnergy: stat.totalAudioEnergy ?? null,
+              totalSamplesDuration: stat.totalSamplesDuration ?? null,
+            }));
+          console.info(
+            `[mic-uplink] ${JSON.stringify({
+              paused: producer.paused,
+              trackLabel: microphoneTrack.label,
+              trackSettings: microphoneTrack.getSettings(),
+              trackEnabled: microphoneTrack.enabled,
+              trackState: microphoneTrack.readyState,
+              outbound,
+              sources,
+            })}`,
+          );
+        } catch (error) {
+          console.warn("[mic-uplink] 无法读取发送统计", error);
+        }
+      }, 3_000);
+      producer.on("trackended", () => {
+        /* 麦克风被拔 */
+      });
 
       // 本地麦克风音量分析（显示在自己名字旁）
-      attachAnalyser('local', stream, socket.id ?? 'local');
+      attachAnalyser("local", stream, socket.id ?? "local");
       startMeters();
 
       voiceSessionActiveRef.current = true;
       setInVoice(true);
-      socket.emit('voice:join', roomId);
 
       // 消费已经在频道里的人的 producer
       const existing = await emitAsync<
-        { producerId: string; peerId: string; kind: string; appData: Record<string, unknown> }[]
-      >(socket, 'ms:get-producers');
+        {
+          producerId: string;
+          peerId: string;
+          kind: string;
+          appData: Record<string, unknown>;
+        }[]
+      >(socket, "ms:get-producers");
       ensureCurrent();
 
       for (const source of existing) {
-        if (source.appData?.type === 'screen-audio')
-          pendingScreenAudioByPeer.current.set(source.peerId, source.producerId);
+        if (source.appData?.type === "screen-audio")
+          pendingScreenAudioByPeer.current.set(
+            source.peerId,
+            source.producerId,
+          );
       }
       for (const { producerId, peerId, kind, appData } of existing) {
         ensureCurrent();
-        if (appData?.type === 'screen') {
+        if (appData?.type === "screen") {
           storeAvailableScreen({
             socketId: peerId,
             videoProducerId: producerId,
@@ -1601,151 +2501,225 @@ export function useWebRTC(socket: Socket, roomId: string) {
           });
           continue;
         }
-        if (appData?.type === 'screen-audio') continue;
-        if (appData?.type === 'application-audio') {
-          const consumed = await consumeProducer(producerId, peerId, kind, appData);
+        if (appData?.type === "screen-audio") continue;
+        if (appData?.type === "application-audio") {
+          const consumed = await consumeProducer(
+            producerId,
+            peerId,
+            kind,
+            appData,
+          );
           if (consumed) {
             storeRemoteApplicationAudio({
               socketId: peerId,
               producerId,
-              label: typeof appData.label === 'string' && appData.label.trim() ? appData.label : '应用',
+              label:
+                typeof appData.label === "string" && appData.label.trim()
+                  ? appData.label
+                  : "应用",
             });
           }
           continue;
         }
         await consumeProducer(producerId, peerId, kind, appData);
       }
-      console.log('%c[joinVoice] [OK] 加入语音完成', 'color:#22c55e;font-weight:bold');
+      console.log(
+        "%c[joinVoice] [OK] 加入语音完成",
+        "color:#22c55e;font-weight:bold",
+      );
     } catch (e) {
-      stream?.getTracks().forEach(track => track.stop());
-      if (rawStream !== stream) rawStream?.getTracks().forEach(track => track.stop());
+      stream?.getTracks().forEach((track) => track.stop());
+      if (rawStream !== stream)
+        rawStream?.getTracks().forEach((track) => track.stop());
       if (generation !== mediaGeneration.current) return;
       resetVoiceRef.current();
       if (localAudioRef.current === stream) localAudioRef.current = null;
       rawAudioRef.current = null;
       micProcessingContext.current?.close().catch(() => {});
       micProcessingContext.current = null;
-      console.error('[joinVoice] [ERROR] 失败:', e);
-      setAudioDeviceError(`加入语音失败：${e instanceof Error ? e.message : String(e)}，可直接重试。`);
+      micProcessingGain.current = null;
+      console.error("[joinVoice] [ERROR] 失败:", e);
+      setAudioDeviceError(
+        `加入语音失败：${e instanceof Error ? e.message : String(e)}，可直接重试。`,
+      );
     } finally {
       if (generation === mediaGeneration.current) {
         joiningRef.current = false;
         setIsJoining(false);
       }
     }
-  }, [socket, roomId, inVoice, setupDevice, consumeProducer, storeAvailableScreen, storeRemoteApplicationAudio, createProcessedMicStream, refreshAudioDevices, requestMicrophone]);
+  }, [
+    socket,
+    roomId,
+    setupDevice,
+    consumeProducer,
+    storeAvailableScreen,
+    storeRemoteApplicationAudio,
+    createProcessedMicStream,
+    refreshAudioDevices,
+    requestMicrophone,
+  ]);
 
   // ── 离开语音 ───────────────────────────────────────────────────────────────
 
-  const resetVoice = useCallback((notifyServer = true) => {
-    mediaGeneration.current += 1;
-    connectionGrace.current.clear();
-    const shouldPlayLeaveTone = voiceSessionActiveRef.current;
-    voiceSessionActiveRef.current = false;
-    if (shouldPlayLeaveTone) playPresenceTone('leave');
-    joiningRef.current = false;
-    setIsJoining(false);
-    audioProducer.current?.close();       audioProducer.current       = null;
-    screenProducer.current?.close();      screenProducer.current      = null;
-    screenAudioProducer.current?.close(); screenAudioProducer.current = null;
-    applicationAudioProducer.current?.close(); applicationAudioProducer.current = null;
-    sendTransport.current?.close();       sendTransport.current       = null;
-    recvTransport.current?.close();       recvTransport.current       = null;
-    deviceRef.current = null;
+  const resetVoice = useCallback(
+    (notifyServer = true) => {
+      mediaGeneration.current += 1;
+      connectionGrace.current.clear();
+      const shouldPlayLeaveTone = voiceSessionActiveRef.current;
+      voiceSessionActiveRef.current = false;
+      if (shouldPlayLeaveTone) playPresenceTone("leave");
+      joiningRef.current = false;
+      setIsJoining(false);
+      audioProducer.current?.close();
+      audioProducer.current = null;
+      screenProducer.current?.close();
+      screenProducer.current = null;
+      screenAudioProducer.current?.close();
+      screenAudioProducer.current = null;
+      applicationAudioProducer.current?.close();
+      applicationAudioProducer.current = null;
+      sendTransport.current?.close();
+      sendTransport.current = null;
+      recvTransport.current?.close();
+      recvTransport.current = null;
+      deviceRef.current = null;
 
-    localAudioRef.current?.getTracks().forEach(t => t.stop());
-    localAudioRef.current = null;
-    rawAudioRef.current?.getTracks().forEach(t => t.stop());
-    rawAudioRef.current = null;
-    micProcessingContext.current?.close().catch(() => {});
-    micProcessingContext.current = null;
-    screenAudioUnsubscribe.current?.();
-    screenAudioUnsubscribe.current = null;
-    screenAudioPipeline.current?.close();
-    screenAudioPipeline.current = null;
-    void window.coveScreenAudio?.stop();
-    applicationAudioUnsubscribe.current?.();
-    applicationAudioUnsubscribe.current = null;
-    applicationAudioPipeline.current?.close();
-    applicationAudioPipeline.current = null;
-    void window.coveApplicationAudio?.stop();
-    setIsApplicationAudioSharing(false);
-    setApplicationAudioLabel(null);
-    localScreenRef.current?.getTracks().forEach(t => t.stop());
-    localScreenRef.current = null;
-    setLocalScreen(null);
-    if (screenAnalysisTimer.current) clearInterval(screenAnalysisTimer.current);
-    screenAnalysisTimer.current = null;
-    if (screenAnalysisVideo.current) screenAnalysisVideo.current.srcObject = null;
-    screenAnalysisVideo.current = null;
-    screenAnalysisCanvas.current = null;
-    previousScreenSample.current = null;
+      localAudioRef.current?.getTracks().forEach((t) => t.stop());
+      localAudioRef.current = null;
+      rawAudioRef.current?.getTracks().forEach((t) => t.stop());
+      rawAudioRef.current = null;
+      micProcessingContext.current?.close().catch(() => {});
+      micProcessingContext.current = null;
+      micProcessingGain.current = null;
+      screenAudioUnsubscribe.current?.();
+      screenAudioUnsubscribe.current = null;
+      screenAudioPipeline.current?.close();
+      screenAudioPipeline.current = null;
+      void window.coveScreenAudio?.stop();
+      applicationAudioUnsubscribe.current?.();
+      applicationAudioUnsubscribe.current = null;
+      applicationAudioPipeline.current?.close();
+      applicationAudioPipeline.current = null;
+      void applicationAudioStop.current?.();
+      applicationAudioStop.current = null;
+      void window.coveApplicationAudio?.stop();
+      void window.coveSystemAudio?.stop();
+      setIsApplicationAudioSharing(false);
+      setApplicationAudioLabel(null);
+      localScreenRef.current?.getTracks().forEach((t) => t.stop());
+      localScreenRef.current = null;
+      setLocalScreen(null);
+      if (screenAnalysisTimer.current)
+        clearInterval(screenAnalysisTimer.current);
+      screenAnalysisTimer.current = null;
+      if (screenAnalysisVideo.current)
+        screenAnalysisVideo.current.srcObject = null;
+      screenAnalysisVideo.current = null;
+      screenAnalysisCanvas.current = null;
+      previousScreenSample.current = null;
 
-    consumers.current.forEach(({ consumer }) => consumer.close());
-    consumers.current.clear();
-    consumerByProducer.current.clear();
-    pendingProducers.current.clear();
+      consumers.current.forEach(({ consumer }) => consumer.close());
+      consumers.current.clear();
+      consumerByProducer.current.clear();
+      pendingProducers.current.clear();
 
-    audioEls.current.forEach(el => { el.pause(); el.srcObject = null; });
-    audioEls.current.clear();
-    remoteAudioOutputs.current.forEach(output => output.close());
-    remoteAudioOutputs.current.clear();
-    screenStreams.current.clear();
+      audioEls.current.forEach((el) => {
+        el.pause();
+        el.srcObject = null;
+      });
+      audioEls.current.clear();
+      remoteAudioOutputs.current.forEach((output) => output.close());
+      remoteAudioOutputs.current.clear();
+      screenStreams.current.clear();
 
-    // 停止音量计和统计
-    stopMeters();
-    analysers.current.clear();
-    receiveLossPrev.current = null;
-    remoteLossPrev.current = null;
-    videoCounterPrev.current = null;
-    setStats(EMPTY_STATS);
+      // 停止音量计和统计
+      stopMeters();
+      analysers.current.clear();
+      receiveLossPrev.current = null;
+      remoteLossPrev.current = null;
+      videoCounterPrev.current = null;
+      setStats(EMPTY_STATS);
 
-    setRemoteScreen(null);
-    clearAvailableScreens();
-    clearRemoteApplicationAudios();
-    pendingScreenAudioByPeer.current.clear();
-    watchingScreenPeerRef.current = null;
-    setWatchingScreenPeer(null);
-    screenDemandActiveRef.current = false;
-    setScreenViewerCount(0);
-    setScreenEncodingPlan(null);
-    setInVoice(false);
-    voiceMembersRef.current = [];
-    setVoiceMembers([]);
-    selfMutedRef.current = false;
-    setIsMuted(forceMutedRef.current);
-    setIsSharing(false);
-    if (notifyServer && socket.connected) socket.emit('voice:leave', roomId);
-  }, [socket, roomId, stopMeters, clearAvailableScreens, playPresenceTone]);
+      setRemoteScreen(null);
+      clearAvailableScreens();
+      clearRemoteApplicationAudios();
+      pendingScreenAudioByPeer.current.clear();
+      watchingScreenPeerRef.current = null;
+      setWatchingScreenPeer(null);
+      screenDemandActiveRef.current = false;
+      setScreenViewerCount(0);
+      setScreenEncodingPlan(null);
+      setInVoice(false);
+      voiceMembersRef.current = [];
+      setVoiceMembers([]);
+      selfMutedRef.current = false;
+      setIsMuted(forceMutedRef.current);
+      setIsSharing(false);
+      if (notifyServer && socket.connected) socket.emit("voice:leave", roomId);
+    },
+    [socket, roomId, stopMeters, clearAvailableScreens, playPresenceTone],
+  );
   resetVoiceRef.current = resetVoice;
   const leaveVoice = useCallback(() => resetVoice(), [resetVoice]);
+  const refreshAudioConnection = useCallback(async () => {
+    if (!socket.connected) {
+      setAudioDeviceError("当前服务器连接已断开，暂时无法刷新语音连接。");
+      return;
+    }
+
+    setAudioDeviceError(null);
+    // 只重建当前麦克风采集链路，不销毁语音传输和屏幕共享，避免刷新设备
+    // 时意外结束正在进行的共享或让观看方重新点击观看。
+    if (voiceSessionActiveRef.current && audioProducer.current) {
+      setAudioInputSwitching(true);
+      try {
+        await replaceMicrophone(selectedAudioInputRef.current);
+      } catch (error) {
+        setAudioDeviceError(
+          `刷新麦克风失败：${error instanceof Error ? error.message : String(error)}`,
+        );
+      } finally {
+        setAudioInputSwitching(false);
+      }
+    }
+
+    // 重新给当前所有播放节点应用输出端点，等效于重连扬声器播放链路。
+    await selectAudioOutput(selectedAudioOutputRef.current);
+  }, [replaceMicrophone, selectAudioOutput, socket]);
 
   useEffect(() => {
     const onDisconnect = (reason: string) => {
-      if (reason === 'io client disconnect' || reason === 'io server disconnect') {
+      if (
+        reason === "io client disconnect" ||
+        reason === "io server disconnect"
+      ) {
         resetVoiceRef.current(false);
         return;
       }
       if (!voiceSessionActiveRef.current && !joiningRef.current) return;
-      connectionGrace.current.fail('signal', () => {
+      connectionGrace.current.fail("signal", () => {
         resetVoiceRef.current(false);
-        setAudioDeviceError('服务器连接中断超过 7.5 秒，连接恢复后可直接加入语音');
+        setAudioDeviceError(
+          "服务器连接中断超过 7.5 秒，连接恢复后可直接加入语音",
+        );
       });
     };
     const onConnect = () => {
-      connectionGrace.current.recover('signal');
+      connectionGrace.current.recover("signal");
       if (voiceSocketId.current !== socket.id || !socket.recovered) {
-        if (voiceSessionActiveRef.current || joiningRef.current) resetVoiceRef.current(false);
+        if (voiceSessionActiveRef.current || joiningRef.current)
+          resetVoiceRef.current(false);
       } else if (!voiceSessionActiveRef.current && !joiningRef.current) {
         // Local timeout/explicit leave won the race against server recovery.
-        socket.emit('voice:leave', roomId);
+        socket.emit("voice:leave", roomId);
       }
     };
-    socket.on('disconnect', onDisconnect);
-    socket.on('connect', onConnect);
+    socket.on("disconnect", onDisconnect);
+    socket.on("connect", onConnect);
     return () => {
-      socket.off('disconnect', onDisconnect);
-      socket.off('connect', onConnect);
+      socket.off("disconnect", onDisconnect);
+      socket.off("connect", onConnect);
       connectionGrace.current.clear();
     };
   }, [socket, roomId]);
@@ -1759,7 +2733,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
     if (selfMutedRef.current) producer.pause();
     else producer.resume();
     setIsMuted(selfMutedRef.current);
-    socket.emit('voice:mute-state', { roomId, muted: selfMutedRef.current });
+    socket.emit("voice:mute-state", { roomId, muted: selfMutedRef.current });
   }, [socket, roomId]);
 
   // ── 屏幕共享 ───────────────────────────────────────────────────────────────
@@ -1774,326 +2748,599 @@ export function useWebRTC(socket: Socket, roomId: string) {
     screenAnalysisVideo.current = null;
     screenAnalysisCanvas.current = null;
     previousScreenSample.current = null;
-    activityCandidate.current = { value: 'active', count: 0 };
+    activityCandidate.current = { value: "active", count: 0 };
   }, []);
 
-  const applyScreenActivity = useCallback((
-    preset: ScreenPreset,
-    maxFps: Fps,
-    activity: ScreenActivity,
-    strictFrameRate = false,
-    nativeResolution = false,
-  ) => {
-    const producer = screenProducer.current;
-    const track = producer?.track ?? localScreenRef.current?.getVideoTracks()[0];
-    const settings = track?.getSettings();
-    const plan = createScreenEncodingPlan({
-      preset,
-      maxFps,
-      activity,
-      sourceWidth: settings?.width,
-      sourceHeight: settings?.height,
-      nativeResolution,
-    });
-    screenActivityRef.current = activity;
-    setScreenActivity(activity);
-    setScreenEncodingPlan(plan);
-    if (track) {
-      track.contentHint = plan.contentHint;
-      void applyScreenCaptureConstraints(track, {
-        fps: plan.fps,
-        strictFrameRate: strictFrameRate && plan.fps === 60,
-      }).then(result => {
-        console.info('[media-diag] 已应用屏幕采集帧率约束', {
-          activity,
-          mode: result.mode,
-          constraints: result.constraints,
-          settings: track.getSettings(),
-        });
-      }).catch(error => {
-        console.warn('[media-diag] 更新屏幕采集帧率约束失败', error);
+  const applyScreenActivity = useCallback(
+    (
+      preset: ScreenPreset,
+      maxFps: Fps,
+      activity: ScreenActivity,
+      strictFrameRate = false,
+      nativeResolution = false,
+    ) => {
+      const producer = screenProducer.current;
+      const track =
+        producer?.track ?? localScreenRef.current?.getVideoTracks()[0];
+      const settings = track?.getSettings();
+      const plan = createScreenEncodingPlan({
+        preset,
+        maxFps,
+        activity,
+        sourceWidth: settings?.width,
+        sourceHeight: settings?.height,
+        nativeResolution,
       });
-    }
-    if (!producer) return;
-    if (producer.track) producer.track.contentHint = plan.contentHint;
-    try {
-      const currentParameters = producer.rtpSender?.getParameters();
-      if (!currentParameters) return;
-      const params = withScreenEncodingPlan(currentParameters, plan);
-      producer.rtpSender?.setParameters(params).then(() => {
-        console.info('[media-diag] 已应用屏幕编码参数', {
-          activity,
-          source: `${plan.sourceWidth}x${plan.sourceHeight}`,
-          outputLimit: `${plan.outputWidth}x${plan.outputHeight}`,
-          scaleResolutionDownBy: plan.scaleResolutionDownBy,
-          requestedFps: plan.fps,
-          configuredMaxBitrate: null,
-          parameters: producer.rtpSender?.getParameters(),
-        });
-      }).catch(error => {
-        console.warn('[media-diag] 应用屏幕编码参数失败', error);
-      });
-    } catch (error) {
-      console.warn('[media-diag] 读取屏幕编码参数失败', error);
-    }
-  }, []);
+      screenActivityRef.current = activity;
+      setScreenActivity(activity);
+      setScreenEncodingPlan(plan);
+      if (track) {
+        track.contentHint = plan.contentHint;
+        void applyScreenCaptureConstraints(track, {
+          fps: plan.fps,
+          strictFrameRate: strictFrameRate && plan.fps === 60,
+        })
+          .then((result) => {
+            console.info("[media-diag] 已应用屏幕采集帧率约束", {
+              activity,
+              mode: result.mode,
+              constraints: result.constraints,
+              settings: track.getSettings(),
+            });
+          })
+          .catch((error) => {
+            console.warn("[media-diag] 更新屏幕采集帧率约束失败", error);
+          });
+      }
+      if (!producer) return;
+      if (producer.track) producer.track.contentHint = plan.contentHint;
+      try {
+        const currentParameters = producer.rtpSender?.getParameters();
+        if (!currentParameters) return;
+        const params = withScreenEncodingPlan(currentParameters, plan);
+        producer.rtpSender
+          ?.setParameters(params)
+          .then(() => {
+            console.info("[media-diag] 已应用屏幕编码参数", {
+              activity,
+              source: `${plan.sourceWidth}x${plan.sourceHeight}`,
+              outputLimit: `${plan.outputWidth}x${plan.outputHeight}`,
+              scaleResolutionDownBy: plan.scaleResolutionDownBy,
+              requestedFps: plan.fps,
+              configuredMaxBitrate: null,
+              parameters: producer.rtpSender?.getParameters(),
+            });
+          })
+          .catch((error) => {
+            console.warn("[media-diag] 应用屏幕编码参数失败", error);
+          });
+      } catch (error) {
+        console.warn("[media-diag] 读取屏幕编码参数失败", error);
+      }
+    },
+    [],
+  );
 
   /**
    * mediasoup 不读取视频像素，因此在发送端把画面缩到 160×90，每秒比较一次
    * 亮度变化。连续静止后降到 15fps；滚动/普通操作用 30fps；大面积变化时才
    * 使用用户选择的最高 60fps。采样只有约 1.4 万像素，开销远低于视频编码。
    */
-  const startScreenAnalysis = useCallback((stream: MediaStream, preset: ScreenPreset, maxFps: Fps, nativeResolution: boolean) => {
-    stopScreenAnalysis();
-    const video = document.createElement('video');
-    video.muted = true;
-    video.playsInline = true;
-    video.srcObject = new MediaStream(stream.getVideoTracks());
-    const canvas = document.createElement('canvas');
-    canvas.width = 160;
-    canvas.height = 90;
-    const context = canvas.getContext('2d', { willReadFrequently: true });
-    if (!context) return;
+  const startScreenAnalysis = useCallback(
+    (
+      stream: MediaStream,
+      preset: ScreenPreset,
+      maxFps: Fps,
+      nativeResolution: boolean,
+    ) => {
+      stopScreenAnalysis();
+      const video = document.createElement("video");
+      video.muted = true;
+      video.playsInline = true;
+      video.srcObject = new MediaStream(stream.getVideoTracks());
+      const canvas = document.createElement("canvas");
+      canvas.width = 160;
+      canvas.height = 90;
+      const context = canvas.getContext("2d", { willReadFrequently: true });
+      if (!context) return;
 
-    screenAnalysisVideo.current = video;
-    screenAnalysisCanvas.current = canvas;
-    video.play().catch(() => {});
-    applyScreenActivity(preset, maxFps, 'active', false, nativeResolution);
+      screenAnalysisVideo.current = video;
+      screenAnalysisCanvas.current = canvas;
+      video.play().catch(() => {});
+      applyScreenActivity(preset, maxFps, "active", false, nativeResolution);
 
-    screenAnalysisTimer.current = setInterval(() => {
-      if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
-      try {
-        context.drawImage(video, 0, 0, canvas.width, canvas.height);
-        const current = context.getImageData(0, 0, canvas.width, canvas.height).data;
-        const previous = previousScreenSample.current;
-        previousScreenSample.current = current;
-        if (!previous || previous.length !== current.length) return;
+      screenAnalysisTimer.current = setInterval(() => {
+        if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
+        try {
+          context.drawImage(video, 0, 0, canvas.width, canvas.height);
+          const current = context.getImageData(
+            0,
+            0,
+            canvas.width,
+            canvas.height,
+          ).data;
+          const previous = previousScreenSample.current;
+          previousScreenSample.current = current;
+          if (!previous || previous.length !== current.length) return;
 
-        let changed = 0;
-        let sampled = 0;
-        // 每隔一个像素采样；通过 RGB 的近似亮度差过滤编码噪点和光标闪烁。
-        for (let index = 0; index < current.length; index += 8) {
-          const nowLuma = current[index] * 3 + current[index + 1] * 6 + current[index + 2];
-          const oldLuma = previous[index] * 3 + previous[index + 1] * 6 + previous[index + 2];
-          if (Math.abs(nowLuma - oldLuma) > 160) changed += 1;
-          sampled += 1;
+          let changed = 0;
+          let sampled = 0;
+          // 每隔一个像素采样；通过 RGB 的近似亮度差过滤编码噪点和光标闪烁。
+          for (let index = 0; index < current.length; index += 8) {
+            const nowLuma =
+              current[index] * 3 + current[index + 1] * 6 + current[index + 2];
+            const oldLuma =
+              previous[index] * 3 +
+              previous[index + 1] * 6 +
+              previous[index + 2];
+            if (Math.abs(nowLuma - oldLuma) > 160) changed += 1;
+            sampled += 1;
+          }
+          const changedRatio = sampled ? changed / sampled : 0;
+          const next: ScreenActivity =
+            changedRatio < 0.004
+              ? "static"
+              : changedRatio > 0.12
+                ? "motion"
+                : "active";
+
+          if (activityCandidate.current.value === next)
+            activityCandidate.current.count += 1;
+          else activityCandidate.current = { value: next, count: 1 };
+
+          // 动态画面立即升档；普通操作需连续2次；静止需连续4秒，防止频繁抖动。
+          const required = next === "motion" ? 1 : next === "active" ? 2 : 4;
+          if (
+            activityCandidate.current.count >= required &&
+            screenActivityRef.current !== next
+          )
+            applyScreenActivity(preset, maxFps, next, false, nativeResolution);
+        } catch {
+          /* 采样失败不影响共享本身 */
         }
-        const changedRatio = sampled ? changed / sampled : 0;
-        const next: ScreenActivity = changedRatio < 0.004
-          ? 'static'
-          : changedRatio > 0.12 ? 'motion' : 'active';
+      }, 1_000);
+    },
+    [applyScreenActivity, stopScreenAnalysis],
+  );
 
-        if (activityCandidate.current.value === next) activityCandidate.current.count += 1;
-        else activityCandidate.current = { value: next, count: 1 };
-
-        // 动态画面立即升档；普通操作需连续2次；静止需连续4秒，防止频繁抖动。
-        const required = next === 'motion' ? 1 : next === 'active' ? 2 : 4;
-        if (activityCandidate.current.count >= required && screenActivityRef.current !== next)
-          applyScreenActivity(preset, maxFps, next, false, nativeResolution);
-      } catch { /* 采样失败不影响共享本身 */ }
-    }, 1_000);
-  }, [applyScreenActivity, stopScreenAnalysis]);
-
-  const startScreenShare = useCallback(async (
-    initPreset?: ScreenPreset, initFps?: Fps, initAudio?: boolean, initGameMode?: boolean,
-    initNativeResolution?: boolean,
-  ) => {
-    if (!inVoice || isSharing) return;
-    const preset     = initPreset  ?? screenPreset;
-    const gameMode   = initGameMode ?? screenGameMode;
-    const nativeResolution = initNativeResolution ?? screenNativeResolution;
-    const currentFps: Fps = gameMode ? 60 : (initFps ?? fps);
-    const audio      = initAudio   ?? shareAudio;
-    if (initPreset  !== undefined) setScreenPreset(initPreset);
-    if (initFps     !== undefined || gameMode) setFps(currentFps);
-    if (initAudio   !== undefined) setShareAudio(initAudio);
-    if (initGameMode !== undefined) setScreenGameMode(initGameMode);
-    if (initNativeResolution !== undefined) setScreenNativeResolution(initNativeResolution);
-
-    // System-audio sharing must use the native process-exclusion bridge so
-    // Cove's own voice and sound-pack playback can never enter the stream.
-    // There is intentionally no full-system/browser fallback.
-    if (audio && !window.coveScreenAudio) {
-      window.alert('排除 Cove 自身音频的系统音频共享仅可在 Windows 桌面版中使用。');
-      return;
+  const closeScreenAudio = useCallback(() => {
+    const producer = screenAudioProducer.current;
+    if (producer) {
+      socket.emit("ms:close-producer", { producerId: producer.id });
+      producer.close();
+      screenAudioProducer.current = null;
     }
+    screenAudioUnsubscribe.current?.();
+    screenAudioUnsubscribe.current = null;
+    screenAudioPipeline.current?.close();
+    screenAudioPipeline.current = null;
+    void window.coveScreenAudio?.stop();
+  }, [socket]);
 
-    const initialActivity: ScreenActivity = gameMode ? 'motion' : 'active';
-    let acquiredStream: MediaStream | null = null;
+  const startScreenAudio = useCallback(async () => {
+    const bridge = window.coveScreenAudio;
+    if (!bridge) throw new Error("无法启动排除 Cove 音频的系统捕获。");
+    let pipeline: ApplicationAudioPipeline | null = null;
+    let unsubscribe: (() => void) | null = null;
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        // 桌面源保持原始尺寸，720p/1080p 由 RTP 编码缩放统一控制。
-        video: { frameRate: { ideal: currentFps, max: currentFps } },
-        // The native Windows bridge supplies the filtered system audio as a
-        // separate track. Chromium's global loopback track is never requested,
-        // because it would include Cove's own playback.
-        audio: false,
-      });
-      acquiredStream = stream;
-      const videoTrack = stream.getVideoTracks()[0];
-      if (!videoTrack) throw new Error('没有取得屏幕视频轨道');
-      videoTrack.contentHint = gameMode ? 'motion' : 'detail';
-      const captureConstraints = await applyScreenCaptureConstraints(videoTrack, {
-        fps: currentFps,
-        strictFrameRate: gameMode,
-      });
-      const trackSettings = videoTrack.getSettings();
-      const initialPlan = createScreenEncodingPlan({
-        preset,
-        maxFps: currentFps,
-        activity: initialActivity,
-        sourceWidth: trackSettings.width,
-        sourceHeight: trackSettings.height,
-        nativeResolution,
-      });
-      console.info('[media-diag] 屏幕采集已开始', {
-        requested: {
+      // Keep the captured pipeline in a stable closure. The IPC listener must
+      // continue forwarding every PCM chunk to the same MediaStream destination.
+      const audioPipeline = new ApplicationAudioPipeline(
+        screenShareVolumeRef.current,
+      );
+      pipeline = audioPipeline;
+      await audioPipeline.resume();
+      audioPipeline.prime();
+      unsubscribe = bridge.onChunk((chunk) => audioPipeline.pushPcm(chunk));
+      const capture = await bridge.start();
+      if (!capture?.ok)
+        throw new Error(
+          capture?.error ?? "无法启动排除 Cove 自身声音的系统捕获。",
+        );
+
+      const track = audioPipeline.track;
+      await waitForMediaTrackWarmup(track);
+      const producer = await produceWithSsrcRetry(() =>
+        sendTransport.current!.produce({
+          track,
+          codecOptions: { opusStereo: true, opusDtx: true, opusFec: true },
+          appData: { type: "screen-audio" },
+          stopTracks: false,
+          disableTrackOnPause: true,
+          zeroRtpOnPause: true,
+        }),
+      );
+      screenAudioPipeline.current = audioPipeline;
+      screenAudioUnsubscribe.current = unsubscribe;
+      unsubscribe = null;
+      screenAudioProducer.current = producer;
+      if (forceMutedRef.current || !screenDemandActiveRef.current)
+        producer.pause();
+    } catch (error) {
+      unsubscribe?.();
+      pipeline?.close();
+      await bridge.stop().catch(() => false);
+      throw error;
+    }
+  }, []);
+
+  const startScreenShare = useCallback(
+    async (
+      initPreset?: ScreenPreset,
+      initFps?: Fps,
+      initAudio?: boolean,
+      initGameMode?: boolean,
+      initNativeResolution?: boolean,
+    ) => {
+      if (!inVoice || isSharing) return;
+      const preset = initPreset ?? screenPreset;
+      const gameMode = initGameMode ?? screenGameMode;
+      const nativeResolution = initNativeResolution ?? screenNativeResolution;
+      const currentFps: Fps = gameMode ? 60 : (initFps ?? fps);
+      const audio = initAudio ?? shareAudio;
+      if (initPreset !== undefined) setScreenPreset(initPreset);
+      if (initFps !== undefined || gameMode) setFps(currentFps);
+      if (initAudio !== undefined) setShareAudio(initAudio);
+      if (initGameMode !== undefined) setScreenGameMode(initGameMode);
+      if (initNativeResolution !== undefined)
+        setScreenNativeResolution(initNativeResolution);
+
+      // System-audio sharing must use the native process-exclusion bridge so
+      // Cove's own voice and sound-pack playback can never enter the stream.
+      // There is intentionally no full-system/browser fallback.
+      if (audio && !window.coveScreenAudio) {
+        window.alert(
+          "排除 Cove 自身音频的系统音频共享仅可在 Windows 桌面版中使用。",
+        );
+        return;
+      }
+
+      const initialActivity: ScreenActivity = gameMode ? "motion" : "active";
+      let acquiredStream: MediaStream | null = null;
+      try {
+        const stream = await navigator.mediaDevices.getDisplayMedia({
+          // 桌面源保持原始尺寸，720p/1080p 由 RTP 编码缩放统一控制。
+          video: { frameRate: { ideal: currentFps, max: currentFps } },
+          // The native Windows bridge supplies the filtered system audio as a
+          // separate track. Chromium's global loopback track is never requested,
+          // because it would include Cove's own playback.
+          audio: false,
+        });
+        acquiredStream = stream;
+        const videoTrack = stream.getVideoTracks()[0];
+        if (!videoTrack) throw new Error("没有取得屏幕视频轨道");
+        await waitForMediaTrackWarmup(videoTrack);
+        videoTrack.contentHint = gameMode ? "motion" : "detail";
+        const captureConstraints = await applyScreenCaptureConstraints(
+          videoTrack,
+          {
+            fps: currentFps,
+            strictFrameRate: gameMode,
+          },
+        );
+        // Applying capture constraints can recreate the underlying source;
+        // give the sender another renderer turn after that operation as well.
+        await waitForMediaTrackWarmup(videoTrack);
+        const trackSettings = videoTrack.getSettings();
+        const initialPlan = createScreenEncodingPlan({
           preset,
-          outputLimit: `${initialPlan.outputWidth}x${initialPlan.outputHeight}`,
+          maxFps: currentFps,
+          activity: initialActivity,
+          sourceWidth: trackSettings.width,
+          sourceHeight: trackSettings.height,
+          nativeResolution,
+        });
+        console.info("[media-diag] 屏幕采集已开始", {
+          requested: {
+            preset,
+            outputLimit: `${initialPlan.outputWidth}x${initialPlan.outputHeight}`,
+            fps: currentFps,
+            gameMode,
+          },
+          constraintMode: captureConstraints.mode,
+          strictConstraintError: captureConstraints.strictError
+            ? String(captureConstraints.strictError)
+            : null,
+          settings: trackSettings,
+          constraints: videoTrack.getConstraints(),
+          capabilities: videoTrack.getCapabilities(),
+        });
+        localScreenRef.current = stream;
+        setLocalScreen(stream);
+        videoCounterPrev.current = null;
+        remoteLossPrev.current = null;
+
+        const negotiatedCodecs =
+          deviceRef.current?.rtpCapabilities.codecs ?? [];
+        const codecCandidates = ["video/av1", "video/vp9"]
+          .map((mimeType) =>
+            negotiatedCodecs.find(
+              (codec) => codec.mimeType.toLowerCase() === mimeType,
+            ),
+          )
+          .filter((codec): codec is NonNullable<typeof codec> =>
+            Boolean(codec),
+          );
+
+        // 直接发送实际应用采集约束的轨道。旧实现 clone() 后继续只约束原轨道，
+        // 会让 Producer 的轨道停留在 Chromium 自行选择的低采集帧率。
+        let producer: Producer | null = null;
+        let lastProduceError: unknown = null;
+        for (const codec of [...codecCandidates, undefined]) {
+          try {
+            producer = await produceWithSsrcRetry(() =>
+              sendTransport.current!.produce({
+                track: videoTrack,
+                appData: {
+                  type: "screen",
+                  adaptation: gameMode ? "game" : "content",
+                  preset,
+                  nativeResolution,
+                  maxFps: currentFps,
+                  outputWidth: initialPlan.outputWidth,
+                  outputHeight: initialPlan.outputHeight,
+                  preferredCodec: codec?.mimeType ?? "auto",
+                },
+                encodings: [toScreenRtpEncoding(initialPlan)],
+                // 初始带宽估计（kbps），不是上限；与 SFU 启动估计一致，之后由拥塞控制调整。
+                codecOptions: { videoGoogleStartBitrate: 10_000 },
+                ...(codec ? { codec } : {}),
+                stopTracks: false,
+                disableTrackOnPause: false,
+                zeroRtpOnPause: true,
+              }),
+            );
+            console.info(
+              `[screen share] 编码器：${codec?.mimeType ?? "浏览器自动选择"}`,
+            );
+            break;
+          } catch (error) {
+            lastProduceError = error;
+            console.warn(
+              `[screen share] ${codec?.mimeType ?? "自动 codec"} 编码失败，尝试回退`,
+              error,
+            );
+          }
+        }
+        if (!producer)
+          throw lastProduceError ?? new Error("没有可用的屏幕共享视频编码器");
+        screenProducer.current = producer;
+        if (!screenDemandActiveRef.current) producer.pause();
+        applyScreenActivity(
+          preset,
+          currentFps,
+          initialActivity,
+          gameMode,
+          nativeResolution,
+        );
+        if (gameMode) stopScreenAnalysis();
+        else startScreenAnalysis(stream, preset, currentFps, nativeResolution);
+
+        // Electron's global `loopback` source captures Cove's own voice and
+        // sound-pack playback as well as other desktop audio. The Windows client
+        // therefore uses only the native process-loopback capture in exclude
+        // mode (Cove's process tree is removed at the WASAPI level).
+        if (audio) {
+          try {
+            await startScreenAudio();
+          } catch (e) {
+            console.warn("[screen share] 排除 Cove 后的系统音频发布失败:", e);
+            window.alert(
+              "屏幕画面已开始共享，但系统音频发布失败。请停止共享后重试。",
+            );
+          }
+        }
+
+        setIsSharing(true);
+
+        // 用户在浏览器 UI 点"停止共享"
+        stream.getVideoTracks()[0].onended = () => stopScreenShare();
+      } catch (e) {
+        console.error("[screen share]", e);
+        stopScreenAnalysis();
+        if (screenProducer.current) {
+          socket.emit("ms:close-producer", {
+            producerId: screenProducer.current.id,
+          });
+          screenProducer.current.close();
+          screenProducer.current = null;
+        }
+        if (screenAudioProducer.current) {
+          socket.emit("ms:close-producer", {
+            producerId: screenAudioProducer.current.id,
+          });
+          screenAudioProducer.current.close();
+          screenAudioProducer.current = null;
+        }
+        screenAudioUnsubscribe.current?.();
+        screenAudioUnsubscribe.current = null;
+        screenAudioPipeline.current?.close();
+        screenAudioPipeline.current = null;
+        await window.coveScreenAudio?.stop();
+        acquiredStream?.getTracks().forEach((track) => track.stop());
+        if (localScreenRef.current === acquiredStream)
+          localScreenRef.current = null;
+        setLocalScreen(null);
+        setIsSharing(false);
+        setScreenEncodingPlan(null);
+        if (!(e instanceof DOMException && e.name === "NotAllowedError"))
+          window.alert(
+            `无法开始屏幕共享：${e instanceof Error ? e.message : String(e)}`,
+          );
+      }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    },
+    [
+      socket,
+      roomId,
+      inVoice,
+      isSharing,
+      screenPreset,
+      fps,
+      shareAudio,
+      screenGameMode,
+      screenNativeResolution,
+      applyScreenActivity,
+      startScreenAnalysis,
+      startScreenAudio,
+      stopScreenAnalysis,
+    ],
+  );
+
+  /**
+   * 修改共享参数时复用现有的视频 Producer，只替换采集轨道和编码参数。
+   * 这样 SFU 侧的 Producer ID 不变，观看方不会被断开，也不需要重新点击观看。
+   */
+  const updateScreenShare = useCallback(
+    async (
+      initPreset?: ScreenPreset,
+      initFps?: Fps,
+      initAudio?: boolean,
+      initGameMode?: boolean,
+      initNativeResolution?: boolean,
+    ) => {
+      if (!inVoice || !isSharing) return;
+      const producer = screenProducer.current;
+      if (!producer) return;
+
+      const preset = initPreset ?? screenPreset;
+      const gameMode = initGameMode ?? screenGameMode;
+      const nativeResolution = initNativeResolution ?? screenNativeResolution;
+      const currentFps: Fps = gameMode ? 60 : (initFps ?? fps);
+      const audio = initAudio ?? shareAudio;
+      if (audio && !window.coveScreenAudio) {
+        window.alert(
+          "排除 Cove 自身音频的系统音频共享仅可在 Windows 桌面版中使用。",
+        );
+        return;
+      }
+
+      const previousStream = localScreenRef.current;
+      let acquiredStream: MediaStream | null = null;
+      try {
+        const stream = await navigator.mediaDevices.getDisplayMedia({
+          video: { frameRate: { ideal: currentFps, max: currentFps } },
+          audio: false,
+        });
+        acquiredStream = stream;
+        const videoTrack = stream.getVideoTracks()[0];
+        if (!videoTrack) throw new Error("没有取得屏幕视频轨道");
+        videoTrack.contentHint = gameMode ? "motion" : "detail";
+        await applyScreenCaptureConstraints(videoTrack, {
+          fps: currentFps,
+          strictFrameRate: gameMode,
+        });
+        const settings = videoTrack.getSettings();
+        const plan = createScreenEncodingPlan({
+          preset,
+          maxFps: currentFps,
+          activity: gameMode ? "motion" : "active",
+          sourceWidth: settings.width,
+          sourceHeight: settings.height,
+          nativeResolution,
+        });
+
+        if (screenProducer.current !== producer || producer.closed) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+        await producer.replaceTrack({ track: videoTrack });
+        if (producer.appData && typeof producer.appData === "object")
+          Object.assign(producer.appData, {
+            adaptation: gameMode ? "game" : "content",
+            preset,
+            nativeResolution,
+            maxFps: currentFps,
+            outputWidth: plan.outputWidth,
+            outputHeight: plan.outputHeight,
+          });
+
+        if (previousStream && previousStream !== stream) {
+          previousStream.getVideoTracks().forEach((track) => {
+            track.onended = null;
+            track.stop();
+          });
+          previousStream.getAudioTracks().forEach((track) => track.stop());
+        }
+        localScreenRef.current = stream;
+        setLocalScreen(stream);
+        videoCounterPrev.current = null;
+        remoteLossPrev.current = null;
+        setScreenPreset(preset);
+        setFps(currentFps);
+        setScreenGameMode(gameMode);
+        setScreenNativeResolution(nativeResolution);
+        applyScreenActivity(
+          preset,
+          currentFps,
+          gameMode ? "motion" : "active",
+          gameMode,
+          nativeResolution,
+        );
+        if (gameMode) stopScreenAnalysis();
+        else startScreenAnalysis(stream, preset, currentFps, nativeResolution);
+
+        let hasScreenAudio = Boolean(screenAudioProducer.current);
+        if (audio && !hasScreenAudio) {
+          try {
+            await startScreenAudio();
+            hasScreenAudio = Boolean(screenAudioProducer.current);
+          } catch (error) {
+            hasScreenAudio = false;
+            console.warn("[screen share] 更新共享音频失败:", error);
+            window.alert("屏幕画面已更新，但共享电脑音频启动失败。请稍后重试。");
+          }
+        } else if (!audio && hasScreenAudio) {
+          closeScreenAudio();
+          hasScreenAudio = false;
+        }
+        setShareAudio(audio && hasScreenAudio);
+        videoTrack.onended = () => stopScreenShare();
+        console.info("[screen share] 共享参数已更新", {
+          preset,
           fps: currentFps,
           gameMode,
-        },
-        constraintMode: captureConstraints.mode,
-        strictConstraintError: captureConstraints.strictError
-          ? String(captureConstraints.strictError) : null,
-        settings: trackSettings,
-        constraints: videoTrack.getConstraints(),
-        capabilities: videoTrack.getCapabilities(),
-      });
-      localScreenRef.current = stream;
-      setLocalScreen(stream);
-      videoCounterPrev.current = null;
-      remoteLossPrev.current = null;
-
-      const negotiatedCodecs = deviceRef.current?.rtpCapabilities.codecs ?? [];
-      const codecCandidates = ['video/av1', 'video/vp9']
-        .map(mimeType => negotiatedCodecs.find(codec => codec.mimeType.toLowerCase() === mimeType))
-        .filter((codec): codec is NonNullable<typeof codec> => Boolean(codec));
-
-      // 直接发送实际应用采集约束的轨道。旧实现 clone() 后继续只约束原轨道，
-      // 会让 Producer 的轨道停留在 Chromium 自行选择的低采集帧率。
-      let producer: Producer | null = null;
-      let lastProduceError: unknown = null;
-      for (const codec of [...codecCandidates, undefined]) {
-        try {
-          producer = await sendTransport.current!.produce({
-            track: videoTrack,
-            appData: {
-              type: 'screen',
-              adaptation: gameMode ? 'game' : 'content',
-              preset,
-              nativeResolution,
-              maxFps: currentFps,
-              outputWidth: initialPlan.outputWidth,
-              outputHeight: initialPlan.outputHeight,
-              preferredCodec: codec?.mimeType ?? 'auto',
-            },
-            encodings: [toScreenRtpEncoding(initialPlan)],
-            // 初始带宽估计（kbps），不是上限；与 SFU 启动估计一致，之后由拥塞控制调整。
-            codecOptions: { videoGoogleStartBitrate: 10_000 },
-            ...(codec ? { codec } : {}),
-            stopTracks: false,
-            disableTrackOnPause: false,
-            zeroRtpOnPause: true,
-          });
-          console.info(`[screen share] 编码器：${codec?.mimeType ?? '浏览器自动选择'}`);
-          break;
-        } catch (error) {
-          lastProduceError = error;
-          console.warn(`[screen share] ${codec?.mimeType ?? '自动 codec'} 编码失败，尝试回退`, error);
-        }
+          nativeResolution,
+          audio: audio && hasScreenAudio,
+        });
+      } catch (error) {
+        acquiredStream?.getTracks().forEach((track) => track.stop());
+        if (!(error instanceof DOMException && error.name === "NotAllowedError"))
+          window.alert(
+            `无法更新屏幕共享：${error instanceof Error ? error.message : String(error)}`,
+          );
       }
-      if (!producer) throw lastProduceError ?? new Error('没有可用的屏幕共享视频编码器');
-      screenProducer.current = producer;
-      if (!screenDemandActiveRef.current) producer.pause();
-      applyScreenActivity(preset, currentFps, initialActivity, gameMode, nativeResolution);
-      if (gameMode) stopScreenAnalysis();
-      else startScreenAnalysis(stream, preset, currentFps, nativeResolution);
-
-      // Electron's global `loopback` source captures Cove's own voice and
-      // sound-pack playback as well as other desktop audio. The Windows client
-      // therefore uses only the native process-loopback capture in exclude
-      // mode (Cove's process tree is removed at the WASAPI level).
-      if (audio) {
-        const bridge = window.coveScreenAudio;
-        if (!bridge) throw new Error('无法启动排除 Cove 音频的系统捕获。');
-        let pipeline: ApplicationAudioPipeline | null = null;
-        let unsubscribe: (() => void) | null = null;
-        try {
-          // Keep the captured pipeline in a stable closure. Do not clear this
-          // local after transferring ownership to the ref: the IPC listener
-          // remains active for the whole share and must continue forwarding
-          // every PCM chunk to the same MediaStream destination.
-          const audioPipeline = new ApplicationAudioPipeline(screenShareVolumeRef.current);
-          pipeline = audioPipeline;
-          await audioPipeline.resume();
-          unsubscribe = bridge.onChunk(chunk => audioPipeline.pushPcm(chunk));
-          const capture = await bridge.start();
-          if (!capture?.ok) throw new Error(capture?.error ?? '无法启动排除 Cove 音频的系统捕获。');
-
-          const ap = await sendTransport.current!.produce({
-            track: audioPipeline.track,
-            codecOptions: { opusStereo: true, opusDtx: true, opusFec: true },
-            appData: { type: 'screen-audio' },
-            disableTrackOnPause: true,
-            zeroRtpOnPause: true,
-          });
-          screenAudioPipeline.current = audioPipeline;
-          screenAudioUnsubscribe.current = unsubscribe;
-          unsubscribe = null;
-          screenAudioProducer.current = ap;
-          if (forceMutedRef.current || !screenDemandActiveRef.current) ap.pause();
-        } catch (e) {
-          unsubscribe?.();
-          pipeline?.close();
-          await bridge.stop().catch(() => false);
-          console.warn('[screen share] 排除 Cove 后的系统音频发布失败:', e);
-          window.alert('屏幕画面已开始共享，但系统音频发布失败。请停止共享后重试。');
-        }
-      }
-
-      setIsSharing(true);
-
-      // 用户在浏览器 UI 点"停止共享"
-      stream.getVideoTracks()[0].onended = () => stopScreenShare();
-    } catch (e) {
-      console.error('[screen share]', e);
-      stopScreenAnalysis();
-      if (screenProducer.current) {
-        socket.emit('ms:close-producer', { producerId: screenProducer.current.id });
-        screenProducer.current.close();
-        screenProducer.current = null;
-      }
-      if (screenAudioProducer.current) {
-        socket.emit('ms:close-producer', { producerId: screenAudioProducer.current.id });
-        screenAudioProducer.current.close();
-        screenAudioProducer.current = null;
-      }
-      screenAudioUnsubscribe.current?.();
-      screenAudioUnsubscribe.current = null;
-      screenAudioPipeline.current?.close();
-      screenAudioPipeline.current = null;
-      await window.coveScreenAudio?.stop();
-      acquiredStream?.getTracks().forEach(track => track.stop());
-      if (localScreenRef.current === acquiredStream) localScreenRef.current = null;
-      setLocalScreen(null);
-      setIsSharing(false);
-      setScreenEncodingPlan(null);
-      if (!(e instanceof DOMException && e.name === 'NotAllowedError'))
-        window.alert(`无法开始屏幕共享：${e instanceof Error ? e.message : String(e)}`);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [socket, roomId, inVoice, isSharing, screenPreset, fps, shareAudio, screenGameMode, screenNativeResolution, applyScreenActivity, startScreenAnalysis, stopScreenAnalysis]);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    },
+    [
+      applyScreenActivity,
+      closeScreenAudio,
+      fps,
+      inVoice,
+      isSharing,
+      screenGameMode,
+      screenNativeResolution,
+      screenPreset,
+      shareAudio,
+      startScreenAnalysis,
+      startScreenAudio,
+      stopScreenAnalysis,
+    ],
+  );
 
   const stopScreenShare = useCallback(() => {
     stopScreenAnalysis();
     if (screenProducer.current) {
-      socket.emit('ms:close-producer', { producerId: screenProducer.current.id });
+      socket.emit("ms:close-producer", {
+        producerId: screenProducer.current.id,
+      });
       screenProducer.current.close();
       screenProducer.current = null;
     }
     if (screenAudioProducer.current) {
-      socket.emit('ms:close-producer', { producerId: screenAudioProducer.current.id });
+      socket.emit("ms:close-producer", {
+        producerId: screenAudioProducer.current.id,
+      });
       screenAudioProducer.current.close();
       screenAudioProducer.current = null;
     }
@@ -2102,24 +3349,29 @@ export function useWebRTC(socket: Socket, roomId: string) {
     screenAudioPipeline.current?.close();
     screenAudioPipeline.current = null;
     void window.coveScreenAudio?.stop();
-    localScreenRef.current?.getTracks().forEach(t => t.stop());
+    localScreenRef.current?.getTracks().forEach((t) => t.stop());
     localScreenRef.current = null;
     setLocalScreen(null);
     setIsSharing(false);
     screenDemandActiveRef.current = false;
     setScreenViewerCount(0);
-    setScreenActivity('active');
-    screenActivityRef.current = 'active';
+    setScreenActivity("active");
+    screenActivityRef.current = "active";
     setScreenEncodingPlan(null);
     videoCounterPrev.current = null;
     remoteLossPrev.current = null;
     if (!watchingScreenPeerRef.current) setStats(EMPTY_STATS);
-  }, [clearAvailableScreens, clearRemoteApplicationAudios, socket, stopScreenAnalysis]);
+  }, [
+    clearAvailableScreens,
+    clearRemoteApplicationAudios,
+    socket,
+    stopScreenAnalysis,
+  ]);
 
   const stopApplicationAudioShare = useCallback(() => {
     const producer = applicationAudioProducer.current;
     if (producer) {
-      socket.emit('ms:close-producer', { producerId: producer.id });
+      socket.emit("ms:close-producer", { producerId: producer.id });
       producer.close();
       applicationAudioProducer.current = null;
     }
@@ -2127,77 +3379,192 @@ export function useWebRTC(socket: Socket, roomId: string) {
     applicationAudioUnsubscribe.current = null;
     applicationAudioPipeline.current?.close();
     applicationAudioPipeline.current = null;
+    void applicationAudioStop.current?.();
+    applicationAudioStop.current = null;
     void window.coveApplicationAudio?.stop();
+    void window.coveSystemAudio?.stop();
     setIsApplicationAudioSharing(false);
     setApplicationAudioLabel(null);
   }, [socket]);
 
-  const startApplicationAudioShare = useCallback(async (source: ApplicationAudioSource) => {
+  const startApplicationAudioShare = useCallback(
+    async (source: ApplicationAudioSource) => {
+      if (!inVoice || applicationAudioProducer.current) return;
+      const bridge = window.coveApplicationAudio;
+      if (!bridge) {
+        window.alert("应用音频共享仅可在 Windows 桌面版中使用。");
+        return;
+      }
+      let pipeline: ApplicationAudioPipeline | null = null;
+      let unsubscribe: (() => void) | null = null;
+      try {
+        pipeline = new ApplicationAudioPipeline(
+          applicationAudioShareVolumeRef.current,
+        );
+        await pipeline.resume();
+        pipeline.prime();
+        unsubscribe = bridge.onChunk((chunk) => pipeline?.pushPcm(chunk));
+        const capture = await bridge.start(source.id);
+        if (!capture.ok)
+          throw new Error(capture.error ?? "无法开始应用音频捕获。");
+        const track = pipeline.track;
+        await waitForMediaTrackWarmup(track);
+        const producer = await produceWithSsrcRetry(() =>
+          sendTransport.current!.produce({
+            track,
+            codecOptions: { opusStereo: true, opusDtx: true, opusFec: true },
+            appData: {
+              type: "application-audio",
+              label: source.name,
+              processId: source.processId,
+            },
+            stopTracks: false,
+            disableTrackOnPause: true,
+            zeroRtpOnPause: true,
+          }),
+        );
+        applicationAudioPipeline.current = pipeline;
+        applicationAudioUnsubscribe.current = unsubscribe;
+        applicationAudioStop.current = bridge.stop;
+        applicationAudioProducer.current = producer;
+        if (forceMutedRef.current) producer.pause();
+        setApplicationAudioLabel(source.name);
+        setIsApplicationAudioSharing(true);
+      } catch (error) {
+        unsubscribe?.();
+        pipeline?.close();
+        await bridge.stop().catch(() => false);
+        console.error("[application-audio] 分享失败", error);
+        window.alert(
+          `无法共享应用音频：${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    },
+    [inVoice],
+  );
+
+  const startSystemAudioShare = useCallback(async () => {
     if (!inVoice || applicationAudioProducer.current) return;
-    const bridge = window.coveApplicationAudio;
+    const bridge = window.coveSystemAudio;
     if (!bridge) {
-      window.alert('应用音频共享仅可在 Windows 桌面版中使用。');
+      window.alert("全部系统音频共享仅可在 Windows 桌面版中使用。");
       return;
     }
     let pipeline: ApplicationAudioPipeline | null = null;
     let unsubscribe: (() => void) | null = null;
     try {
-      pipeline = new ApplicationAudioPipeline(applicationAudioShareVolumeRef.current);
+      pipeline = new ApplicationAudioPipeline(
+        applicationAudioShareVolumeRef.current,
+      );
       await pipeline.resume();
-      unsubscribe = bridge.onChunk(chunk => pipeline?.pushPcm(chunk));
-      const capture = await bridge.start(source.id);
-      if (!capture.ok) throw new Error(capture.error ?? '无法开始应用音频捕获。');
-      const producer = await sendTransport.current!.produce({
-        track: pipeline.track,
-        codecOptions: { opusStereo: true, opusDtx: true, opusFec: true },
-        appData: { type: 'application-audio', label: source.name, processId: source.processId },
-        disableTrackOnPause: true,
-        zeroRtpOnPause: true,
-      });
+      pipeline.prime();
+      unsubscribe = bridge.onChunk((chunk) => pipeline?.pushPcm(chunk));
+      const capture = await bridge.start();
+      if (!capture.ok)
+        throw new Error(capture.error ?? "无法开始系统音频捕获。");
+      const track = pipeline.track;
+      await waitForMediaTrackWarmup(track);
+      const producer = await produceWithSsrcRetry(() =>
+        sendTransport.current!.produce({
+          track,
+          codecOptions: { opusStereo: true, opusDtx: true, opusFec: true },
+          appData: {
+            type: "application-audio",
+            label: "全部系统音频",
+            processId: 0,
+          },
+          stopTracks: false,
+          disableTrackOnPause: true,
+          zeroRtpOnPause: true,
+        }),
+      );
       applicationAudioPipeline.current = pipeline;
       applicationAudioUnsubscribe.current = unsubscribe;
+      applicationAudioStop.current = bridge.stop;
       applicationAudioProducer.current = producer;
       if (forceMutedRef.current) producer.pause();
-      setApplicationAudioLabel(source.name);
+      setApplicationAudioLabel("全部系统音频");
       setIsApplicationAudioSharing(true);
     } catch (error) {
       unsubscribe?.();
       pipeline?.close();
       await bridge.stop().catch(() => false);
-      console.error('[application-audio] 分享失败', error);
-      window.alert(`无法共享应用音频：${error instanceof Error ? error.message : String(error)}`);
+      console.error("[system-audio] 分享失败", error);
+      window.alert(
+        `无法共享系统音频：${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }, [inVoice]);
 
-  const toggleShareAudio = useCallback(() => setShareAudio(p => !p), []);
+  const toggleShareAudio = useCallback(() => setShareAudio((p) => !p), []);
 
   return {
-    inVoice, isJoining, isMuted, isForceMuted, isSharing,
-    screenPreset, fps, shareAudio, screenGameMode, screenNativeResolution,
-    isApplicationAudioSharing, applicationAudioLabel, applicationAudioShareVolume,
-    screenActivity, screenEncodingPlan, screenViewerCount,
+    inVoice,
+    isJoining,
+    isMuted,
+    isForceMuted,
+    isSharing,
+    screenPreset,
+    fps,
+    shareAudio,
+    screenGameMode,
+    screenNativeResolution,
+    isApplicationAudioSharing,
+    applicationAudioLabel,
+    applicationAudioShareVolume,
+    screenActivity,
+    screenEncodingPlan,
+    screenViewerCount,
     voiceMembers,
     localScreen,
-    remoteScreen,        // { socketId, stream: MediaStream } | null
+    remoteScreen, // { socketId, stream: MediaStream } | null
     availableScreens,
     remoteApplicationAudios,
     watchingScreenPeerId: watchingScreenPeer,
     isWatchingScreen: !!watchingScreenPeer,
-    joinVoice, leaveVoice, toggleMute,
-    startScreenShare, stopScreenShare,
-    startApplicationAudioShare, stopApplicationAudioShare, setApplicationAudioShareVolume,
-    watchScreen, stopWatchingScreen, toggleShareAudio,
+    joinVoice,
+    leaveVoice,
+    toggleMute,
+    startScreenShare,
+    updateScreenShare,
+    stopScreenShare,
+    startApplicationAudioShare,
+    stopApplicationAudioShare,
+    setApplicationAudioShareVolume,
+    startSystemAudioShare,
+    watchScreen,
+    stopWatchingScreen,
+    toggleShareAudio,
     // 新增：实时统计 + 音量
-    stats, statsEnabled, toggleStats, exportMediaDiagnostics,
-    speakingLevels,      // socketId → 0~1
-    memberVolumes, setMemberVolume, toggleMemberMute,
-    screenReceiveVolume, setScreenReceiveVolume,
-    screenShareVolume, setScreenShareVolume,
-    applicationAudioReceiveVolumes, setApplicationAudioReceiveVolume,
-    audioInputDevices, audioOutputDevices,
-    selectedAudioInputId, selectedAudioOutputId,
-    audioDevicesRefreshing, audioInputSwitching, audioDeviceError,
-    refreshAudioDevices, selectAudioInput, selectAudioOutput,
+    stats,
+    statsEnabled,
+    toggleStats,
+    exportMediaDiagnostics,
+    speakingLevels, // socketId → 0~1
+    memberVolumes,
+    setMemberVolume,
+    toggleMemberMute,
+    screenReceiveVolume,
+    setScreenReceiveVolume,
+    screenShareVolume,
+    setScreenShareVolume,
+    applicationAudioReceiveVolumes,
+    setApplicationAudioReceiveVolume,
+    microphoneVolume,
+    setMicrophoneVolume,
+    masterOutputVolume,
+    setMasterOutputVolume,
+    audioInputDevices,
+    audioOutputDevices,
+    selectedAudioInputId,
+    selectedAudioOutputId,
+    audioDevicesRefreshing,
+    audioInputSwitching,
+    audioDeviceError,
+    refreshAudioDevices,
+    selectAudioInput,
+    selectAudioOutput,
+    refreshAudioConnection,
     playPresenceTone,
     localSocketId: socket.id,
   };

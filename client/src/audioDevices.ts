@@ -1,7 +1,8 @@
-export const DEFAULT_AUDIO_DEVICE_ID = 'default';
+export const DEFAULT_AUDIO_DEVICE_ID = "default";
+export const COMMUNICATIONS_AUDIO_DEVICE_ID = "communications";
 
-export const AUDIO_INPUT_DEVICE_KEY = 'cove:audio-input-device';
-export const AUDIO_OUTPUT_DEVICE_KEY = 'cove:audio-output-device';
+export const AUDIO_INPUT_DEVICE_KEY = "cove:audio-input-device";
+export const AUDIO_OUTPUT_DEVICE_KEY = "cove:audio-output-device";
 
 export interface AudioDeviceOption {
   deviceId: string;
@@ -24,25 +25,44 @@ export function saveAudioDeviceId(key: string, deviceId: string): void {
   }
 }
 
-export function createMicrophoneConstraints(deviceId: string): MediaTrackConstraints {
+export function normalizeMicrophoneDeviceId(deviceId: string): string {
+  // `communications` is a virtual Windows role endpoint. Chromium can expose
+  // a live track for it even when the role has no usable capture samples.
+  return !deviceId || deviceId === COMMUNICATIONS_AUDIO_DEVICE_ID
+    ? DEFAULT_AUDIO_DEVICE_ID
+    : deviceId;
+}
+
+export function createMicrophoneConstraints(
+  deviceId: string,
+): MediaTrackConstraints {
+  const normalizedDeviceId = normalizeMicrophoneDeviceId(deviceId);
   return {
     echoCancellation: true,
     noiseSuppression: true,
-    autoGainControl: false,
+    // Realtek microphone arrays can expose a live WebRTC track whose raw
+    // samples are effectively silent when Chromium's capture AGC is disabled.
+    autoGainControl: true,
     channelCount: 1,
     sampleRate: 48_000,
-    ...(deviceId && deviceId !== DEFAULT_AUDIO_DEVICE_ID
-      ? { deviceId: { exact: deviceId } }
+    ...(normalizedDeviceId !== DEFAULT_AUDIO_DEVICE_ID
+      ? { deviceId: { exact: normalizedDeviceId } }
       : {}),
   };
 }
 
-export function toAudioDeviceOptions(devices: MediaDeviceInfo[], kind: MediaDeviceKind): AudioDeviceOption[] {
+export function toAudioDeviceOptions(
+  devices: MediaDeviceInfo[],
+  kind: MediaDeviceKind,
+): AudioDeviceOption[] {
   let index = 0;
-  const fallback = kind === 'audioinput' ? '麦克风' : '扬声器';
+  const fallback = kind === "audioinput" ? "麦克风" : "扬声器";
   return devices
-    .filter(device => device.kind === kind && device.deviceId !== DEFAULT_AUDIO_DEVICE_ID)
-    .map(device => {
+    .filter(
+      (device) =>
+        device.kind === kind && device.deviceId !== DEFAULT_AUDIO_DEVICE_ID,
+    )
+    .map((device) => {
       index += 1;
       return {
         deviceId: device.deviceId,
@@ -60,7 +80,7 @@ type SinkAudioContext = AudioContext & {
 };
 
 export function resolvedSinkId(deviceId: string): string {
-  return deviceId === DEFAULT_AUDIO_DEVICE_ID ? '' : deviceId;
+  return deviceId === DEFAULT_AUDIO_DEVICE_ID ? "" : deviceId;
 }
 
 export async function applyAudioElementOutput(
@@ -68,7 +88,7 @@ export async function applyAudioElementOutput(
   deviceId: string,
 ): Promise<boolean> {
   const sinkElement = element as SinkElement;
-  if (typeof sinkElement.setSinkId !== 'function') return false;
+  if (typeof sinkElement.setSinkId !== "function") return false;
   await sinkElement.setSinkId(resolvedSinkId(deviceId));
   return true;
 }
@@ -78,13 +98,17 @@ export async function applyAudioContextOutput(
   deviceId: string,
 ): Promise<boolean> {
   const sinkContext = context as SinkAudioContext;
-  if (typeof sinkContext.setSinkId !== 'function') return false;
+  if (typeof sinkContext.setSinkId !== "function") return false;
   await sinkContext.setSinkId(resolvedSinkId(deviceId));
   return true;
 }
 
 export function isMemberVoiceAudio(kind: string, sourceType?: string): boolean {
-  return kind === 'audio' && sourceType !== 'screen-audio' && sourceType !== 'application-audio';
+  return (
+    kind === "audio" &&
+    sourceType !== "screen-audio" &&
+    sourceType !== "application-audio"
+  );
 }
 
 /** Only the gain path is audible; Chromium also needs a muted element to activate remote playout. */
@@ -93,6 +117,7 @@ export function createRemoteAudioOutput(
   stream: MediaStream,
   volume: number,
   activationElement: HTMLAudioElement = new Audio(),
+  destination: AudioNode = context.destination,
 ) {
   const source = context.createMediaStreamSource(stream);
   const gain = context.createGain();
@@ -101,9 +126,11 @@ export function createRemoteAudioOutput(
   activationElement.muted = true;
   activationElement.volume = 0;
   activationElement.srcObject = stream;
-  gain.gain.value = Number.isFinite(volume) ? Math.max(0, Math.min(2, volume)) : 1;
+  gain.gain.value = Number.isFinite(volume)
+    ? Math.max(0, Math.min(2, volume))
+    : 1;
   try {
-    source.connect(gain).connect(context.destination);
+    source.connect(gain).connect(destination);
   } catch (error) {
     source.disconnect();
     gain.disconnect();
@@ -115,10 +142,14 @@ export function createRemoteAudioOutput(
     source,
     gain,
     setVolume(value: number) {
-      if (!closed) gain.gain.value = Number.isFinite(value) ? Math.max(0, Math.min(2, value)) : 1;
+      if (!closed)
+        gain.gain.value = Number.isFinite(value)
+          ? Math.max(0, Math.min(2, value))
+          : 1;
     },
     async resume() {
-      if (!closed) await Promise.all([context.resume(), activationElement.play()]);
+      if (!closed)
+        await Promise.all([context.resume(), activationElement.play()]);
     },
     close() {
       if (closed) return;

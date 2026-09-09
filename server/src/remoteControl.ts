@@ -101,6 +101,14 @@ export class RemoteControlRegistry {
     return request;
   }
 
+  cancelRequest(requestId: string, requesterSocketId: string): RegistryResult<RemoteControlRequest> {
+    const request = this.requests.get(requestId);
+    if (!request || request.controllerSocketId !== requesterSocketId)
+      return { ok: false, error: '远程控制请求不存在或无权取消' };
+    this.requests.delete(requestId);
+    return { ok: true, value: request };
+  }
+
   respond(requestId: string, responderSocketId: string, accepted: boolean, now = Date.now()): RegistryResult<{ request: RemoteControlRequest; session: RemoteControlSession | null }> {
     const request = this.requests.get(requestId);
     if (!request || request.expiresAt <= now) {

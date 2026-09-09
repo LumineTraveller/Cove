@@ -51,6 +51,44 @@ internal static class RemoteInputHelper
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint SendInput(uint count, INPUT[] inputs, int size);
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINT { public int x; public int y; }
+    [DllImport("user32.dll")]
+    private static extern IntPtr WindowFromPoint(POINT point);
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetAncestor(IntPtr window, uint flags);
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+    [DllImport("user32.dll")]
+    private static extern int GetSystemMetrics(int index);
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    private static extern IntPtr SendMessageTimeout(IntPtr window, uint message,
+        UIntPtr wParam, IntPtr lParam, uint flags, uint timeout, out UIntPtr result);
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindowAsync(IntPtr window, int command);
+
+    private static uint CoveProcessId;
+    private static IntPtr PendingMinimize = IntPtr.Zero;
+
+    private static IntPtr CoveMinimizeButton(double x, double y) {
+        if (CoveProcessId == 0) return IntPtr.Zero;
+        // Use the same primary-screen coordinates as absolute SendInput.
+        var point = new POINT {
+            x = (int)Math.Round(x * (GetSystemMetrics(0) - 1)),
+            y = (int)Math.Round(y * (GetSystemMetrics(1) - 1)),
+        };
+        var window = GetAncestor(WindowFromPoint(point), 2); // GA_ROOT
+        uint owner;
+        GetWindowThreadProcessId(window, out owner);
+        if (window == IntPtr.Zero || owner != CoveProcessId) return IntPtr.Zero;
+        UIntPtr hit;
+        var position = new IntPtr(unchecked((point.y << 16) | (point.x & 0xffff)));
+        // Bound the query: never block the input helper on an unresponsive window.
+        if (SendMessageTimeout(window, 0x0084, UIntPtr.Zero, position,
+            2, 100, out hit) == IntPtr.Zero) return IntPtr.Zero; // WM_NCHITTEST
+        return hit.ToUInt64() == 8 ? window : IntPtr.Zero; // HTMINBUTTON
+    }
+
     private static readonly HashSet<ushort> PressedKeys = new HashSet<ushort>();
     private static readonly HashSet<string> PressedButtons = new HashSet<string>();
     private static readonly Dictionary<string, ushort> NamedKeys = new Dictionary<string, ushort>(StringComparer.Ordinal) {
@@ -114,6 +152,24 @@ internal static class RemoteInputHelper
         if (message.type == "pointer") {
             SendMouse(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, 0, message.x, message.y);
         } else if (message.type == "button") {
+            if (message.button == "left") {
+                if (message.down && !PressedButtons.Contains("left")) {
+                    var target = CoveMinimizeButton(message.x, message.y);
+                    if (target != IntPtr.Zero) {
+                        // Do not enter Cove's native caption tracking loop: the
+                        // matching remote up event also needs its main thread.
+                        PendingMinimize = target;
+                        return;
+                    }
+                } else if (!message.down && PendingMinimize != IntPtr.Zero) {
+                    var target = PendingMinimize;
+                    PendingMinimize = IntPtr.Zero;
+                    // Preserve click cancellation when released outside the button.
+                    if (CoveMinimizeButton(message.x, message.y) == target)
+                        ShowWindowAsync(target, 6); // SW_MINIMIZE
+                    return;
+                }
+            }
             SendMouse(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, 0, message.x, message.y);
             uint flag = 0;
             if (message.button == "left") flag = message.down ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP;
@@ -133,6 +189,7 @@ internal static class RemoteInputHelper
     }
 
     private static void ReleaseAll() {
+        PendingMinimize = IntPtr.Zero;
         foreach (var key in new List<ushort>(PressedKeys)) {
             var input = new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = key, dwFlags = KEYEVENTF_KEYUP } } };
             SendInput(1, new[] { input }, Marshal.SizeOf(typeof(INPUT)));
@@ -144,7 +201,8 @@ internal static class RemoteInputHelper
         PressedKeys.Clear(); PressedButtons.Clear();
     }
 
-    public static void Main() {
+    public static void Main(string[] args) {
+        if (args.Length > 0) UInt32.TryParse(args[0], out CoveProcessId);
         var serializer = new JavaScriptSerializer { MaxJsonLength = 8192 };
         try {
             string line;

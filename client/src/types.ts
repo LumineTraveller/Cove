@@ -1,4 +1,4 @@
-export type ClientPlatform = 'desktop' | 'mobile';
+export type ClientPlatform = "desktop" | "mobile";
 
 export interface Room {
   id: string;
@@ -7,6 +7,12 @@ export interface Room {
   ownerName: string | null;
   maxMembers: number | null;
   hasPassword: boolean;
+  isOwner?: boolean;
+  avatarUrl?: string | null;
+  backgroundTop?: string | null;
+  backgroundBottom?: string | null;
+  backgroundTopDark?: string | null;
+  backgroundBottomDark?: string | null;
 }
 
 export interface Message {
@@ -14,7 +20,7 @@ export interface Message {
   roomId: string;
   author: string;
   content: string;
-  type?: 'chat' | 'soundpack' | 'image' | 'system';
+  type?: "chat" | "soundpack" | "image" | "system";
   timestamp: number;
 }
 
@@ -53,9 +59,15 @@ export interface OnlineUser extends UserProfile {
 
 export interface RoomState {
   roomId: string;
+  name?: string;
   ownerName: string | null;
   isOwner: boolean;
   members: RoomMember[];
   maxMembers: number | null;
   hasPassword: boolean;
+  avatarUrl?: string | null;
+  backgroundTop?: string | null;
+  backgroundBottom?: string | null;
+  backgroundTopDark?: string | null;
+  backgroundBottomDark?: string | null;
 }

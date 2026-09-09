@@ -13,8 +13,10 @@ const sizes = {
 };
 
 export function Avatar({ username, avatarUrl, size = 'md', className = '' }: Props) {
+  const hasAvatar = Boolean(avatarUrl);
+  const fallbackClass = hasAvatar ? 'bg-white/10 text-white' : 'avatar-fallback';
   return (
-    <div className={`${sizes[size]} overflow-hidden rounded-full border border-white/15 bg-white/10 text-white flex flex-shrink-0 items-center justify-center font-semibold ${className}`}>
+    <div data-avatar-fallback={hasAvatar ? undefined : ''} className={`${sizes[size]} overflow-hidden rounded-full border border-white/15 ${fallbackClass} flex flex-shrink-0 items-center justify-center font-semibold ${className}`}>
       {avatarUrl ? (
         <img src={avatarUrl} alt={`${username} 的头像`} className="h-full w-full object-cover" />
       ) : (

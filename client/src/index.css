@@ -65,6 +65,36 @@ html, body, #root {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #3f3f46;
+  background: transparent;
   border-radius: 3px;
+}
+* {
+  scrollbar-color: transparent transparent;
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
+  transition: scrollbar-color 220ms ease;
+}
+.scrollbar-active {
+  scrollbar-width: thin !important;
+  scrollbar-color: #3f3f46 transparent;
+}
+.scrollbar-active::-webkit-scrollbar-thumb {
+  background: #3f3f46;
+}
+::-webkit-scrollbar-thumb {
+  transition: background-color 220ms ease;
+}
+:root[data-theme="dark"] .scrollbar-active {
+  scrollbar-color: #56677d transparent;
+}
+:root[data-theme="dark"] .scrollbar-active::-webkit-scrollbar-thumb {
+  background: #56677d;
+}
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: scrollbar-color 0s;
+  }
+  ::-webkit-scrollbar-thumb {
+    transition: none;
+  }
 }

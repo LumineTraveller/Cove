@@ -1,10 +1,28 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AlertCircle, Check, CheckCircle2, Download, ExternalLink, FileText, LoaderCircle, RefreshCw, RotateCcw, X } from 'lucide-react';
+import {
+  AlertCircle,
+  Check,
+  CheckCircle2,
+  Download,
+  ExternalLink,
+  FileText,
+  LoaderCircle,
+  RefreshCw,
+  RotateCcw,
+  X,
+} from 'lucide-react';
 import packageInfo from '../../package.json';
 import {
-  UPDATE_CENTER_OPEN_EVENT, UPDATE_STEPS, formatTransferPercent,
-  isUpdateBusy, updateStepIndex, updateWaitWarning, type UpdateState,
+  UPDATE_CENTER_OPEN_EVENT,
+  UPDATE_STEPS,
+  formatTransferPercent,
+  isUpdateBusy,
+  openUpdateDetails,
+  updateStepIndex,
+  updateWaitWarning,
+  type UpdateState,
 } from '../update';
+import '../ui-v2.css';
 
 const initialState: UpdateState = { status: 'idle' };
 
@@ -13,8 +31,8 @@ function statusTitle(state: UpdateState): string {
     case 'checking': return '正在检查更新';
     case 'available': return '正在准备下载';
     case 'downloading': return '正在传输安装包';
-    case 'finalizing': return '传输完成，正在校验与准备';
-    case 'downloaded': return '更新已就绪，可以安装';
+    case 'finalizing': return '传输完成，正在校验';
+    case 'downloaded': return '更新已就绪';
     case 'installing': return '正在启动安装程序';
     case 'not-available': return 'Cove 已是最新版本';
     case 'error': return '更新未完成';
@@ -23,18 +41,186 @@ function statusTitle(state: UpdateState): string {
   }
 }
 
+function compactStatusMessage(state: UpdateState): string {
+  switch (state.status) {
+    case 'checking': return '正在检查可用的新版本。';
+    case 'available': return state.version ? `发现 v${state.version}，准备下载。` : '发现新版本，准备下载。';
+    case 'downloading': return state.percent == null ? '正在下载更新包。' : `正在下载更新包 · ${formatTransferPercent(state.percent)}`;
+    case 'finalizing': return '下载完成，正在校验并准备安装。';
+    case 'downloaded': return '更新包已经准备好，可以重启更新。';
+    case 'installing': return '安装程序启动后，Cove 将退出并完成更新。';
+    case 'not-available': return '当前已经是最新版本。';
+    case 'disabled': return state.message ?? '当前环境没有提供应用内更新服务。';
+    case 'error': return state.message ?? '更新失败，可以重试或查看详细信息。';
+    default: return '检查是否有可用的新版本。';
+  }
+}
+
 function bytes(value?: number): string {
   if (value == null || !Number.isFinite(value)) return '未知';
-  return value >= 1024 * 1024 ? `${(value / 1024 / 1024).toFixed(1)} MB`
+  return value >= 1024 * 1024
+    ? `${(value / 1024 / 1024).toFixed(1)} MB`
     : `${Math.max(0, value / 1024).toFixed(1)} KB`;
 }
 
 function duration(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000));
-  return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
+  return seconds < 60
+    ? `${seconds} 秒`
+    : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
 }
 
-export function UpdateCenter() {
+function statusTone(state: UpdateState): 'error' | 'success' | 'progress' | 'neutral' {
+  if (state.status === 'error' || state.status === 'disabled') return 'error';
+  if (state.status === 'downloaded' || state.status === 'not-available') return 'success';
+  if (isUpdateBusy(state.status)) return 'progress';
+  return 'neutral';
+}
+
+function StatusIcon({ state }: { state: UpdateState }) {
+  const tone = statusTone(state);
+  return (
+    <span className={`update-status-icon tone-${tone}`} aria-hidden="true">
+      {state.status === 'error' || state.status === 'disabled' ? <AlertCircle size={19} />
+        : state.status === 'downloaded' || state.status === 'not-available' ? <CheckCircle2 size={19} />
+        : state.status === 'downloading' ? <Download size={19} />
+        : isUpdateBusy(state.status) ? <LoaderCircle size={19} className="update-status-spin" />
+        : <RefreshCw size={19} />}
+    </span>
+  );
+}
+
+function UpdateProgress({
+  state,
+  clock,
+  compact = false,
+}: {
+  state: UpdateState;
+  clock: number;
+  compact?: boolean;
+}) {
+  const stepIndex = updateStepIndex(state);
+  const warning = updateWaitWarning(state, clock);
+  const stageMs = clock - (state.stageStartedAt ?? clock);
+  const sinceActivity = clock - (state.lastActivityAt ?? clock);
+  const recentSpeed = sinceActivity < 5000 ? state.bytesPerSecond : undefined;
+  const eta = state.status === 'downloading' && recentSpeed && recentSpeed > 0 &&
+    state.total != null && state.transferred != null
+    ? Math.ceil(Math.max(0, state.total - state.transferred) / recentSpeed) * 1000
+    : null;
+  const transferring = state.status === 'downloading';
+  const showTransfer = state.percent != null && stepIndex >= 2;
+  const indeterminate = state.status === 'checking' || state.status === 'available' ||
+    state.status === 'finalizing' || state.status === 'installing';
+  const stepLabel = stepIndex >= 0 ? UPDATE_STEPS[stepIndex].label : '检查更新';
+
+  if (compact) {
+    if (!showTransfer && !indeterminate) return null;
+    return (
+      <div className="update-status-progress">
+        <div
+          className="update-progress-track"
+          role="progressbar"
+          aria-label={transferring ? '安装包传输进度' : stepLabel}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={indeterminate ? undefined : state.percent}
+        >
+          <span
+            className={indeterminate ? 'indeterminate' : ''}
+            style={indeterminate ? undefined : { width: `${state.percent ?? 0}%` }}
+          />
+        </div>
+        {showTransfer && (
+          <div className="update-progress-caption">
+            <span>{formatTransferPercent(state.percent)} · {bytes(state.transferred)} / {bytes(state.total)}</span>
+            {transferring && <span>{eta != null ? `剩余约 ${duration(eta)}` : '计算剩余时间…'}</span>}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="update-details-progress">
+      {stepIndex >= 0 && (
+        <ol className="update-step-list" aria-label="更新阶段">
+          {UPDATE_STEPS.map((step, index) => {
+            const current = index === stepIndex;
+            const failed = current && state.status === 'error';
+            const complete = index < stepIndex || (current && state.status === 'downloaded');
+            return (
+              <li
+                key={step.status}
+                aria-current={current ? 'step' : undefined}
+                className={failed ? 'failed' : complete ? 'complete' : current ? 'current' : ''}
+              >
+                <span>
+                  {failed ? <AlertCircle size={14} />
+                    : complete ? <Check size={14} />
+                    : current && isUpdateBusy(state.status) ? <LoaderCircle size={14} className="update-status-spin" />
+                    : index + 1}
+                </span>
+                {step.label}
+              </li>
+            );
+          })}
+        </ol>
+      )}
+
+      {(showTransfer || indeterminate) && (
+        <div className="update-detail-transfer">
+          <div
+            className="update-progress-track"
+            role="progressbar"
+            aria-label={transferring ? '安装包传输进度' : stepLabel}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={indeterminate ? undefined : state.percent}
+          >
+            <span
+              className={indeterminate ? 'indeterminate' : ''}
+              style={indeterminate ? undefined : { width: `${state.percent ?? 0}%` }}
+            />
+          </div>
+          {showTransfer && (
+            <div className="update-progress-caption">
+              <span>已传输 {bytes(state.transferred)} / {bytes(state.total)}</span>
+              <span>{formatTransferPercent(state.percent)}（传输）</span>
+            </div>
+          )}
+          {transferring && (
+            <div className="update-progress-caption muted">
+              <span>{recentSpeed != null ? `${bytes(recentSpeed)}/s` : '速度：等待新数据'}</span>
+              <span>{eta != null ? `预计剩余 ${duration(eta)}` : '预计剩余：计算中'}</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {isUpdateBusy(state.status) && (
+        <p className="update-stage-time">当前阶段已用时 {duration(stageMs)}</p>
+      )}
+      {warning && <p className="update-warning" role="status">{warning}</p>}
+      {state.status === 'error' && <p className="update-error-stage">失败阶段：{stepLabel}</p>}
+      {state.errorDetail && (
+        <details className="update-error-detail">
+          <summary>错误详情{state.errorCode ? ` · ${state.errorCode}` : ''}</summary>
+          <pre>{state.errorDetail}</pre>
+        </details>
+      )}
+      {stepIndex >= 0 && (
+        <p className="update-details-note">
+          {state.status === 'installing'
+            ? '安装过程由系统安装程序接管。'
+            : '关闭或切换页面不会取消更新；仅在开始安装时退出 Cove。传输 100% 不代表安装包已经就绪。'}
+        </p>
+      )}
+    </div>
+  );
+}
+
+export function UpdateCenter({ embedded = false }: { embedded?: boolean }) {
   const [state, setState] = useState<UpdateState>(initialState);
   const [open, setOpen] = useState(false);
   const [clock, setClock] = useState(Date.now);
@@ -47,48 +233,59 @@ export function UpdateCenter() {
     manualCheckRef.current = true;
     dismissedRef.current = false;
     setActionError('');
-    setOpen(true);
+    if (!embedded) setOpen(true);
     const updater = window.coveUpdater;
     if (!updater) {
       setState({ status: 'disabled', message: '当前环境没有提供应用内更新服务。' });
       return;
     }
-    // Keep an active transfer or ready installer visible while reopening the panel.
     try {
       setState(await updater.checkNow());
     } catch (cause) {
-      setState({ status: 'error', failedStage: 'checking', message: cause instanceof Error ? cause.message : '检查更新失败，请稍后重试。' });
+      setState({
+        status: 'error',
+        failedStage: 'checking',
+        message: cause instanceof Error ? cause.message : '检查更新失败，请稍后重试。',
+      });
     }
-  }, []);
+  }, [embedded]);
 
   useEffect(() => {
     const updater = window.coveUpdater;
-    if (updater) void updater.getState().then(setState).catch(() => undefined);
-    const unsubscribe = updater?.onState(next => {
+    let active = true;
+    if (updater) {
+      void updater.getState().then((next) => {
+        if (!active) return;
+        setState(next);
+        if (!embedded && ['available', 'downloading', 'finalizing', 'downloaded', 'installing', 'error'].includes(next.status)) setOpen(true);
+      }).catch(() => undefined);
+    }
+    const unsubscribe = updater?.onState((next) => {
       setState(next);
       const important = next.status !== previousStatusRef.current &&
         (next.status === 'downloaded' || next.status === 'error');
       previousStatusRef.current = next.status;
-      if (important || (!dismissedRef.current &&
-          (next.status === 'available' || next.status === 'downloading' || next.status === 'finalizing')) ||
-          (manualCheckRef.current && ['not-available', 'error', 'disabled'].includes(next.status))) {
+      if (!embedded && (important || (!dismissedRef.current &&
+          ['available', 'downloading', 'finalizing', 'installing'].includes(next.status)) ||
+          (manualCheckRef.current && ['not-available', 'error', 'disabled'].includes(next.status)))) {
         setOpen(true);
       }
     });
     const handleOpen = () => { void checkNow(); };
     window.addEventListener(UPDATE_CENTER_OPEN_EVENT, handleOpen);
     return () => {
+      active = false;
       unsubscribe?.();
       window.removeEventListener(UPDATE_CENTER_OPEN_EVENT, handleOpen);
     };
-  }, [checkNow]);
+  }, [checkNow, embedded]);
 
   useEffect(() => {
-    if (!open || !isUpdateBusy(state.status)) return;
+    if ((!embedded && !open) || !isUpdateBusy(state.status)) return;
     setClock(Date.now());
-    const timer = setInterval(() => setClock(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, [open, state.status]);
+    const timer = window.setInterval(() => setClock(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [embedded, open, state.status]);
 
   const installNow = async () => {
     setActionError('');
@@ -116,7 +313,8 @@ export function UpdateCenter() {
     setActionError('');
     const base = `https://${source}.com/LumineTraveller/Cove/releases`;
     const url = state.version && /^\d+\.\d+\.\d+$/.test(state.version)
-      ? `${base}/${source === 'github' ? 'tag/' : ''}v${state.version}` : base;
+      ? `${base}/${source === 'github' ? 'tag/' : ''}v${state.version}`
+      : base;
     try {
       if (window.coveShell) {
         if (!await window.coveShell.openExternal(url)) throw new Error();
@@ -126,100 +324,111 @@ export function UpdateCenter() {
     }
   };
 
-  if (!open) return null;
+  const closeStatus = () => {
+    dismissedRef.current = true;
+    manualCheckRef.current = false;
+    setOpen(false);
+  };
+  const showDetails = () => {
+    closeStatus();
+    openUpdateDetails();
+  };
+  const retryLabel = state.status === 'not-available' ? '重新检查' : '检查更新';
+  const currentVersion = `Cove v${packageInfo.version}`;
+  const targetVersion = state.version ? ` → v${state.version}` : '';
   const busy = isUpdateBusy(state.status);
-  const stepIndex = updateStepIndex(state);
-  const warning = updateWaitWarning(state, clock);
-  const stageMs = clock - (state.stageStartedAt ?? clock);
-  const sinceActivity = clock - (state.lastActivityAt ?? clock);
-  const recentSpeed = sinceActivity < 5000 ? state.bytesPerSecond : undefined;
-  const eta = state.status === 'downloading' && recentSpeed && recentSpeed > 0 &&
-    state.total != null && state.transferred != null
-    ? Math.ceil(Math.max(0, state.total - state.transferred) / recentSpeed) * 1000 : null;
-  const transferring = state.status === 'downloading';
-  const showTransfer = state.percent != null && stepIndex >= 2;
-  const indeterminate = state.status === 'checking' || state.status === 'available' ||
-    state.status === 'finalizing' || state.status === 'installing';
-  const stepLabel = stepIndex >= 0 ? UPDATE_STEPS[stepIndex].label : '检查更新';
+
+  if (!embedded && !open) return null;
+
+  if (embedded) {
+    return (
+      <section className="update-center-details" aria-label="Cove 更新详情">
+        <div className="update-details-summary">
+          <StatusIcon state={state} />
+          <div className="update-details-summary-copy" aria-live="polite">
+            <strong>{statusTitle(state)}</strong>
+            <small>{currentVersion}{targetVersion}{state.sourceLabel ? ` · ${state.sourceLabel}` : ''}</small>
+            <p>{state.message ?? compactStatusMessage(state)}</p>
+          </div>
+          <button
+            type="button"
+            className="update-check-button"
+            onClick={() => { void checkNow(); }}
+            disabled={busy}
+          >
+            {busy ? <LoaderCircle size={16} className="update-status-spin" /> : <RefreshCw size={16} />}
+            {busy ? '检查中…' : '检查更新'}
+          </button>
+        </div>
+
+        <UpdateProgress state={state} clock={clock} />
+
+        <div className="update-details-actions">
+          {state.status === 'downloaded' && (
+            <button type="button" className="update-primary-action" onClick={() => { void installNow(); }}>
+              <RotateCcw size={16} />重启并更新
+            </button>
+          )}
+          {state.status === 'installing' && (
+            <button type="button" className="update-primary-action" disabled>
+              <LoaderCircle size={16} className="update-status-spin" />正在启动安装…
+            </button>
+          )}
+          {['error', 'not-available', 'idle', 'disabled'].includes(state.status) && (
+            <button type="button" className="update-secondary-action" onClick={() => { void checkNow(); }}>
+              <RefreshCw size={16} />{retryLabel}
+            </button>
+          )}
+        </div>
+        {actionError && <p className="update-action-error" role="alert">{actionError}</p>}
+
+        <details className="update-manual-tools">
+          <summary>排查与手动下载</summary>
+          <div>
+            <button type="button" onClick={() => { void openLog(); }}><FileText size={14} />打开更新日志</button>
+            <button type="button" onClick={() => { void openRelease('github'); }}><ExternalLink size={14} />GitHub 发布页</button>
+            <button type="button" onClick={() => { void openRelease('gitee'); }}><ExternalLink size={14} />Gitee 发布页</button>
+          </div>
+          <p>分享错误详情或 updater.log 可帮助定位停在何处。手动下载请选择 Windows 客户端 .exe 安装包；这不会取消当前后台更新。</p>
+        </details>
+      </section>
+    );
+  }
 
   return (
-    <aside className="fixed bottom-5 right-5 z-[170] max-h-[calc(100vh-2.5rem)] w-[26rem] max-w-[calc(100vw-2.5rem)] overflow-y-auto rounded-2xl border border-white/15 bg-zinc-900/95 shadow-2xl backdrop-blur-2xl" aria-label="Cove 更新">
-      <div className="flex items-start gap-3 p-4">
-        <div className={`mt-0.5 flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl ${state.status === 'error' ? 'bg-red-500/15 text-red-300' : state.status === 'downloaded' || state.status === 'not-available' ? 'bg-emerald-500/15 text-emerald-300' : 'bg-cyan-300/10 text-cyan-200'}`}>
-          {state.status === 'error' || state.status === 'disabled' ? <AlertCircle size={20} />
-            : state.status === 'downloaded' || state.status === 'not-available' ? <CheckCircle2 size={20} />
-            : transferring ? <Download size={20} /> : <LoaderCircle size={20} className={busy ? 'animate-spin' : ''} />}
+    <aside className="update-status-popover" aria-label="Cove 更新状态">
+      <div className="update-status-heading">
+        <StatusIcon state={state} />
+        <div className="update-status-heading-copy" aria-live="polite">
+          <strong>{statusTitle(state)}</strong>
+          <small>{currentVersion}{targetVersion}{state.sourceLabel ? ` · ${state.sourceLabel}` : ''}</small>
         </div>
-        <div className="min-w-0 flex-1" aria-live="polite">
-          <p className="font-semibold text-white">{statusTitle(state)}</p>
-          <p className="mt-1 text-xs text-white/45">Cove v{packageInfo.version}{state.version ? ` → v${state.version}` : ''}{state.sourceLabel ? ` · ${state.sourceLabel}` : ''}</p>
-          <p className="mt-2 text-sm leading-relaxed text-white/60">{state.message ?? '检查是否有可用的新版本。'}</p>
-        </div>
-        <button onClick={() => { dismissedRef.current = true; manualCheckRef.current = false; setOpen(false); }} className="rounded-lg p-1.5 text-white/40 transition hover:bg-white/10 hover:text-white" aria-label="收起更新提示"><X size={17} /></button>
+        <button type="button" className="update-status-close" onClick={closeStatus} aria-label="关闭更新提示">
+          <X size={16} />
+        </button>
       </div>
-
-      {stepIndex >= 0 && (
-        <div className="px-4 pb-4">
-          <ol className="grid grid-cols-2 gap-x-3 gap-y-2.5 rounded-xl bg-black/20 p-3 text-xs" aria-label="更新阶段">
-            {UPDATE_STEPS.map((step, index) => {
-              const current = index === stepIndex;
-              const failed = current && state.status === 'error';
-              const complete = index < stepIndex || (current && state.status === 'downloaded');
-              return (
-                <li key={step.status} aria-current={current ? 'step' : undefined} className={`flex items-center gap-2 ${failed ? 'text-red-300' : complete ? 'text-emerald-300' : current ? 'text-cyan-200' : 'text-white/35'}`}>
-                  <span className="flex h-4 w-4 shrink-0 items-center justify-center">
-                    {failed ? <AlertCircle size={14} /> : complete ? <Check size={14} /> : current && busy ? <LoaderCircle size={14} className="animate-spin" /> : index + 1}
-                  </span>
-                  {step.label}
-                </li>
-              );
-            })}
-          </ol>
-
-          {(showTransfer || indeterminate) && (
-            <div className="mt-3">
-              <div className="h-1.5 overflow-hidden rounded-full bg-white/10" role="progressbar" aria-label={transferring ? '安装包传输进度' : stepLabel} aria-valuemin={0} aria-valuemax={100} aria-valuenow={indeterminate ? undefined : state.percent}>
-                <div className={`h-full rounded-full bg-cyan-300 ${indeterminate ? 'w-full animate-pulse opacity-50' : 'transition-[width] duration-300'}`} style={indeterminate ? undefined : { width: `${state.percent ?? 0}%` }} />
-              </div>
-              {showTransfer && <div className="mt-2 flex justify-between gap-2 text-xs tabular-nums text-white/65">
-                <span>已传输 {bytes(state.transferred)} / {bytes(state.total)}</span>
-                <span>{formatTransferPercent(state.percent)}（传输）</span>
-              </div>}
-              {transferring && <div className="mt-1.5 flex justify-between text-xs tabular-nums text-white/45">
-                <span>{recentSpeed != null ? `${bytes(recentSpeed)}/s` : '速度：等待新数据'}</span>
-                <span>{eta != null ? `预计剩余 ${duration(eta)}` : '预计剩余：计算中'}</span>
-              </div>}
-            </div>
-          )}
-
-          {busy && <p className="mt-2 text-xs tabular-nums text-white/45">当前阶段已用时 {duration(stageMs)}</p>}
-          {warning && <p className="mt-3 rounded-lg border border-amber-300/20 bg-amber-300/5 p-2.5 text-xs leading-relaxed text-amber-100/85" role="status">{warning}</p>}
-          {state.status === 'error' && <p className="mt-3 text-xs text-red-300">失败阶段：{stepLabel}</p>}
-          {state.errorDetail && <details className="mt-2 text-xs text-white/60">
-            <summary className="cursor-pointer hover:text-white">错误详情{state.errorCode ? ` · ${state.errorCode}` : ''}</summary>
-            <pre className="mt-2 whitespace-pre-wrap break-all rounded-lg bg-black/25 p-2">{state.errorDetail}</pre>
-          </details>}
-          <p className="mt-3 text-xs leading-relaxed text-white/35">
-            {state.status === 'installing' ? '安装过程由系统安装程序接管。'
-              : '收起不会取消更新。仅在开始安装时退出 Cove；传输 100% 不代表安装包已就绪。'}
-          </p>
-        </div>
-      )}
-
-      <div className="space-y-2 border-t border-white/10 p-3">
-        {state.status === 'downloaded' && <button onClick={() => { void installNow(); }} className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-white py-2.5 text-sm font-semibold text-zinc-900 transition hover:bg-cyan-100"><RotateCcw size={16} />立即重启并安装</button>}
-        {state.status === 'installing' && <button disabled className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-white/10 py-2.5 text-sm text-white/60"><LoaderCircle size={16} className="animate-spin" />正在启动安装…</button>}
-        {['error', 'not-available', 'idle'].includes(state.status) && <button onClick={() => { void checkNow(); }} className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-white/10 py-2.5 text-sm font-medium text-white/75 transition hover:bg-white/15 hover:text-white"><RefreshCw size={16} />重试检查与下载</button>}
-        <details className="rounded-lg bg-black/15 px-2.5 py-2 text-xs text-white/55">
-          <summary className="cursor-pointer hover:text-white">排查与手动下载</summary>
-          <div className="mt-2 flex flex-wrap gap-2">
-            <button onClick={() => { void openLog(); }} className="inline-flex items-center gap-1 rounded px-2 py-1.5 hover:bg-white/10 hover:text-white"><FileText size={13} />打开更新日志</button>
-            <button onClick={() => { void openRelease('github'); }} className="inline-flex items-center gap-1 rounded px-2 py-1.5 hover:bg-white/10 hover:text-white"><ExternalLink size={13} />GitHub 发布页</button>
-            <button onClick={() => { void openRelease('gitee'); }} className="inline-flex items-center gap-1 rounded px-2 py-1.5 hover:bg-white/10 hover:text-white"><ExternalLink size={13} />Gitee 发布页</button>
-          </div>
-          <p className="mt-2 leading-relaxed">分享错误详情或 updater.log 可帮助定位停在何处。手动下载请选择 Windows 客户端 .exe 安装包；这不会取消当前后台更新。</p>
-        </details>
-        {actionError && <p className="px-1 text-xs text-red-300" role="alert">{actionError}</p>}
+      <p className="update-status-message">{compactStatusMessage(state)}</p>
+      <UpdateProgress state={state} clock={clock} compact />
+      {actionError && <p className="update-action-error" role="alert">{actionError}</p>}
+      <div className="update-status-actions">
+        {state.status === 'downloaded' && (
+          <button type="button" className="update-primary-action" onClick={() => { void installNow(); }}>
+            <RotateCcw size={15} />重启并更新
+          </button>
+        )}
+        {state.status === 'installing' && (
+          <button type="button" className="update-primary-action" disabled>
+            <LoaderCircle size={15} className="update-status-spin" />正在安装…
+          </button>
+        )}
+        {['error', 'not-available', 'idle', 'disabled'].includes(state.status) && (
+          <button type="button" className="update-secondary-action" onClick={() => { void checkNow(); }}>
+            <RefreshCw size={15} />{retryLabel}
+          </button>
+        )}
+        <button type="button" className="update-details-action" onClick={showDetails}>
+          <FileText size={15} />详细信息
+        </button>
       </div>
     </aside>
   );

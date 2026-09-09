@@ -5,6 +5,7 @@ import {
   createRemoteAudioOutput,
   isMemberVoiceAudio,
   createMicrophoneConstraints,
+  normalizeMicrophoneDeviceId,
   DEFAULT_AUDIO_DEVICE_ID,
   resolvedSinkId,
   toAudioDeviceOptions,
@@ -15,12 +16,18 @@ test('default microphone constraints follow the Windows system device', () => {
   assert.equal(constraints.deviceId, undefined);
   assert.equal(constraints.echoCancellation, true);
   assert.equal(constraints.noiseSuppression, true);
+  assert.equal(constraints.autoGainControl, true);
   assert.equal(constraints.channelCount, 1);
 });
 
 test('a selected microphone uses an exact device id', () => {
   const constraints = createMicrophoneConstraints('microphone-123');
   assert.deepEqual(constraints.deviceId, { exact: 'microphone-123' });
+});
+
+test('the Windows communications alias follows the system default microphone', () => {
+  assert.equal(normalizeMicrophoneDeviceId('communications'), DEFAULT_AUDIO_DEVICE_ID);
+  assert.equal(createMicrophoneConstraints('communications').deviceId, undefined);
 });
 
 test('device options filter the Chromium default alias and provide private labels', () => {
