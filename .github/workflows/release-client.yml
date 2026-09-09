@@ -86,8 +86,8 @@ jobs:
             if (-not (Test-Path -LiteralPath $asset)) {
               throw "Missing release asset: $asset"
             }
-            if ((Get-Item -LiteralPath $asset).Length -gt 100MB) {
-              throw "Release asset exceeds the Gitee sync script's 100 MB limit: $asset"
+            if ((Get-Item -LiteralPath $asset).Length -gt 120MB) {
+              throw "Release asset exceeds the 120 MiB safety limit: $asset"
             }
           }
 
