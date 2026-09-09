@@ -51,21 +51,10 @@ body {
   border-bottom: 0;
   color: var(--ink);
   backdrop-filter: none;
-  -webkit-app-region: no-drag;
-  /* Keep the titlebar itself targetable so Chromium's frameless-window hit
-     testing cannot discard clicks before they reach the controls. The drag
-     strip below remains the only draggable area. */
-  pointer-events: auto;
-  user-select: none;
-}
-.cove-window-drag-region {
-  position: absolute;
-  inset: 0 160px auto 0;
-  height: 18px;
-  display: block;
-  pointer-events: auto;
   -webkit-app-region: drag;
-  cursor: move;
+  pointer-events: auto;
+  cursor: default;
+  user-select: none;
 }
 .cove-window-title {
   font-size: 12px;
@@ -2982,14 +2971,6 @@ select:focus-visible {
   position: relative;
   -webkit-app-region: no-drag;
 }
-/* Native drag regions must follow actual headers, never overlay controls. */
-.workspace-header,
-.lobby-header,
-.auth-brand,
-.nav-brand,
-.chat-panel > header {
-  -webkit-app-region: drag;
-}
 .workspace-header button,
 .lobby-header button,
 .nav-brand button,
@@ -3238,9 +3219,6 @@ select:focus-visible {
 
 /* Final interaction/theme overrides (kept last so the earlier prototype
    rules cannot undo the production layout). */
-.cove-window-drag-region {
-  inset: 0 480px auto 0;
-}
 body .cove-window-controls,
 body .cove-window-controls button {
   pointer-events: auto !important;
@@ -3325,13 +3303,6 @@ body .cove-window-controls {
   color: #ff9a9a;
 }
 
-/* Keep the drag strip away from the three window controls. Explicit stacking
-   and no-drag on the controls prevents the transparent strip from swallowing
-   their clicks. */
-.cove-window-drag-region {
-  inset: 0 480px auto 0;
-  z-index: 0;
-}
 .cove-window-controls {
   z-index: 3;
   pointer-events: auto;
@@ -7229,12 +7200,14 @@ body .cove-window-controls button {
   background: #351d24;
 }
 
-/* Frameless-window controls must remain a real hit target.  The titlebar is
-   above the app shell, while the drag strip is the only draggable child, so
-   clicks cannot be swallowed by a transparent app-region layer. */
+/* The transparent titlebar is the single native drag surface.  Controls are
+   carved out below with no-drag, while Windows keeps the invisible outer
+   resize frame provided by BrowserWindow. */
 .cove-window-titlebar {
   pointer-events: auto;
   isolation: isolate;
+  -webkit-app-region: drag !important;
+  cursor: default;
 }
 body .cove-window-controls {
   position: fixed;
@@ -7250,27 +7223,6 @@ body .cove-window-controls button {
   pointer-events: auto !important;
   -webkit-app-region: no-drag !important;
   touch-action: manipulation;
-}
-
-/* Content headers used to be marked as native drag regions.  On Windows a
-   drag region can win the OS-level hit test even when a sibling titlebar is
-   visually above it, which made the controls work on the login view but not
-   after the shell mounted.  Keep dragging on the dedicated titlebar strip
-   and make every routed surface explicitly non-draggable. */
-.auth-page,
-.cove-v2-page,
-.cove-shell,
-.lobby-shell,
-.workspace-header,
-.lobby-header,
-.auth-brand,
-.nav-brand,
-.chat-panel > header {
-  -webkit-app-region: no-drag !important;
-}
-.cove-window-drag-region {
-  -webkit-app-region: drag !important;
-  pointer-events: auto !important;
 }
 
 /* Keep avatar content on the same visual inset as the Cove mark.  Narrow

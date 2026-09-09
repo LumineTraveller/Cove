@@ -87,6 +87,7 @@ function createWindow() {
     height: 800,
     minWidth: 900,
     minHeight: 600,
+    resizable: true,
     backgroundColor: "#09090b",
     frame: false,
     titleBarStyle: "hidden",

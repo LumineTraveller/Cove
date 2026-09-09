@@ -33,7 +33,6 @@ function WindowTitleBar({ showBrand = true }: { showBrand?: boolean }) {
 
   return (
     <div className="cove-window-titlebar" onDoubleClick={toggleMaximize}>
-      <span className="cove-window-drag-region" aria-hidden="true" />
       {showBrand && (
         <span className="cove-window-brand">
           <img src="./assets/cove-icon.png" alt="" aria-hidden="true" />
