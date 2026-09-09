@@ -73,7 +73,7 @@
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
-      "!node_modules/{react,react-dom,react-router,react-router-dom,@remix-run/router,lucide-react,@phosphor-icons/react,mediasoup-client,socket.io-client,@socket.io,engine.io-client,engine.io-parser,socket.io-parser,debug,ms,xmlhttprequest-ssl,ws}/**/*",
+      "!node_modules/{react,react-dom,react-router,react-router-dom,@remix-run/router,lucide-react,@phosphor-icons/react,mediasoup-client,socket.io-client,@socket.io,engine.io-client,engine.io-parser,socket.io-parser,xmlhttprequest-ssl,ws}/**/*",
       "!node_modules/**/*.map",
       "!node_modules/**/*.d.{ts,mts,cts}"
     ],
