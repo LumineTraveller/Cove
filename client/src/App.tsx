@@ -36,7 +36,7 @@ function WindowTitleBar({ showBrand = true }: { showBrand?: boolean }) {
       <span className="cove-window-drag-region" aria-hidden="true" />
       {showBrand && (
         <span className="cove-window-brand">
-          <img src="/assets/cove-icon.png" alt="" aria-hidden="true" />
+          <img src="./assets/cove-icon.png" alt="" aria-hidden="true" />
           <span className="cove-window-title">Cove</span>
         </span>
       )}
@@ -305,7 +305,7 @@ export default function App() {
         <div className="auth-shell">
           <section className="auth-showcase" aria-label="Cove 产品介绍">
             <div className="auth-brand">
-              <img src="/assets/cove-icon.png" alt="Cove" />
+              <img src="./assets/cove-icon.png" alt="Cove" />
               <span>Cove</span>
             </div>
             <div className="auth-showcase-copy">

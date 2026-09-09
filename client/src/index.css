@@ -71,7 +71,6 @@ html, body, #root {
 * {
   scrollbar-color: transparent transparent;
   scrollbar-width: thin;
-  scrollbar-gutter: stable;
   transition: scrollbar-color 220ms ease;
 }
 .scrollbar-active {

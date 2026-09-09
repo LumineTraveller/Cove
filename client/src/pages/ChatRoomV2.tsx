@@ -2143,7 +2143,7 @@ export function GlobalSettingsV2({
               <div className="about-settings-main">
                 <img
                   className="about-app-icon"
-                  src="/assets/cove-icon.png"
+                  src="./assets/cove-icon.png"
                   alt="Cove"
                 />
                 <h3>Cove</h3>
@@ -2238,7 +2238,7 @@ export function NavigationRailV2({
         >
           <img
             className="app-mark-image"
-            src="/assets/cove-icon.png"
+            src="./assets/cove-icon.png"
             alt="Cove"
           />
           {!expanded && (

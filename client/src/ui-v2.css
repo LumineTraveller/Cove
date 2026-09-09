@@ -52,7 +52,10 @@ body {
   color: var(--ink);
   backdrop-filter: none;
   -webkit-app-region: no-drag;
-  pointer-events: none;
+  /* Keep the titlebar itself targetable so Chromium's frameless-window hit
+     testing cannot discard clicks before they reach the controls. The drag
+     strip below remains the only draggable area. */
+  pointer-events: auto;
   user-select: none;
 }
 .cove-window-drag-region {
@@ -300,7 +303,7 @@ select:focus-visible {
   display: grid;
   place-items: center;
   border-radius: 14px;
-  background: #2f6fd0 url("/assets/cove-icon.png") center / cover no-repeat;
+  background: #2f6fd0 url("../assets/cove-icon.png") center / cover no-repeat;
   color: transparent;
   font-size: 0;
   overflow: hidden;
@@ -2734,8 +2737,9 @@ select:focus-visible {
   padding-bottom: 6px;
 }
 .app-mark-image {
-  width: 42px;
-  height: 42px;
+  width: 46px;
+  height: 46px;
+  aspect-ratio: 1;
   border-radius: 14px;
   object-fit: cover;
   grid-area: 1 / 1;
@@ -7223,6 +7227,69 @@ body .cove-window-controls button {
 }
 :root[data-theme="dark"] .room-delete-confirm-icon {
   background: #351d24;
+}
+
+/* Frameless-window controls must remain a real hit target.  The titlebar is
+   above the app shell, while the drag strip is the only draggable child, so
+   clicks cannot be swallowed by a transparent app-region layer. */
+.cove-window-titlebar {
+  pointer-events: auto;
+  isolation: isolate;
+}
+body .cove-window-controls {
+  position: fixed;
+  z-index: 10000;
+  top: 6px;
+  right: 6px;
+  pointer-events: auto !important;
+  -webkit-app-region: no-drag !important;
+}
+body .cove-window-controls button {
+  position: relative;
+  z-index: 1;
+  pointer-events: auto !important;
+  -webkit-app-region: no-drag !important;
+  touch-action: manipulation;
+}
+
+/* Keep avatar content on the same visual inset as the Cove mark.  Narrow
+   rails are already centered, so the extra leading space applies only while
+   a rail/card has room for its labels. */
+.navigation-rail.expanded .room-switch {
+  padding-left: 12px;
+}
+.lobby-navigation-rail.expanded .room-switch {
+  padding-left: 24px;
+}
+.mode-idle .member-row .member-identity,
+.mode-available .member-row .member-identity {
+  padding-left: 8px;
+}
+.mode-idle .member-row .shared-badges,
+.mode-available .member-row .shared-badges {
+  left: 8px;
+}
+
+/* Never reserve a document-wide scrollbar gutter: the shell owns all of its
+   scrolling regions, and reserving one on body creates the white strip seen
+   on the right edge after opening a room. */
+body:has(.cove-v2-page),
+html:has(.cove-v2-page) {
+  overflow: hidden;
+}
+.room-nav-list,
+.member-list-view,
+.message-list,
+.settings-scroll,
+.global-settings > aside,
+.global-settings > main > .settings-page,
+.screen-settings,
+.auth-history-list,
+.soundpack-management-list,
+.update-status-popover,
+.audio-popover-layer,
+.audio-share-list {
+  scrollbar-gutter: stable;
 }
 
 /* Application audio is a full decision surface, not a dock popover.  Keep
