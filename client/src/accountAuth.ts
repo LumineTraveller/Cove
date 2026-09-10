@@ -1,5 +1,5 @@
 import type { UserProfile } from './types';
-import { readProfile } from './profile';
+import { profileForStorage, readProfile } from './profile';
 
 const SESSION_KEY = 'cove_account_session';
 const HISTORY_KEY = 'cove_remembered_logins';
@@ -31,7 +31,13 @@ function legacySession(): AccountSession | null {
     const value = JSON.parse(localStorage.getItem(SESSION_KEY) ?? 'null');
     if (typeof value?.token !== 'string' || !value.token || typeof value.accountId !== 'string' || typeof value.email !== 'string' || typeof value.serverUrl !== 'string') return null;
     const serverUrl = normalizeLoginServer(value.serverUrl);
-    return serverUrl ? { ...value, serverUrl, profile: value.profile ?? readProfile() } : null;
+    const profile = value.profile && typeof value.profile.username === 'string'
+      ? profileForStorage({
+        username: value.profile.username,
+        avatarUrl: typeof value.profile.avatarUrl === 'string' ? value.profile.avatarUrl : null,
+      })
+      : readProfile();
+    return serverUrl ? { ...value, serverUrl, profile } : null;
   } catch { return null; }
 }
 
@@ -39,12 +45,21 @@ export function readRememberedLogins(): RememberedLogin[] {
   let entries: RememberedLogin[] = [];
   try {
     const parsed = JSON.parse(localStorage.getItem(HISTORY_KEY) ?? '[]');
-    if (Array.isArray(parsed)) entries = parsed.filter(value => typeof value?.serverUrl === 'string' && normalizeLoginServer(value.serverUrl) === value.serverUrl && typeof value.email === 'string' && typeof value.accountId === 'string');
+    if (Array.isArray(parsed)) entries = parsed
+      .filter(value => typeof value?.serverUrl === 'string' && normalizeLoginServer(value.serverUrl) === value.serverUrl && typeof value.email === 'string' && typeof value.accountId === 'string')
+      .map(value => value.profile && typeof value.profile.username === 'string'
+        ? { ...value, profile: profileForStorage({ username: value.profile.username, avatarUrl: typeof value.profile.avatarUrl === 'string' ? value.profile.avatarUrl : null }) }
+        : value);
   } catch { /* Keep the current login usable if history is damaged. */ }
   const current = legacySession();
   if (current && !entries.some(entry => entry.serverUrl === current.serverUrl)) {
     entries = [current, ...entries].slice(0, 8);
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(entries));
+    try {
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(entries));
+    } catch {
+      // A legacy session may contain a large avatar. It remains usable as the
+      // active session; history persistence is best effort only.
+    }
   }
   return entries;
 }
@@ -54,10 +69,26 @@ export function rememberAccountSession(session: AccountSession) {
   if (!serverUrl) throw new Error('服务器地址无效');
   // Whitelist persisted fields: never store a login form or its password.
   const saved: AccountSession = { serverUrl, token: session.token, accountId: session.accountId, email: session.email,
-    profile: session.profile, allowInvalidServerCertificate: session.allowInvalidServerCertificate === true };
+    profile: session.profile ? profileForStorage(session.profile) : undefined,
+    allowInvalidServerCertificate: session.allowInvalidServerCertificate === true };
   const history = readRememberedLogins().filter(entry => entry.serverUrl !== serverUrl);
-  localStorage.setItem(HISTORY_KEY, JSON.stringify([saved, ...history].slice(0, 8)));
-  localStorage.setItem(SESSION_KEY, JSON.stringify(saved));
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify([saved, ...history].slice(0, 8)));
+    localStorage.setItem(SESSION_KEY, JSON.stringify(saved));
+  } catch {
+    // Keep the active login recoverable even if old history consumed most of
+    // the quota. Large animated avatar data is deliberately not persisted.
+    const compact = saved.profile
+      ? { ...saved, profile: { ...saved.profile, avatarUrl: null } }
+      : saved;
+    try {
+      localStorage.removeItem(HISTORY_KEY);
+      localStorage.setItem(HISTORY_KEY, JSON.stringify([compact]));
+      localStorage.setItem(SESSION_KEY, JSON.stringify(compact));
+    } catch {
+      // The current in-memory session is still valid until the window closes.
+    }
+  }
 }
 
 interface AuthResponse {
@@ -82,14 +113,24 @@ export function clearAccountSession(serverUrl = legacySession()?.serverUrl) {
   const history = readRememberedLogins();
   const normalized = normalizeLoginServer(serverUrl ?? '');
   if (!normalized || legacySession()?.serverUrl === normalized) localStorage.removeItem(SESSION_KEY);
-  localStorage.setItem(HISTORY_KEY, JSON.stringify(history.map(entry => entry.serverUrl === normalized ? { ...entry, token: undefined } : entry)));
+  const safeHistory = history.map(entry => entry.profile ? { ...entry, profile: profileForStorage(entry.profile) } : entry);
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(safeHistory.map(entry => entry.serverUrl === normalized ? { ...entry, token: undefined } : entry)));
+  } catch {
+    // Removing the active token is more important than preserving history.
+  }
 }
 
 export function forgetRememberedLogin(serverUrl: string) {
   const normalized = normalizeLoginServer(serverUrl);
   const history = readRememberedLogins().filter(entry => entry.serverUrl !== normalized);
   if (legacySession()?.serverUrl === normalized) localStorage.removeItem(SESSION_KEY);
-  localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+  const safeHistory = history.map(entry => entry.profile ? { ...entry, profile: profileForStorage(entry.profile) } : entry);
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(safeHistory));
+  } catch {
+    // The current session has already been removed; history is best effort.
+  }
 }
 
 export function disconnectAccountSession() {

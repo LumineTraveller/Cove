@@ -947,39 +947,38 @@ select:focus-visible {
 .strip-member .shared-badges {
   height: 14px;
 }
-.strip-chat-button {
-  height: 44px;
-  padding: 0 14px;
-  border-radius: 13px;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  position: relative;
-  background: color-mix(in srgb, var(--room-fg) 8%, transparent);
-  font-size: 12px;
-  white-space: nowrap;
-  top: 50%;
-  transform: translateY(-50%);
-}
-.strip-chat-button.active {
-  background: var(--blue);
-  color: #fff;
-}
-.strip-chat-button i {
-  position: absolute;
-  right: -4px;
-  top: -5px;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  border: 2px solid white;
-  border-radius: 999px;
+.chat-edge-toggle {
+  width: 26px;
+  height: 64px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
   display: grid;
   place-items: center;
-  background: #2f6fd0;
-  color: white;
-  font-style: normal;
-  font-size: 9px;
+  position: relative;
+  background: transparent;
+  color: var(--room-fg);
+  box-shadow: none;
+  transition: color 140ms ease;
+  -webkit-app-region: no-drag;
+}
+.chat-edge-toggle:hover {
+  background: transparent;
+  color: color-mix(in srgb, var(--room-fg) 78%, transparent);
+  box-shadow: none;
+}
+.chat-edge-toggle.active {
+  background: transparent;
+  color: var(--room-fg);
+  box-shadow: none;
+}
+.chat-edge-toggle > svg {
+  width: 18px;
+  height: 18px;
+  stroke-width: 16;
+}
+.chat-edge-toggle i {
+  display: none;
 }
 .vertical-volume-popover {
   position: absolute;
@@ -1422,14 +1421,11 @@ select:focus-visible {
   opacity: 1;
 }
 .control-ball.voice-idle.expanded .ball-side {
-  flex: 0 0 108px;
-  width: 108px;
-  max-width: 108px;
+  flex: 0 0 116px;
+  width: 116px;
+  max-width: 116px;
+  min-width: 116px;
   justify-content: center;
-}
-.control-ball.voice-idle.expanded .ball-left,
-.control-ball.voice-idle.expanded .ball-right {
-  min-width: 108px;
 }
 .control-ball .ball-side button {
   flex: 0 0 auto;
@@ -1460,6 +1456,20 @@ select:focus-visible {
 }
 .control-ball .ball-side button:active {
   transform: scale(0.97);
+}
+/* Concentric end caps: outer radius 29px = 1px border + 6px inset +
+   22px button radius. Fill the side slot without bleeding into that inset. */
+.control-ball.voice-idle.expanded .ball-side button {
+  flex: 0 0 100%;
+  width: 100%;
+  margin-inline: 0;
+  padding-inline: 13px;
+}
+.control-ball.voice-idle.expanded .ball-left button:first-child {
+  transform-origin: 22px 50%;
+}
+.control-ball.voice-idle.expanded .ball-right button:last-child {
+  transform-origin: calc(100% - 22px) 50%;
 }
 .split-tool {
   display: flex;
@@ -2238,6 +2248,7 @@ select:focus-visible {
   }
   .cove-shell.mode-watching,
   .cove-shell.mode-self {
+    --chat-overlay-width: min(360px, 52vw);
     grid-template-columns: var(--rail-width) minmax(0, 1fr);
   }
   .mode-watching .chat-slot,
@@ -2247,15 +2258,16 @@ select:focus-visible {
     right: 0;
     top: 0;
     bottom: 0;
-    width: min(340px, 42vw);
+    width: var(--chat-overlay-width);
     box-shadow: -18px 0 40px rgba(28, 40, 55, 0.12);
     transform: translateX(0);
     transition: transform 320ms var(--ease-layout);
   }
   .mode-watching .chat-slot .chat-panel,
   .mode-self .chat-slot .chat-panel {
-    background: color-mix(in srgb, var(--room-bottom) 74%, transparent);
-    backdrop-filter: blur(18px);
+    background: transparent;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
   }
   .cove-shell.mode-watching.chat-closed .chat-slot,
   .cove-shell.mode-self.chat-closed .chat-slot {
@@ -2264,15 +2276,6 @@ select:focus-visible {
   .navigation-rail.expanded {
     width: 280px;
     position: relative;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation-duration: 1ms !important;
-    transition-duration: 1ms !important;
   }
 }
 
@@ -2499,11 +2502,6 @@ select:focus-visible {
 .strip-scroll {
   justify-content: center;
   padding-inline: 88px;
-}
-.strip-chat-button {
-  position: absolute;
-  right: 16px;
-  z-index: 2;
 }
 .shared-badges {
   color: var(--purple);
@@ -2978,7 +2976,7 @@ select:focus-visible {
 .chat-font-picker *,
 .chat-font-menu,
 .chat-font-menu *,
-.strip-chat-button-anchor {
+.chat-edge-toggle-anchor {
   -webkit-app-region: no-drag;
 }
 .chat-header-actions-left {
@@ -3082,8 +3080,7 @@ select:focus-visible {
   margin: 3px 0 0;
   font-size: 16px;
 }
-.chat-panel > header h2 i,
-.strip-chat-button i {
+.chat-panel > header h2 i {
   min-width: 18px;
   height: 18px;
   padding: 0 5px;
@@ -3245,18 +3242,6 @@ body .cove-window-controls {
 .mode-available .member-row .volume-control label {
   margin-left: 4px;
 }
-.control-ball.voice-idle.expanded .ball-side,
-.control-ball.voice-idle.expanded .ball-left,
-.control-ball.voice-idle.expanded .ball-right {
-  flex-basis: 116px;
-  width: 116px;
-  max-width: 116px;
-  min-width: 116px;
-}
-.control-ball.voice-idle.expanded .ball-side button {
-  margin-inline: -4px;
-  padding-inline: 13px;
-}
 .message-bubble {
   position: relative;
   overflow: visible;
@@ -3330,21 +3315,6 @@ body .cove-window-controls {
 .mode-idle .member-row .volume-control label,
 .mode-available .member-row .volume-control label {
   margin-left: 4px;
-}
-
-/* In the idle dock the hover hit/background area extends a few pixels beyond
-   the labels, while the centered text/icon stays in the same visual position. */
-.control-ball.voice-idle.expanded .ball-side,
-.control-ball.voice-idle.expanded .ball-left,
-.control-ball.voice-idle.expanded .ball-right {
-  flex-basis: 116px;
-  width: 116px;
-  max-width: 116px;
-  min-width: 116px;
-}
-.control-ball.voice-idle.expanded .ball-side button {
-  margin-inline: -4px;
-  padding-inline: 13px;
 }
 
 /* Keep the native window controls above every drag region, including on
@@ -4225,6 +4195,69 @@ body .cove-window-controls button {
 .chat-composer-wrap {
   position: relative;
 }
+.chat-image-error {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% - 1px);
+  z-index: 40;
+  width: min(390px, calc(100% - 28px));
+  padding: 11px 12px 11px 13px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  border-radius: 14px;
+  color: var(--ink);
+  box-shadow: 0 14px 34px rgba(35, 52, 70, 0.18);
+  transform: translateX(-50%);
+  animation: chat-image-error-in 180ms var(--ease-enter);
+}
+.chat-image-error-copy {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+}
+.chat-image-error-icon {
+  flex: 0 0 auto;
+  width: 27px;
+  height: 27px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--danger) 13%, transparent);
+  color: var(--danger);
+}
+.chat-image-error-copy strong {
+  display: block;
+  font-size: 12px;
+  line-height: 1.3;
+}
+.chat-image-error-copy p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.chat-image-error-close {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--muted);
+  transition: background 150ms ease, color 150ms ease;
+}
+.chat-image-error-close:hover {
+  background: var(--surface-strong);
+  color: var(--ink);
+}
+@keyframes chat-image-error-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(5px) scale(0.98); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+}
 .image-send-confirm {
   position: absolute;
   left: 13px;
@@ -4310,6 +4343,184 @@ body .cove-window-controls button {
   background: color-mix(in srgb, var(--blue) 10%, transparent);
   color: var(--blue);
 }
+.avatar-crop-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 1800;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(11, 20, 32, 0.62);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  animation: fade-in 160ms ease;
+}
+.avatar-crop-dialog {
+  width: min(390px, calc(100vw - 32px));
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 22px;
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: var(--shadow);
+}
+.avatar-crop-header {
+  min-height: 66px;
+  padding: 14px 16px 12px 19px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--line);
+}
+.avatar-crop-header small {
+  color: var(--blue);
+  font-size: 10px;
+  font-weight: 700;
+}
+.avatar-crop-header h2 {
+  margin: 3px 0 0;
+  font-size: 18px;
+  letter-spacing: -0.025em;
+}
+.avatar-crop-body {
+  padding: 20px 22px 15px;
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+}
+.avatar-crop-stage {
+  position: relative;
+  width: min(280px, calc(100vw - 80px));
+  aspect-ratio: 1;
+  overflow: hidden;
+  border: 2px solid color-mix(in srgb, var(--blue) 58%, var(--line-strong));
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--surface-strong) 78%, #0d1724);
+  box-shadow: 0 12px 30px rgba(15, 32, 52, 0.2);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.avatar-crop-stage.dragging {
+  cursor: grabbing;
+}
+.avatar-crop-stage > img {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  max-width: none;
+  pointer-events: none;
+  user-select: none;
+}
+.avatar-crop-loading {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 11px;
+  pointer-events: none;
+}
+.avatar-crop-guide {
+  position: absolute;
+  inset: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  border-radius: 50%;
+  box-shadow: 0 0 0 999px rgba(4, 11, 20, 0.12), inset 0 0 0 1px rgba(5, 13, 24, 0.25);
+  pointer-events: none;
+}
+.avatar-crop-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: center;
+}
+.avatar-crop-controls {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.avatar-crop-controls input[type="range"] {
+  min-width: 0;
+  flex: 1;
+  accent-color: var(--blue);
+}
+.avatar-crop-controls .icon-btn {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+}
+.avatar-crop-reset {
+  min-height: 28px;
+  padding: 0 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-radius: 8px;
+  background: var(--surface-strong);
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.avatar-crop-reset:hover:not(:disabled) {
+  color: var(--ink);
+  background: color-mix(in srgb, var(--blue) 12%, var(--surface-strong));
+}
+.avatar-crop-controls button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+.avatar-crop-error {
+  width: 100%;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--line));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--danger) 9%, transparent);
+  color: var(--danger);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.avatar-crop-actions {
+  padding: 12px 18px 16px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+}
+.avatar-crop-actions .plain-action,
+.avatar-crop-actions .primary-wide {
+  width: auto;
+  height: 36px;
+  margin-top: 0;
+  min-height: 36px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: 10px;
+  font-size: 11px;
+}
+.avatar-crop-actions .plain-action {
+  flex: 0 0 78px;
+  background: var(--surface-strong);
+  color: var(--muted);
+}
+.avatar-crop-actions .plain-action:hover:not(:disabled) {
+  color: var(--ink);
+}
+.avatar-crop-actions .primary-wide {
+  flex: 1;
+  background: var(--blue);
+  color: #fff;
+}
+.avatar-crop-actions button:disabled {
+  cursor: wait;
+  opacity: 0.48;
+}
 .message-bubble.image img {
   cursor: zoom-in;
 }
@@ -4339,16 +4550,6 @@ body .cove-window-controls button {
   object-fit: contain;
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.35);
   cursor: default;
-}
-.image-lightbox-close {
-  position: absolute;
-  top: 18px;
-  right: 18px;
-  color: #fff;
-  background: rgba(255, 255, 255, 0.14);
-}
-.image-lightbox-close:hover {
-  background: rgba(255, 255, 255, 0.24);
 }
 .share-status-actions .remote-pending {
   cursor: pointer;
@@ -4974,8 +5175,7 @@ body .cove-window-controls button {
   display: flex;
   flex-direction: column;
   background: #f8fafc;
-  overflow-y: auto;
-  scrollbar-gutter: stable;
+  overflow: hidden;
 }
 .lobby-header {
   flex: 0 0 auto;
@@ -5002,9 +5202,11 @@ body .cove-window-controls button {
   line-height: 1.15;
 }
 .lobby-content {
-  flex: 0 0 auto;
-  min-height: auto;
-  overflow: visible;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
   padding: 44px 56px 64px;
 }
 .lobby-hero {
@@ -5497,6 +5699,11 @@ body .cove-window-controls button {
 :root[data-theme="dark"] .control-ball .ball-side button:hover,
 :root[data-theme="dark"] .member-context > button:hover {
   background: var(--surface-strong);
+}
+:root[data-theme="dark"] .control-ball .ball-side button.danger:hover {
+  background: color-mix(in srgb, var(--danger) 55%, #3b1d29);
+  color: #fff;
+  box-shadow: 0 7px 18px rgba(224, 82, 82, 0.28);
 }
 :root[data-theme="dark"] .audio-popover-layer .audio-menu,
 :root[data-theme="dark"] .process-picker select,
@@ -6351,10 +6558,12 @@ body .cove-window-controls button {
 .mode-watching .chat-slot,
 .mode-self .chat-slot {
   min-width: 0;
+  background: linear-gradient(180deg, var(--room-top), var(--room-bottom));
 }
 .mode-watching .chat-slot .chat-panel,
 .mode-self .chat-slot .chat-panel {
   min-width: 0;
+  border-left: 0;
 }
 .mode-watching .chat-slot .message-list,
 .mode-self .chat-slot .message-list {
@@ -6378,13 +6587,6 @@ body .cove-window-controls button {
   left: auto;
 }
 
-@media (max-width: 1023px) {
-  .mode-watching .chat-slot,
-  .mode-self .chat-slot {
-    width: min(360px, 52vw);
-  }
-}
-
 /* Chat header hierarchy: shared-screen chat starts directly with messages;
    the normal chat keeps only the useful title and actions. */
 .chat-panel:not(.compact) > header {
@@ -6401,22 +6603,55 @@ body .cove-window-controls button {
   top: 14px;
 }
 
-/* The shared-mode chat toggle owns its font-size popover.  A wrapper keeps
-   the hit area alive while the pointer travels from the button to the menu. */
-.strip-chat-button-anchor {
+/* The shared-mode chat handle stays on the panel seam while the panel slides. */
+.chat-edge-toggle-anchor {
   position: absolute;
-  top: calc(50% + 6px);
-  left: auto;
-  right: 16px;
-  transform: translateY(-50%);
-  z-index: 80;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 44px;
+  z-index: 500;
+  pointer-events: none;
+  transition: right 320ms var(--ease-layout);
+  -webkit-app-region: no-drag;
 }
-.strip-chat-button-anchor > .strip-chat-button {
-  position: relative;
-  top: auto;
-  transform: none;
-  right: auto;
-  z-index: auto;
+.cove-shell.mode-watching.chat-open .chat-edge-toggle-anchor,
+.cove-shell.mode-self.chat-open .chat-edge-toggle-anchor {
+  right: var(--chat-width);
+}
+.chat-edge-toggle-anchor > .chat-edge-toggle {
+  position: absolute;
+  top: 52px;
+  right: 0;
+  width: 44px;
+  height: 64px;
+  pointer-events: auto;
+  z-index: 500;
+}
+.chat-edge-seam {
+  position: absolute;
+  inset: 0;
+  width: 44px;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+  z-index: 499;
+}
+.chat-edge-seam-fill {
+  fill: url("#shared-chat-seam-gradient");
+  clip-path: url("#shared-chat-seam-clip");
+}
+.chat-edge-seam-line {
+  fill: none;
+  stroke: var(--line);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+@media (max-width: 1023px) {
+  .cove-shell.mode-watching.chat-open .chat-edge-toggle-anchor,
+  .cove-shell.mode-self.chat-open .chat-edge-toggle-anchor {
+    right: var(--chat-overlay-width);
+  }
 }
 .strip-chat-font-menu {
   top: 100%;
@@ -6956,6 +7191,291 @@ body .cove-window-controls button {
   font-size: 11px;
   text-align: center;
 }
+
+/* In-app audio trimming: a quiet, focused editing surface that keeps the
+   waveform and selection handles readable in both Cove themes. */
+.audio-trim-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 1600;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(15, 23, 35, 0.48);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+.audio-trim-dialog {
+  width: min(700px, calc(100vw - 40px));
+  max-height: min(620px, calc(100vh - 40px));
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 24px;
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: var(--shadow);
+}
+.audio-trim-header {
+  min-height: 92px;
+  padding: 20px 22px 16px;
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  border-bottom: 1px solid var(--line);
+}
+.audio-trim-heading {
+  min-width: 0;
+  flex: 1;
+}
+.audio-trim-heading small {
+  color: var(--blue);
+  font-size: 11px;
+  font-weight: 700;
+}
+.audio-trim-heading h2 {
+  margin: 4px 0 3px;
+  font-size: 21px;
+  letter-spacing: -0.025em;
+}
+.audio-trim-heading p {
+  max-width: 520px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.audio-trim-close {
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  color: var(--muted);
+}
+.audio-trim-close:hover {
+  background: var(--surface-strong);
+  color: var(--ink);
+}
+.audio-trim-body {
+  padding: 22px 22px 16px;
+}
+.audio-trim-waveform-wrap {
+  display: grid;
+  gap: 8px;
+}
+.audio-trim-waveform-toolbar {
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.audio-trim-waveform-toolbar > span {
+  margin-right: auto;
+  color: var(--ink);
+  font-weight: 700;
+}
+.audio-trim-waveform-toolbar output {
+  min-width: 30px;
+  margin-right: 4px;
+  color: var(--blue);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+.audio-trim-waveform-toolbar button {
+  min-width: 28px;
+  height: 28px;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-strong);
+  color: var(--ink);
+  font-size: 16px;
+  line-height: 1;
+}
+.audio-trim-waveform-toolbar button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--blue) 45%, var(--line));
+  color: var(--blue);
+}
+.audio-trim-waveform-toolbar button:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+.audio-trim-waveform-toolbar .audio-trim-overview {
+  min-width: 42px;
+  font-size: 11px;
+}
+.audio-trim-waveform {
+  position: relative;
+  height: 174px;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--surface-strong) 74%, #0c1623);
+  isolation: isolate;
+}
+.audio-trim-waveform canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.audio-trim-selection {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 1;
+  background: color-mix(in srgb, var(--blue) 13%, transparent);
+  border-left: 2px solid var(--blue);
+  border-right: 2px solid var(--blue);
+  pointer-events: none;
+}
+.audio-trim-waveform.boundary-start-hover .audio-trim-selection,
+.audio-trim-waveform.boundary-end-hover .audio-trim-selection {
+  border-color: color-mix(in srgb, var(--blue) 82%, white);
+}
+.audio-trim-range {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  appearance: none;
+  background: transparent;
+  pointer-events: none;
+}
+.audio-trim-range-end {
+  z-index: 3;
+}
+.audio-trim-range::-webkit-slider-runnable-track {
+  height: 100%;
+  background: transparent;
+}
+.audio-trim-range::-webkit-slider-thumb {
+  width: 14px;
+  height: 100%;
+  appearance: none;
+  border: 0;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--blue) 86%, white);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--blue) 62%, white), 0 3px 12px rgba(14, 45, 90, 0.25);
+  pointer-events: auto;
+  cursor: ew-resize;
+}
+.audio-trim-range::-moz-range-track {
+  height: 100%;
+  background: transparent;
+}
+.audio-trim-range::-moz-range-thumb {
+  width: 14px;
+  height: 100%;
+  border: 0;
+  border-radius: 8px;
+  background: var(--blue);
+  pointer-events: auto;
+  cursor: ew-resize;
+}
+.audio-trim-times {
+  margin-top: 10px;
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.audio-trim-times span:nth-child(2) {
+  color: var(--blue);
+  font-weight: 700;
+}
+.audio-trim-pan {
+  min-height: 24px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.audio-trim-pan span {
+  flex: 0 0 auto;
+}
+.audio-trim-pan input {
+  min-width: 0;
+  flex: 1;
+  height: 4px;
+  accent-color: var(--blue);
+}
+.audio-trim-hint,
+.audio-trim-error {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.audio-trim-error {
+  color: var(--danger);
+}
+.audio-trim-actions {
+  padding: 14px 22px 20px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+}
+.audio-trim-actions button {
+  min-height: 38px;
+  padding: 0 13px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border-radius: 11px;
+  font-size: 12px;
+  font-weight: 650;
+}
+.audio-trim-secondary,
+.audio-trim-reset {
+  background: var(--surface-strong);
+  color: var(--ink);
+}
+.audio-trim-secondary:hover,
+.audio-trim-reset:hover {
+  background: color-mix(in srgb, var(--blue) 13%, var(--surface-strong));
+}
+.audio-trim-primary {
+  background: var(--blue);
+  color: #fff;
+}
+.audio-trim-primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+.audio-trim-actions button:disabled {
+  cursor: wait;
+  opacity: 0.48;
+}
+@media (max-width: 640px) {
+  .audio-trim-layer {
+    padding: 14px;
+  }
+  .audio-trim-dialog {
+    width: 100%;
+    border-radius: 19px;
+  }
+  .audio-trim-waveform {
+    height: 140px;
+  }
+  .audio-trim-actions {
+    flex-wrap: wrap;
+  }
+  .audio-trim-primary {
+    flex: 1 0 100%;
+  }
+}
 .soundpack-quick-list button span {
   font-size: 12px;
 }
@@ -7224,6 +7744,12 @@ body .cove-window-controls button {
   -webkit-app-region: no-drag !important;
   touch-action: manipulation;
 }
+/* The maximized client area reaches the screen edge, so let the controls use
+   the last few pixels that remain reserved by the windowed layout. Keep the
+   normal windowed offset untouched. */
+.cove-window-titlebar.is-maximized .cove-window-controls {
+  right: 0;
+}
 
 /* Keep avatar content on the same visual inset as the Cove mark.  Narrow
    rails are already centered, so the extra leading space applies only while
@@ -7422,6 +7948,14 @@ html:has(.cove-v2-page) {
   border-radius: 14px;
   background: var(--surface-strong);
   color: var(--muted);
+}
+.audio-share-modal .source-option-icon img {
+  width: 28px;
+  height: 28px;
+  object-fit: contain;
+  border-radius: 7px;
+  user-select: none;
+  -webkit-user-drag: none;
 }
 .audio-share-modal .system-audio-option .source-option-icon {
   background: color-mix(in srgb, var(--purple) 14%, var(--surface-strong));
@@ -7793,4 +8327,198 @@ html:has(.cove-v2-page) {
   margin-left: 8px;
   font-style: normal;
   white-space: nowrap;
+}
+
+/* Theme changes should feel like one surface changing temperature rather than
+   two pages swapping instantly.  Restrict the temporary transition to paint
+   properties so it cannot animate layout, dragging or control geometry. */
+html.theme-transitioning,
+html.theme-transitioning *,
+html.theme-transitioning *::before,
+html.theme-transitioning *::after {
+  transition-property: background, background-color, background-image,
+    border-color, color, box-shadow, fill, stroke !important;
+  transition-duration: 360ms !important;
+  transition-timing-function: ease !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html.theme-transitioning,
+  html.theme-transitioning *,
+  html.theme-transitioning *::before,
+  html.theme-transitioning *::after {
+    transition-duration: 180ms !important;
+  }
+}
+
+/* Chromium's View Transition API gives theme changes a real old/new surface
+   cross-fade, including gradient room backgrounds and inherited color tokens.
+   Keep the animation paint-only; no layout or drag geometry is animated. */
+::view-transition-group(root) {
+  animation-duration: 520ms;
+  animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+}
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 520ms;
+  animation-timing-function: ease;
+  mix-blend-mode: normal;
+}
+@keyframes cove-theme-old {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes cove-theme-new {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+::view-transition-old(root) {
+  animation-name: cove-theme-old;
+}
+::view-transition-new(root) {
+  animation-name: cove-theme-new;
+}
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(root),
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation-duration: 180ms !important;
+  }
+}
+
+/* Ending a share uses the same quiet-by-default danger treatment as the
+   leave-voice control: red is reserved for hover/press feedback. */
+.share-status-actions .end-share {
+  background: transparent;
+  color: var(--danger);
+}
+.share-status-actions .end-share:hover {
+  background: var(--danger);
+  color: #ffeded;
+  box-shadow: 0 6px 16px rgba(224, 82, 82, 0.2);
+}
+.share-status-actions .end-share:active {
+  transform: scale(0.97);
+}
+
+/* The titlebar remains the drag surface.  Only the font picker is raised one
+   layer above it so the size buttons remain clickable at the top edge of the
+   chat panel.  A modal below will deliberately pull it back under its blur. */
+.chat-font-picker {
+  z-index: 3001;
+}
+.chat-font-menu {
+  z-index: 3002;
+}
+
+/* The transparent titlebar is above ordinary page content for dragging. When
+   a Cove foreground surface opens, the font control must join the background
+   snapshot so the scrim can blur it instead of leaving a crisp icon floating
+   above the dialog. The native window controls stay in their own 10000 layer. */
+body:has(
+  .modal-scrim,
+  .audio-popover-layer,
+  .audio-trim-layer,
+  .avatar-crop-scrim,
+  .image-lightbox,
+  .profile-modal-v2-scrim,
+  .user-profile-v2-scrim,
+  .cove-connection-scrim,
+  .cove-settings-scrim
+) .chat-font-picker {
+  z-index: 1;
+}
+
+/* Keep active non-screen controls legible on the dark control-ball surface;
+   screen sharing intentionally keeps its existing yellow treatment. */
+:root[data-theme="dark"] .control-ball .ball-side button.enabled-blue,
+:root[data-theme="dark"] .control-ball .ball-side button.active {
+  background: color-mix(in srgb, var(--blue) 22%, #1a2430);
+  color: #c9dcff;
+}
+:root[data-theme="dark"] .control-ball .ball-side button.enabled-blue:hover,
+:root[data-theme="dark"] .control-ball .ball-side button.active:hover {
+  background: color-mix(in srgb, var(--blue) 32%, #202e3e);
+  color: #e8f1ff;
+}
+:root[data-theme="dark"] .control-ball .ball-side button.enabled-purple {
+  background: color-mix(in srgb, var(--purple) 22%, #1a2430);
+  color: #e0d2ff;
+}
+:root[data-theme="dark"] .control-ball .ball-side button.enabled-purple:hover {
+  background: color-mix(in srgb, var(--purple) 32%, #202e3e);
+  color: #f3edff;
+}
+:root[data-theme="dark"] .control-ball .ball-side button.debug-enabled {
+  background: color-mix(in srgb, var(--debug) 18%, #1a2430);
+  color: #d3e0ff;
+}
+:root[data-theme="dark"] .control-ball .ball-side button.debug-enabled:hover {
+  background: color-mix(in srgb, var(--debug) 28%, #202e3e);
+  color: #edf3ff;
+}
+:root[data-theme="dark"] .share-status-actions .end-share {
+  background: transparent;
+  color: var(--danger);
+}
+:root[data-theme="dark"] .share-status-actions .end-share:hover {
+  background: color-mix(in srgb, var(--danger) 55%, #3b1d29);
+  color: #fff;
+  box-shadow: 0 7px 18px rgba(224, 82, 82, 0.28);
+}
+
+/* The history affordance is a real control inside the server field.  Keep it
+   above the field's clipping/stacking layers and give it a dark-mode surface
+   with enough contrast against the login panel. */
+.auth-input-wrap.auth-server-input-wrap {
+  position: relative;
+}
+.auth-history-button {
+  position: relative;
+  z-index: 2;
+  align-self: center;
+}
+:root[data-theme="dark"] .auth-history-button {
+  border-left-color: #30445a;
+  background: #152231;
+  color: #a9bdd5;
+}
+:root[data-theme="dark"] .auth-history-button:hover:not(:disabled),
+:root[data-theme="dark"] .auth-history-button[aria-expanded="true"] {
+  border-left-color: #5278a5;
+  background: #294363;
+  color: #e0edff;
+}
+:root[data-theme="dark"] .auth-field > small {
+  color: #9fb3c9;
+}
+:root[data-theme="dark"] .auth-field > small.auth-warning {
+  color: #efc878;
+}
+
+/* Thin selection handles make the audio trim range easier to place precisely
+   without changing the waveform's hit area. */
+.audio-trim-range::-webkit-slider-thumb {
+  width: 6px;
+  border-radius: 4px;
+}
+.audio-trim-range::-moz-range-thumb {
+  width: 6px;
+  border-radius: 4px;
+}
+
+/* Replace the low-contrast amber quick-send treatment in dark mode with the
+   same cool accent used by the active sound-pack controls. */
+:root[data-theme="dark"] .soundpack-popover-title,
+:root[data-theme="dark"] .soundpack-quick-list button svg {
+  color: var(--purple);
+}
+:root[data-theme="dark"] .soundpack-quick-list button:hover {
+  color: var(--ink);
+  background: color-mix(in srgb, var(--purple) 14%, #202e3e);
+  border-color: color-mix(in srgb, var(--purple) 42%, var(--line));
+}
+:root[data-theme="dark"] .soundpack-quick-list button b {
+  background: color-mix(in srgb, var(--purple) 20%, #202e3e);
+  color: #e0d2ff;
 }

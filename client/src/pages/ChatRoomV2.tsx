@@ -17,6 +17,7 @@ import {
   ArrowRight,
   Waveform as AudioLines,
   CaretLeft,
+  CaretRight,
   ChatCircleDots,
   Check,
   Clipboard,
@@ -61,6 +62,7 @@ import {
 } from "../hooks/useWebRTC";
 import { useScreenFullscreen } from "../hooks/useScreenFullscreen";
 import { Avatar } from "../components/Avatar";
+import { AvatarCropDialog } from "../components/AvatarCropDialog";
 import { ProfileModal } from "../components/ProfileModal";
 import { UserProfileModal } from "../components/UserProfileModal";
 import { SoundPackPanel } from "../components/SoundPackPanel";
@@ -71,7 +73,6 @@ import { UPDATE_CENTER_DETAILS_EVENT } from "../update";
 import { loadProfileRemarks, saveProfileRemark } from "../profileRemarks";
 import { createRoomPayload } from "../roomSettings";
 import { sortRoomMembers } from "../memberOrdering";
-import { prepareAvatar } from "../profile";
 import { parseChatText } from "../chatLinks";
 import {
   CHAT_IMAGE_MAX_BATCH,
@@ -568,72 +569,6 @@ function VerticalVolume({
     </div>
   );
 }
-function MemberMenu({
-  member,
-  x,
-  y,
-  onClose,
-  onProfile,
-  onRemark,
-  onMute,
-  onRemove,
-  canModerate,
-}: {
-  member: RoomMember;
-  x: number;
-  y: number;
-  onClose: () => void;
-  onProfile: () => void;
-  onRemark: () => void;
-  onMute: () => void;
-  onRemove: () => void;
-  canModerate: boolean;
-}) {
-  const left = Math.max(8, Math.min(x, window.innerWidth - 232));
-  const top = Math.max(8, Math.min(y, window.innerHeight - 244));
-  return (
-    <div
-      className="member-context popover-card"
-      style={{ position: "fixed", left, top, zIndex: 950 }}
-      role="menu"
-    >
-      <header>
-        <div>
-          <b>{member.username}</b>
-          <small>{member.platform === "mobile" ? "手机端" : "电脑端"}</small>
-        </div>
-        <button
-          className="icon-btn"
-          onClick={onClose}
-          aria-label="关闭成员菜单"
-        >
-          <X size={16} />
-        </button>
-      </header>
-      <button onClick={onProfile}>
-        <UserCircle size={18} />
-        查看资料
-      </button>
-      <button onClick={onRemark}>
-        <Wrench size={18} />
-        添加备注
-      </button>
-      {canModerate && (
-        <button onClick={onMute}>
-          <MicrophoneSlash size={18} />
-          {member.isMuted ? "解除禁言" : "禁言"}
-        </button>
-      )}
-      {canModerate && (
-        <button className="danger-row" onClick={onRemove}>
-          <PhoneDisconnect size={18} />
-          移出房间
-        </button>
-      )}
-    </div>
-  );
-}
-
 function LocalScreenVideo({ stream }: { stream: MediaStream }) {
   const videoRef = useRef<HTMLVideoElement>(null);
 
@@ -881,6 +816,9 @@ function ChatPanelV2({
   setInput,
   onSend,
   onSendImages,
+  imageError,
+  onDismissImageError,
+  onImageError,
   compact,
   fontSize,
   onFontSizeChange,
@@ -896,6 +834,9 @@ function ChatPanelV2({
   setInput: (value: string) => void;
   onSend: () => void;
   onSendImages: (files: FileList | File[] | null) => void;
+  imageError: string | null;
+  onDismissImageError: () => void;
+  onImageError: (message: string | null) => void;
   compact: boolean;
   unread: number;
   fontSize: ChatFontSize;
@@ -1115,13 +1056,35 @@ function ChatPanelV2({
       showCopyNotice("复制图片失败，请重试");
     }
   };
+  const downloadImage = async (src: string) => {
+    try {
+      const response = await fetch(src);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const mimeSubtype = blob.type.split("/")[1]?.split(";")[0] ?? "png";
+      const extension = mimeSubtype === "jpeg" ? "jpg" : mimeSubtype;
+      const anchor = document.createElement("a");
+      anchor.href = objectUrl;
+      anchor.download = `cove-image-${Date.now()}.${extension}`;
+      anchor.rel = "noopener";
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+      showCopyNotice("图片已开始下载");
+    } catch (error) {
+      console.warn("[chat-download] 图片下载失败", error);
+      showCopyNotice("下载图片失败，请重试");
+    }
+  };
   const openImageContextMenu = (
-    event: MouseEvent<HTMLButtonElement>,
+    event: MouseEvent<HTMLElement>,
     src: string,
   ) => {
     event.preventDefault();
-    const menuWidth = 148;
-    const menuHeight = 48;
+    const menuWidth = 160;
+    const menuHeight = 84;
     setImageContextMenu({
       src,
       x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
@@ -1133,9 +1096,17 @@ function ChatPanelV2({
     const images = collectChatImageFiles(files);
     if (!images.length) return;
     if (images.length > CHAT_IMAGE_MAX_BATCH) {
-      window.alert(`一次最多发送 ${CHAT_IMAGE_MAX_BATCH} 张图片。`);
+      onImageError(`一次最多发送 ${CHAT_IMAGE_MAX_BATCH} 张图片。`);
       return;
     }
+    for (const file of images) {
+      const validationError = validateChatImageFile(file);
+      if (validationError) {
+        onImageError(validationError);
+        return;
+      }
+    }
+    onImageError(null);
     setPendingImages(images);
   };
   const confirmImages = () => {
@@ -1381,6 +1352,20 @@ function ChatPanelV2({
         </button>
       )}
       <div className="chat-composer-wrap">
+        {imageError && (
+          <div className="chat-image-error popover-card" role="alert">
+            <div className="chat-image-error-copy">
+              <span className="chat-image-error-icon"><Info size={17} weight="bold" /></span>
+              <div>
+                <strong>图片无法发送</strong>
+                <p>{imageError}</p>
+              </div>
+            </div>
+            <button type="button" className="chat-image-error-close" onClick={onDismissImageError} aria-label="关闭提示">
+              <X size={16} />
+            </button>
+          </div>
+        )}
         {pendingImages.length > 0 && (
           <div className="image-send-confirm popover-card" role="dialog">
             <div className="image-send-confirm-copy">
@@ -1413,6 +1398,7 @@ function ChatPanelV2({
             className="icon-btn"
             onClick={() => imageRef.current?.click()}
             aria-label="添加图片"
+            title="添加图片（最大 10MB）"
           >
             <ImageSquare size={19} />
           </button>
@@ -1460,6 +1446,18 @@ function ChatPanelV2({
             onClick={() => {
               const src = imageContextMenu.src;
               setImageContextMenu(null);
+              void downloadImage(src);
+            }}
+          >
+            <DownloadSimple size={16} />
+            <span>下载图片</span>
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              const src = imageContextMenu.src;
+              setImageContextMenu(null);
               void copyImage(src);
             }}
           >
@@ -1476,17 +1474,10 @@ function ChatPanelV2({
           aria-label="查看聊天图片"
           onClick={() => setLightboxImage(null)}
         >
-          <button
-            type="button"
-            className="image-lightbox-close icon-btn"
-            onClick={() => setLightboxImage(null)}
-            aria-label="关闭图片预览"
-          >
-            <X size={20} />
-          </button>
           <img
             src={lightboxImage}
             alt="放大的聊天图片"
+            onContextMenu={(event) => openImageContextMenu(event, lightboxImage)}
             onClick={(event) => event.stopPropagation()}
           />
         </div>
@@ -1535,6 +1526,7 @@ export function RoomAppearanceSettings({
   >("keep");
   const [password, setPassword] = useState("");
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [cropFile, setCropFile] = useState<File | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   return (
     <div className="modal-scrim">
@@ -1576,15 +1568,10 @@ export function RoomAppearanceSettings({
                   hidden
                   type="file"
                   accept="image/*"
-                  onChange={async (event) => {
+                  onChange={(event) => {
                     const file = event.target.files?.[0];
-                    if (file) {
-                      try {
-                        setAvatar(await prepareAvatar(file));
-                      } catch {
-                        window.alert("房间头像处理失败");
-                      }
-                    }
+                    if (file) setCropFile(file);
+                    event.currentTarget.value = "";
                   }}
                 />
               </div>
@@ -1793,6 +1780,16 @@ export function RoomAppearanceSettings({
           </button>
         </div>
       </section>
+      {cropFile && (
+        <AvatarCropDialog
+          file={cropFile}
+          onCancel={() => setCropFile(null)}
+          onConfirm={(avatarUrl) => {
+            setAvatar(avatarUrl);
+            setCropFile(null);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -1832,6 +1829,7 @@ export function GlobalSettingsV2({
   );
   const [name, setName] = useState(profile.username);
   const [avatar, setAvatar] = useState(profile.avatarUrl);
+  const [cropFile, setCropFile] = useState<File | null>(null);
   const uploadRef = useRef<HTMLInputElement>(null);
   const [draftAudioInputId, setDraftAudioInputId] = useState(
     rtc.selectedAudioInputId,
@@ -1843,6 +1841,11 @@ export function GlobalSettingsV2({
   const audioDeviceSelectionChanged =
     draftAudioInputId !== rtc.selectedAudioInputId ||
     draftAudioOutputId !== rtc.selectedAudioOutputId;
+
+  useEffect(() => {
+    setName(profile.username);
+    setAvatar(profile.avatarUrl);
+  }, [profile.username, profile.avatarUrl]);
 
   useEffect(() => {
     setPage(initialPage);
@@ -2085,15 +2088,10 @@ export function GlobalSettingsV2({
                     hidden
                     type="file"
                     accept="image/*"
-                    onChange={async (event) => {
+                    onChange={(event) => {
                       const file = event.target.files?.[0];
-                      if (file) {
-                        try {
-                          setAvatar(await prepareAvatar(file));
-                        } catch {
-                          window.alert("头像处理失败");
-                        }
-                      }
+                      if (file) setCropFile(file);
+                      event.currentTarget.value = "";
                     }}
                   />
                 </div>
@@ -2198,6 +2196,16 @@ export function GlobalSettingsV2({
           )}
         </main>
       </section>
+      {cropFile && (
+        <AvatarCropDialog
+          file={cropFile}
+          onCancel={() => setCropFile(null)}
+          onConfirm={(avatarUrl) => {
+            setAvatar(avatarUrl);
+            setCropFile(null);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -2628,7 +2636,11 @@ function AudioShareMenuV2({
                 onClick={() => onApplicationAudio(source)}
               >
                 <span className="source-option-icon">
-                  <AppWindow size={20} />
+                  {source.iconDataUrl ? (
+                    <img src={source.iconDataUrl} alt="" draggable={false} />
+                  ) : (
+                    <AppWindow size={20} />
+                  )}
                 </span>
                 <span className="source-option-copy">
                   <b>{source.name}</b>
@@ -3225,7 +3237,6 @@ export default function ChatRoomV2({
   const [rooms, setRooms] = useState<RoomWithAppearance[]>([]);
   const [voiceCounts, setVoiceCounts] = useState<Record<string, number>>({});
   const [roomMembers, setRoomMembers] = useState<RoomMember[]>([]);
-  const [isOwner, setIsOwner] = useState(false);
   const [roomSynced, setRoomSynced] = useState(false);
   const [joining, setJoining] = useState(false);
   const [joinError, setJoinError] = useState("");
@@ -3237,16 +3248,12 @@ export default function ChatRoomV2({
   const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
   const [historyLoadVersion, setHistoryLoadVersion] = useState(0);
   const [input, setInput] = useState("");
+  const [imageError, setImageError] = useState<string | null>(null);
   const [unread, setUnread] = useState(0);
   const [chatFontSize, setChatFontSize] =
     useState<ChatFontSize>(readChatFontSize);
   const [chatOpen, setChatOpen] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [memberMenu, setMemberMenu] = useState<{
-    member: RoomMember;
-    x: number;
-    y: number;
-  } | null>(null);
   const [roomSettings, setRoomSettings] = useState<RoomWithAppearance | null>(
     null,
   );
@@ -3288,6 +3295,23 @@ export default function ChatRoomV2({
   const [remoteNotice, setRemoteNotice] = useState("");
   const [debug, setDebug] = useState(false);
   const [diagnosticsCompact, setDiagnosticsCompact] = useState(false);
+  useEffect(() => {
+    const socketId = socket.id;
+    if (!socketId) return;
+    setRoomMembers((current) => {
+      let changed = false;
+      const next = current.map((member) => {
+        if (member.socketId !== socketId && member.username !== profile.username) return member;
+        if (member.username === profile.username && member.avatarUrl === profile.avatarUrl) return member;
+        changed = true;
+        return { ...member, username: profile.username, avatarUrl: profile.avatarUrl };
+      });
+      return changed ? next : current;
+    });
+  }, [profile.username, profile.avatarUrl, roomId]);
+  useEffect(() => {
+    setImageError(null);
+  }, [roomId]);
   const outputVolume = rtc.masterOutputVolume * 100;
   const setOutputVolume = (value: number) =>
     rtc.setMasterOutputVolume(value / 100);
@@ -3337,7 +3361,7 @@ export default function ChatRoomV2({
   const openSoundboard = () => {
     clearSoundboardHoverTimer();
     setShowSoundboardQuick(false);
-    setShowSoundboard(true);
+    setShowSoundboard((current) => !current);
   };
   useEffect(
     () => () => {
@@ -3359,6 +3383,18 @@ export default function ChatRoomV2({
   }, [roomSynced]);
   useEffect(() => {
     setChatOpen(shareLayout ? false : true);
+  }, [shareLayout]);
+  useEffect(() => {
+    // Remote-control messages are meaningful only while a share is visible.
+    // Clear the transient state as soon as both local and remote media leave
+    // the layout so an old “屏幕共享已结束” notice cannot leak into a later
+    // share session.
+    if (shareLayout) return;
+    setRemoteNotice("");
+    setPendingRemote(null);
+    setPendingRemoteRequest(false);
+    setPendingRemoteRequestId(null);
+    setRemoteSession(null);
   }, [shareLayout]);
   useEffect(() => {
     // 聊天栏重新可见时，清除之前在收起期间累积的提示。
@@ -3612,10 +3648,21 @@ export default function ChatRoomV2({
       roomJoinGenerationRef.current += 1;
       socket.off("connect", onConnect);
       socket.off("disconnect", onDisconnect);
-      if (socket.connected) socket.emit("room:leave", roomId);
-      rtc.leaveVoice();
     };
   }, [roomId, sessionReady, joinRetryNonce]);
+  // Re-registering after a transport interruption is NOT leaving the room.
+  // Only the room lifetime owns media teardown; useWebRTC owns the grace timer.
+  useEffect(() => {
+    if (!roomId) return;
+    const leaveVoice = rtc.leaveVoice;
+    return () => {
+      if (socket.connected) socket.emit("room:leave", roomId);
+      else socket.once("connect", () => {
+        if (socket.recovered) socket.emit("room:leave", roomId);
+      });
+      leaveVoice();
+    };
+  }, [roomId]);
   useEffect(() => {
     if (!roomId) return;
     historyGenerationRef.current += 1;
@@ -3705,7 +3752,6 @@ export default function ChatRoomV2({
     const onState = (state: RoomState) => {
       if (state.roomId !== roomId) return;
       setRoomMembers(state.members);
-      setIsOwner(state.isOwner);
       setRoom((current) =>
         current
           ? {
@@ -3858,16 +3904,17 @@ export default function ChatRoomV2({
     const images = files ? collectChatImageFiles(files) : [];
     if (!images.length || !roomId || imageBusy.current) return;
     if (images.length > CHAT_IMAGE_MAX_BATCH) {
-      window.alert(`一次最多发送 ${CHAT_IMAGE_MAX_BATCH} 张图片。`);
+      setImageError(`一次最多发送 ${CHAT_IMAGE_MAX_BATCH} 张图片。`);
       return;
     }
     for (const file of images) {
       const validationError = validateChatImageFile(file);
       if (validationError) {
-        window.alert(validationError);
+        setImageError(validationError);
         return;
       }
     }
+    setImageError(null);
     imageBusy.current = true;
     try {
       for (const file of images) {
@@ -3884,10 +3931,11 @@ export default function ChatRoomV2({
             }),
           },
         );
-        if (!response.ok) throw new Error("图片上传失败");
+        const result = await response.json().catch(() => ({})) as { error?: string };
+        if (!response.ok) throw new Error(result.error ?? `图片上传失败（${response.status}）`);
       }
     } catch (error) {
-      window.alert(error instanceof Error ? error.message : "图片发送失败");
+      setImageError(error instanceof Error ? error.message : "图片发送失败");
     } finally {
       imageBusy.current = false;
     }
@@ -3909,6 +3957,7 @@ export default function ChatRoomV2({
     void refreshAudioSources();
   };
   const openScreenModal = (editing: boolean) => {
+    setRemoteNotice("");
     setEditingScreen(editing && rtc.isSharing);
     setPendingPreset(rtc.screenPreset);
     setPendingFps(rtc.fps);
@@ -3975,6 +4024,7 @@ export default function ChatRoomV2({
   const requestRemote = () => {
     const target = rtc.remoteScreen?.socketId;
     if (!target || !roomId || pendingRemoteRequest) return;
+    setRemoteNotice("");
     setPendingRemoteRequest(true);
     socket
       .timeout(5000)
@@ -4027,40 +4077,6 @@ export default function ChatRoomV2({
         input: inputValue,
       });
   }, []);
-  const muteMember = (member: RoomMember) => {
-    if (!roomId || !isOwner || member.isOwner) return;
-    socket
-      .timeout(5000)
-      .emit(
-        "room:set-muted",
-        { roomId, targetSocketId: member.socketId, muted: !member.isMuted },
-        (error: Error | null, response?: { ok?: boolean; error?: string }) => {
-          if (error || !response?.ok)
-            window.alert(response?.error ?? error?.message ?? "禁言操作失败");
-          else setMemberMenu(null);
-        },
-      );
-  };
-  const removeMember = (member: RoomMember) => {
-    if (
-      !roomId ||
-      !isOwner ||
-      member.isOwner ||
-      !window.confirm(`确定将“${member.username}”移出房间吗？`)
-    )
-      return;
-    socket
-      .timeout(5000)
-      .emit(
-        "room:kick",
-        { roomId, targetSocketId: member.socketId },
-        (error: Error | null, response?: { ok?: boolean; error?: string }) => {
-          if (error || !response?.ok)
-            window.alert(response?.error ?? error?.message ?? "移出房间失败");
-          else setMemberMenu(null);
-        },
-      );
-  };
   const applyRoomSettings = (changes: Record<string, unknown>) => {
     if (!roomId) return;
     socket.timeout(5000).emit(
@@ -4221,7 +4237,7 @@ export default function ChatRoomV2({
                     const voice = rtc.voiceMembers.find(
                       (item) => item.socketId === member.socketId,
                     );
-                    const isSelf = member.socketId === socket.id;
+                    const isSelf = member.socketId === socket.id || member.username === profile.username;
                     const screen =
                       Boolean(member.isSharingScreen) ||
                       (isSelf && Boolean(rtc.localScreen)) ||
@@ -4254,17 +4270,17 @@ export default function ChatRoomV2({
                       <article
                         className={`member-row ${isSelf ? "self" : ""} ${screen ? "has-watch" : ""} ${voice ? "in-voice" : "not-in-voice"}`}
                         key={member.socketId}
+                        onContextMenu={(event) => {
+                          // Member actions are intentionally not exposed from a
+                          // context menu; keep the whole row free of the
+                          // browser menu as well as the former Cove popover.
+                          event.preventDefault();
+                          event.stopPropagation();
+                        }}
                       >
                         <button
                           className="member-identity"
-                          onContextMenu={(event) => {
-                            event.preventDefault();
-                            setMemberMenu({
-                              member,
-                              x: event.clientX,
-                              y: event.clientY,
-                            });
-                          }}
+                          onContextMenu={(event) => event.preventDefault()}
                           onClick={() =>
                             isSelf
                               ? setShowProfile(true)
@@ -4274,6 +4290,12 @@ export default function ChatRoomV2({
                           <MemberAvatar
                             member={{
                               ...member,
+                              ...(isSelf
+                                ? {
+                                    username: profile.username,
+                                    avatarUrl: profile.avatarUrl,
+                                  }
+                                : {}),
                               isMuted: Boolean(
                                 member.isMuted ||
                                   voice?.isMuted ||
@@ -4353,7 +4375,7 @@ export default function ChatRoomV2({
                             )}
                           </div>
                         )}
-                        {screen && !isSelf && (
+                        {rtc.inVoice && screen && !isSelf && (
                           <button
                             className="watch-button"
                             onClick={() => {
@@ -4392,7 +4414,7 @@ export default function ChatRoomV2({
                       rtc.remoteApplicationAudios.some(
                         (item) => item.socketId === member.socketId,
                       );
-                    const isSelf = member.socketId === socket.id;
+                    const isSelf = member.socketId === socket.id || member.username === profile.username;
                     const sharedVolume = getSharedAudioVolume(member, isSelf);
                     const level =
                       rtc.speakingLevels[member.socketId] ??
@@ -4409,15 +4431,7 @@ export default function ChatRoomV2({
                       <div className="strip-member" key={member.socketId}>
                         <button
                           className="strip-member-button"
-                          onContextMenu={(event) => {
-                            if (member.socketId === socket.id) return;
-                            event.preventDefault();
-                            setMemberMenu({
-                              member,
-                              x: event.clientX,
-                              y: event.clientY,
-                            });
-                          }}
+                          onContextMenu={(event) => event.preventDefault()}
                           onClick={() =>
                             member.socketId === socket.id
                               ? setShowProfile(true)
@@ -4427,6 +4441,12 @@ export default function ChatRoomV2({
                           <MemberAvatar
                             member={{
                               ...member,
+                              ...(isSelf
+                                ? {
+                                    username: profile.username,
+                                    avatarUrl: profile.avatarUrl,
+                                  }
+                                : {}),
                               isMuted: Boolean(
                                 member.isMuted ||
                                   (member.socketId === socket.id &&
@@ -4509,20 +4529,6 @@ export default function ChatRoomV2({
                     );
                   })}
                 </div>
-                <div className="strip-chat-button-anchor">
-                  <button
-                    type="button"
-                    className={`strip-chat-button ${chatOpen ? "active" : ""}`}
-                    onClick={() => {
-                      setChatOpen((value) => !value);
-                      setUnread(0);
-                    }}
-                  >
-                    <ChatCircleDots size={19} weight="fill" />
-                    <span>聊天</span>
-                    {unread > 0 && <i>{unread}</i>}
-                  </button>
-                </div>
               </div>
               <div className="share-layout-body">
                 <ShareViewV2
@@ -4555,7 +4561,7 @@ export default function ChatRoomV2({
             </>
           )}
         </section>
-        <div className="chat-slot">
+        <div id="shared-chat-panel" className="chat-slot">
           {chatVisible && (
             <ChatPanelV2
               key={roomId}
@@ -4566,6 +4572,9 @@ export default function ChatRoomV2({
               setInput={setInput}
               onSend={sendMessage}
               onSendImages={sendImages}
+              imageError={imageError}
+              onDismissImageError={() => setImageError(null)}
+              onImageError={setImageError}
               compact={shareLayout}
               unread={unread}
               fontSize={chatFontSize}
@@ -4577,6 +4586,72 @@ export default function ChatRoomV2({
             />
           )}
         </div>
+        {shareLayout && (
+          <div className="chat-edge-toggle-anchor">
+            <svg
+              className="chat-edge-seam"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <defs>
+                <linearGradient
+                  id="shared-chat-seam-gradient"
+                  x1="0"
+                  y1="0"
+                  x2="0"
+                  y2="100%"
+                  gradientUnits="userSpaceOnUse"
+                >
+                  <stop offset="0%" stopColor="var(--room-top)" />
+                  <stop offset="100%" stopColor="var(--room-bottom)" />
+                </linearGradient>
+                <clipPath
+                  id="shared-chat-seam-clip"
+                  clipPathUnits="userSpaceOnUse"
+                >
+                  <path d="M43.5 32 C43.5 52 5 64 5 84 C5 104 43.5 116 43.5 136 L43.5 32 Z" />
+                </clipPath>
+              </defs>
+              <rect
+                className="chat-edge-seam-fill"
+                x="0"
+                y="0"
+                width="44"
+                height="100%"
+              />
+              <path
+                className="chat-edge-seam-line"
+                d="M43.5 0 V32 C43.5 52 5 64 5 84 C5 104 43.5 116 43.5 136"
+              />
+              <line
+                className="chat-edge-seam-line"
+                x1="43.5"
+                y1="136"
+                x2="43.5"
+                y2="100%"
+              />
+            </svg>
+            <button
+              type="button"
+              className={`chat-edge-toggle ${chatOpen ? "active" : ""}`}
+              onClick={() => {
+                setChatOpen((value) => !value);
+                setUnread(0);
+              }}
+              aria-expanded={chatOpen}
+              aria-controls="shared-chat-panel"
+              aria-label={`${chatOpen ? "收起聊天" : "展开聊天"}${unread > 0 ? `，${unread}条未读消息` : ""}`}
+              title={chatOpen ? "收起聊天" : "展开聊天"}
+            >
+              {chatOpen ? (
+                <CaretRight size={20} weight="bold" />
+              ) : (
+                <CaretLeft size={20} weight="bold" />
+              )}
+              {unread > 0 && <i aria-live="polite">{unread}</i>}
+            </button>
+          </div>
+        )}
         <ControlBallV2
           rtc={rtc}
           mode={mode}
@@ -4616,25 +4691,6 @@ export default function ChatRoomV2({
           />
         )}
       </div>
-      {memberMenu && (
-        <MemberMenu
-          member={memberMenu.member}
-          x={memberMenu.x}
-          y={memberMenu.y}
-          onClose={() => setMemberMenu(null)}
-          onProfile={() => {
-            setMemberMenu(null);
-            setViewingProfile(memberMenu.member);
-          }}
-          onRemark={() => {
-            setMemberMenu(null);
-            setViewingProfile(memberMenu.member);
-          }}
-          onMute={() => muteMember(memberMenu.member)}
-          onRemove={() => removeMember(memberMenu.member)}
-          canModerate={isOwner && !memberMenu.member.isOwner}
-        />
-      )}
       {showCreateRoom && (
         <CreateRoomDialog
           name={newRoomName}
@@ -4736,6 +4792,7 @@ export default function ChatRoomV2({
           }
           onConfirm={() => {
             const shouldUpdate = editingScreen && rtc.isSharing;
+            setRemoteNotice("");
             setEditingScreen(false);
             setShowScreenModal(false);
             const update = shouldUpdate

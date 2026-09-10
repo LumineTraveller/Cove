@@ -490,7 +490,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
       connectionGrace.current.fail(key, () => {
         resetVoiceRef.current();
         setAudioDeviceError(
-          "语音连接中断超过 7.5 秒，可直接重新加入语音，无需重连服务器",
+          "语音连接中断超过 5 秒，可直接重新加入语音，无需重连服务器",
         );
       });
     }
@@ -2701,7 +2701,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
       connectionGrace.current.fail("signal", () => {
         resetVoiceRef.current(false);
         setAudioDeviceError(
-          "服务器连接中断超过 7.5 秒，连接恢复后可直接加入语音",
+          "服务器连接中断超过 5 秒，连接恢复后可直接加入语音",
         );
       });
     };

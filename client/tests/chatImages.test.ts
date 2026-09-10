@@ -32,6 +32,6 @@ test('drag and clipboard collections ignore non-image files', () => {
 
 test('unsupported and oversized images are rejected before upload', () => {
   assert.match(validateChatImageFile(file('photo.bmp', 'image/bmp')) ?? '', /仅支持/);
-  assert.match(validateChatImageFile(file('large.png', 'image/png', 5 * 1024 * 1024 + 1)) ?? '', /5MB/);
+  assert.match(validateChatImageFile(file('large.png', 'image/png', 10 * 1024 * 1024 + 1)) ?? '', /10MB/);
   assert.equal(validateChatImageFile(file('valid.png', 'image/png')), null);
 });

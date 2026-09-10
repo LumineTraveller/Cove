@@ -1,8 +1,8 @@
 import { useRef, useState } from 'react';
 import { Camera, Check, LogOut, Server, Trash2, UserRound, X } from 'lucide-react';
-import { prepareAvatar } from '../profile';
 import type { UserProfile } from '../types';
 import { Avatar } from './Avatar';
+import { AvatarCropDialog } from './AvatarCropDialog';
 import packageInfo from '../../package.json';
 import { openUpdateCenter } from '../update';
 
@@ -19,19 +19,15 @@ interface Props {
 export function ProfileModal({ profile, serverURL, onSave, onClose, onOpenServerSettings, onReset, onSwitchServer }: Props) {
   const [username, setUsername] = useState(profile.username);
   const [avatarUrl, setAvatarUrl] = useState<string | null>(profile.avatarUrl);
+  const [cropFile, setCropFile] = useState<File | null>(null);
   const [error, setError] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const chooseAvatar = async (file?: File) => {
+  const chooseAvatar = (file?: File) => {
     if (!file) return;
-    try {
-      setError('');
-      setAvatarUrl(await prepareAvatar(file));
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '头像处理失败');
-    } finally {
-      if (inputRef.current) inputRef.current.value = '';
-    }
+    setError('');
+    setCropFile(file);
+    if (inputRef.current) inputRef.current.value = '';
   };
 
   const save = () => {
@@ -56,7 +52,7 @@ export function ProfileModal({ profile, serverURL, onSave, onClose, onOpenServer
               <button onClick={() => inputRef.current?.click()} className="absolute bottom-0 right-0 rounded-full border-2 border-zinc-900 bg-white p-2 text-zinc-900 shadow-lg transition hover:bg-cyan-100 focus:outline-none focus:ring-2 focus:ring-cyan-300" aria-label="更换头像" title="更换头像">
                 <Camera size={16} />
               </button>
-              <input ref={inputRef} type="file" accept="image/png,image/jpeg,image/webp" className="hidden" onChange={event => chooseAvatar(event.target.files?.[0])} />
+              <input ref={inputRef} type="file" accept="image/png,image/jpeg,image/webp,image/gif" className="hidden" onChange={event => chooseAvatar(event.target.files?.[0])} />
             </div>
             {avatarUrl && (
               <button onClick={() => setAvatarUrl(null)} className="mb-1 inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-sm text-white/45 transition hover:bg-white/10 hover:text-white" title="移除头像">
@@ -104,6 +100,16 @@ export function ProfileModal({ profile, serverURL, onSave, onClose, onOpenServer
           Cove v{packageInfo.version}
         </button>
       </section>
+      {cropFile && (
+        <AvatarCropDialog
+          file={cropFile}
+          onCancel={() => setCropFile(null)}
+          onConfirm={(nextAvatar) => {
+            setAvatarUrl(nextAvatar);
+            setCropFile(null);
+          }}
+        />
+      )}
     </div>
   );
 }

@@ -31,11 +31,16 @@ const app = express();
 const httpServer = createServer(app);
 
 app.use(cors({ origin: '*' }));
-app.use(express.json({ limit: '12mb' })); // 语音包 base64 最大约 8MB 文件
+// A 10 MiB image becomes roughly 13.4 MiB after base64 encoding. Leave room
+// for the JSON envelope while keeping the request bounded.
+app.use(express.json({ limit: '15mb' }));
 
 const io = new Server(httpServer, {
   cors: { origin: '*', methods: ['GET', 'POST'] },
-  // Keep packet offsets slightly longer than the 7.5s peer deadline. Otherwise
+  // GIF avatars are kept as data URLs so the browser can animate them. An 8 MiB
+  // file expands to roughly 11.2 MiB in base64; leave room for the packet.
+  maxHttpBufferSize: 16 * 1024 * 1024,
+  // Keep packet offsets slightly longer than the 5s peer deadline. Otherwise
   // a quiet client's last offset may expire before its recovery window ends.
   connectionStateRecovery: { maxDisconnectionDuration: DISCONNECT_GRACE_MS * 2, skipMiddlewares: false },
 });
@@ -296,6 +301,7 @@ const ROOM_COLOR_RE = /^#[0-9a-f]{6}$/i;
 const DEFAULT_ROOM_COLOR = '#FFFFFF';
 const DEFAULT_ROOM_DARK_TOP = '#111827';
 const DEFAULT_ROOM_DARK_BOTTOM = '#0B1220';
+const MAX_AVATAR_DATA_URL_LENGTH = 12 * 1024 * 1024;
 function sanitizeRoomColor(value: unknown, fallback: string | null = null): string | null {
   if (value == null || value === '') return fallback;
   if (typeof value !== 'string' || !ROOM_COLOR_RE.test(value.trim()))
@@ -304,8 +310,14 @@ function sanitizeRoomColor(value: unknown, fallback: string | null = null): stri
 }
 function sanitizeRoomAvatar(value: unknown, fallback: string | null = null): string | null {
   if (value == null || value === '') return fallback;
-  if (typeof value !== 'string' || value.length > 240 * 1024 || !/^data:image\/(?:png|jpeg|webp);base64,/i.test(value))
+  if (typeof value !== 'string' || value.length > MAX_AVATAR_DATA_URL_LENGTH || !/^data:image\/(?:png|jpeg|webp|gif);base64,/i.test(value))
     throw new RoomSettingsError('INVALID_SETTINGS', '房间头像格式不受支持或文件过大');
+  return value;
+}
+
+function sanitizeProfileAvatar(value: unknown): string | null {
+  if (value == null || value === '') return null;
+  if (typeof value !== 'string' || value.length > MAX_AVATAR_DATA_URL_LENGTH || !/^data:image\/(?:png|jpeg|webp|gif);base64,/i.test(value)) return null;
   return value;
 }
 
@@ -433,6 +445,41 @@ app.post('/api/auth/login', async (req, res) => {
   catch (error) { authResponse(error, res); }
 });
 
+// Large animated avatars use HTTP instead of a Socket.IO profile packet. The
+// request is authenticated by the existing account token and the active
+// socket, when present, is updated and notified just like the socket path.
+app.post('/api/auth/profile', (req, res) => {
+  const body = req.body as { token?: unknown; username?: unknown; avatarUrl?: unknown } | undefined;
+  const token = typeof body?.token === 'string' ? body.token : '';
+  const account = accounts.accountForToken(token);
+  if (!account) { res.status(401).json({ error: '登录已失效，请重新登录' }); return; }
+  if (typeof body?.username !== 'string' || !body.username.trim() || body.username.trim().length > 64) {
+    res.status(400).json({ error: '用户名不能为空' }); return;
+  }
+  const username = body.username.trim().slice(0, 64);
+  const requestedAvatar = body.avatarUrl;
+  const avatarUrl = requestedAvatar === undefined ? account.avatarUrl : sanitizeProfileAvatar(requestedAvatar);
+  if (requestedAvatar !== undefined && requestedAvatar !== null && requestedAvatar !== '' && avatarUrl === null) {
+    res.status(400).json({ error: '头像格式不受支持或文件过大' }); return;
+  }
+  accounts.updateProfile(account.id, username, avatarUrl);
+  const socketId = accountSockets.get(account.id);
+  const activeSocket = socketId ? io.sockets.sockets.get(socketId) : undefined;
+  if (socketId && activeSocket?.connected) {
+    userNames.set(socketId, username);
+    userAvatars.set(socketId, avatarUrl);
+    const updated = stmtUpdateOwnerName.run(username, `account:${account.id}`, username);
+    if (updated.changes > 0) io.emit('rooms:updated', stmtGetRooms.all());
+    broadcastOnlineUsers();
+    for (const [roomId, members] of roomMembers) {
+      if (!members.has(socketId)) continue;
+      broadcastRoomMembers(roomId);
+      broadcastVoiceList(roomId);
+    }
+  }
+  res.json({ ok: true });
+});
+
 app.post('/api/auth/logout', (req, res) => {
   accounts.logout(req.body?.token);
   res.status(204).end();
@@ -535,8 +582,8 @@ app.post('/api/rooms/:id/images', (req, res) => {
     res.status(403).json({ error: '请先进入该房间' }); return;
   }
   const buffer = Buffer.from(data, 'base64');
-  if (!buffer.length || buffer.length > 5 * 1024 * 1024) {
-    res.status(400).json({ error: '图片大小必须在 5MB 以内' }); return;
+  if (!buffer.length || buffer.length > 10 * 1024 * 1024) {
+    res.status(400).json({ error: '图片大小必须在 10MB 以内' }); return;
   }
   if (!validChatImage(buffer, mimeType)) {
     res.status(400).json({ error: '图片内容与文件类型不匹配' }); return;
@@ -968,12 +1015,6 @@ io.on('connection', socket => {
   }
   socket.emit('session:checkpoint');
 
-  const sanitizeAvatarUrl = (value: unknown): string | null => {
-    if (value == null || value === '') return null;
-    if (typeof value !== 'string' || value.length > 240 * 1024) return null;
-    return /^data:image\/(?:png|jpeg|webp);base64,/i.test(value) ? value : null;
-  };
-
   const refreshProfileViews = () => {
     broadcastOnlineUsers();
     for (const [roomId, members] of roomMembers) {
@@ -985,7 +1026,7 @@ io.on('connection', socket => {
 
   socket.on('user:register', (
     registration: string | { username?: string; clientId?: string; authToken?: string; avatarUrl?: unknown; platform?: unknown; remoteControlSupported?: unknown },
-    cb?: (result: { ok: boolean; error?: string; code?: string }) => void,
+    cb?: (result: { ok: boolean; error?: string; code?: string; profile?: { username: string; avatarUrl: string | null } }) => void,
   ) => {
     const account = typeof registration === 'string' ? null : accounts.accountForToken(registration?.authToken);
     if (typeof registration !== 'string' && registration?.authToken && !account) {
@@ -1031,7 +1072,7 @@ io.on('connection', socket => {
       if (migratedOwners.changes > 0) io.emit('rooms:updated', stmtGetRooms.all());
     }
     userNames.set(socket.id, username.slice(0, 64));
-    userAvatars.set(socket.id, sanitizeAvatarUrl(account?.avatarUrl ?? (typeof registration === 'string' ? null : registration.avatarUrl)));
+    userAvatars.set(socket.id, sanitizeProfileAvatar(account?.avatarUrl ?? (typeof registration === 'string' ? null : registration.avatarUrl)));
     userClientIds.set(socket.id, clientId);
     socket.data.authToken = account && typeof registration !== 'string' ? registration.authToken : undefined;
     socket.data.accountId = account?.id;
@@ -1047,7 +1088,13 @@ io.on('connection', socket => {
     if (updated.changes > 0) io.emit('rooms:updated', stmtGetRooms.all());
     refreshProfileViews();
     socket.emit('voice:counts', voiceCounts());
-    cb?.({ ok: true });
+    cb?.({
+      ok: true,
+      profile: {
+        username: userNames.get(socket.id) ?? username.slice(0, 64),
+        avatarUrl: userAvatars.get(socket.id) ?? null,
+      },
+    });
   });
 
   socket.on('user:update-profile', (
@@ -1058,7 +1105,7 @@ io.on('connection', socket => {
     const clientId = userClientIds.get(socket.id);
     if (!username || !clientId) { cb?.({ ok: false, error: '用户尚未注册' }); return; }
     userNames.set(socket.id, username);
-    const avatarUrl = sanitizeAvatarUrl(update.avatarUrl);
+    const avatarUrl = sanitizeProfileAvatar(update.avatarUrl);
     userAvatars.set(socket.id, avatarUrl);
     if (clientId.startsWith('account:')) accounts.updateProfile(clientId.slice('account:'.length), username, avatarUrl);
     const updated = stmtUpdateOwnerName.run(username, clientId, username);
@@ -1691,11 +1738,18 @@ io.on('connection', socket => {
           sourceType: demandType,
         });
         if (demandType === 'screen') {
-          stopRemoteControlForSocket(socket.id, '屏幕共享已结束');
-          io.to(producerRoomId).emit('screen:viewers', {
-            peerId: socket.id,
-            viewerCount: 0,
-          });
+          // A new producer of the same source may replace this one in the
+          // same event loop turn.  Defer the “ended” notice until replacement
+          // registration has settled so viewers never see a stale message
+          // during a normal screen-share update/reconnect.
+          setTimeout(() => {
+            if (isSharingScreen(socket.id, producerRoomId)) return;
+            stopRemoteControlForSocket(socket.id, '屏幕共享已结束');
+            io.to(producerRoomId).emit('screen:viewers', {
+              peerId: socket.id,
+              viewerCount: 0,
+            });
+          }, 0);
         }
       });
 

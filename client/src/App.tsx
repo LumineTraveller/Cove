@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useLayoutEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { flushSync } from 'react-dom';
 import { HashRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { ArrowRight, Clock3, Copy, Headphones, LoaderCircle, LockKeyhole, LogIn, Mail, MessageCircle, Minus, MonitorPlay, Server, Sparkles, Square, UserRound, WifiOff, X } from 'lucide-react';
 import RoomList from './pages/RoomList';
 import ChatRoomV2 from './pages/ChatRoomV2';
 import { UpdateCenter } from './components/UpdateCenter';
 import { createConnectionDeadline } from './connectionDeadline';
-import { clearProfile, persistProfile, readProfile } from './profile';
+import { createSessionRegistration } from './sessionRegistration';
+import { clearProfile, MAX_PERSISTED_AVATAR_DATA_URL_LENGTH, persistProfile, readProfile } from './profile';
 import { socket, getClientId, getServerURL, normalizeURL } from './socket';
 import type { UserProfile } from './types';
 import { ServerCertificateToggle } from './components/ServerCertificateToggle';
@@ -32,7 +34,7 @@ function WindowTitleBar({ showBrand = true }: { showBrand?: boolean }) {
   };
 
   return (
-    <div className="cove-window-titlebar" onDoubleClick={toggleMaximize}>
+    <div className={`cove-window-titlebar ${maximized ? "is-maximized" : ""}`} onDoubleClick={toggleMaximize}>
       {showBrand && (
         <span className="cove-window-brand">
           <img src="./assets/cove-icon.png" alt="" aria-hidden="true" />
@@ -71,8 +73,7 @@ export default function App() {
   const accountSession = readAccountSession(serverURL);
   const needLogin = !profile.username || !serverUrl || !accountSession;
 
-  useLayoutEffect(() => {
-    applyTheme(theme);
+  useEffect(() => {
     try {
       window.localStorage.setItem(THEME_STORAGE_KEY, theme);
     } catch {
@@ -81,7 +82,9 @@ export default function App() {
   }, [theme]);
 
   const handleThemeChange = useCallback((next: AppTheme) => {
-    setTheme(next);
+    // Capture the old surface BEFORE React changes theme-dependent gradients
+    // and controls. Commit both CSS tokens and React state in the snapshot update.
+    applyTheme(next, () => flushSync(() => setTheme(next)));
   }, []);
 
   useEffect(() => {
@@ -125,53 +128,72 @@ export default function App() {
       return true;
     };
 
-    const register = () => {
-      const currentProfile = readAccountSession(serverURL)?.profile ?? readProfile();
-      setConnected(null);
-      socket.timeout(8_000).emit('user:register', {
-        username: currentProfile.username,
-        avatarUrl: currentProfile.avatarUrl,
-        clientId: getClientId(),
-        authToken: readAccountSession(serverURL)?.token,
-        platform: 'desktop',
-        remoteControlSupported: window.coveRemoteControl?.supported === true,
-      }, (error: Error | null, response?: { ok?: boolean; error?: string; code?: string }) => {
-        if (!active) return;
-        const registered = !error && response?.ok !== false;
-        setConnected(registered);
-        if (registered) {
-          sessionRetryAttempt = 0;
-          if (sessionRetryTimer) {
-            clearTimeout(sessionRetryTimer);
-            sessionRetryTimer = null;
-          }
-          deadline.complete();
-          setInitialConnectionPending(false);
-          setConnectionProblem(null);
-        } else {
-          socket.disconnect();
-          setInitialConnectionPending(false);
-          if (response?.error?.includes('登录已失效')) {
-            clearAccountSession(serverURL);
-            clearProfile();
-            window.location.reload();
-            return;
-          }
-          if (response?.code === 'SESSION_IN_USE') {
-            if (scheduleSessionRetry()) return;
-            clearAccountSession(serverURL);
-            clearProfile();
-            setProfile({ username: '', avatarUrl: null });
-            setAuthError(response.error ?? '账号已在其他设备使用，请重新登录。');
-            setEditingServer(false);
-            return;
-          }
-          setConnectionProblem('registration');
-          setEditingServer(true);
+    const registration = createSessionRegistration({
+      isConnected: () => active && socket.connected,
+      onPending: () => setConnected(null),
+      send: acknowledge => {
+        const currentProfile = readAccountSession(serverURL)?.profile ?? readProfile();
+        socket.timeout(8_000).emit('user:register', {
+          username: currentProfile.username,
+          avatarUrl: currentProfile.avatarUrl,
+          clientId: getClientId(),
+          authToken: readAccountSession(serverURL)?.token,
+          platform: 'desktop',
+          remoteControlSupported: window.coveRemoteControl?.supported === true,
+        }, acknowledge);
+      },
+      onTransientError: error => {
+        console.warn('[connection] 登录登记确认暂未收到，将自动重试:', error.message);
+      },
+      onSuccess: response => {
+        setConnected(true);
+        if (response.profile?.username) {
+          const syncedProfile: UserProfile = {
+            username: response.profile.username,
+            avatarUrl: response.profile.avatarUrl ?? null,
+          };
+          setProfile(syncedProfile);
+          persistProfile(syncedProfile);
+          const session = readAccountSession(serverURL);
+          if (session) rememberAccountSession({ ...session, profile: syncedProfile });
         }
-      });
+        sessionRetryAttempt = 0;
+        if (sessionRetryTimer) {
+          clearTimeout(sessionRetryTimer);
+          sessionRetryTimer = null;
+        }
+        deadline.complete();
+        setInitialConnectionPending(false);
+        setConnectionProblem(null);
+      },
+      onRejected: response => {
+        setConnected(false);
+        socket.disconnect();
+        setInitialConnectionPending(false);
+        if (response.error?.includes('登录已失效')) {
+          clearAccountSession(serverURL);
+          clearProfile();
+          window.location.reload();
+          return;
+        }
+        if (response.code === 'SESSION_IN_USE') {
+          if (scheduleSessionRetry()) return;
+          clearAccountSession(serverURL);
+          clearProfile();
+          setProfile({ username: '', avatarUrl: null });
+          setAuthError(response.error ?? '账号已在其他设备使用，请重新登录。');
+          setEditingServer(false);
+          return;
+        }
+        setConnectionProblem('registration');
+        setEditingServer(true);
+      },
+    });
+    const register = () => registration.start();
+    const disconnect = () => {
+      registration.cancel();
+      if (active) setConnected(false);
     };
-    const disconnect = () => active && setConnected(false);
     const connectError = () => active && setConnected(false);
     const sessionReplaced = () => {
       if (!active) return;
@@ -207,6 +229,7 @@ export default function App() {
     void connectToServer();
     return () => {
       active = false;
+      registration.cancel();
       deadline.cancel();
       if (sessionRetryTimer) clearTimeout(sessionRetryTimer);
       socket.off('connect', register);
@@ -273,6 +296,22 @@ export default function App() {
     const session = readAccountSession(getServerURL());
     if (session) rememberAccountSession({ ...session, profile: next });
     setProfile(next);
+    const hasLargeAvatar = Boolean(next.avatarUrl && next.avatarUrl.length > MAX_PERSISTED_AVATAR_DATA_URL_LENGTH);
+    if (hasLargeAvatar && session?.token) {
+      // Keep multi-megabyte animated GIFs out of the real-time packet path.
+      // Older Socket.IO proxies commonly close the connection when a single
+      // profile packet exceeds their payload limit.
+      void fetch(`${session.serverUrl}/api/auth/profile`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: session.token, username: next.username, avatarUrl: next.avatarUrl }),
+      }).then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      }).catch(error => {
+        console.warn('[profile] 大头像同步失败', error);
+      });
+      return;
+    }
     if (socket.connected) socket.emit('user:update-profile', next);
   }, []);
 

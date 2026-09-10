@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import {
   Activity, AppWindow, ArrowLeft, AudioLines, Crown, Ellipsis, Eye, EyeOff, Gamepad2, Hash, Headphones, ImagePlus, LoaderCircle, Maximize2, Menu, MessageCircle, MousePointer2,
   Mic, MicOff, Minimize2, Monitor, MonitorPlay, MonitorUp, PanelRightClose, PanelRightOpen, PhoneOff,
-  RefreshCw, Send, Settings2, Smartphone, Trash2, UserMinus, UserRound, Volume2, VolumeX, X,
+  Info, RefreshCw, Send, Settings2, Smartphone, Trash2, UserMinus, UserRound, Volume2, VolumeX, X,
 } from 'lucide-react';
 import { socket } from '../socket';
 import { useWebRTC, SCREEN_PRESETS, ScreenPreset, Fps } from '../hooks/useWebRTC';
@@ -13,7 +13,6 @@ import { CollapsibleMediaBanner, WatchingScreenBanner } from '../components/Coll
 import { ScreenFullscreenControl } from '../components/ScreenFullscreenControl';
 import { ScreenVolumeControl } from '../components/ScreenVolumeControl';
 import { WatchingScreenControls } from '../components/WatchingScreenControls';
-import { MemberContextMenu } from '../components/MemberContextMenu';
 import { ProfileModal } from '../components/ProfileModal';
 import { UserProfileModal } from '../components/UserProfileModal';
 import { SoundPackPanel } from '../components/SoundPackPanel';
@@ -302,7 +301,9 @@ function ApplicationAudioModal({
             <div className="space-y-2">
               {sources.map(source => (
                 <button key={`${source.processId}-${source.id}`} onClick={() => onSelect(source)} className="flex w-full items-center gap-3 rounded-2xl border border-white/[0.08] bg-white/[0.045] px-4 py-3 text-left transition hover:border-violet-300/30 hover:bg-violet-300/[0.08]">
-                  <span className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl bg-white/10 text-white/55"><AppWindow size={18} /></span>
+                  <span className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl bg-white/10 text-white/55">
+                    {source.iconDataUrl ? <img src={source.iconDataUrl} alt="" draggable={false} className="h-7 w-7 rounded-lg object-contain" /> : <AppWindow size={18} />}
+                  </span>
                   <span className="min-w-0 flex-1"><span className="block truncate text-sm font-semibold text-white/85">{source.name}</span><span className="mt-0.5 block truncate text-xs text-white/35">{source.processName} · PID {source.processId}</span></span>
                   <span className="text-xs font-semibold text-violet-200/80">共享音频</span>
                 </button>
@@ -421,15 +422,6 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
   const [input, setInput]             = useState('');
   const [roomMembers, setRoomMembers] = useState<RoomMember[]>([]);
   const [isOwner, setIsOwner]         = useState(false);
-  const [moderatingId, setModeratingId] = useState<string | null>(null);
-  const [kickingId, setKickingId] = useState<string | null>(null);
-  const [kickConfirmMember, setKickConfirmMember] = useState<RoomMember | null>(null);
-  const [memberMenu, setMemberMenu] = useState<{ socketId: string; roomId: string; x: number; y: number } | null>(null);
-  const memberMenuAnchor = useRef<HTMLButtonElement | null>(null);
-  const closeMemberMenu = useCallback((restoreFocus = false) => {
-    setMemberMenu(null);
-    if (restoreFocus && memberMenuAnchor.current?.isConnected) memberMenuAnchor.current.focus({ preventScroll: true });
-  }, []);
   const [kickNotice, setKickNotice] = useState<{ title: string; message: string; returnToList: boolean } | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [draggingVolumeMember, setDraggingVolumeMember] = useState<string | null>(null);
@@ -469,6 +461,7 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
   const joinBlockedRef = useRef(false);
   const [messagesLoaded, setMessagesLoaded] = useState(false);
   const [imageUploading, setImageUploading] = useState(false);
+  const [imageError, setImageError] = useState<string | null>(null);
   const [imageDragActive, setImageDragActive] = useState(false);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const messagesEndRef                = useRef<HTMLDivElement>(null);
@@ -797,14 +790,15 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
   const sendImages = useCallback(async (files: File[]) => {
     if (!files.length || !roomId || !socket.id || !sessionReady || !roomSynced || imageUploadingRef.current) return;
     if (files.length > CHAT_IMAGE_MAX_BATCH) {
-      window.alert(`一次最多发送 ${CHAT_IMAGE_MAX_BATCH} 张图片。`);
+      setImageError(`一次最多发送 ${CHAT_IMAGE_MAX_BATCH} 张图片。`);
       return;
     }
     for (const file of files) {
       const validationError = validateChatImageFile(file);
-      if (validationError) { window.alert(validationError); return; }
+      if (validationError) { setImageError(validationError); return; }
     }
 
+    setImageError(null);
     imageUploadingRef.current = true;
     setImageUploading(true);
     try {
@@ -820,7 +814,7 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
         if (!response.ok) throw new Error(result.error ?? `HTTP ${response.status}`);
       }
     } catch (cause) {
-      window.alert(`图片发送失败：${cause instanceof Error ? cause.message : String(cause)}`);
+      setImageError(`图片发送失败：${cause instanceof Error ? cause.message : String(cause)}`);
     } finally {
       imageUploadingRef.current = false;
       setImageUploading(false);
@@ -873,58 +867,6 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
     void sendImages(images);
   }, [sendImages]);
 
-  const setMemberMuted = useCallback(async (member: RoomMember) => {
-    if (!roomId || !isOwner || member.isOwner) return;
-    setModeratingId(member.socketId);
-    try {
-      const result = await new Promise<{ ok: boolean; error?: string }>((resolve, reject) => {
-        socket.timeout(5_000).emit('room:set-muted', {
-          roomId,
-          targetSocketId: member.socketId,
-          muted: !member.isMuted,
-        }, (error: Error | null, response: { ok: boolean; error?: string }) => {
-          if (error) reject(error);
-          else resolve(response);
-        });
-      });
-      if (!result.ok) throw new Error(result.error ?? '操作失败');
-    } catch (error) {
-      alert(error instanceof Error ? error.message : String(error));
-    } finally {
-      setModeratingId(null);
-    }
-  }, [isOwner, roomId]);
-
-  const kickMember = useCallback(async (member: RoomMember) => {
-    if (!roomId || !isOwner || member.isOwner || member.socketId === socket.id) return;
-    setKickingId(member.socketId);
-    try {
-      const result = await new Promise<{ ok: boolean; error?: string }>((resolve, reject) => {
-        socket.timeout(5_000).emit('room:kick', {
-          roomId,
-          targetSocketId: member.socketId,
-        }, (error: Error | null, response: { ok: boolean; error?: string }) => {
-          if (error) reject(error);
-          else resolve(response);
-        });
-      });
-      if (!result.ok) throw new Error(result.error ?? '移除失败');
-    } catch (error) {
-      setKickNotice({
-        title: '移除失败',
-        message: error instanceof Error ? error.message : String(error),
-        returnToList: false,
-      });
-    } finally {
-      setKickingId(null);
-    }
-  }, [isOwner, roomId]);
-
-  const requestKickMember = useCallback((member: RoomMember) => {
-    if (!roomId || !isOwner || member.isOwner || member.socketId === socket.id) return;
-    setKickConfirmMember(member);
-  }, [isOwner, roomId]);
-
   const deleteRoom = useCallback(async () => {
     if (!roomId || !isOwner || !room) return;
     try {
@@ -955,13 +897,6 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
       setUpdatingRoomSettings(false);
     });
   }, [isOwner, roomId, settingsMaxMembers, passwordAction, settingsPassword, updatingRoomSettings]);
-
-  const menuMember = memberMenu && memberMenu.roomId === roomId && isOwner && sessionReady && roomSynced && sidebarOpen
-    ? roomMembers.find(member => member.socketId === memberMenu.socketId && !member.isOwner && member.socketId !== socket.id)
-    : undefined;
-  useEffect(() => {
-    if (memberMenu && !menuMember) closeMemberMenu();
-  }, [memberMenu, menuMember, closeMemberMenu]);
 
   if (!room || !roomSynced) return (
     <div className="flex h-full items-center justify-center bg-gradient-to-br from-zinc-950 via-black to-zinc-900 p-4">
@@ -1073,23 +1008,6 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
         </div>
       )}
 
-      {kickConfirmMember && (
-        <div className="fixed inset-0 z-[125] flex items-center justify-center bg-black/65 p-4 backdrop-blur-md" onMouseDown={() => setKickConfirmMember(null)}>
-          <section className="w-full max-w-sm rounded-3xl border border-red-400/20 bg-zinc-900/95 p-7 shadow-2xl" onMouseDown={event => event.stopPropagation()} role="alertdialog" aria-modal="true" aria-labelledby="kick-member-title">
-            <div className="flex items-start justify-between">
-              <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-red-500/15 text-red-300"><UserMinus size={21} /></div>
-              <button onClick={() => setKickConfirmMember(null)} className="rounded-xl p-2 text-white/35 transition hover:bg-white/10 hover:text-white" aria-label="关闭移除确认"><X size={18} /></button>
-            </div>
-            <h2 id="kick-member-title" className="mt-5 text-xl font-bold text-white">移除成员？</h2>
-            <p className="mt-2 text-sm leading-relaxed text-white/45">确定要将 <span className="font-semibold text-white/80">{kickConfirmMember.username}</span> 移出当前房间吗？对方将立即离开房间，但之后仍可重新加入。</p>
-            <div className="mt-6 flex gap-2.5">
-              <button onClick={() => setKickConfirmMember(null)} className="flex-1 rounded-xl bg-white/10 py-3 font-medium text-white/70 transition hover:bg-white/15">取消</button>
-              <button onClick={() => { const member = kickConfirmMember; setKickConfirmMember(null); void kickMember(member); }} className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl bg-red-500 py-3 font-semibold text-white transition hover:bg-red-400"><UserMinus size={17} />确认移除</button>
-            </div>
-          </section>
-        </div>
-      )}
-
       {kickNotice && (
         <div className="fixed inset-0 z-[135] flex items-center justify-center bg-black/65 p-4 backdrop-blur-md" onMouseDown={() => { if (kickNotice.returnToList) navigate('/', { replace: true }); setKickNotice(null); }}>
           <section className="w-full max-w-sm rounded-3xl border border-amber-300/20 bg-zinc-900/95 p-7 shadow-2xl" onMouseDown={event => event.stopPropagation()} role="alertdialog" aria-modal="true" aria-labelledby="kick-notice-title">
@@ -1102,13 +1020,6 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
             <button onClick={() => { if (kickNotice.returnToList) navigate('/', { replace: true }); setKickNotice(null); }} className="mt-6 w-full rounded-xl bg-white py-3 font-semibold text-zinc-900 transition hover:bg-cyan-100">{kickNotice.returnToList ? '返回频道列表' : '知道了'}</button>
           </section>
         </div>
-      )}
-
-      {memberMenu && menuMember && (
-        <MemberContextMenu key={menuMember.socketId} username={menuMember.username} muted={menuMember.isMuted}
-          x={memberMenu.x} y={memberMenu.y} disabled={moderatingId === menuMember.socketId || kickingId === menuMember.socketId}
-          onClose={closeMemberMenu} onToggleMute={() => { void setMemberMuted(menuMember); }}
-          onRemove={() => requestKickMember(menuMember)} />
       )}
 
       {showRoomSettings && (
@@ -1136,7 +1047,6 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
       {previewImage && (
         <div className="fixed inset-0 z-[140] flex items-center justify-center bg-black/90 p-8 backdrop-blur-md" onMouseDown={() => setPreviewImage(null)} role="dialog" aria-modal="true" aria-label="图片预览">
           <img src={previewImage} alt="聊天图片预览" className="max-h-full max-w-full rounded-2xl object-contain shadow-2xl" onMouseDown={event => event.stopPropagation()} />
-          <button onClick={() => setPreviewImage(null)} className="absolute right-6 top-6 rounded-xl bg-white/10 p-3 text-white/70 transition hover:bg-white/20 hover:text-white" aria-label="关闭图片预览"><X size={21} /></button>
         </div>
       )}
 
@@ -1174,7 +1084,6 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
             <div className="space-y-1">
               {sortedRoomMembers.map(member => {
                 const isSelf = member.socketId === socket.id;
-                const canModerate = isOwner && !member.isOwner && !isSelf && sessionReady && roomSynced;
                 const voiceMember = rtc.voiceMembers.find(voice => voice.socketId === member.socketId);
                 const inVoice = !!voiceMember;
                 const showVoiceState = rtc.inVoice && inVoice;
@@ -1188,32 +1097,14 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
                 const sharingApplicationAudio = !!member.isSharingApplicationAudio || (isSelf && rtc.isApplicationAudioSharing)
                   || rtc.remoteApplicationAudios.some(audio => audio.socketId === member.socketId);
                 return (
-                  <div key={member.socketId} className="group rounded-xl px-2 py-2 transition-colors hover:bg-white/[0.06]"
-                    onContextMenu={event => {
-                      if (!canModerate || !roomId) return;
-                      event.preventDefault(); event.stopPropagation();
-                      memberMenuAnchor.current = event.currentTarget.querySelector<HTMLButtonElement>('[data-member-profile]');
-                      setMemberMenu({ socketId: member.socketId, roomId, x: event.clientX, y: event.clientY });
-                    }}
-                    onKeyDown={event => {
-                      if (!canModerate || !roomId || !(event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10'))) return;
-                      event.preventDefault(); event.stopPropagation();
-                      const anchor = event.currentTarget.querySelector<HTMLButtonElement>('[data-member-profile]');
-                      memberMenuAnchor.current = anchor;
-                      const rect = (anchor ?? event.currentTarget).getBoundingClientRect();
-                      setMemberMenu({ socketId: member.socketId, roomId, x: rect.left, y: rect.bottom });
-                    }}>
-                    {/* 管理操作仅由右键菜单唤出，不再挤占成员信息行。 */}
+                  <div key={member.socketId} className="group rounded-xl px-2 py-2 transition-colors hover:bg-white/[0.06]" onContextMenu={event => { event.preventDefault(); event.stopPropagation(); }}>
                     <div className="flex items-start gap-2">
                       <div className="min-w-0 flex-1">
                         <button
                           data-member-profile
                           onClick={() => isSelf ? setShowProfile(true) : setViewingProfile(member)}
                           className="flex w-full min-w-0 items-center gap-3 rounded-xl text-left focus:outline-none focus:ring-2 focus:ring-cyan-300/35"
-                          title={isSelf ? '打开个人名片' : `查看 ${member.username} 的主页${canModerate ? '（右键管理成员）' : ''}`}
-                          aria-haspopup={canModerate ? 'menu' : undefined}
-                          aria-expanded={canModerate ? menuMember?.socketId === member.socketId : undefined}
-                          aria-controls={menuMember?.socketId === member.socketId ? 'member-moderation-menu' : undefined}
+                          title={isSelf ? '打开个人名片' : `查看 ${member.username} 的主页`}
                         >
                           <Avatar username={member.username} avatarUrl={member.avatarUrl} size="sm" className={speaking ? 'border-green-400/60 ring-2 ring-green-400/40' : isSelf ? 'border-white/30' : 'transition group-hover:border-cyan-200/30'} />
                           <div className="min-w-0 flex-1">
@@ -1555,7 +1446,7 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
 
         {/* Messages */}
         <div className={hasScreen
-          ? `absolute bottom-20 right-0 top-16 z-10 w-96 overflow-y-auto border-l border-white/10 bg-zinc-950/90 px-5 py-4 shadow-2xl backdrop-blur-xl transform transition-[transform,opacity] duration-300 ease-in-out will-change-transform motion-reduce:transition-none ${chatDrawerOpen ? 'translate-x-0 opacity-100' : 'translate-x-full opacity-0 pointer-events-none'}`
+          ? `absolute bottom-20 right-0 top-16 z-10 w-96 overflow-y-auto border-l border-white/10 bg-zinc-950/90 px-5 py-4 shadow-2xl backdrop-blur-xl transform transition-[transform,opacity] duration-300 ease-in-out will-change-transform ${chatDrawerOpen ? 'translate-x-0 opacity-100' : 'translate-x-full opacity-0 pointer-events-none'}`
           : 'flex-1 overflow-y-auto min-h-0 px-6 py-5'}>
           {messages.length === 0 && (
             <div className="flex flex-col items-center justify-center h-full gap-3">
@@ -1621,9 +1512,23 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
         </div>
 
         {/* Input */}
-        <div className={hasScreen
-          ? `absolute bottom-0 right-0 z-10 w-96 border-l border-t border-white/10 bg-zinc-950/95 px-4 py-3 backdrop-blur-xl transform transition-[transform,opacity] duration-300 ease-in-out will-change-transform motion-reduce:transition-none ${chatDrawerOpen ? 'translate-x-0 opacity-100' : 'translate-x-full opacity-0 pointer-events-none'}`
-          : 'flex-shrink-0 px-5 py-4 border-t border-white/[0.08]'}>
+        <div className={(hasScreen
+          ? `absolute bottom-0 right-0 z-10 w-96 border-l border-t border-white/10 bg-zinc-950/95 px-4 py-3 backdrop-blur-xl transform transition-[transform,opacity] duration-300 ease-in-out will-change-transform ${chatDrawerOpen ? 'translate-x-0 opacity-100' : 'translate-x-full opacity-0 pointer-events-none'}`
+          : 'flex-shrink-0 px-5 py-4 border-t border-white/[0.08]') + ' relative'}>
+          {imageError && (
+            <div className="chat-image-error popover-card" role="alert">
+              <div className="chat-image-error-copy">
+                <span className="chat-image-error-icon"><Info size={17} strokeWidth={2.5} /></span>
+                <div>
+                  <strong>图片无法发送</strong>
+                  <p>{imageError}</p>
+                </div>
+              </div>
+              <button type="button" className="chat-image-error-close" onClick={() => setImageError(null)} aria-label="关闭提示">
+                <X size={16} />
+              </button>
+            </div>
+          )}
           <div
             onDragEnter={handleImageDragEnter}
             onDragOver={handleImageDragOver}
@@ -1649,7 +1554,7 @@ export default function ChatRoom({ profile, onProfileChange, serverURL, sessionR
               disabled={imageUploading || !sessionReady || !roomSynced}
               onClick={() => imageInputRef.current?.click()}
               aria-label="发送图片"
-              title="发送图片（最大 5MB）"
+              title="发送图片（最大 10MB）"
             >
               {imageUploading ? <LoaderCircle size={19} className="animate-spin" /> : <ImagePlus size={19} />}
             </button>

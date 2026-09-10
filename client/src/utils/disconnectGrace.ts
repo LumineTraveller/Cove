@@ -1,4 +1,4 @@
-export const DISCONNECT_GRACE_MS = 7_500;
+export const DISCONNECT_GRACE_MS = 5_000;
 
 // Each failing channel gets its own deadline; repeated notifications never extend it.
 export class DisconnectGrace {

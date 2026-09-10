@@ -1,3 +1,5 @@
+import { avatarCropPresentation } from '../profile';
+
 interface Props {
   username: string;
   avatarUrl?: string | null;
@@ -14,11 +16,27 @@ const sizes = {
 
 export function Avatar({ username, avatarUrl, size = 'md', className = '' }: Props) {
   const hasAvatar = Boolean(avatarUrl);
+  const crop = avatarUrl ? avatarCropPresentation(avatarUrl) : null;
   const fallbackClass = hasAvatar ? 'bg-white/10 text-white' : 'avatar-fallback';
   return (
-    <div data-avatar-fallback={hasAvatar ? undefined : ''} className={`${sizes[size]} overflow-hidden rounded-full border border-white/15 ${fallbackClass} flex flex-shrink-0 items-center justify-center font-semibold ${className}`}>
+    <div data-avatar-fallback={hasAvatar ? undefined : ''} className={`${sizes[size]} relative overflow-hidden rounded-full border border-white/15 ${fallbackClass} flex flex-shrink-0 items-center justify-center font-semibold ${className}`}>
       {avatarUrl ? (
-        <img src={avatarUrl} alt={`${username} 的头像`} className="h-full w-full object-cover" />
+        <img
+          src={crop?.source ?? avatarUrl}
+          alt={`${username} 的头像`}
+          className="h-full w-full object-cover"
+          style={crop ? {
+            position: 'absolute',
+            left: '50%',
+            top: '50%',
+            width: `${crop.zoom * 100}%`,
+            height: `${crop.zoom * 100}%`,
+            maxWidth: 'none',
+            maxHeight: 'none',
+            objectFit: 'cover',
+            transform: `translate(-50%, -50%) translate(${crop.offsetX * 100}%, ${crop.offsetY * 100}%)`,
+          } : undefined}
+        />
       ) : (
         <span aria-hidden="true">{username[0]?.toUpperCase() ?? '?'}</span>
       )}

@@ -3,6 +3,8 @@ export interface ApplicationAudioSource {
   name: string;
   processId: number;
   processName: string;
+  /** Windows app icon encoded as a data URL for renderer-safe display. */
+  iconDataUrl?: string;
 }
 
 // The Windows loopback helper emits 48 kHz, signed 16-bit, interleaved stereo PCM.

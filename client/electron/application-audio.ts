@@ -18,6 +18,8 @@ export interface ApplicationAudioSource {
   name: string;
   processId: number;
   processName: string;
+  /** Windows app icon encoded as a data URL for renderer-safe display. */
+  iconDataUrl?: string;
 }
 
 interface ProcessWindow {
@@ -73,7 +75,7 @@ export async function listApplicationAudioSources(): Promise<ApplicationAudioSou
   const sources = await desktopCapturer.getSources({
     types: ['window'],
     thumbnailSize: { width: 0, height: 0 },
-    fetchWindowIcons: false,
+    fetchWindowIcons: true,
   });
   const handles = sources.map(source => windowHandleFromSourceId(source.id)).filter((value): value is number => value !== null);
   const processes = await visibleProcessWindows(handles);
@@ -86,7 +88,23 @@ export async function listApplicationAudioSources(): Promise<ApplicationAudioSou
     // duplicate browser/game windows producing the same audio twice.
     if (!process || seen.has(process.processId)) return [];
     seen.add(process.processId);
-    return [{ id: source.id, name: source.name, processId: process.processId, processName: process.processName }];
+    let iconDataUrl: string | undefined;
+    try {
+      if (source.appIcon && !source.appIcon.isEmpty()) {
+        iconDataUrl = source.appIcon.toDataURL();
+      }
+    } catch (error) {
+      // An app can disappear while the desktop-capturer result is being read;
+      // the source remains usable with the generic window icon in that case.
+      console.debug('[application-audio] 无法读取窗口图标', error);
+    }
+    return [{
+      id: source.id,
+      name: source.name,
+      processId: process.processId,
+      processName: process.processName,
+      ...(iconDataUrl ? { iconDataUrl } : {}),
+    }];
   });
 }
 

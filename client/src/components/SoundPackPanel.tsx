@@ -26,6 +26,8 @@ import {
   applyAudioElementOutput,
   DEFAULT_AUDIO_DEVICE_ID,
 } from "../audioDevices";
+import { encodeAudioBufferSegment } from "../audioTrim";
+import { AudioTrimEditor } from "./AudioTrimEditor";
 
 interface Soundpack {
   id: string;
@@ -140,8 +142,25 @@ export function SoundPackPanel({
     left: number;
     bottom: number;
   } | null>(null);
+  const [audioEditor, setAudioEditor] = useState<{
+    file: File;
+    buffer: AudioBuffer;
+    index: number;
+    total: number;
+    busy: boolean;
+    error?: string;
+  } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioPreviewSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const uploadQueueRef = useRef<File[]>([]);
+  const uploadQueueIndexRef = useRef(0);
+  const uploadSummaryRef = useRef<{ succeeded: number; failed: string[]; skipped: string[] }>({
+    succeeded: 0,
+    failed: [],
+    skipped: [],
+  });
   const ownTriggerRef = useRef<HTMLButtonElement>(null);
   const managementPopoverRef = useRef<HTMLElement>(null);
   const quickPopoverRef = useRef<HTMLDivElement>(null);
@@ -243,6 +262,13 @@ export function SoundPackPanel({
     audioRef.current = null;
     setPlayingId(null);
   }, [inVoice]);
+
+  useEffect(() => () => {
+    audioPreviewSourceRef.current?.stop();
+    audioPreviewSourceRef.current = null;
+    void audioContextRef.current?.close();
+    audioContextRef.current = null;
+  }, []);
 
   const updateSoundpackVolume = (value: number) => {
     const normalized = Math.min(100, Math.max(0, value));
@@ -374,7 +400,7 @@ export function SoundPackPanel({
       );
   };
 
-  const uploadSoundpack = async (file: File) => {
+  const uploadSoundpack = async (file: File, displayName = file.name) => {
     const bytes = new Uint8Array(await file.arrayBuffer());
     let binary = "";
     for (let index = 0; index < bytes.length; index += 8192)
@@ -383,7 +409,7 @@ export function SoundPackPanel({
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        name: file.name.replace(/\.[^.]+$/, ""),
+        name: displayName.replace(/\.[^.]+$/, ""),
         data: btoa(binary),
         mimeType: file.type,
         socketId: socket.id,
@@ -399,6 +425,116 @@ export function SoundPackPanel({
       message = `上传失败（HTTP ${response.status}）`;
     }
     throw new Error(message);
+  };
+
+  const finishUploadQueue = () => {
+    const summary = uploadSummaryRef.current;
+    const total = uploadQueueRef.current.length;
+    if (summary.failed.length > 0 || summary.skipped.length > 0) {
+      const lines = [
+        `批量上传完成：成功 ${summary.succeeded} 个，失败 ${summary.failed.length} 个，跳过 ${summary.skipped.length} 个。`,
+      ];
+      if (summary.failed.length > 0) lines.push(`失败：\n${summary.failed.join("\n")}`);
+      if (summary.skipped.length > 0) lines.push(`跳过：\n${summary.skipped.join("\n")}`);
+      alert(lines.join("\n"));
+    } else if (total > 1) {
+      alert(`已添加 ${summary.succeeded} 个语音包。`);
+    }
+    uploadQueueRef.current = [];
+    uploadQueueIndexRef.current = 0;
+    setAudioEditor(null);
+    setUploading(false);
+    setUploadProgress(null);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  const openAudioEditor = async (file: File, index: number, total: number) => {
+    setAudioEditor(null);
+    try {
+      const context = audioContextRef.current ?? new AudioContext();
+      audioContextRef.current = context;
+      const source = await file.arrayBuffer();
+      const buffer = await context.decodeAudioData(source.slice(0));
+      setAudioEditor({ file, buffer, index, total, busy: false });
+    } catch {
+      uploadSummaryRef.current.failed.push(`${file.name}：无法解析音频格式`);
+      const nextIndex = index + 1;
+      if (nextIndex < uploadQueueRef.current.length) {
+        uploadQueueIndexRef.current = nextIndex;
+        setUploadProgress({ completed: nextIndex, total });
+        void openAudioEditor(uploadQueueRef.current[nextIndex], nextIndex, total);
+      } else {
+        finishUploadQueue();
+      }
+    }
+  };
+
+  const advanceAudioQueue = () => {
+    const nextIndex = uploadQueueIndexRef.current + 1;
+    const total = uploadQueueRef.current.length;
+    if (nextIndex >= total) {
+      finishUploadQueue();
+      return;
+    }
+    uploadQueueIndexRef.current = nextIndex;
+    setUploadProgress({ completed: nextIndex, total });
+    void openAudioEditor(uploadQueueRef.current[nextIndex], nextIndex, total);
+  };
+
+  const previewAudioSelection = (start: number, end: number) => {
+    const editor = audioEditor;
+    const context = audioContextRef.current;
+    if (!editor || !context) return;
+    audioPreviewSourceRef.current?.stop();
+    const source = context.createBufferSource();
+    source.buffer = editor.buffer;
+    source.connect(context.destination);
+    source.onended = () => {
+      if (audioPreviewSourceRef.current === source) audioPreviewSourceRef.current = null;
+    };
+    audioPreviewSourceRef.current = source;
+    void context.resume();
+    source.start(0, Math.max(0, start), Math.max(0.01, end - start));
+  };
+
+  const confirmAudioSelection = async (start: number, end: number) => {
+    const editor = audioEditor;
+    if (!editor || editor.busy) return;
+    setAudioEditor({ ...editor, busy: true, error: undefined });
+    try {
+      const fullSelection = start <= 0.01 && end >= editor.buffer.duration - 0.01;
+      let uploadFile = editor.file;
+      if (!fullSelection) {
+        const blob = encodeAudioBufferSegment(editor.buffer, start, end);
+        uploadFile = new File([blob], `${editor.file.name.replace(/\.[^.]+$/, "")}-clip.wav`, {
+          type: "audio/wav",
+        });
+      }
+      if (uploadFile.size > 8 * 1024 * 1024)
+        throw new Error("裁剪后的音频超过 8MB，请缩短片段后重试");
+      await uploadSoundpack(uploadFile, editor.file.name);
+      uploadSummaryRef.current.succeeded += 1;
+      setUploadProgress({ completed: editor.index + 1, total: editor.total });
+      advanceAudioQueue();
+    } catch (cause) {
+      setAudioEditor({
+        ...editor,
+        busy: false,
+        error: cause instanceof Error ? cause.message : "裁剪上传失败，请重试",
+      });
+    }
+  };
+
+  const cancelAudioSelection = () => {
+    audioPreviewSourceRef.current?.stop();
+    audioPreviewSourceRef.current = null;
+    uploadQueueRef.current = [];
+    uploadQueueIndexRef.current = 0;
+    uploadSummaryRef.current = { succeeded: 0, failed: [], skipped: [] };
+    setAudioEditor(null);
+    setUploading(false);
+    setUploadProgress(null);
+    if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
   const handleFileChange = async (
@@ -425,36 +561,12 @@ export function SoundPackPanel({
       return;
     }
 
+    uploadQueueRef.current = validFiles;
+    uploadQueueIndexRef.current = 0;
+    uploadSummaryRef.current = { succeeded: 0, failed: [], skipped };
     setUploading(true);
     setUploadProgress({ completed: 0, total: validFiles.length });
-    const failed: string[] = [];
-    try {
-      // 顺序上传可避免多个 8MB base64 请求同时占用大量内存，也不会超过单请求体积限制。
-      for (const [index, file] of validFiles.entries()) {
-        try {
-          await uploadSoundpack(file);
-        } catch (cause) {
-          failed.push(
-            `${file.name}：${cause instanceof Error ? cause.message : "网络错误"}`,
-          );
-        }
-        setUploadProgress({ completed: index + 1, total: validFiles.length });
-      }
-
-      if (skipped.length > 0 || failed.length > 0) {
-        const succeeded = validFiles.length - failed.length;
-        const summary = [
-          `批量上传完成：成功 ${succeeded} 个，失败 ${failed.length} 个，跳过 ${skipped.length} 个。`,
-        ];
-        if (failed.length > 0) summary.push(`失败：\n${failed.join("\n")}`);
-        if (skipped.length > 0) summary.push(`跳过：\n${skipped.join("\n")}`);
-        alert(summary.join("\n"));
-      }
-    } finally {
-      setUploading(false);
-      setUploadProgress(null);
-      if (fileInputRef.current) fileInputRef.current.value = "";
-    }
+    void openAudioEditor(validFiles[0], 0, validFiles.length);
   };
 
   const deleteSoundTarget = async (target: Soundpack) => {
@@ -581,6 +693,22 @@ export function SoundPackPanel({
       setReordering(false);
     }
   };
+
+  const audioEditorOverlay = audioEditor
+    ? createPortal(
+        <AudioTrimEditor
+          fileName={audioEditor.file.name}
+          buffer={audioEditor.buffer}
+          queueLabel={`${audioEditor.index + 1}/${audioEditor.total}`}
+          busy={audioEditor.busy}
+          error={audioEditor.error}
+          onCancel={cancelAudioSelection}
+          onConfirm={(start, end) => void confirmAudioSelection(start, end)}
+          onPreview={previewAudioSelection}
+        />,
+        document.body,
+      )
+    : null;
 
   if (compact) {
     const compactPopoverStyle = popoverPosition
@@ -910,6 +1038,7 @@ export function SoundPackPanel({
             </section>,
             document.body,
           )}
+        {audioEditorOverlay}
       </>
     );
   }
@@ -1251,6 +1380,7 @@ export function SoundPackPanel({
           </div>,
           document.body,
         )}
+      {audioEditorOverlay}
     </>
   );
 }

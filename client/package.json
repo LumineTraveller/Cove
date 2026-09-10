@@ -1,6 +1,6 @@
 {
   "name": "cove-client",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Cove - 即时通讯客户端",
   "author": "Cove",
   "private": true,
@@ -10,7 +10,7 @@
     "remote-input:build": "node electron/build-remote-input.cjs",
     "electron:compile": "npm run remote-input:build && tsc -p electron/tsconfig.json",
     "test:updater": "npm run electron:compile && node --test tests/updater.test.cjs tests/gitee-installer-cache.test.cjs tests/server-certificate-policy.test.cjs",
-    "test:connection": "tsx --test tests/connectionDeadline.test.ts",
+    "test:connection": "tsx --test tests/connectionDeadline.test.ts tests/sessionRegistration.test.ts",
     "test:audio-devices": "tsx --test tests/audioDevices.test.ts tests/remoteAudioPlayback.test.ts",
     "test:chat-images": "tsx --test tests/chatImages.test.ts",
     "test:chat-links": "tsx --test tests/chatLinks.test.ts",
