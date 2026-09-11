@@ -19,3 +19,8 @@ test('rejects stale APK metadata, duplicate version codes, and missing release n
   expect(() => createFeed({ ...metadata, variantName: 'debug' }, '0.4.0', '说明', apk, null)).toThrow('Release APK');
   expect(() => createFeed(metadata, '0.4.0', '说明', apk, null, '../bad')).toThrow('已有 Release');
 });
+test('rejects release notes written with the wrong encoding', () => {
+  // 历史事故：清单被手工重新生成后，notes 里的中文变成了乱码。
+  expect(() => createFeed(metadata, '0.4.0', '\uFFFD鍙戝竷鏃ユ湡', apk, null)).toThrow('替换字符');
+  expect(() => createFeed(metadata, '0.4.0', '正常说明', apk, null, 'mobile-v0.4.0')).not.toThrow();
+});

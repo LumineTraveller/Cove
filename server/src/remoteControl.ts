@@ -64,6 +64,7 @@ export class RemoteControlRegistry {
   private readonly requests = new Map<string, RemoteControlRequest>();
   private readonly sessions = new Map<string, RemoteControlSession>();
   private readonly inputWindows = new Map<string, { startedAt: number; count: number }>();
+  private readonly pressedInputs = new Map<string, Set<string>>();
 
   constructor(private readonly createId: () => string = randomUUID) {}
 
@@ -133,16 +134,27 @@ export class RemoteControlRegistry {
     return { ok: true, value: { request, session } };
   }
 
-  authorizeInput(sessionId: string, controllerSocketId: string, now = Date.now()): RemoteControlSession | null {
+  authorizeInput(sessionId: string, controllerSocketId: string, now = Date.now(), input?: RemoteControlInput): RemoteControlSession | null {
     const session = this.sessions.get(sessionId);
     if (!session || session.controllerSocketId !== controllerSocketId) return null;
+    const edge = input?.type === 'key' ? `key:${input.code}` : input?.type === 'button' ? `button:${input.button}` : null;
+    if (edge && input && 'down' in input && !input.down) {
+      // Only release a previously admitted press. This bounded exception keeps
+      // key/button-up reliable without letting arbitrary release spam bypass limits.
+      return this.pressedInputs.get(sessionId)?.delete(edge) ? session : null;
+    }
     const window = this.inputWindows.get(sessionId);
     if (!window || now - window.startedAt >= 1000) {
       this.inputWindows.set(sessionId, { startedAt: now, count: 1 });
-      return session;
+    } else {
+      if (window.count >= MAX_INPUTS_PER_SECOND) return null;
+      window.count += 1;
     }
-    if (window.count >= MAX_INPUTS_PER_SECOND) return null;
-    window.count += 1;
+    if (edge) {
+      let pressed = this.pressedInputs.get(sessionId);
+      if (!pressed) this.pressedInputs.set(sessionId, pressed = new Set());
+      pressed.add(edge);
+    }
     return session;
   }
 
@@ -152,6 +164,7 @@ export class RemoteControlRegistry {
       return { ok: false, error: '远程控制会话不存在' };
     this.sessions.delete(sessionId);
     this.inputWindows.delete(sessionId);
+    this.pressedInputs.delete(sessionId);
     return { ok: true, value: session };
   }
 
@@ -167,6 +180,7 @@ export class RemoteControlRegistry {
       if (session.controllerSocketId !== socketId && session.sharerSocketId !== socketId) continue;
       this.sessions.delete(sessionId);
       this.inputWindows.delete(sessionId);
+      this.pressedInputs.delete(sessionId);
       sessions.push(session);
     }
     return { requests, sessions };
@@ -184,6 +198,7 @@ export class RemoteControlRegistry {
       if (session.roomId !== roomId) continue;
       this.sessions.delete(sessionId);
       this.inputWindows.delete(sessionId);
+      this.pressedInputs.delete(sessionId);
       sessions.push(session);
     }
     return { requests, sessions };

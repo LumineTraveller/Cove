@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "start": "react-native start",
     "test": "jest",
-    "update:prepare": "node scripts/prepare-update.cjs"
+    "update:prepare": "node scripts/prepare-update.cjs",
+    "release:verify": "node scripts/verify-release.cjs --preflight"
   },
   "dependencies": {
     "@react-native-async-storage/async-storage": "^3.1.1",

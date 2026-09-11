@@ -1,6 +1,7 @@
 import {
   Fragment,
   type MouseEvent,
+  type PointerEvent as ReactPointerEvent,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -80,7 +81,8 @@ import {
   collectChatImageFiles,
   validateChatImageFile,
 } from "../chatImages";
-import { isScreenEncodingWithinPlan } from "../screenCapture";
+import { isScreenEncodingWithinPlan, screenEncodingPlanLabel } from "../screenCapture";
+import { diagnosticPacketLoss } from "../mediaDiagnostics";
 import type {
   Message,
   Room,
@@ -90,9 +92,11 @@ import type {
 } from "../types";
 import {
   normalizedVideoPoint,
+  RemotePointerSender,
   type RemoteControlInput,
 } from "../remoteControl";
 import type { ApplicationAudioSource } from "../applicationAudio";
+import { RemoteControlLifecycle, type RemoteControlSession } from "../remoteControlSession";
 import type { AppTheme } from "../theme";
 import { pickAboutQuote, type AboutQuote } from "../aboutQuotes";
 import "../ui-v2.css";
@@ -119,13 +123,6 @@ interface RemoteControlRequest {
   requestId: string;
   roomId: string;
   controllerName: string;
-}
-interface RemoteControlSession {
-  sessionId: string;
-  roomId: string;
-  role: "controller" | "sharer";
-  sharerSocketId?: string;
-  controllerName?: string;
 }
 interface MessageHistoryCursor {
   timestamp: number;
@@ -606,7 +603,7 @@ function RemoteScreenVideo({
   onInput: (input: RemoteControlInput) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const lastMove = useRef(0);
+  const inputSender = useMemo(() => new RemotePointerSender(onInput), [onInput]);
   const pressedKeys = useRef(new Set<string>());
   const pressedButtons = useRef(
     new Map<"left" | "right" | "middle", { x: number; y: number }>(),
@@ -643,15 +640,16 @@ function RemoteScreenVideo({
     return mapped;
   };
   const release = useCallback(() => {
+    inputSender.cancel();
     pressedKeys.current.forEach((code) =>
-      onInput({ type: "key", code, down: false }),
+      inputSender.send({ type: "key", code, down: false }),
     );
     pressedButtons.current.forEach((mapped, button) =>
-      onInput({ type: "button", button, down: false, ...mapped }),
+      inputSender.send({ type: "button", button, down: false, ...mapped }),
     );
     pressedKeys.current.clear();
     pressedButtons.current.clear();
-  }, [onInput]);
+  }, [inputSender]);
   useEffect(() => {
     if (!controlling) release();
     return release;
@@ -663,11 +661,7 @@ function RemoteScreenVideo({
       onPointerMove={(event) => {
         if (!controlling) return;
         const p = rememberPoint(point(event));
-        if (event.timeStamp - lastMove.current < 16) return;
-        if (p) {
-          lastMove.current = event.timeStamp;
-          onInput({ type: "pointer", ...p });
-        }
+        if (p) inputSender.send({ type: "pointer", ...p });
       }}
       onPointerDown={(event) => {
         if (!controlling) return;
@@ -685,7 +679,7 @@ function RemoteScreenVideo({
         event.currentTarget.focus();
         event.currentTarget.setPointerCapture(event.pointerId);
         pressedButtons.current.set(button, p);
-        onInput({ type: "button", button, down: true, ...p });
+        inputSender.send({ type: "button", button, down: true, ...p });
       }}
       onPointerUp={(event) => {
         if (!controlling) return;
@@ -706,7 +700,7 @@ function RemoteScreenVideo({
         if (!releasePoint) return;
         event.preventDefault();
         pressedButtons.current.delete(button);
-        onInput({ type: "button", button, down: false, ...releasePoint });
+        inputSender.send({ type: "button", button, down: false, ...releasePoint });
       }}
       onPointerCancel={release}
       onLostPointerCapture={release}
@@ -715,7 +709,7 @@ function RemoteScreenVideo({
         const p = point(event);
         if (!p) return;
         event.preventDefault();
-        onInput({
+        inputSender.send({
           type: "wheel",
           deltaX: event.deltaX,
           deltaY: event.deltaY,
@@ -727,14 +721,14 @@ function RemoteScreenVideo({
         event.preventDefault();
         event.stopPropagation();
         pressedKeys.current.add(event.code);
-        onInput({ type: "key", code: event.code, down: true });
+        inputSender.send({ type: "key", code: event.code, down: true });
       }}
       onKeyUp={(event) => {
         if (!controlling) return;
         event.preventDefault();
         event.stopPropagation();
         pressedKeys.current.delete(event.code);
-        onInput({ type: "key", code: event.code, down: false });
+        inputSender.send({ type: "key", code: event.code, down: false });
       }}
       onBlur={release}
       onContextMenu={(event) => controlling && event.preventDefault()}
@@ -865,6 +859,80 @@ function ChatPanelV2({
   const [pendingImages, setPendingImages] = useState<File[]>([]);
   const [dragActive, setDragActive] = useState(false);
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
+  // 大图查看：滚轮缩放 + 拖拽平移。缩放 1 倍时不允许拖动，保持点击关闭的手感。
+  const [lightboxZoom, setLightboxZoom] = useState(1);
+  const [lightboxOffset, setLightboxOffset] = useState({ x: 0, y: 0 });
+  const lightboxRef = useRef<HTMLDivElement>(null);
+  const lightboxImageRef = useRef<HTMLImageElement>(null);
+  const lightboxDragRef = useRef<{
+    pointerX: number;
+    pointerY: number;
+    originX: number;
+    originY: number;
+  } | null>(null);
+  useEffect(() => {
+    setLightboxZoom(1);
+    setLightboxOffset({ x: 0, y: 0 });
+    lightboxDragRef.current = null;
+  }, [lightboxImage]);
+  useEffect(() => {
+    const element = lightboxRef.current;
+    if (!element || !lightboxImage) return;
+    // React 的 onWheel 是被动监听，无法阻止页面滚动；这里显式注册非被动监听。
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      setLightboxZoom((current) => {
+        const next = Math.max(
+          1,
+          Math.min(6, current * (event.deltaY < 0 ? 1.15 : 1 / 1.15)),
+        );
+        if (next === 1) setLightboxOffset({ x: 0, y: 0 });
+        return next;
+      });
+    };
+    element.addEventListener("wheel", onWheel, { passive: false });
+    return () => element.removeEventListener("wheel", onWheel);
+  }, [lightboxImage]);
+  const lightboxPanLimit = () => {
+    const node = lightboxImageRef.current;
+    const scale = Math.max(0, lightboxZoom - 1);
+    if (!node) return { x: 0, y: 0 };
+    return {
+      x: (node.offsetWidth * scale) / 2,
+      y: (node.offsetHeight * scale) / 2,
+    };
+  };
+  const startLightboxDrag = (event: ReactPointerEvent<HTMLImageElement>) => {
+    if (lightboxZoom <= 1) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    lightboxDragRef.current = {
+      pointerX: event.clientX,
+      pointerY: event.clientY,
+      originX: lightboxOffset.x,
+      originY: lightboxOffset.y,
+    };
+  };
+  const moveLightboxDrag = (event: ReactPointerEvent<HTMLImageElement>) => {
+    const drag = lightboxDragRef.current;
+    if (!drag) return;
+    const limit = lightboxPanLimit();
+    setLightboxOffset({
+      x: Math.max(
+        -limit.x,
+        Math.min(limit.x, drag.originX + (event.clientX - drag.pointerX)),
+      ),
+      y: Math.max(
+        -limit.y,
+        Math.min(limit.y, drag.originY + (event.clientY - drag.pointerY)),
+      ),
+    });
+  };
+  const endLightboxDrag = (event: ReactPointerEvent<HTMLImageElement>) => {
+    if (!lightboxDragRef.current) return;
+    lightboxDragRef.current = null;
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId))
+      event.currentTarget.releasePointerCapture(event.pointerId);
+  };
   const [fontMenuOpen, setFontMenuOpen] = useState(false);
   const fontHoverTimerRef = useRef<number | null>(null);
   const openFontMenuOnHover = () => {
@@ -1468,6 +1536,7 @@ function ChatPanelV2({
       )}
       {lightboxImage && (
         <div
+          ref={lightboxRef}
           className="image-lightbox"
           role="dialog"
           aria-modal="true"
@@ -1475,10 +1544,25 @@ function ChatPanelV2({
           onClick={() => setLightboxImage(null)}
         >
           <img
+            ref={lightboxImageRef}
             src={lightboxImage}
             alt="放大的聊天图片"
+            className={lightboxZoom > 1 ? "is-zoomed" : ""}
+            title="滚轮缩放，按住拖动查看其他区域，点击空白处关闭"
+            style={{
+              transform: `translate(${lightboxOffset.x}px, ${lightboxOffset.y}px) scale(${lightboxZoom})`,
+            }}
             onContextMenu={(event) => openImageContextMenu(event, lightboxImage)}
             onClick={(event) => event.stopPropagation()}
+            onPointerDown={startLightboxDrag}
+            onPointerMove={moveLightboxDrag}
+            onPointerUp={endLightboxDrag}
+            onPointerCancel={endLightboxDrag}
+            onDoubleClick={(event) => {
+              event.stopPropagation();
+              setLightboxZoom(1);
+              setLightboxOffset({ x: 0, y: 0 });
+            }}
           />
         </div>
       )}
@@ -1537,8 +1621,16 @@ export function RoomAppearanceSettings({
   const [cropFile, setCropFile] = useState<File | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   return (
-    <div className="modal-scrim">
-      <section className="settings-modal room-settings">
+    <div
+      className="modal-scrim"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <section
+        className="settings-modal room-settings"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
         <header>
           <div>
             <small>仅房主可调整</small>
@@ -1913,8 +2005,16 @@ export function GlobalSettingsV2({
     ["about", <Info size={19} />, "关于应用"],
   ];
   return (
-    <div className="modal-scrim">
-      <section className="settings-modal global-settings">
+    <div
+      className="modal-scrim"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <section
+        className="settings-modal global-settings"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
         <aside>
           <h2>设置</h2>
           {nav.map(([id, icon, label]) => (
@@ -2377,7 +2477,6 @@ function ShareStatusBarV2({
   onEnd,
   fullscreenMode,
   onAppFull,
-  notice,
 }: {
   self: boolean;
   sharer: string;
@@ -2392,7 +2491,6 @@ function ShareStatusBarV2({
   onEnd: () => void;
   fullscreenMode: string | null;
   onAppFull: () => void;
-  notice?: string;
 }) {
   const appFullscreen = fullscreenMode === "app";
   return (
@@ -2437,11 +2535,6 @@ function ShareStatusBarV2({
             </button>
           )}
         </div>
-        {notice && (
-          <span className="share-status-notice" role="status">
-            {notice}
-          </span>
-        )}
         <button className="end-share" onClick={onEnd}>
           <PhoneDisconnect size={17} />
           {self ? "结束共享" : "结束观看"}
@@ -2503,24 +2596,6 @@ function ScreenShareSettingsV2({
             : "根据画面变化自动调整帧率。"}{" "}
           不设码率上限，实际速率由网络与设备能力决定。
         </p>
-        <label className="settings-toggle-card">
-          <span>
-            <b>游戏模式</b>
-            <small>以 60 FPS 和稳定动态画面为目标</small>
-          </span>
-          <input type="checkbox" checked={gameMode} onChange={onGameMode} />
-        </label>
-        <label className="settings-toggle-card">
-          <span>
-            <b>以原生分辨率共享</b>
-            <small>使用采集源自身分辨率</small>
-          </span>
-          <input
-            type="checkbox"
-            checked={nativeResolution}
-            onChange={(event) => onNativeResolution(event.target.checked)}
-          />
-        </label>
         <section
           className={`media-choice-section ${nativeResolution ? "disabled" : ""}`}
         >
@@ -2538,6 +2613,17 @@ function ScreenShareSettingsV2({
             ))}
           </div>
         </section>
+        <label className="settings-toggle-card">
+          <span>
+            <b>以原生分辨率共享</b>
+            <small>使用采集源自身分辨率</small>
+          </span>
+          <input
+            type="checkbox"
+            checked={nativeResolution}
+            onChange={(event) => onNativeResolution(event.target.checked)}
+          />
+        </label>
         <section className="media-choice-section">
           <span>帧率</span>
           <div className="choice-grid">
@@ -2556,6 +2642,13 @@ function ScreenShareSettingsV2({
             </button>
           </div>
         </section>
+        <label className="settings-toggle-card">
+          <span>
+            <b>游戏模式</b>
+            <small>以 60 FPS 和稳定动态画面为目标</small>
+          </span>
+          <input type="checkbox" checked={gameMode} onChange={onGameMode} />
+        </label>
         <label className="settings-toggle-card computer-audio-toggle">
           <span>
             <b>共享电脑音频</b>
@@ -2586,6 +2679,38 @@ function AudioShareMenuV2({
   onSystemAudio: () => void;
   onApplicationAudio: (source: ApplicationAudioSource) => void;
 }) {
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const listHeightRef = useRef<number | null>(null);
+  const listAnimationRef = useRef<Animation | null>(null);
+
+  // 列表内容高度变化时（首次载入、刷新后项数变化）让高度平滑过渡，弹窗随之拉长，
+  // 而不是一帧跳到位。
+  //
+  // 这里量的是 offsetHeight（当前已渲染高度），不是 scrollHeight：内容超出弹窗
+  // max-height 时（8 项约 734px > 可用 570px），scrollHeight 会给出一个够不到的自然
+  // 高度，动画会在头 100ms 内就撞上 flex 收缩的上限然后静止，缓动等于白给；改用已
+  // 渲染高度当目标，缓动才真正作用在可见的增长上。offsetHeight 也不受祖先 transform
+  // 影响，弹窗入场时的 scale 不会污染测量。
+  useLayoutEffect(() => {
+    const element = listRef.current;
+    if (!element) return;
+    const next = element.offsetHeight;
+    const previous = listHeightRef.current;
+    listHeightRef.current = next;
+    // offsetHeight 取整，留 1px 容差避免抖动触发无意义的过渡。
+    if (previous === null || Math.abs(previous - next) < 1) return;
+    // 尊重系统的「减少动态效果」：跳过过渡，直接呈现终态。
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    listAnimationRef.current?.cancel();
+    listAnimationRef.current = element.animate(
+      [{ height: `${previous}px` }, { height: `${next}px` }],
+      // 与 --ease-layout 取值一致：起步快、末端平稳收住。
+      { duration: 420, easing: "cubic-bezier(0.22, 1, 0.36, 1)" },
+    );
+  }, [sources, loading]);
+
+  useEffect(() => () => listAnimationRef.current?.cancel(), []);
+
   return (
     <div
       className="audio-popover-layer"
@@ -2632,10 +2757,11 @@ function AudioShareMenuV2({
             刷新
           </button>
         </div>
-        <div className="audio-share-list">
+        <div className="audio-share-list" ref={listRef}>
           <button
             type="button"
             className="source-option system-audio-option"
+            style={{ "--i": 0 } as React.CSSProperties}
             onClick={onSystemAudio}
           >
             <span className="source-option-icon">
@@ -2649,17 +2775,24 @@ function AudioShareMenuV2({
               <AudioLines size={19} weight="bold" />
             </span>
           </button>
-          {loading ? (
+          {/* 刷新时 sources 仍持有上一次的列表，这时不切回转圈，避免列表先塌陷再长回来；
+              只有首次载入（还没有任何内容可显示）才展示加载态。 */}
+          {loading && sources.length === 0 ? (
             <div className="audio-share-loading">
               <LoaderCircle className="spin" size={19} />
               正在读取可共享的应用…
             </div>
           ) : sources.length > 0 ? (
-            sources.map((source) => (
+            sources.map((source, index) => (
               <button
                 type="button"
                 key={source.id}
                 className="source-option"
+                // 逐条入场的序号（系统音频占 0）。封顶 12：否则 20 个应用会让末尾
+                // 等将近一秒。在 JS 里夹取而不是用 CSS min()，避免依赖
+                //「min() 接受无单位数值」这一行为 —— 一旦不支持，整条
+                // animation-delay 会被丢弃，stagger 静默失效。
+                style={{ "--i": Math.min(index + 1, 12) } as React.CSSProperties}
                 onClick={() => onApplicationAudio(source)}
               >
                 <span className="source-option-icon">
@@ -2786,7 +2919,7 @@ function DiagnosticsOverlayV2({
           <div>
             <span>丢包/重传</span>
             <b>
-              {rtc.stats.loss ?? "—"}% / {rtc.stats.retransmitBitrate ?? "—"}{" "}
+              {diagnosticPacketLoss(rtc.stats) ?? "—"}% / {rtc.stats.retransmitBitrate ?? "—"}{" "}
               kbps
             </b>
           </div>
@@ -2807,13 +2940,11 @@ function DiagnosticsOverlayV2({
             <div>
               <span>档位检查</span>
               <b>
-                {isScreenEncodingWithinPlan(
+                {screenEncodingPlanLabel(isScreenEncodingWithinPlan(
                   rtc.stats.width,
                   rtc.stats.height,
                   rtc.screenEncodingPlan,
-                ) === false
-                  ? "超过档位"
-                  : "正常"}
+                ))}
               </b>
             </div>
           )}
@@ -2840,7 +2971,6 @@ function ShareViewV2({
   onToggleDebug: () => void;
   remoteControl: {
     state: "available" | "pending" | "active" | "unsupported";
-    notice: string;
     sharerActive?: boolean;
     controllerName?: string;
   };
@@ -2952,7 +3082,7 @@ function ShareViewV2({
             </div>
             <div>
               <span>丢包</span>
-              <b>{rtc.stats.loss != null ? `${rtc.stats.loss}%` : "—"}</b>
+              <b>{diagnosticPacketLoss(rtc.stats) != null ? `${diagnosticPacketLoss(rtc.stats)}%` : "—"}</b>
             </div>
           </div>
         )}
@@ -2982,7 +3112,6 @@ function ShareViewV2({
           nativeFullscreen ? "full" : screenMaximized ? "app" : null
         }
         onAppFull={toggleFullscreen}
-        notice={remoteControl.notice}
       />
     </div>
   );
@@ -3320,6 +3449,14 @@ export default function ChatRoomV2({
   const [remoteSession, setRemoteSession] =
     useState<RemoteControlSession | null>(null);
   const [remoteNotice, setRemoteNotice] = useState("");
+  // 房主右键成员唤出的操作菜单（禁言 / 移出房间）。
+  const [memberMenu, setMemberMenu] = useState<{
+    socketId: string;
+    username: string;
+    muted: boolean;
+    x: number;
+    y: number;
+  } | null>(null);
   const [debug, setDebug] = useState(false);
   const [diagnosticsCompact, setDiagnosticsCompact] = useState(false);
   useEffect(() => {
@@ -3350,7 +3487,7 @@ export default function ChatRoomV2({
       // 本地存储不可用时仍即时应用字号。
     }
   };
-  const remoteRef = useRef<RemoteControlSession | null>(null);
+  const remoteLifecycleRef = useRef<RemoteControlLifecycle | null>(null);
   const roomSyncedRef = useRef(false);
   const joinPasswordRef = useRef("");
   const roomJoinGenerationRef = useRef(0);
@@ -3362,6 +3499,10 @@ export default function ChatRoomV2({
   joinPasswordRef.current = joinPassword;
   const shareLayout = Boolean(rtc.localScreen || rtc.remoteScreen);
   const chatVisible = !shareLayout || chatOpen;
+  // 只有房主能唤出成员菜单，权限由服务端在 room:state 里计算，客户端不自行声明。
+  const isRoomOwner = roomMembers.some(
+    (member) => member.socketId === socket.id && member.isOwner,
+  );
   const chatVisibleRef = useRef(chatVisible);
   // 让消息回调同步读取最新的可见状态，避免打开聊天栏的状态切换窗口
   // 仍被旧回调误判为“聊天栏已收起”。
@@ -3402,9 +3543,6 @@ export default function ChatRoomV2({
     setShowSoundboard(false);
     setShowSoundboardQuick(false);
   }, [rtc.inVoice]);
-  useEffect(() => {
-    remoteRef.current = remoteSession;
-  }, [remoteSession]);
   useEffect(() => {
     roomSyncedRef.current = roomSynced;
   }, [roomSynced]);
@@ -3803,17 +3941,38 @@ export default function ChatRoomV2({
     const onDeleted = ({ roomId: deleted }: { roomId: string }) => {
       if (deleted === roomId) navigate("/", { replace: true });
     };
+    // 被房主移出频道后必须真的离开房间界面，否则会停留在已经失去成员身份的房间。
+    const onKicked = ({ roomId: kicked, by }: { roomId: string; by?: string }) => {
+      if (kicked !== roomId) return;
+      navigate("/", { replace: true });
+      window.alert(`你已被${by ?? "房主"}移出频道。`);
+    };
     socket.on("message:new", onMessage);
     socket.on("room:state", onState);
     socket.on("room:deleted", onDeleted);
+    socket.on("room:kicked", onKicked);
     return () => {
       socket.off("message:new", onMessage);
       socket.off("room:state", onState);
       socket.off("room:deleted", onDeleted);
+      socket.off("room:kicked", onKicked);
     };
   }, [roomId, navigate]);
   useEffect(() => {
     const bridge = window.coveRemoteControl;
+    const lifecycle = new RemoteControlLifecycle({
+      roomId: roomId ?? "",
+      socket,
+      bridge,
+      onSession: (session) => {
+        setRemoteSession(session);
+        setPendingRemoteRequest(false);
+        setPendingRemoteRequestId(null);
+        setPendingRemote(null);
+      },
+      onNotice: setRemoteNotice,
+    });
+    remoteLifecycleRef.current = lifecycle;
     const onRequested = (request: RemoteControlRequest) => {
       if (request.roomId === roomId) setPendingRemote(request);
     };
@@ -3830,7 +3989,10 @@ export default function ChatRoomV2({
       setPendingRemoteRequestId((current) =>
         !requestId || current === requestId ? null : current,
       );
-      if (!accepted) setRemoteNotice(error ?? "远程控制请求未获批准");
+      if (!accepted) {
+        lifecycle.cancelExpectedStart();
+        setRemoteNotice(error ?? "远程控制请求未获批准");
+      }
     };
     const onRequestCancelled = ({
       requestId,
@@ -3839,6 +4001,7 @@ export default function ChatRoomV2({
       requestId: string;
       reason?: string;
     }) => {
+      lifecycle.cancelExpectedStart();
       setPendingRemote((current) =>
         current?.requestId === requestId ? null : current,
       );
@@ -3847,70 +4010,15 @@ export default function ChatRoomV2({
       );
       setRemoteNotice(reason ?? "远程控制请求已取消");
     };
-    const onStarted = async (session: RemoteControlSession) => {
-      if (session.roomId !== roomId) return;
-      if (session.role === "sharer") {
-        const enabled = await bridge?.setActive(session.sessionId);
-        if (!enabled) {
-          socket.emit("remote-control:stop", { sessionId: session.sessionId });
-          setRemoteNotice("本机远程输入组件不可用，控制已终止");
-          return;
-        }
-      }
-      setPendingRemoteRequest(false);
-      setPendingRemoteRequestId(null);
-      setPendingRemote(null);
-      setRemoteSession(session);
-    };
-    const onInput = ({
-      sessionId,
-      input,
-    }: {
-      sessionId: string;
-      input: RemoteControlInput;
-    }) => {
-      const current = remoteRef.current;
-      if (current?.role === "sharer" && current.sessionId === sessionId)
-        void bridge?.sendInput(sessionId, input);
-    };
-    const removeEmergencyListener = bridge?.onEmergencyStop(() => {
-      if (remoteRef.current?.role !== "sharer") return;
-      socket.emit("remote-control:stop", {
-        sessionId: remoteRef.current.sessionId,
-      });
-      void bridge.setActive(null);
-      setRemoteSession(null);
-      setRemoteNotice("已通过紧急快捷键终止远程控制");
-    });
-    const onStopped = ({
-      sessionId,
-      reason,
-    }: {
-      sessionId: string;
-      reason?: string;
-    }) => {
-      if (remoteRef.current?.sessionId === sessionId) {
-        setPendingRemoteRequest(false);
-        setRemoteSession(null);
-        if (remoteRef.current.role === "sharer") void bridge?.setActive(null);
-        setRemoteNotice(reason ?? "远程控制已结束");
-      }
-    };
     socket.on("remote-control:requested", onRequested);
     socket.on("remote-control:request-result", onResult);
     socket.on("remote-control:request-cancelled", onRequestCancelled);
-    socket.on("remote-control:started", onStarted);
-    socket.on("remote-control:input", onInput);
-    socket.on("remote-control:stopped", onStopped);
     return () => {
       socket.off("remote-control:requested", onRequested);
       socket.off("remote-control:request-result", onResult);
       socket.off("remote-control:request-cancelled", onRequestCancelled);
-      socket.off("remote-control:started", onStarted);
-      socket.off("remote-control:input", onInput);
-      socket.off("remote-control:stopped", onStopped);
-      void bridge?.setActive(null);
-      removeEmergencyListener?.();
+      lifecycle.dispose();
+      if (remoteLifecycleRef.current === lifecycle) remoteLifecycleRef.current = null;
     };
   }, [roomId]);
   const sortedMembers = useMemo(
@@ -4051,6 +4159,7 @@ export default function ChatRoomV2({
   const requestRemote = () => {
     const target = rtc.remoteScreen?.socketId;
     if (!target || !roomId || pendingRemoteRequest) return;
+    if (!remoteLifecycleRef.current?.expectStart("controller")) return;
     setRemoteNotice("");
     setPendingRemoteRequest(true);
     socket
@@ -4063,6 +4172,7 @@ export default function ChatRoomV2({
           response?: { ok?: boolean; requestId?: string; error?: string },
         ) => {
           if (error || !response?.ok) {
+            remoteLifecycleRef.current?.cancelExpectedStart();
             setPendingRemoteRequest(false);
             setPendingRemoteRequestId(null);
             setRemoteNotice(response?.error ?? "请求失败");
@@ -4072,6 +4182,7 @@ export default function ChatRoomV2({
   };
   const respondRemote = (accepted: boolean) => {
     if (!pendingRemote) return;
+    if (accepted && !remoteLifecycleRef.current?.expectStart("sharer")) return;
     socket.emit("remote-control:respond", {
       requestId: pendingRemote.requestId,
       accepted,
@@ -4079,16 +4190,11 @@ export default function ChatRoomV2({
     setPendingRemote(null);
   };
   const stopRemote = () => {
-    if (remoteSession)
-      socket.emit("remote-control:stop", {
-        sessionId: remoteSession.sessionId,
-      });
-    else if (pendingRemoteRequestId)
+    if (!remoteSession && pendingRemoteRequestId && socket.connected)
       socket.emit("remote-control:cancel", {
         requestId: pendingRemoteRequestId,
       });
-    if (remoteSession?.role === "sharer")
-      void window.coveRemoteControl?.setActive(null);
+    remoteLifecycleRef.current?.stop();
     const cancelledRequest = !remoteSession && Boolean(pendingRemoteRequestId);
     setPendingRemoteRequest(false);
     setPendingRemoteRequestId(null);
@@ -4097,13 +4203,51 @@ export default function ChatRoomV2({
     if (cancelledRequest) setRemoteNotice("远程控制请求已取消");
   };
   const sendRemoteInput = useCallback((inputValue: RemoteControlInput) => {
-    const current = remoteRef.current;
-    if (current?.role === "controller")
-      socket.emit("remote-control:input", {
-        sessionId: current.sessionId,
-        input: inputValue,
-      });
+    remoteLifecycleRef.current?.send(inputValue);
   }, []);
+  // 房主右键菜单：位置夹在窗口内，避免贴近右下角时被裁掉。
+  const openMemberMenu = (
+    event: MouseEvent,
+    member: RoomMember,
+    isSelf: boolean,
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!isRoomOwner || isSelf) return;
+    setMemberMenu({
+      socketId: member.socketId,
+      username: member.username,
+      muted: Boolean(member.isMuted),
+      x: Math.max(8, Math.min(event.clientX, window.innerWidth - 188)),
+      y: Math.max(8, Math.min(event.clientY, window.innerHeight - 104)),
+    });
+  };
+  const applyMemberMute = (muted: boolean) => {
+    const target = memberMenu;
+    if (!roomId || !target) return;
+    setMemberMenu(null);
+    socket.timeout(5000).emit(
+      "room:set-muted",
+      { roomId, targetSocketId: target.socketId, muted },
+      (error: Error | null, response?: { ok?: boolean; error?: string }) => {
+        if (error || !response?.ok)
+          window.alert(response?.error ?? error?.message ?? "操作失败");
+      },
+    );
+  };
+  const kickMember = () => {
+    const target = memberMenu;
+    if (!roomId || !target) return;
+    setMemberMenu(null);
+    socket.timeout(5000).emit(
+      "room:kick",
+      { roomId, targetSocketId: target.socketId },
+      (error: Error | null, response?: { ok?: boolean; error?: string }) => {
+        if (error || !response?.ok)
+          window.alert(response?.error ?? error?.message ?? "操作失败");
+      },
+    );
+  };
   const applyRoomSettings = (changes: Record<string, unknown>) => {
     if (!roomId) return;
     socket.timeout(5000).emit(
@@ -4298,11 +4442,8 @@ export default function ChatRoomV2({
                         className={`member-row ${isSelf ? "self" : ""} ${screen ? "has-watch" : ""} ${voice ? "in-voice" : "not-in-voice"}`}
                         key={member.socketId}
                         onContextMenu={(event) => {
-                          // Member actions are intentionally not exposed from a
-                          // context menu; keep the whole row free of the
-                          // browser menu as well as the former Cove popover.
-                          event.preventDefault();
-                          event.stopPropagation();
+                          // 房主右键唤出成员操作；非房主只屏蔽浏览器菜单。
+                          openMemberMenu(event, member, isSelf);
                         }}
                       >
                         <button
@@ -4458,7 +4599,9 @@ export default function ChatRoomV2({
                       <div className="strip-member" key={member.socketId}>
                         <button
                           className="strip-member-button"
-                          onContextMenu={(event) => event.preventDefault()}
+                          onContextMenu={(event) =>
+                            openMemberMenu(event, member, isSelf)
+                          }
                           onClick={() =>
                             member.socketId === socket.id
                               ? setShowProfile(true)
@@ -4567,7 +4710,6 @@ export default function ChatRoomV2({
                   }}
                   remoteControl={{
                     state: remoteState,
-                    notice: remoteNotice,
                     sharerActive: remoteSession?.role === "sharer",
                     controllerName: remoteSession?.controllerName,
                   }}
@@ -4589,29 +4731,29 @@ export default function ChatRoomV2({
           )}
         </section>
         <div id="shared-chat-panel" className="chat-slot">
-          {chatVisible && (
-            <ChatPanelV2
-              key={roomId}
-              messages={messages}
-              profile={profile}
-              serverURL={serverURL}
-              input={input}
-              setInput={setInput}
-              onSend={sendMessage}
-              onSendImages={sendImages}
-              imageError={imageError}
-              onDismissImageError={() => setImageError(null)}
-              onImageError={setImageError}
-              compact={shareLayout}
-              unread={unread}
-              fontSize={chatFontSize}
-              onFontSizeChange={updateChatFontSize}
-              hasOlderMessages={hasOlderMessages}
-              loadingOlderMessages={loadingOlderMessages}
-              historyLoadVersion={historyLoadVersion}
-              onLoadOlderMessages={loadOlderMessages}
-            />
-          )}
+          {/* 共享态下聊天区固定在最终宽度、只做 translateX 平移；面板必须保持挂载，
+              否则滑出动画只会带走一块空背景。未共享时它一直是可见的。 */}
+          <ChatPanelV2
+            key={roomId}
+            messages={messages}
+            profile={profile}
+            serverURL={serverURL}
+            input={input}
+            setInput={setInput}
+            onSend={sendMessage}
+            onSendImages={sendImages}
+            imageError={imageError}
+            onDismissImageError={() => setImageError(null)}
+            onImageError={setImageError}
+            compact={shareLayout}
+            unread={unread}
+            fontSize={chatFontSize}
+            onFontSizeChange={updateChatFontSize}
+            hasOlderMessages={hasOlderMessages}
+            loadingOlderMessages={loadingOlderMessages}
+            historyLoadVersion={historyLoadVersion}
+            onLoadOlderMessages={loadOlderMessages}
+          />
         </div>
         {shareLayout && (
           <div className="chat-edge-toggle-anchor">
@@ -4839,9 +4981,87 @@ export default function ChatRoomV2({
           }}
         />
       )}
+      {/* 远程控制的结束/取消播报是可确认的弹窗：作为状态条里的常驻文字时，
+          它既容易被忽略，又会在下一次操作前一直留在屏幕上。 */}
+      {remoteNotice && (
+        <div
+          className="modal-scrim"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setRemoteNotice("");
+          }}
+        >
+          <section
+            className="remote-notice-dialog popover-card"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="remote-notice-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <MousePointer2 size={25} />
+            <h2 id="remote-notice-title">远程控制</h2>
+            <p>{remoteNotice}</p>
+            <button
+              className="primary-wide"
+              onClick={() => setRemoteNotice("")}
+            >
+              知道了
+            </button>
+          </section>
+        </div>
+      )}
+      {/* 房主右键成员唤出的操作菜单；成员栏与共享态成员条共用同一份。 */}
+      {memberMenu && (
+        <>
+          <div
+            className="menu-click-away"
+            onMouseDown={() => setMemberMenu(null)}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              setMemberMenu(null);
+            }}
+          />
+          <div
+            className="member-context popover-card"
+            role="menu"
+            aria-label={`${memberMenu.username} 的操作`}
+            style={{ left: memberMenu.x, top: memberMenu.y }}
+          >
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => applyMemberMute(!memberMenu.muted)}
+            >
+              {memberMenu.muted ? (
+                <Microphone size={16} />
+              ) : (
+                <MicrophoneSlash size={16} />
+              )}
+              {memberMenu.muted ? "取消语音禁言" : "语音禁言"}
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="danger-row"
+              onClick={kickMember}
+            >
+              <DoorOpen size={16} />
+              移出房间
+            </button>
+          </div>
+        </>
+      )}
       {pendingRemote && (
-        <div className="modal-scrim">
-          <section className="remote-request popover-card">
+        <div
+          className="modal-scrim"
+          onMouseDown={(event) => {
+            // 点击外部等同拒绝：绝不会因为误触而授权控制。
+            if (event.target === event.currentTarget) respondRemote(false);
+          }}
+        >
+          <section
+            className="remote-request popover-card"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
             <MousePointer2 size={25} />
             <h2>远程控制请求</h2>
             <p>{pendingRemote.controllerName} 请求控制你正在共享的屏幕。</p>

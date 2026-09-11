@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { HashRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { ArrowRight, Clock3, Copy, Headphones, LoaderCircle, LockKeyhole, LogIn, Mail, MessageCircle, Minus, MonitorPlay, Server, Sparkles, Square, UserRound, WifiOff, X } from 'lucide-react';
@@ -336,6 +336,25 @@ export default function App() {
     setRememberedLogins(readRememberedLogins());
   };
 
+  const loginVideoRef = useRef<HTMLVideoElement | null>(null);
+  useEffect(() => {
+    if (!needLogin) return;
+    const video = loginVideoRef.current;
+    if (!video || !video.requestVideoFrameCallback) return;
+    let callbackId = 0;
+    const onFrame: VideoFrameRequestCallback = (_now, metadata) => {
+      // This decorative clip has matching endpoints. Skip its duplicate tail
+      // before native looping drains and restarts the decoder.
+      if (Number.isFinite(video.duration) && video.duration > 0.12 &&
+          metadata.mediaTime >= video.duration - 0.06 && !video.seeking) {
+        video.currentTime = 0;
+      }
+      callbackId = video.requestVideoFrameCallback(onFrame);
+    };
+    callbackId = video.requestVideoFrameCallback(onFrame);
+    return () => video.cancelVideoFrameCallback(callbackId);
+  }, [needLogin]);
+
   if (needLogin) {
     return (
       <main className="auth-page">
@@ -345,6 +364,20 @@ export default function App() {
             <div className="auth-brand">
               <img src="./assets/cove-icon.png" alt="Cove" />
               <span>Cove</span>
+            </div>
+            {/* 装饰性循环动画：静音、循环播放，且不进无障碍树。
+                muted 必须保留 —— 否则 Electron 的自动播放会被拦下。 */}
+            <div className="auth-showcase-media" aria-hidden="true">
+              <video
+                ref={loginVideoRef}
+                src="./assets/cove-login-loop.mp4"
+                autoPlay
+                muted
+                loop
+                playsInline
+                preload="auto"
+                disablePictureInPicture
+              />
             </div>
             <div className="auth-showcase-copy">
               <p className="auth-eyebrow">COVE · VOICE SPACE</p>

@@ -1,12 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  diagnosticPacketLoss,
   intervalLossPercent,
   mediaDiagnosticSessionKey,
   shouldAcceptMediaDiagnosticSample,
   videoCounterRates,
   videoCounterSample,
 } from '../src/mediaDiagnostics';
+
+test('diagnostic packet loss uses sender feedback without masking missing samples', () => {
+  const stats = { role: 'sender' as const, loss: 0, remoteLoss: 4 };
+  assert.equal(diagnosticPacketLoss(stats), 4);
+  assert.equal(diagnosticPacketLoss({ ...stats, remoteLoss: null }), null);
+  assert.equal(diagnosticPacketLoss({ ...stats, role: 'receiver', loss: 2 }), 2);
+  assert.equal(diagnosticPacketLoss({ ...stats, role: 'idle' }), null);
+});
 
 test('videoCounterRates derives kbps and stage fps from monotonic counters', () => {
   const previous = videoCounterSample({

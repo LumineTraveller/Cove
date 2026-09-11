@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { Socket } from "socket.io-client";
 import { Device, types as MsTypes } from "mediasoup-client";
 import { DisconnectGrace } from "../utils/disconnectGrace";
+import { createVoiceConnectionRecovery } from "../voiceConnectionRecovery";
 
 type Transport = MsTypes.Transport;
 type Producer = MsTypes.Producer;
@@ -481,14 +482,14 @@ export function useWebRTC(socket: Socket, roomId: string) {
   const joiningRef = useRef(false);
   const mediaGeneration = useRef(0);
   const connectionGrace = useRef(new DisconnectGrace());
-  const resetVoiceRef = useRef<(notifyServer?: boolean) => void>(() => {});
+  const resetVoiceRef = useRef<(notifyServer?: boolean, reason?: string) => void>(() => {});
   const voiceSocketId = useRef<string>();
 
   const checkTransport = useCallback((key: string, state: string) => {
     if (state === "connected") connectionGrace.current.recover(key);
     if (state === "failed" || state === "disconnected") {
       connectionGrace.current.fail(key, () => {
-        resetVoiceRef.current();
+        resetVoiceRef.current(true, `media-${key}-timeout`);
         setAudioDeviceError(
           "语音连接中断超过 5 秒，可直接重新加入语音，无需重连服务器",
         );
@@ -2532,7 +2533,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
       if (rawStream !== stream)
         rawStream?.getTracks().forEach((track) => track.stop());
       if (generation !== mediaGeneration.current) return;
-      resetVoiceRef.current();
+      resetVoiceRef.current(true, "join-failed");
       if (localAudioRef.current === stream) localAudioRef.current = null;
       rawAudioRef.current = null;
       micProcessingContext.current?.close().catch(() => {});
@@ -2563,7 +2564,17 @@ export function useWebRTC(socket: Socket, roomId: string) {
   // ── 离开语音 ───────────────────────────────────────────────────────────────
 
   const resetVoice = useCallback(
-    (notifyServer = true) => {
+    (notifyServer = true, reason = "leave-voice") => {
+      if (voiceSessionActiveRef.current || joiningRef.current) {
+        console.warn(`[voice-recovery] ${JSON.stringify({
+          at: new Date().toISOString(), event: "voice-reset", reason, roomId,
+          socketId: socket.id ?? null, voiceSocketId: voiceSocketId.current ?? null,
+          connected: socket.connected, recovered: socket.recovered,
+          active: voiceSessionActiveRef.current, joining: joiningRef.current,
+          sendState: sendTransport.current?.connectionState ?? null,
+          recvState: recvTransport.current?.connectionState ?? null,
+        })}`);
+      }
       mediaGeneration.current += 1;
       connectionGrace.current.clear();
       const shouldPlayLeaveTone = voiceSessionActiveRef.current;
@@ -2689,37 +2700,29 @@ export function useWebRTC(socket: Socket, roomId: string) {
   }, [replaceMicrophone, selectAudioOutput, socket]);
 
   useEffect(() => {
-    const onDisconnect = (reason: string) => {
-      if (
-        reason === "io client disconnect" ||
-        reason === "io server disconnect"
-      ) {
-        resetVoiceRef.current(false);
-        return;
-      }
-      if (!voiceSessionActiveRef.current && !joiningRef.current) return;
-      connectionGrace.current.fail("signal", () => {
-        resetVoiceRef.current(false);
-        setAudioDeviceError(
-          "服务器连接中断超过 5 秒，连接恢复后可直接加入语音",
-        );
-      });
-    };
-    const onConnect = () => {
-      connectionGrace.current.recover("signal");
-      if (voiceSocketId.current !== socket.id || !socket.recovered) {
-        if (voiceSessionActiveRef.current || joiningRef.current)
-          resetVoiceRef.current(false);
-      } else if (!voiceSessionActiveRef.current && !joiningRef.current) {
-        // Local timeout/explicit leave won the race against server recovery.
-        socket.emit("voice:leave", roomId);
-      }
-    };
-    socket.on("disconnect", onDisconnect);
-    socket.on("connect", onConnect);
+    const readState = () => ({
+      socketId: socket.id, voiceSocketId: voiceSocketId.current,
+      connected: socket.connected, recovered: socket.recovered,
+      active: voiceSessionActiveRef.current, joining: joiningRef.current,
+      sendState: sendTransport.current?.connectionState ?? null,
+      recvState: recvTransport.current?.connectionState ?? null,
+    });
+    const recovery = createVoiceConnectionRecovery({
+      grace: connectionGrace.current,
+      readState,
+      resetVoice: reason => resetVoiceRef.current(false, reason),
+      leaveRecoveredVoice: () => socket.emit("voice:leave", roomId),
+      onError: setAudioDeviceError,
+      onEvent: (event, reason) => console.info(`[voice-recovery] ${JSON.stringify({
+        at: new Date().toISOString(), event, reason, roomId, ...readState(),
+      })}`),
+    });
+    socket.on("disconnect", recovery.onDisconnect);
+    socket.on("connect", recovery.onConnect);
     return () => {
-      socket.off("disconnect", onDisconnect);
-      socket.off("connect", onConnect);
+      socket.off("disconnect", recovery.onDisconnect);
+      socket.off("connect", recovery.onConnect);
+      recovery.dispose();
       connectionGrace.current.clear();
     };
   }, [socket, roomId]);

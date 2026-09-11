@@ -21,8 +21,8 @@ export function ServerCertificateToggle({ serverUrl, checked, onChange, tone = '
         onChange={event => onChange(event.target.checked)}
       />
       <span className="min-w-0">
-        <span className={`flex items-center gap-1.5 text-sm font-medium ${light ? 'text-slate-700' : 'text-white/70'}`}><ShieldAlert size={15} className={light ? 'text-amber-600' : 'text-amber-200/70'} />允许此服务器使用不受信任的证书</span>
-        <span className={`mt-1 block text-xs leading-relaxed ${light ? 'text-slate-500' : 'text-white/35'}`}>
+        <span className="server-certificate-title flex items-center gap-1.5 text-sm font-medium"><ShieldAlert size={15} className="server-certificate-icon" aria-hidden="true" />允许此服务器使用不受信任的证书</span>
+        <span className="server-certificate-hint mt-1 block text-xs leading-relaxed">
           {available
             ? '仅对当前 HTTPS 域名和端口生效。只在使用 SakuraFrp 自动 HTTPS 时开启。'
             : '此选项仅适用于 https:// 开头的服务器地址。'}

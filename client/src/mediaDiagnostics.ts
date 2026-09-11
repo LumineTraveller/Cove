@@ -1,5 +1,14 @@
 export type RtcStat = Record<string, unknown>;
 
+/** Sender feedback is remoteLoss; loss describes a received stream only. */
+export function diagnosticPacketLoss(stats: {
+  role: 'sender' | 'receiver' | 'idle';
+  loss: number | null;
+  remoteLoss: number | null;
+}): number | null {
+  return stats.role === 'sender' ? stats.remoteLoss : stats.role === 'receiver' ? stats.loss : null;
+}
+
 export interface RtcVideoCounterSample {
   id: string;
   timestamp: number;

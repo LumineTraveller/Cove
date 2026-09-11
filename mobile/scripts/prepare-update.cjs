@@ -14,6 +14,8 @@ function createFeed(metadata, packageVersion, notes, apk, previous, releaseTag) 
   const minApi = metadata.minSdkVersionForDexing;
   if (!Number.isSafeInteger(minApi) || minApi < 23 || minApi > 100) throw new Error('APK 元数据缺少有效最低 Android API');
   if (!notes.trim() || notes.length > 12000) throw new Error('需要 1—12000 字符的手机端更新说明');
+  // 出现替换字符说明文件被按错误编码读取或写出；这种清单曾经被直接发给所有用户。
+  if (notes.includes('\uFFFD')) throw new Error('更新说明含替换字符，请用 UTF-8 重新读取说明文件');
   if (!Buffer.isBuffer(apk) || apk.length === 0 || apk.length > 1024 * 1024 * 1024) throw new Error('APK 大小无效');
   if (typeof releaseTag !== 'string' || !(releaseTag === `mobile-v${item.versionName}` || /^v\d+\.\d+\.\d+$/.test(releaseTag))) {
     throw new Error('请指定承载 APK 的已有 Release 标签（如 v0.8.0）');

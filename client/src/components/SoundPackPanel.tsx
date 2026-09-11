@@ -3,12 +3,14 @@ import {
   useEffect,
   useRef,
   useState,
+  type MouseEvent as ReactMouseEvent,
   type RefObject,
 } from "react";
 import { createPortal } from "react-dom";
 import type { Socket } from "socket.io-client";
 import {
   AlertTriangle,
+  Download,
   GripVertical,
   LayoutGrid,
   LoaderCircle,
@@ -27,6 +29,7 @@ import {
   DEFAULT_AUDIO_DEVICE_ID,
 } from "../audioDevices";
 import { encodeAudioBufferSegment } from "../audioTrim";
+import { soundpackDownloadFileName } from "../soundpackDownload";
 import { useSortableList } from "../hooks/useSortableList";
 import { AudioTrimEditor } from "./AudioTrimEditor";
 
@@ -90,6 +93,8 @@ function loadSoundpackVolume() {
   }
 }
 
+// Windows 保留名不能作为文件名，加前缀避开。
+
 function applySoundpackOrder(packs: Soundpack[], orderedIds: string[]) {
   const byId = new Map(packs.map((pack) => [pack.id, pack]));
   const ordered = orderedIds.flatMap((id) => {
@@ -150,6 +155,14 @@ export function SoundPackPanel({
     busy: boolean;
     error?: string;
   } | null>(null);
+  // 卡片右键菜单（下载 / 重命名 / 删除）与下载结果提示。
+  const [cardMenu, setCardMenu] = useState<{
+    sound: Soundpack;
+    x: number;
+    y: number;
+  } | null>(null);
+  const [downloadNotice, setDownloadNotice] = useState("");
+  const cardMenuRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioPreviewSourceRef = useRef<AudioBufferSourceNode | null>(null);
@@ -239,7 +252,9 @@ export function SoundPackPanel({
       if (
         resolvedAnchorRef.current?.contains(target) ||
         managementPopoverRef.current?.contains(target) ||
-        quickPopoverRef.current?.contains(target)
+        quickPopoverRef.current?.contains(target) ||
+        // 右键菜单挂在 body 上，点它不能被当成“点了面板外部”。
+        cardMenuRef.current?.contains(target)
       )
         return;
       if (open) closePanel();
@@ -248,6 +263,33 @@ export function SoundPackPanel({
     document.addEventListener("pointerdown", handlePointerDown);
     return () => document.removeEventListener("pointerdown", handlePointerDown);
   }, [compact, open, quickOpen, resolvedAnchorRef]);
+  // 右键菜单：点击别处或按 Esc 关闭；面板关闭时一并收起。
+  useEffect(() => {
+    if (!cardMenu) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && cardMenuRef.current?.contains(target)) return;
+      setCardMenu(null);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setCardMenu(null);
+    };
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown, true);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [cardMenu]);
+  useEffect(() => {
+    if (!cardMenu) return;
+    if (!open && !quickOpen) setCardMenu(null);
+  }, [cardMenu, open, quickOpen]);
+  useEffect(() => {
+    if (!downloadNotice) return;
+    const timer = window.setTimeout(() => setDownloadNotice(""), 3_000);
+    return () => window.clearTimeout(timer);
+  }, [downloadNotice]);
   useEffect(() => {
     if (!audioRef.current) return;
     applyAudioElementOutput(audioRef.current, outputDeviceId).catch((error) => {
@@ -634,6 +676,48 @@ export function SoundPackPanel({
     setRenameValue(sound.name);
   };
 
+  /** 下载语音包源文件到本机。服务端把上传的音频原样存在 /sounds 下，直接取回即可。 */
+  const downloadSound = async (sound: Soundpack) => {
+    const url = `${serverURL}/sounds/${encodeURIComponent(sound.filename)}`;
+    setDownloadNotice("");
+    try {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = objectUrl;
+      anchor.download = soundpackDownloadFileName(
+        sound.name,
+        sound.filename,
+        sound.id,
+      );
+      anchor.rel = "noopener";
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+      setDownloadNotice(`已开始下载「${sound.name}」`);
+    } catch (error) {
+      console.warn("[soundpack] 下载语音包失败", error);
+      setDownloadNotice("下载失败，请重试");
+    }
+  };
+
+  const openCardMenu = (
+    event: ReactMouseEvent<HTMLElement>,
+    sound: Soundpack,
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    // 菜单位置夹在窗口内，避免靠近右下角时被裁掉。
+    setCardMenu({
+      sound,
+      x: Math.max(8, Math.min(event.clientX, window.innerWidth - 188)),
+      y: Math.max(8, Math.min(event.clientY, window.innerHeight - 132)),
+    });
+  };
+
   const renameSound = async () => {
     if (!pendingRename || disabled || !renameValue.trim()) return;
     const target = pendingRename;
@@ -976,9 +1060,7 @@ export function SoundPackPanel({
                           aria-disabled={disabled || !inVoice}
                           title={
                             inVoice
-                              ? sound.canDelete
-                                ? "点击播放，拖动排序，右键编辑"
-                                : "点击播放，拖动排序"
+                              ? "点击播放，拖动排序，右键更多操作"
                               : "请先加入语音"
                           }
                           onClick={() => {
@@ -991,10 +1073,7 @@ export function SoundPackPanel({
                             event.preventDefault();
                             handlePlay(sound);
                           }}
-                          onContextMenu={(event) => {
-                            event.preventDefault();
-                            if (sound.canDelete && !disabled) beginRename(sound);
-                          }}
+                          onContextMenu={(event) => openCardMenu(event, sound)}
                         >
                           <div className="soundpack-item-copy">
                             <b>{sound.name}</b>
@@ -1119,7 +1198,72 @@ export function SoundPackPanel({
                   </form>
                 </div>
               )}
+              {downloadNotice && (
+                <p className="soundpack-download-notice" role="status">
+                  {downloadNotice}
+                </p>
+              )}
             </section>,
+            document.body,
+          )}
+        {/* 右键菜单必须挂在弹层之外：弹层有 transform（translateX(-50%)），
+            会让 position:fixed 的后代以它为包含块并被 overflow:hidden 裁掉。 */}
+        {cardMenu &&
+          createPortal(
+            <div
+              ref={cardMenuRef}
+              className="soundpack-card-menu popover-card"
+              role="menu"
+              aria-label={`${cardMenu.sound.name} 的操作`}
+              style={{ left: cardMenu.x, top: cardMenu.y }}
+            >
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  const target = cardMenu.sound;
+                  setCardMenu(null);
+                  void downloadSound(target);
+                }}
+              >
+                <Download size={16} />
+                下载到本地
+              </button>
+              {cardMenu.sound.canDelete && (
+                <>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={disabled}
+                    onClick={() => {
+                      const target = cardMenu.sound;
+                      setCardMenu(null);
+                      beginRename(target);
+                    }}
+                  >
+                    <Pencil size={16} />
+                    重命名
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="danger-row"
+                    disabled={disabled || deletingId === cardMenu.sound.id}
+                    onClick={() => {
+                      const target = cardMenu.sound;
+                      setCardMenu(null);
+                      // compact 分支不渲染 pendingDelete 确认框，沿用编辑弹窗里的
+                      // 同一套确认 + 删除流程，避免出现点了没反应的菜单项。
+                      if (!window.confirm(`确定删除“${target.name}”吗？`)) return;
+                      void deleteSoundTarget(target);
+                    }}
+                  >
+                    <Trash2 size={16} />
+                    删除
+                  </button>
+                </>
+              )}
+            </div>,
             document.body,
           )}
         {sortableOverlay}

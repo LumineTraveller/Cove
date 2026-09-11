@@ -18,14 +18,21 @@ test('summarizeTransportStat exposes ingress, egress and BWE in kbps', () => {
   assert.equal(value?.protocol, 'UDP');
 });
 
-test('summarizeRtpStat keeps packet feedback and converts RTT', () => {
+test('summarizeRtpStat keeps mediasoup RTT in milliseconds', () => {
   const value = summarizeRtpStat({
     timestamp: 456, kind: 'video', mimeType: 'video/AV1', bitrate: 950_000,
     packetsLost: 12, fractionLost: 3, jitter: 7,
     packetsDiscarded: 1, packetsRetransmitted: 20, packetsRepaired: 8,
-    nackCount: 4, pliCount: 2, firCount: 1, roundTripTime: 0.057, score: 8,
+    nackCount: 4, pliCount: 2, firCount: 1, roundTripTime: 57, score: 8,
   });
   assert.equal(value.bitrateKbps, 950);
   assert.equal(value.roundTripTimeMs, 57);
   assert.equal(value.score, 8);
+});
+
+test('missing RTT remains unknown and fractional milliseconds are rounded once', () => {
+  assert.equal(summarizeRtpStat({}).roundTripTimeMs, null);
+  assert.equal(summarizeRtpStat({ roundTripTime: NaN }).roundTripTimeMs, null);
+  assert.equal(summarizeRtpStat({ roundTripTime: 0 }).roundTripTimeMs, 0);
+  assert.equal(summarizeRtpStat({ roundTripTime: 57.4 }).roundTripTimeMs, 57);
 });

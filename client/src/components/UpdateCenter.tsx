@@ -232,6 +232,7 @@ export function UpdateCenter({ embedded = false }: { embedded?: boolean }) {
   const [actionError, setActionError] = useState('');
   const manualCheckRef = useRef(false);
   const dismissedRef = useRef(false);
+  const popoverRef = useRef<HTMLElement | null>(null);
   const previousStatusRef = useRef(state.status);
 
   const checkNow = useCallback(async () => {
@@ -291,6 +292,20 @@ export function UpdateCenter({ embedded = false }: { embedded?: boolean }) {
     const timer = window.setInterval(() => setClock(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, [embedded, open, state.status]);
+
+  // 点击更新浮窗以外的任何位置即关闭，和其余弹窗保持一致。
+  useEffect(() => {
+    if (embedded || !open) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && popoverRef.current?.contains(target)) return;
+      dismissedRef.current = true;
+      manualCheckRef.current = false;
+      setOpen(false);
+    };
+    document.addEventListener('pointerdown', onPointerDown, true);
+    return () => document.removeEventListener('pointerdown', onPointerDown, true);
+  }, [embedded, open]);
 
   const installNow = async () => {
     setActionError('');
@@ -398,7 +413,7 @@ export function UpdateCenter({ embedded = false }: { embedded?: boolean }) {
   }
 
   return (
-    <aside className="update-status-popover" aria-label="Cove 更新状态">
+    <aside className="update-status-popover" aria-label="Cove 更新状态" ref={popoverRef}>
       <div className="update-status-heading">
         <StatusIcon state={state} />
         <div className="update-status-heading-copy" aria-live="polite">

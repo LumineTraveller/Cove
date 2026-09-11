@@ -4,6 +4,47 @@ export type RemoteControlInput =
   | { type: 'wheel'; deltaX: number; deltaY: number; x: number; y: number }
   | { type: 'key'; code: string; down: boolean };
 
+/** Leading/trailing 16ms pointer throttle; every non-pointer is an ordering barrier. */
+export class RemotePointerSender {
+  private lastSent = -Infinity;
+  private pending: Extract<RemoteControlInput, { type: 'pointer' }> | null = null;
+  private timer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(
+    private readonly emit: (input: RemoteControlInput) => void,
+    private readonly now: () => number = () => performance.now(),
+  ) {}
+
+  send(input: RemoteControlInput) {
+    if (input.type !== 'pointer') {
+      this.flush();
+      this.emit(input);
+      return;
+    }
+    this.pending = input;
+    const remaining = 16 - (this.now() - this.lastSent);
+    if (remaining <= 0) this.flush();
+    else if (this.timer === null) this.timer = setTimeout(() => this.flush(), remaining);
+  }
+
+  private flush() {
+    if (this.timer !== null) clearTimeout(this.timer);
+    this.timer = null;
+    const input = this.pending;
+    this.pending = null;
+    if (!input) return;
+    this.lastSent = this.now();
+    this.emit(input);
+  }
+
+  cancel() {
+    if (this.timer !== null) clearTimeout(this.timer);
+    this.timer = null;
+    this.pending = null;
+    this.lastSent = -Infinity;
+  }
+}
+
 export interface VideoSurfaceRect { left: number; top: number; width: number; height: number }
 
 /** Maps a pointer into the actual object-contain video area, excluding letterbox bars. */

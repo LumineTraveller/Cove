@@ -1,6 +1,44 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizedVideoPoint, remoteMouseButton } from '../src/remoteControl';
+import { normalizedVideoPoint, remoteMouseButton, RemotePointerSender, type RemoteControlInput } from '../src/remoteControl';
+
+test('pointer throttle sends the first event immediately and the newest tail without further movement', t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let now = 0;
+  const sent: RemoteControlInput[] = [];
+  const sender = new RemotePointerSender(input => sent.push(input), () => now);
+  sender.send({ type: 'pointer', x: 0, y: 0 });
+  now = 2; t.mock.timers.tick(2);
+  sender.send({ type: 'pointer', x: 0.1, y: 0.1 });
+  sender.send({ type: 'pointer', x: 0.2, y: 0.2 });
+  assert.equal(sent.length, 1);
+  now = 16; t.mock.timers.tick(14);
+  assert.deepEqual(sent, [{ type: 'pointer', x: 0, y: 0 }, { type: 'pointer', x: 0.2, y: 0.2 }]);
+  t.mock.timers.tick(100);
+  assert.equal(sent.length, 2);
+});
+
+test('button/key/wheel barriers flush earlier movement and cancel prevents a late old-session tail', t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let now = 0;
+  const sent: RemoteControlInput[] = [];
+  const sender = new RemotePointerSender(input => sent.push(input), () => now);
+  sender.send({ type: 'pointer', x: 0, y: 0 });
+  now = 2;
+  sender.send({ type: 'pointer', x: 0.1, y: 0.1 });
+  sender.send({ type: 'button', button: 'left', down: true, x: 0.2, y: 0.2 });
+  now = 4;
+  sender.send({ type: 'pointer', x: 0.3, y: 0.3 });
+  sender.send({ type: 'button', button: 'left', down: false, x: 0.4, y: 0.4 });
+  assert.deepEqual(sent.map(input => input.type), ['pointer', 'pointer', 'button', 'pointer', 'button']);
+  now = 5;
+  sender.send({ type: 'pointer', x: 0.9, y: 0.9 });
+  sender.cancel();
+  t.mock.timers.tick(100);
+  assert.equal(sent.length, 5);
+  sender.send({ type: 'pointer', x: 1, y: 1 });
+  assert.equal(sent.length, 6, 'a new session does not inherit the previous throttle');
+});
 
 test('remote pointer excludes top and bottom letterbox bars', () => {
   const rect = { left: 0, top: 0, width: 1000, height: 1000 };

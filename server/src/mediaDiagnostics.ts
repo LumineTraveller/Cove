@@ -87,7 +87,8 @@ export function summarizeRtpStat(stat: UnknownStat): RtpStreamDiagnostic {
     nackCount: finiteNumber(stat.nackCount),
     pliCount: finiteNumber(stat.pliCount),
     firCount: finiteNumber(stat.firCount),
-    roundTripTimeMs: rtt == null ? null : Math.round(rtt * 1_000),
+    // mediasoup RtpStreamSend reports milliseconds (unlike browser RTCStats).
+    roundTripTimeMs: rtt == null ? null : Math.round(rtt),
     score: finiteNumber(stat.score),
   };
 }

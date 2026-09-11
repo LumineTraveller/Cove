@@ -62,3 +62,22 @@ test('remote input is rate limited per active session', () => {
   assert.equal(registry.authorizeInput('session', 'viewer', 100), null);
   assert.ok(registry.authorizeInput('session', 'viewer', 1100));
 });
+
+test('matching releases survive exhausted input budget without creating an unlimited release bypass', () => {
+  const ids = ['request', 'session'];
+  const registry = new RemoteControlRegistry(() => ids.shift()!);
+  registry.createRequest('room', 'viewer', 'sharer', 0);
+  registry.respond('request', 'sharer', true, 1);
+  assert.ok(registry.authorizeInput('session', 'viewer', 100, { type: 'key', code: 'ShiftLeft', down: true }));
+  assert.ok(registry.authorizeInput('session', 'viewer', 100, { type: 'button', button: 'left', down: true, x: 0, y: 0 }));
+  for (let i = 2; i < 240; i++) assert.ok(registry.authorizeInput('session', 'viewer', 100, { type: 'pointer', x: 0, y: 0 }));
+  const up = { type: 'key' as const, code: 'ShiftLeft', down: false };
+  assert.equal(registry.authorizeInput('session', 'intruder', 100, up), null);
+  assert.ok(registry.authorizeInput('session', 'viewer', 100, up));
+  assert.equal(registry.authorizeInput('session', 'viewer', 100, up), null);
+  assert.ok(registry.authorizeInput('session', 'viewer', 100, { type: 'button', button: 'left', down: false, x: 1, y: 1 }));
+  assert.equal(registry.authorizeInput('session', 'viewer', 100, { type: 'key', code: 'KeyA', down: true }), null);
+  assert.equal(registry.authorizeInput('session', 'viewer', 100, { type: 'key', code: 'KeyA', down: false }), null);
+  registry.stop('session', 'sharer');
+  assert.equal(registry.authorizeInput('session', 'viewer', 1100, up), null);
+});

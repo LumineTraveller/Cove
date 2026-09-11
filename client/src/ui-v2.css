@@ -14,7 +14,9 @@
   --screen-yellow: #f4cc78;
   --screen-yellow-action: #f6d484;
   --screen-yellow-action-ink: #15191f;
-  --screen-yellow-control: #15191f;
+  /* 控制球里“共享屏幕/结束共享”激活态的文字与图标色。它必须和 --blue / --purple
+     一样是「该功能色系里的深色」，而不是纯黑，否则只有这一个按钮的文字脱离色相。 */
+  --screen-yellow-control: #8a6a12;
   --screen-yellow-soft: #fff7e4;
   --purple: #8654d9;
   --debug: #234ca8;
@@ -601,7 +603,17 @@ select:focus-visible {
     transform: translateY(0) scale(1);
   }
 }
-.member-context > button {
+/* 右键唤出的浮层菜单（成员操作、语音包卡片操作）：跟随指针定位，因此用 fixed 坐标。 */
+.member-context,
+.soundpack-card-menu {
+  position: fixed;
+  z-index: 900;
+  width: 172px;
+  padding: 6px;
+  border-radius: 14px;
+}
+.member-context > button,
+.soundpack-card-menu > button {
   width: 100%;
   height: 38px;
   padding: 0 10px;
@@ -612,8 +624,14 @@ select:focus-visible {
   text-align: left;
   font-size: 12px;
 }
-.member-context > button:hover {
+.member-context > button:hover:not(:disabled),
+.soundpack-card-menu > button:hover:not(:disabled) {
   background: var(--surface);
+}
+.member-context > button:disabled,
+.soundpack-card-menu > button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 .danger-row {
   color: var(--danger) !important;
@@ -1244,9 +1262,8 @@ select:focus-visible {
 .mode-watching .control-ball-anchor,
 .mode-self .control-ball-anchor {
   bottom: 15px;
-  left: calc(50% + (var(--rail-width) - var(--chat-width)) / 2);
-  transition: left 340ms var(--ease-layout);
-  will-change: left;
+  /* left 统一由 --control-center 决定；共享态聊天区已不占列宽，
+     这里再按 --chat-width 偏移会与覆盖层布局互相矛盾。 */
 }
 .cove-shell.mode-watching .chat-slot,
 .cove-shell.mode-self .chat-slot {
@@ -2255,6 +2272,10 @@ select:focus-visible {
   .cove-shell.mode-self.chat-open {
     --chat-width: 270px;
   }
+  .cove-shell.mode-watching,
+  .cove-shell.mode-self {
+    --chat-overlay-width: 270px;
+  }
   .member-row {
     grid-template-columns: 150px minmax(180px, 1fr) auto 38px;
     gap: 10px;
@@ -2275,32 +2296,10 @@ select:focus-visible {
     width: 100%;
     overflow: hidden;
   }
+  /* 共享态聊天区在所有宽度下都已是覆盖层，这里只需按窄窗口收窄它的宽度。 */
   .cove-shell.mode-watching,
   .cove-shell.mode-self {
     --chat-overlay-width: min(360px, 52vw);
-    grid-template-columns: var(--rail-width) minmax(0, 1fr);
-  }
-  .mode-watching .chat-slot,
-  .mode-self .chat-slot {
-    position: absolute;
-    z-index: 420;
-    right: 0;
-    top: 0;
-    bottom: 0;
-    width: var(--chat-overlay-width);
-    box-shadow: -18px 0 40px rgba(28, 40, 55, 0.12);
-    transform: translateX(0);
-    transition: transform 320ms var(--ease-layout);
-  }
-  .mode-watching .chat-slot .chat-panel,
-  .mode-self .chat-slot .chat-panel {
-    background: transparent;
-    backdrop-filter: none;
-    -webkit-backdrop-filter: none;
-  }
-  .cove-shell.mode-watching.chat-closed .chat-slot,
-  .cove-shell.mode-self.chat-closed .chat-slot {
-    transform: translateX(100%);
   }
   .navigation-rail.expanded {
     width: 280px;
@@ -2311,9 +2310,8 @@ select:focus-visible {
 /* September review: chat-first room layout and anchored controls. */
 .cove-shell.mode-watching,
 .cove-shell.mode-self {
-  --control-center: calc(
-    50% + (var(--rail-width) - var(--chat-width)) / 2
-  );
+  /* 共享态聊天区是覆盖层、不占列宽，控制球以工作区（rail 右侧的整块）居中。 */
+  --control-center: calc(50% + var(--rail-width) / 2);
 }
 .cove-shell.mode-idle,
 .cove-shell.mode-available {
@@ -2918,14 +2916,6 @@ select:focus-visible {
   padding: 0 10px;
   color: var(--muted);
   font-size: 11px;
-}
-.share-status-notice {
-  max-width: 180px;
-  overflow: hidden;
-  color: var(--danger);
-  font-size: 10px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .diagnostics-v2 {
   width: min(360px, calc(100% - 28px));
@@ -3688,6 +3678,7 @@ body .cove-window-controls button {
   place-items: center;
   background: rgba(33, 45, 59, 0.26);
   backdrop-filter: blur(10px);
+  animation: fade-in 160ms ease;
 }
 .profile-modal-v2,
 .user-profile-v2 {
@@ -3699,6 +3690,8 @@ body .cove-window-controls button {
   background: #fff;
   color: var(--ink);
   box-shadow: 0 28px 80px rgba(30, 49, 70, 0.2);
+  /* 左键点击成员信息框唤出名片时淡入，和设置弹窗保持同一套入场语言。 */
+  animation: modal-in 220ms var(--ease-enter);
 }
 .profile-modal-v2 > div:first-child,
 .user-profile-v2 > div:first-child {
@@ -3834,6 +3827,29 @@ body .cove-window-controls button {
   background: var(--blue);
   color: #fff;
 }
+/* 远程控制结束/取消的播报改成需要确认的弹窗，不再作为状态条里的常驻文字。 */
+.remote-notice-dialog {
+  width: min(370px, calc(100vw - 40px));
+  padding: 28px 28px 24px;
+  border-radius: 22px;
+  color: var(--ink);
+  text-align: center;
+}
+.remote-notice-dialog > svg {
+  color: var(--muted);
+}
+.remote-notice-dialog h2 {
+  margin: 12px 0 8px;
+  font-size: 19px;
+}
+.remote-notice-dialog p {
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+.remote-notice-dialog .primary-wide {
+  margin-top: 20px;
+}
 .settings-actions {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -3952,8 +3968,9 @@ body .cove-window-controls button {
   border: 0;
 }
 .strip-member .member-avatar > .avatar-core.speaking {
+  /* 间隙环必须跟随房间背景：写死白色会在深色房间/深色主题下变成一圈白边。 */
   box-shadow:
-    0 0 0 2px #fff,
+    0 0 0 2px var(--room-top),
     0 0 0 4px rgba(35, 155, 103, 0.7),
     0 0 16px rgba(35, 155, 103, 0.45);
 }
@@ -4568,6 +4585,7 @@ body .cove-window-controls button {
   padding: 32px;
   display: grid;
   place-items: center;
+  overflow: hidden;
   background: rgba(11, 20, 32, 0.74);
   backdrop-filter: blur(8px);
   cursor: zoom-out;
@@ -4580,6 +4598,15 @@ body .cove-window-controls button {
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.35);
   cursor: default;
 }
+/* 滚轮放大后可以按住拖动；未放大时保持「点击空白关闭」的手感。 */
+.image-lightbox > img.is-zoomed {
+  cursor: grab;
+  touch-action: none;
+  will-change: transform;
+}
+.image-lightbox > img.is-zoomed:active {
+  cursor: grabbing;
+}
 .share-status-actions .remote-pending {
   cursor: pointer;
 }
@@ -4590,7 +4617,11 @@ body .cove-window-controls button {
   min-height: 100%;
   padding: 28px;
   display: grid;
-  place-items: center;
+  /* 登录/注册切换时注册多一行用户名，卡片会变高。垂直居中会让上下边缘同时
+     扩张，切换标签时按钮会从指针下移走；这里锚定上边缘，只向下扩展。
+     顶部留白仍然随窗口高度增长，宽屏下观感与居中基本一致。 */
+  place-items: start center;
+  padding-top: clamp(28px, calc((100vh - 760px) / 2), 120px);
   overflow-y: auto;
   overflow-x: hidden;
   background:
@@ -4635,8 +4666,28 @@ body .cove-window-controls button {
   object-fit: cover;
   box-shadow: 0 9px 20px rgba(53, 120, 229, 0.14);
 }
+/* 左栏上方原本的空白是 .auth-showcase-copy 的 margin-top: auto 撑出来的。
+   现在改由这块媒体区域吸收剩余空间（flex: 1），文案的 auto 上边距随之取消。
+   视频用 max-width/max-height + auto 尺寸，保持原始 16:9 比例完整显示、不裁切。 */
+.auth-showcase-media {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 26px 0 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.auth-showcase-media video {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 18px;
+  box-shadow: 0 16px 36px rgba(53, 120, 229, 0.16);
+}
 .auth-showcase-copy {
-  margin: auto 0 34px;
+  margin: 0 0 34px;
   max-width: 430px;
 }
 .auth-eyebrow {
@@ -4971,6 +5022,35 @@ body .cove-window-controls button {
 .server-certificate-toggle-light:hover {
   background: #fff6df;
 }
+/* 证书开关的说明文字用语义类着色。之前这里用的是 Tailwind 的 text-slate-700/500，
+   深浅两套主题共用同一组固定灰阶，深色主题下就变成深底上的深色字。 */
+.server-certificate-toggle-light .server-certificate-title {
+  color: #334155;
+}
+.server-certificate-toggle-light .server-certificate-hint {
+  color: #64748b;
+}
+.server-certificate-toggle-light .server-certificate-icon {
+  color: #d97706;
+}
+.server-certificate-toggle:not(.server-certificate-toggle-light) .server-certificate-title {
+  color: rgba(255, 255, 255, 0.7);
+}
+.server-certificate-toggle:not(.server-certificate-toggle-light) .server-certificate-hint {
+  color: rgba(255, 255, 255, 0.35);
+}
+.server-certificate-toggle:not(.server-certificate-toggle-light) .server-certificate-icon {
+  color: rgba(253, 230, 138, 0.7);
+}
+:root[data-theme="dark"] .server-certificate-toggle-light .server-certificate-title {
+  color: #f4e2b4;
+}
+:root[data-theme="dark"] .server-certificate-toggle-light .server-certificate-hint {
+  color: #c6b083;
+}
+:root[data-theme="dark"] .server-certificate-toggle-light .server-certificate-icon {
+  color: #f0c67a;
+}
 .auth-error {
   padding: 11px 13px;
   border: 1px solid #f3caca;
@@ -5046,8 +5126,16 @@ body .cove-window-controls button {
     min-height: 360px;
     padding: 28px 24px 24px;
   }
+  /* 单栏布局下没有多余空间可分配，媒体改为按自身高度占位，并限高避免占掉整屏。 */
+  .auth-showcase-media {
+    flex: 0 0 auto;
+    margin: 22px 0 0;
+  }
+  .auth-showcase-media video {
+    max-height: 200px;
+  }
   .auth-showcase-copy {
-    margin: 52px 0 24px;
+    margin: 24px 0 24px;
   }
   .auth-showcase-copy h1 {
     font-size: clamp(30px, 6vw, 38px);
@@ -5695,6 +5783,10 @@ body .cove-window-controls button {
   color: #c8d5e3;
   border-color: #111923;
 }
+/* 麦克风角标的白色描边在深色主题下同样是一圈白边，跟随设备角标一起换成深色。 */
+:root[data-theme="dark"] .mic-badge {
+  border-color: #111923;
+}
 :root[data-theme="dark"] .chat-panel {
   border-color: color-mix(in srgb, var(--room-fg) 18%, var(--line));
 }
@@ -6131,6 +6223,27 @@ body .cove-window-controls button {
   background: #fff;
   box-shadow: 0 22px 55px rgba(28, 40, 55, 0.2);
   color: var(--ink);
+}
+/* 下载结果提示：浮在面板底部，不参与布局也不拦截点击。 */
+.soundpack-download-notice {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  z-index: 2;
+  max-width: calc(100% - 28px);
+  padding: 8px 14px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  box-shadow: 0 10px 26px rgba(28, 40, 55, 0.18);
+  transform: translateX(-50%);
+  pointer-events: none;
+  animation: fade-in 160ms ease;
 }
 .soundpack-management-header {
   min-height: 58px;
@@ -6590,20 +6703,41 @@ body .cove-window-controls button {
   bottom: 0;
 }
 
-/* Shared-screen chat keeps enough horizontal room for message actions. */
-.cove-shell.mode-watching.chat-open,
-.cove-shell.mode-self.chat-open {
-  --chat-width: 320px;
+/* 共享态的聊天区是覆盖层，用 transform 平移开合。
+   如果让它参与 grid 列宽过渡，开合期间每一帧都会以内层新宽度重新布局消息
+   气泡与图片，观看共享时就是肉眼可见的卡顿。固定宽度 + translateX 只动合成
+   层，面板本身在动画期间不再重排。 */
+.cove-shell.mode-watching,
+.cove-shell.mode-self {
+  --chat-overlay-width: 320px;
+  grid-template-columns: var(--rail-width) minmax(0, 1fr);
 }
 .mode-watching .chat-slot,
 .mode-self .chat-slot {
+  position: absolute;
+  z-index: 420;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: var(--chat-overlay-width);
   min-width: 0;
   background: linear-gradient(180deg, var(--room-top), var(--room-bottom));
+  box-shadow: -18px 0 40px rgba(28, 40, 55, 0.12);
+  transform: translateX(0);
+  transition: transform 320ms var(--ease-layout);
+  will-change: transform;
+}
+.cove-shell.mode-watching.chat-closed .chat-slot,
+.cove-shell.mode-self.chat-closed .chat-slot {
+  transform: translateX(100%);
 }
 .mode-watching .chat-slot .chat-panel,
 .mode-self .chat-slot .chat-panel {
   min-width: 0;
   border-left: 0;
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 .mode-watching .chat-slot .message-list,
 .mode-self .chat-slot .message-list {
@@ -6652,12 +6786,14 @@ body .cove-window-controls button {
   width: 44px;
   z-index: 500;
   pointer-events: none;
-  transition: right 320ms var(--ease-layout);
+  /* 跟聊天区一样用 transform 跟随接缝，避免动画期间反复计算 right。 */
+  transform: translateX(calc(-1 * var(--chat-overlay-width)));
+  transition: transform 320ms var(--ease-layout);
   -webkit-app-region: no-drag;
 }
-.cove-shell.mode-watching.chat-open .chat-edge-toggle-anchor,
-.cove-shell.mode-self.chat-open .chat-edge-toggle-anchor {
-  right: var(--chat-width);
+.cove-shell.mode-watching.chat-closed .chat-edge-toggle-anchor,
+.cove-shell.mode-self.chat-closed .chat-edge-toggle-anchor {
+  transform: translateX(0);
 }
 .chat-edge-toggle-anchor > .chat-edge-toggle {
   position: absolute;
@@ -6686,12 +6822,6 @@ body .cove-window-controls button {
   stroke: var(--line);
   stroke-width: 1;
   vector-effect: non-scaling-stroke;
-}
-@media (max-width: 1023px) {
-  .cove-shell.mode-watching.chat-open .chat-edge-toggle-anchor,
-  .cove-shell.mode-self.chat-open .chat-edge-toggle-anchor {
-    right: var(--chat-overlay-width);
-  }
 }
 .strip-chat-font-menu {
   top: 100%;
@@ -7964,6 +8094,19 @@ html:has(.cove-v2-page) {
   padding: 16px 24px 24px;
   scrollbar-gutter: stable;
 }
+/* 内容就位时逐条淡入上移，配合列表高度过渡形成「窗口拉开、内容依次浮现」。
+   animation-fill-mode: backwards 不可省略：条目带 animation-delay，默认
+   fill: none 会让它在等待期内先以终态绘制一帧，再跳回起点重播。 */
+@keyframes source-option-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
 .audio-share-modal .source-option {
   min-height: 78px;
   margin-top: 10px;
@@ -7977,6 +8120,9 @@ html:has(.cove-v2-page) {
   color: var(--ink);
   transition: border-color 160ms ease, background 160ms ease,
     box-shadow 160ms ease, transform 160ms ease;
+  animation: source-option-in 280ms var(--ease-enter) backwards;
+  /* --i 由组件给出并已夹取上限（见 AudioShareMenuV2），这里只做乘法。 */
+  animation-delay: calc(var(--i, 0) * 38ms);
 }
 .audio-share-modal .audio-share-list > .source-option:first-child {
   margin-top: 0;
@@ -8058,6 +8204,18 @@ html:has(.cove-v2-page) {
 .audio-share-empty small {
   color: var(--muted);
   font-size: 11px;
+}
+/* 关闭动效时直接呈现终态：条目不再逐条淡入（高度过渡在脚本里另做判断）。 */
+@media (prefers-reduced-motion: reduce) {
+  .audio-share-modal .source-option {
+    animation: none;
+  }
+  /* 聊天区与接缝的平移同样直接呈现终态。 */
+  .mode-watching .chat-slot,
+  .mode-self .chat-slot,
+  .chat-edge-toggle-anchor {
+    transition: none;
+  }
 }
 :root[data-theme="dark"] .audio-popover-layer {
   background: rgba(2, 7, 13, 0.68);
@@ -8541,7 +8699,9 @@ body:has(
   align-self: center;
 }
 :root[data-theme="dark"] .auth-history-button {
-  border-left-color: #30445a;
+  /* 深色主题下按钮自带独立底色，再画一条浅色左边框就会变成一条白边
+     （含圆角处的亮弧）。这里让边框透明，只保留底色与圆角。 */
+  border-left-color: transparent;
   background: #152231;
   color: #a9bdd5;
 }

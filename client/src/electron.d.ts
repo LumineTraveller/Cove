@@ -1,6 +1,7 @@
 import type { UpdateState } from './update';
 import type { ApplicationAudioSource } from './applicationAudio';
 import type { RemoteControlInput } from './remoteControl';
+import type { RemoteControlActivation } from '../electron/remote-control-activation';
 
 interface CoveUpdaterApi {
   getState(): Promise<UpdateState>;
@@ -52,9 +53,9 @@ interface CoveSystemAudioApi {
 
 interface CoveRemoteControlApi {
   supported: boolean;
-  setActive(sessionId: string | null): Promise<boolean>;
+  setActive(sessionId: string | null): Promise<RemoteControlActivation>;
   sendInput(sessionId: string, input: RemoteControlInput): Promise<boolean>;
-  onEmergencyStop(listener: () => void): () => void;
+  onEmergencyStop(listener: (reason?: string) => void): () => void;
 }
 
 declare global {

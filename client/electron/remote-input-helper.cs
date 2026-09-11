@@ -39,6 +39,7 @@ internal static class RemoteInputHelper
         public uint time; public UIntPtr dwExtraInfo;
     }
     private sealed class Message {
+        public long seq { get; set; }
         public string type { get; set; }
         public double x { get; set; }
         public double y { get; set; }
@@ -76,7 +77,7 @@ internal static class RemoteInputHelper
     private static extern bool UnhookWindowsHookEx(IntPtr hook);
     [DllImport("user32.dll")]
     private static extern IntPtr CallNextHookEx(IntPtr hook, int nCode, IntPtr wParam, IntPtr lParam);
-    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
     private static extern IntPtr GetModuleHandle(string moduleName);
 
     private static IntPtr MouseHook = IntPtr.Zero;
@@ -194,7 +195,7 @@ internal static class RemoteInputHelper
     private static void SendKey(string code, bool down) {
         var key = KeyCode(code);
         if (key == 0) return;
-        if (down) PressedKeys.Add(key); else PressedKeys.Remove(key);
+        if (down) PressedKeys.Add(key); else if (!PressedKeys.Remove(key)) return;
         var input = new INPUT {
             type = INPUT_KEYBOARD,
             U = new InputUnion { ki = new KEYBDINPUT {
@@ -280,9 +281,23 @@ internal static class RemoteInputHelper
         StartMouseActivityHook();
         var serializer = new JavaScriptSerializer { MaxJsonLength = 8192 };
         try {
+            Console.WriteLine("{\"ready\":true}");
+            Console.Out.Flush();
             string line;
             while ((line = Console.ReadLine()) != null) {
-                try { Handle(serializer.Deserialize<Message>(line)); } catch { }
+                try {
+                    var message = serializer.Deserialize<Message>(line);
+                    if (message != null && message.type == "stop") break;
+                    if (message == null || message.seq <= 0) break;
+                    Handle(message);
+                    // Consumption acknowledgement only; no network round trip.
+                    Console.WriteLine("{\"seq\":" + message.seq + "}");
+                    Console.Out.Flush();
+                } catch {
+                    Console.WriteLine("{\"error\":true}");
+                    Console.Out.Flush();
+                    break;
+                }
             }
         } finally { ReleaseAll(); }
     }

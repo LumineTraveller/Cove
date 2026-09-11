@@ -113,6 +113,10 @@ export function isScreenEncodingWithinPlan(
     && actualHeight <= plan.outputHeight + tolerance;
 }
 
+export function screenEncodingPlanLabel(withinPlan: boolean | null): string {
+  return withinPlan == null ? '未知' : withinPlan ? '正常' : '超过档位';
+}
+
 /** 只约束帧率和尺寸，不设置应用层码率上限；实际速率由编码器和拥塞控制决定。 */
 export function toScreenRtpEncoding(
   plan: ScreenEncodingPlan,

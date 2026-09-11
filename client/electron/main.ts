@@ -17,6 +17,7 @@ import { normalizeExternalHttpUrl } from "./external-links";
 import { ServerCertificatePolicy } from "./server-certificate-policy";
 import {
   RemoteInputController,
+  type RemoteControlActivation,
   type RemoteControlInput,
 } from "./remote-control";
 import {
@@ -56,7 +57,11 @@ const screenAudioCapture = new ApplicationAudioCaptureController(
 const systemAudioCapture = new ApplicationAudioCaptureController(
   "cove:system-audio:chunk",
 );
-const remoteInputController = new RemoteInputController();
+const remoteInputController = new RemoteInputController((reason) => {
+  setRemoteStopShortcut(false);
+  mainWindow?.webContents.send("cove:remote-control:emergency-stop", reason);
+});
+let remoteActivationGeneration = 0;
 const remoteStopShortcut = "Control+Alt+Shift+X";
 
 function setRemoteStopShortcut(enabled: boolean): boolean {
@@ -263,18 +268,33 @@ app.whenReady().then(() => {
   );
   ipcMain.handle(
     "cove:remote-control:set-active",
-    (event, sessionId: unknown) => {
+    async (event, sessionId: unknown): Promise<RemoteControlActivation> => {
       if (
         event.sender !== mainWindow?.webContents ||
         (sessionId !== null && typeof sessionId !== "string")
       )
-        return false;
-      const enabled = remoteInputController.setActive(sessionId);
-      const shortcutReady = setRemoteStopShortcut(
-        enabled && sessionId !== null,
-      );
-      if (enabled && !shortcutReady) remoteInputController.stop();
-      return enabled && shortcutReady;
+        return { ok: false, reason: "远程控制请求无效。" };
+      const generation = ++remoteActivationGeneration;
+      if (!setRemoteStopShortcut(sessionId !== null)) {
+        remoteInputController.stop();
+        // 最常见的成因是另一个 Cove 实例（例如正式安装版与开发版同时运行）
+        // 已经占用了这个全局热键；Windows 会返回 ERROR_HOTKEY_ALREADY_REGISTERED。
+        const reason =
+          `紧急停止快捷键 ${remoteStopShortcut.replace(/\+/g, " + ")} 已被其他程序占用，` +
+          "无法保证随时中止远程控制。请关闭另一个 Cove 实例或占用该快捷键的程序后重试。";
+        console.error(`[remote-control] ${reason}`);
+        return { ok: false, reason };
+      }
+      const enabled = await remoteInputController.setActive(sessionId);
+      if (generation !== remoteActivationGeneration)
+        return { ok: false, reason: "远程控制状态已被新的请求取代。" };
+      if (!enabled) {
+        setRemoteStopShortcut(false);
+        const reason = "本机远程输入组件不可用，控制已终止。";
+        console.error(`[remote-control] ${reason}`);
+        return { ok: false, reason };
+      }
+      return { ok: true };
     },
   );
   ipcMain.handle(

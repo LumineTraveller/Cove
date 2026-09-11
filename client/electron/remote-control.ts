@@ -2,6 +2,9 @@ import { app } from 'electron';
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import { RemoteInputQueue } from './remote-input-queue';
+
+export type { RemoteControlActivation } from './remote-control-activation';
 
 export type RemoteControlInput =
   | { type: 'pointer'; x: number; y: number }
@@ -28,44 +31,107 @@ export function isRemoteControlInput(value: unknown): value is RemoteControlInpu
 export class RemoteInputController {
   private helper: ChildProcessWithoutNullStreams | null = null;
   private sessionId: string | null = null;
+  private queue: RemoteInputQueue | null = null;
+  private readiness: Promise<boolean> | null = null;
+  private resolveReadiness: ((ready: boolean) => void) | null = null;
+  private readyTimer: ReturnType<typeof setTimeout> | null = null;
+  private stopped: Promise<void> = Promise.resolve();
+
+  constructor(private readonly onFailure: (reason: string) => void = () => {}) {}
 
   get supported(): boolean { return process.platform === 'win32'; }
 
-  setActive(sessionId: string | null): boolean {
-    if (!this.supported) return false;
-    if (!sessionId) { this.stop(); return true; }
-    if (!/^[a-zA-Z0-9-]{8,80}$/.test(sessionId)) return false;
-    this.sessionId = sessionId;
-    return this.ensureHelper();
+  setActive(sessionId: string | null): Promise<boolean> {
+    if (!this.supported) return Promise.resolve(false);
+    if (!sessionId) { this.stop(); return Promise.resolve(true); }
+    if (!/^[a-zA-Z0-9-]{8,80}$/.test(sessionId)) return Promise.resolve(false);
+    if (sessionId === this.sessionId && this.readiness) return this.readiness;
+    this.stop();
+    const previousStopped = this.stopped;
+    const executable = app.isPackaged
+      ? path.join(process.resourcesPath, 'remote-input-helper.exe')
+      : path.join(app.getAppPath(), 'build', 'remote-input-helper.exe');
+    if (!fs.existsSync(executable)) return Promise.resolve(false);
+    try {
+      const helper = spawn(executable, [String(process.pid)], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+      this.helper = helper;
+      this.sessionId = sessionId;
+      const readiness = new Promise<boolean>(resolve => { this.resolveReadiness = resolve; });
+      this.readiness = readiness;
+      this.queue = new RemoteInputQueue(helper.stdin, reason => this.fail(helper, reason));
+      // Keep an error listener after the queue is closed; late EPIPE must not
+      // crash Electron or restart a helper whose authorization was revoked.
+      helper.stdin.on('error', () => this.fail(helper, '远程输入管道已关闭'));
+      helper.on('exit', () => this.fail(helper, '远程输入组件已退出，控制已终止'));
+      helper.on('error', () => this.fail(helper, '远程输入组件启动失败'));
+      helper.stderr.resume();
+      let output = '';
+      helper.stdout.on('data', (chunk: Buffer) => {
+        if (this.helper !== helper) return;
+        output += chunk.toString('utf8');
+        if (output.length > 4096) { this.fail(helper, '远程输入组件响应无效'); return; }
+        let newline: number;
+        while ((newline = output.indexOf('\n')) >= 0) {
+          const line = output.slice(0, newline);
+          output = output.slice(newline + 1);
+          try {
+            const message = JSON.parse(line) as { ready?: boolean; seq?: number; error?: boolean };
+            if (message.error) { this.fail(helper, '远程输入执行失败，控制已终止'); return; }
+            if (message.ready && this.resolveReadiness) {
+              // The old helper's ReleaseAll must finish before a new helper
+              // injects a press, otherwise that old release can undo the press.
+              void previousStopped.then(() => {
+                if (this.helper !== helper || !this.resolveReadiness) return;
+                if (this.readyTimer !== null) clearTimeout(this.readyTimer);
+                this.readyTimer = null;
+                this.queue?.markReady();
+                this.resolveReadiness?.(this.helper === helper);
+                this.resolveReadiness = null;
+              });
+            } else if (typeof message.seq === 'number') this.queue?.acknowledge(message.seq);
+          } catch {
+            this.fail(helper, '远程输入组件响应无效');
+            return;
+          }
+        }
+      });
+      this.readyTimer = setTimeout(() => this.fail(helper, '远程输入组件未就绪，控制已终止'), 2000);
+      return readiness;
+    } catch {
+      this.stop();
+      return Promise.resolve(false);
+    }
   }
 
   send(sessionId: string, input: RemoteControlInput): boolean {
-    if (!this.supported || !this.sessionId || sessionId !== this.sessionId || !isRemoteControlInput(input) || !this.ensureHelper()) return false;
-    try { return this.helper!.stdin.write(`${JSON.stringify(input)}\n`); }
-    catch { this.stop(); return false; }
+    if (!this.supported || sessionId !== this.sessionId || !isRemoteControlInput(input)) return false;
+    // true means accepted by the bounded local queue, not Windows injection success.
+    return this.queue?.enqueue(input) ?? false;
   }
 
   stop() {
     this.sessionId = null;
+    this.resolveReadiness?.(false);
+    this.resolveReadiness = null;
+    this.readiness = null;
+    if (this.readyTimer !== null) clearTimeout(this.readyTimer);
+    this.readyTimer = null;
+    this.queue?.close();
+    this.queue = null;
     if (!this.helper) return;
     const helper = this.helper;
     this.helper = null;
-    try { helper.stdin.end(); } catch { }
-    setTimeout(() => { if (!helper.killed) helper.kill(); }, 500).unref();
+    const closed = new Promise<void>(resolve => helper.once('close', () => resolve()));
+    this.stopped = Promise.all([this.stopped, closed]).then(() => {});
+    // At most the already executing command precedes this stop. Pending moves
+    // and edges were discarded above; the helper releases held input in finally.
+    try { helper.stdin.end('{"type":"stop"}\n'); } catch { }
+    setTimeout(() => { if (helper.exitCode === null && !helper.killed) helper.kill(); }, 500).unref();
   }
 
-  private ensureHelper(): boolean {
-    if (this.helper && !this.helper.killed) return true;
-    const executable = app.isPackaged
-      ? path.join(process.resourcesPath, 'remote-input-helper.exe')
-      : path.join(app.getAppPath(), 'build', 'remote-input-helper.exe');
-    if (!fs.existsSync(executable)) return false;
-    try {
-      const helper = spawn(executable, [String(process.pid)], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
-      helper.on('exit', () => { if (this.helper === helper) this.helper = null; });
-      helper.on('error', () => { if (this.helper === helper) this.helper = null; });
-      this.helper = helper;
-      return true;
-    } catch { return false; }
+  private fail(helper: ChildProcessWithoutNullStreams, reason: string) {
+    if (this.helper !== helper) return;
+    this.stop();
+    this.onFailure(reason);
   }
 }

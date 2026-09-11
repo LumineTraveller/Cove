@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { UpdateState } from "./updater-core";
+import type { RemoteControlActivation } from "./remote-control-activation";
 import type { RemoteControlInput } from "./remote-control";
 
 contextBridge.exposeInMainWorld("coveUpdater", {
@@ -54,12 +55,12 @@ contextBridge.exposeInMainWorld("coveSecurity", {
 
 contextBridge.exposeInMainWorld("coveRemoteControl", {
   supported: process.platform === "win32",
-  setActive: (sessionId: string | null): Promise<boolean> =>
+  setActive: (sessionId: string | null): Promise<RemoteControlActivation> =>
     ipcRenderer.invoke("cove:remote-control:set-active", sessionId),
   sendInput: (sessionId: string, input: RemoteControlInput): Promise<boolean> =>
     ipcRenderer.invoke("cove:remote-control:input", sessionId, input),
-  onEmergencyStop: (listener: () => void) => {
-    const handler = () => listener();
+  onEmergencyStop: (listener: (reason?: string) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, reason?: string) => listener(reason);
     ipcRenderer.on("cove:remote-control:emergency-stop", handler);
     return () => ipcRenderer.off("cove:remote-control:emergency-stop", handler);
   },

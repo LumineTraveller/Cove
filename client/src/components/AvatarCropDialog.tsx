@@ -102,7 +102,7 @@ export function AvatarCropDialog({ file, onCancel, onConfirm }: Props) {
   };
 
   return (
-    <div className="avatar-crop-scrim" role="dialog" aria-modal="true" aria-labelledby="avatar-crop-title" onMouseDown={(event) => event.stopPropagation()}>
+    <div className="avatar-crop-scrim" role="dialog" aria-modal="true" aria-labelledby="avatar-crop-title" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onCancel(); }}>
       <section className="avatar-crop-dialog" onMouseDown={(event) => event.stopPropagation()}>
         <header className="avatar-crop-header">
           <div>

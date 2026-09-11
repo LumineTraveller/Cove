@@ -5,6 +5,7 @@ import {
   buildScreenCaptureConstraints,
   createScreenEncodingPlan,
   isScreenEncodingWithinPlan,
+  screenEncodingPlanLabel,
   SCREEN_PRESETS,
   toScreenRtpEncoding,
   withScreenEncodingPlan,
@@ -138,6 +139,9 @@ test('runtime stats detect when Chromium ignored the RTP resolution limit', () =
   assert.equal(isScreenEncodingWithinPlan(1730, 1082, plan), true);
   assert.equal(isScreenEncodingWithinPlan(2560, 1600, plan), false);
   assert.equal(isScreenEncodingWithinPlan(undefined, undefined, plan), null);
+  assert.equal(screenEncodingPlanLabel(isScreenEncodingWithinPlan(undefined, undefined, plan)), '未知');
+  assert.equal(screenEncodingPlanLabel(true), '正常');
+  assert.equal(screenEncodingPlanLabel(false), '超过档位');
 });
 
 test('native sharing preserves a 4K source regardless of preset and content activity', () => {

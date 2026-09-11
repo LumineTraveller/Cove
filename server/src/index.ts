@@ -1350,7 +1350,7 @@ io.on('connection', socket => {
     if (!sessionId) return;
     const safeInput = sanitizeRemoteControlInput(input);
     if (!safeInput) return;
-    const session = remoteControls.authorizeInput(sessionId, socket.id);
+    const session = remoteControls.authorizeInput(sessionId, socket.id, Date.now(), safeInput);
     if (!session) return;
     const members = roomMembers.get(session.roomId);
     if (!members?.has(session.controllerSocketId) || !members.has(session.sharerSocketId)
