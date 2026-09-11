@@ -70,3 +70,13 @@ export function updateWaitWarning(state: UpdateState, now: number): string | nul
   }
   return null;
 }
+
+/**
+ * 更新详情卡片是否应渲染。空闲、已是最新、更新服务不可用等状态下没有可展示的
+ * 内容，必须整块隐藏，避免留下一个空白框。
+ */
+export function updateHasDetails(state: UpdateState, now: number): boolean {
+  return updateStepIndex(state) >= 0 || isUpdateBusy(state.status) ||
+    Boolean(updateWaitWarning(state, now)) || state.status === 'error' ||
+    Boolean(state.errorDetail);
+}

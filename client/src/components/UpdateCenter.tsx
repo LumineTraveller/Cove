@@ -18,6 +18,7 @@ import {
   formatTransferPercent,
   isUpdateBusy,
   openUpdateDetails,
+  updateHasDetails,
   updateStepIndex,
   updateWaitWarning,
   type UpdateState,
@@ -140,6 +141,10 @@ function UpdateProgress({
       </div>
     );
   }
+
+  // 详情卡片只在确有进度、阶段或错误可展示时出现；空闲、最新版本或更新服务
+  // 不可用等状态下不应留下一个空白框。
+  if (!updateHasDetails(state, clock)) return null;
 
   return (
     <div className="update-details-progress">
@@ -363,23 +368,20 @@ export function UpdateCenter({ embedded = false }: { embedded?: boolean }) {
 
         <UpdateProgress state={state} clock={clock} />
 
-        <div className="update-details-actions">
-          {state.status === 'downloaded' && (
-            <button type="button" className="update-primary-action" onClick={() => { void installNow(); }}>
-              <RotateCcw size={16} />重启并更新
-            </button>
-          )}
-          {state.status === 'installing' && (
-            <button type="button" className="update-primary-action" disabled>
-              <LoaderCircle size={16} className="update-status-spin" />正在启动安装…
-            </button>
-          )}
-          {['error', 'not-available', 'idle', 'disabled'].includes(state.status) && (
-            <button type="button" className="update-secondary-action" onClick={() => { void checkNow(); }}>
-              <RefreshCw size={16} />{retryLabel}
-            </button>
-          )}
-        </div>
+        {(state.status === 'downloaded' || state.status === 'installing') && (
+          <div className="update-details-actions">
+            {state.status === 'downloaded' && (
+              <button type="button" className="update-primary-action" onClick={() => { void installNow(); }}>
+                <RotateCcw size={16} />重启并更新
+              </button>
+            )}
+            {state.status === 'installing' && (
+              <button type="button" className="update-primary-action" disabled>
+                <LoaderCircle size={16} className="update-status-spin" />正在启动安装…
+              </button>
+            )}
+          </div>
+        )}
         {actionError && <p className="update-action-error" role="alert">{actionError}</p>}
 
         <details className="update-manual-tools">

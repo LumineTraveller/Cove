@@ -27,6 +27,7 @@ import {
   DEFAULT_AUDIO_DEVICE_ID,
 } from "../audioDevices";
 import { encodeAudioBufferSegment } from "../audioTrim";
+import { useSortableList } from "../hooks/useSortableList";
 import { AudioTrimEditor } from "./AudioTrimEditor";
 
 interface Soundpack {
@@ -130,7 +131,6 @@ export function SoundPackPanel({
   const [pendingRename, setPendingRename] = useState<Soundpack | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [renamingId, setRenamingId] = useState<string | null>(null);
-  const [draggedId, setDraggedId] = useState<string | null>(null);
   const [reordering, setReordering] = useState(false);
   const [soundpackVolume, setSoundpackVolume] = useState(loadSoundpackVolume);
   const [favoriteIds, setFavoriteIds] = useState<string[]>(() =>
@@ -310,9 +310,14 @@ export function SoundPackPanel({
     (soundId: string) => {
       const sound = packsRef.current.find((pack) => pack.id === soundId);
       if (!sound) return;
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current.src = "";
+      const previous = audioRef.current;
+      if (previous) {
+        // 摘掉回调再清空 src：空 src 会让资源选择失败并在该元素上触发 error，
+        // 若此时回调还在，它会清掉下面即将设置的 playingId（表现为暂停图标闪现）。
+        previous.onended = null;
+        previous.onerror = null;
+        previous.pause();
+        previous.src = "";
       }
       const audio = new Audio(`${serverURL}/sounds/${sound.filename}`);
       audio.volume = soundpackVolumeRef.current / 100;
@@ -324,10 +329,16 @@ export function SoundPackPanel({
         })
         .finally(() => {
           if (audioRef.current !== audio) return;
-          audio.play().catch(() => setPlayingId(null));
+          audio.play().catch(() => {
+            if (audioRef.current === audio) setPlayingId(null);
+          });
         });
-      audio.onended = () => setPlayingId(null);
-      audio.onerror = () => setPlayingId(null);
+      audio.onended = () => {
+        if (audioRef.current === audio) setPlayingId(null);
+      };
+      audio.onerror = () => {
+        if (audioRef.current === audio) setPlayingId(null);
+      };
     },
     [serverURL, outputDeviceId],
   );
@@ -343,8 +354,14 @@ export function SoundPackPanel({
       setFavoriteIds((previous) => previous.filter((id) => id !== soundId));
       setPlayingId((current) => {
         if (current !== soundId) return current;
-        audioRef.current?.pause();
-        if (audioRef.current) audioRef.current.src = "";
+        const playing = audioRef.current;
+        if (playing) {
+          // 与 playSound 同理：先摘回调再清空 src，避免过期 error 再次触发。
+          playing.onended = null;
+          playing.onerror = null;
+          playing.pause();
+          playing.src = "";
+        }
         return null;
       });
       setPendingDelete((current) => (current?.id === soundId ? null : current));
@@ -657,42 +674,51 @@ export function SoundPackPanel({
     }
   };
 
-  const reorderSound = async (sourceId: string, targetId: string) => {
-    if (disabled || reordering || sourceId === targetId) return;
-    const previous = packsRef.current;
-    const sourceIndex = previous.findIndex((sound) => sound.id === sourceId);
-    const targetIndex = previous.findIndex((sound) => sound.id === targetId);
-    if (sourceIndex < 0 || targetIndex < 0) return;
-
-    const next = [...previous];
-    const [moved] = next.splice(sourceIndex, 1);
-    next.splice(targetIndex, 0, moved);
-    setPacks(next);
-    setReordering(true);
-    try {
-      const result = await new Promise<{ ok: boolean; error?: string }>(
-        (resolve, reject) => {
-          socket.timeout(5_000).emit(
-            "soundpack:reorder",
-            {
-              roomId,
-              orderedIds: next.map((sound) => sound.id),
-            },
-            (error: Error | null, response: { ok: boolean; error?: string }) =>
-              error ? reject(error) : resolve(response),
+  const commitOrder = useCallback(
+    (orderedIds: string[]) => {
+      const previous = packsRef.current;
+      const byId = new Map(previous.map((pack) => [pack.id, pack]));
+      const next = orderedIds.flatMap((id) => {
+        const pack = byId.get(id);
+        return pack ? [pack] : [];
+      });
+      if (next.length !== previous.length) return;
+      if (next.every((pack, index) => pack.id === previous[index]?.id)) return;
+      setPacks(next);
+      setReordering(true);
+      void new Promise<{ ok: boolean; error?: string }>((resolve, reject) => {
+        socket.timeout(5_000).emit(
+          "soundpack:reorder",
+          { roomId, orderedIds: next.map((pack) => pack.id) },
+          (error: Error | null, response: { ok: boolean; error?: string }) =>
+            error ? reject(error) : resolve(response),
+        );
+      })
+        .then((result) => {
+          if (!result.ok) throw new Error(result.error ?? "调整顺序失败");
+        })
+        .catch((cause) => {
+          setPacks(previous);
+          alert(
+            cause instanceof Error ? cause.message : "调整顺序失败，请检查网络连接",
           );
-        },
-      );
-      if (!result.ok) throw new Error(result.error ?? "调整顺序失败");
-    } catch (cause) {
-      setPacks(previous);
-      alert(
-        cause instanceof Error ? cause.message : "调整顺序失败，请检查网络连接",
-      );
-    } finally {
-      setReordering(false);
-    }
-  };
+        })
+        .finally(() => setReordering(false));
+    },
+    [roomId, socket],
+  );
+
+  const sortable = useSortableList({
+    ids: packs.map((pack) => pack.id),
+    disabled: disabled || reordering || packs.length < 2,
+    layout: "grid",
+    onCommit: commitOrder,
+  });
+  const packsById = new Map(packs.map((pack) => [pack.id, pack]));
+  const orderedPacks = sortable.orderedIds.flatMap((id) => {
+    const pack = packsById.get(id);
+    return pack ? [pack] : [];
+  });
 
   const audioEditorOverlay = audioEditor
     ? createPortal(
@@ -709,6 +735,74 @@ export function SoundPackPanel({
         document.body,
       )
     : null;
+
+  const overlayPack = sortable.overlay
+    ? packs.find((pack) => pack.id === sortable.overlay!.id)
+    : undefined;
+  const overlayFavoriteIndex = overlayPack
+    ? favoriteIds.indexOf(overlayPack.id)
+    : -1;
+  const sortableOverlay =
+    sortable.overlay && overlayPack && sortable.overlayStyle
+      ? createPortal(
+          <div
+            ref={sortable.overlayRef}
+            className={
+              compact
+                ? "soundpack-item soundpack-item-overlay"
+                : "soundpack-card-overlay soundpack-item-overlay"
+            }
+            style={sortable.overlayStyle}
+            aria-hidden="true"
+          >
+            {compact ? (
+              <>
+                <div className="soundpack-item-copy">
+                  <b>{overlayPack.name}</b>
+                  <small>{overlayPack.uploader}</small>
+                </div>
+                {/* Visual stand-in for the resting card's favorite button: it
+                    occupies the same slot so the centered name does not shift
+                    sideways when the card is picked up. Non-interactive by
+                    design — the whole overlay is pointer-events: none. */}
+                <span
+                  className={`soundpack-favorite-button ${
+                    overlayFavoriteIndex >= 0 ? "active" : ""
+                  }`}
+                >
+                  <Star
+                    size={16}
+                    fill={overlayFavoriteIndex >= 0 ? "currentColor" : "none"}
+                  />
+                  {overlayFavoriteIndex >= 0 && (
+                    <i>{overlayFavoriteIndex + 1}</i>
+                  )}
+                </span>
+              </>
+            ) : (
+              <>
+                <span className="soundpack-overlay-play">
+                  <Play size={15} fill="currentColor" />
+                </span>
+                <span className="min-w-0">
+                  <span className="block truncate text-sm font-semibold">
+                    {overlayPack.name}
+                  </span>
+                  <span className="mt-1 block truncate text-xs text-white/40">
+                    {overlayPack.uploader}
+                  </span>
+                </span>
+              </>
+            )}
+          </div>,
+          document.body,
+        )
+      : null;
+  const sortableLiveRegion = (
+    <div className="sortable-live-region" role="status" aria-live="polite">
+      {sortable.announcement}
+    </div>
+  );
 
   if (compact) {
     const compactPopoverStyle = popoverPosition
@@ -770,7 +864,6 @@ export function SoundPackPanel({
                     >
                       <b>{index + 1}</b>
                       <span>{sound.name}</span>
-                      {playingId === sound.id && <Pause size={14} />}
                     </button>
                   ))}
                 </div>
@@ -858,16 +951,28 @@ export function SoundPackPanel({
                   <span>{packs.length} 个</span>
                 </div>
                 {packs.length > 0 ? (
-                  <div className="soundpack-items">
-                    {packs.map((sound) => {
+                  <div className="soundpack-items" data-sortable={orderedPacks.length > 1 ? "true" : undefined}>
+                    {orderedPacks.map((sound) => {
                       const playing = playingId === sound.id;
                       const favoriteIndex = favoriteIds.indexOf(sound.id);
+                      if (sound.id === sortable.draggingId && !sortable.keyboardId) {
+                        return (
+                          <div
+                            key={sound.id}
+                            ref={sortable.placeholderRef}
+                            className="soundpack-item-placeholder"
+                            style={{ height: sortable.overlayHeight }}
+                            aria-hidden="true"
+                          />
+                        );
+                      }
                       return (
                         <div
                           key={sound.id}
-                          className={`soundpack-item ${playing ? "playing" : ""} ${draggedId === sound.id ? "dragged" : ""}`}
+                          ref={sortable.registerRow(sound.id)}
+                          {...sortable.getRowProps(sound.id)}
+                          className={`soundpack-item ${playing ? "playing" : ""} ${sortable.keyboardId === sound.id ? "soundpack-item-lifted" : ""}`}
                           role="button"
-                          tabIndex={disabled || !inVoice ? -1 : 0}
                           aria-disabled={disabled || !inVoice}
                           title={
                             inVoice
@@ -876,9 +981,13 @@ export function SoundPackPanel({
                                 : "点击播放，拖动排序"
                               : "请先加入语音"
                           }
-                          onClick={() => handlePlay(sound)}
+                          onClick={() => {
+                            if (sortable.consumeClickSuppression()) return;
+                            handlePlay(sound);
+                          }}
                           onKeyDown={(event) => {
-                            if (event.key !== "Enter" && event.key !== " ") return;
+                            if (sortable.handleKeyDown(event, sound.id)) return;
+                            if (event.key !== "Enter") return;
                             event.preventDefault();
                             handlePlay(sound);
                           }}
@@ -886,27 +995,6 @@ export function SoundPackPanel({
                             event.preventDefault();
                             if (sound.canDelete && !disabled) beginRename(sound);
                           }}
-                          draggable={!disabled && !reordering && packs.length > 1}
-                          onDragStart={(event) => {
-                            setDraggedId(sound.id);
-                            event.dataTransfer.effectAllowed = "move";
-                            event.dataTransfer.setData("text/plain", sound.id);
-                          }}
-                          onDragOver={(event) => {
-                            if (draggedId && draggedId !== sound.id) {
-                              event.preventDefault();
-                              event.dataTransfer.dropEffect = "move";
-                            }
-                          }}
-                          onDrop={(event) => {
-                            event.preventDefault();
-                            const sourceId =
-                              event.dataTransfer.getData("text/plain") ||
-                              draggedId;
-                            setDraggedId(null);
-                            if (sourceId) void reorderSound(sourceId, sound.id);
-                          }}
-                          onDragEnd={() => setDraggedId(null)}
                         >
                           <div className="soundpack-item-copy">
                             <b>{sound.name}</b>
@@ -920,10 +1008,6 @@ export function SoundPackPanel({
                               toggleFavorite(sound.id);
                             }}
                             onPointerDown={(event) => event.stopPropagation()}
-                            onDragStart={(event) => {
-                              event.preventDefault();
-                              event.stopPropagation();
-                            }}
                             onContextMenu={(event) => {
                               event.preventDefault();
                               event.stopPropagation();
@@ -1038,6 +1122,8 @@ export function SoundPackPanel({
             </section>,
             document.body,
           )}
+        {sortableOverlay}
+        {sortableLiveRegion}
         {audioEditorOverlay}
       </>
     );
@@ -1160,39 +1246,38 @@ export function SoundPackPanel({
                     <span className="text-sm text-white/25">最大 8MB</span>
                   </button>
                 ) : (
-                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-                    {packs.map((sound) => {
+                  <div
+                    className="grid grid-cols-2 gap-3 sm:grid-cols-3"
+                    data-sortable={orderedPacks.length > 1 ? "true" : undefined}
+                  >
+                    {orderedPacks.map((sound) => {
                       const playing = playingId === sound.id;
+                      if (sound.id === sortable.draggingId && !sortable.keyboardId) {
+                        return (
+                          <div
+                            key={sound.id}
+                            ref={sortable.placeholderRef}
+                            className="soundpack-card-placeholder"
+                            style={{ height: sortable.overlayHeight }}
+                            aria-hidden="true"
+                          />
+                        );
+                      }
                       return (
                         <div
                           key={sound.id}
-                          draggable={
-                            !disabled && !reordering && packs.length > 1
-                          }
-                          onDragStart={(event) => {
-                            setDraggedId(sound.id);
-                            event.dataTransfer.effectAllowed = "move";
-                            event.dataTransfer.setData("text/plain", sound.id);
+                          ref={sortable.registerRow(sound.id)}
+                          {...sortable.getRowProps(sound.id)}
+                          onKeyDown={(event) => {
+                            sortable.handleKeyDown(event, sound.id);
                           }}
-                          onDragOver={(event) => {
-                            if (draggedId && draggedId !== sound.id) {
-                              event.preventDefault();
-                              event.dataTransfer.dropEffect = "move";
-                            }
-                          }}
-                          onDrop={(event) => {
-                            event.preventDefault();
-                            const sourceId =
-                              event.dataTransfer.getData("text/plain") ||
-                              draggedId;
-                            setDraggedId(null);
-                            if (sourceId) void reorderSound(sourceId, sound.id);
-                          }}
-                          onDragEnd={() => setDraggedId(null)}
-                          className={`group relative min-h-20 ${packs.length > 1 && !disabled ? "cursor-grab active:cursor-grabbing" : ""} ${draggedId === sound.id ? "opacity-45" : ""}`}
+                          className={`group relative min-h-20 ${sortable.keyboardId === sound.id ? "soundpack-card-lifted" : ""}`}
                         >
                           <button
-                            onClick={() => handlePlay(sound)}
+                            onClick={() => {
+                              if (sortable.consumeClickSuppression()) return;
+                              handlePlay(sound);
+                            }}
                             disabled={disabled || !inVoice}
                             className={`relative h-full min-h-20 w-full overflow-hidden rounded-2xl border px-4 py-3 text-left transition-all focus:outline-none focus:ring-2 focus:ring-cyan-300/50 disabled:cursor-not-allowed disabled:opacity-35 ${sound.canDelete ? "pr-20" : ""} ${playing ? "border-cyan-300/50 bg-cyan-300/15 text-cyan-100 shadow-lg shadow-cyan-950/30" : "border-white/[0.07] bg-white/[0.055] text-white/75 hover:-translate-y-0.5 hover:border-cyan-300/25 hover:bg-white/10 hover:text-white"}`}
                             title={
@@ -1253,7 +1338,7 @@ export function SoundPackPanel({
                               </button>
                             </div>
                           )}
-                          {packs.length > 1 && (
+                          {orderedPacks.length > 1 && (
                             <span
                               className="pointer-events-none absolute bottom-2 right-2 z-10 rounded-lg bg-zinc-950/65 p-1 text-white/25 opacity-0 backdrop-blur transition-opacity group-hover:opacity-100"
                               aria-hidden="true"
@@ -1380,6 +1465,8 @@ export function SoundPackPanel({
           </div>,
           document.body,
         )}
+      {sortableOverlay}
+      {sortableLiveRegion}
       {audioEditorOverlay}
     </>
   );

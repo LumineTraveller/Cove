@@ -1513,6 +1513,14 @@ export function RoomAppearanceSettings({
   const [darkBottom, setDarkBottom] = useState(
     roomColor(room.backgroundBottomDark, ROOM_DARK_BOTTOM),
   );
+  // 只有用户真正动过的那一套主题背景才会被提交。未编辑的一套不下发对应字段，
+  // 由服务端沿用数据库中的原值，避免浅色/深色互相覆盖。
+  const [lightColorsDirty, setLightColorsDirty] = useState(false);
+  const [darkColorsDirty, setDarkColorsDirty] = useState(false);
+  const markColorsDirty = (mode: AppTheme) => {
+    if (mode === "dark") setDarkColorsDirty(true);
+    else setLightColorsDirty(true);
+  };
   const top = backgroundMode === "dark" ? darkTop : lightTop;
   const bottom = backgroundMode === "dark" ? darkBottom : lightBottom;
   const setTop = backgroundMode === "dark" ? setDarkTop : setLightTop;
@@ -1663,9 +1671,10 @@ export function RoomAppearanceSettings({
                   <input
                     type="color"
                     value={top}
-                    onChange={(event) =>
-                      setTop(event.target.value.toUpperCase())
-                    }
+                    onChange={(event) => {
+                      setTop(event.target.value.toUpperCase());
+                      markColorsDirty(backgroundMode);
+                    }}
                     aria-label="房间顶部颜色"
                   />
                 </label>
@@ -1673,9 +1682,10 @@ export function RoomAppearanceSettings({
                   <input
                     type="color"
                     value={bottom}
-                    onChange={(event) =>
-                      setBottom(event.target.value.toUpperCase())
-                    }
+                    onChange={(event) => {
+                      setBottom(event.target.value.toUpperCase());
+                      markColorsDirty(backgroundMode);
+                    }}
                     aria-label="房间底部颜色"
                   />
                 </label>
@@ -1685,18 +1695,20 @@ export function RoomAppearanceSettings({
                   <span>顶部颜色</span>
                   <input
                     value={top}
-                    onChange={(event) =>
-                      setTop(event.target.value.toUpperCase())
-                    }
+                    onChange={(event) => {
+                      setTop(event.target.value.toUpperCase());
+                      markColorsDirty(backgroundMode);
+                    }}
                   />
                 </label>
                 <label>
                   <span>底部颜色</span>
                   <input
                     value={bottom}
-                    onChange={(event) =>
-                      setBottom(event.target.value.toUpperCase())
-                    }
+                    onChange={(event) => {
+                      setBottom(event.target.value.toUpperCase());
+                      markColorsDirty(backgroundMode);
+                    }}
                   />
                 </label>
               </div>
@@ -1758,13 +1770,21 @@ export function RoomAppearanceSettings({
           <button
             className="primary-wide"
             onClick={() => {
+              // 只提交用户实际编辑过的那一套主题背景；未编辑的一套不下发该字段，
+              // 由服务端沿用数据库原值，避免两套主题互相覆盖。
+              const colorChanges: Record<string, string> = {};
+              if (lightColorsDirty) {
+                colorChanges.backgroundTop = lightTop;
+                colorChanges.backgroundBottom = lightBottom;
+              }
+              if (darkColorsDirty) {
+                colorChanges.backgroundTopDark = darkTop;
+                colorChanges.backgroundBottomDark = darkBottom;
+              }
               onSave({
                 name: name.trim() || room.name,
                 avatarUrl: avatar,
-                backgroundTop: top,
-                backgroundBottom: bottom,
-                backgroundTopDark: darkTop,
-                backgroundBottomDark: darkBottom,
+                ...colorChanges,
                 maxMembers:
                   maxMembers === "unlimited" ? null : Number(maxMembers),
                 password:
@@ -2189,9 +2209,16 @@ export function GlobalSettingsV2({
                   </a>
                 </nav>
               </div>
-              <small className="about-quote">
+              <button
+                type="button"
+                className="about-quote"
+                onClick={() =>
+                  setAboutQuote((previous) => pickAboutQuote(previous))
+                }
+                title="点击换一句"
+              >
                 “{aboutQuote.text}”
-              </small>
+              </button>
             </div>
           )}
         </main>

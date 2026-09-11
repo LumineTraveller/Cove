@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Sortable List QA</title>
+    <style>
+      body { margin: 0; font-family: sans-serif; background: #f4f5f7; }
+      #list { list-style: none; width: 340px; margin: 16px; padding: 0; display: grid; grid-template-columns: repeat(3, 100px); gap: 10px; }
+      #list li { min-height: 80px; display: flex; align-items: center; justify-content: center; border: 1px solid #d6dae0; border-radius: 11px; background: #fff; }
+      .placeholder { border-style: dashed; background: #eef3fb; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./sortable-qa.tsx"></script>
+  </body>
+</html>

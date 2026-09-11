@@ -1,5 +1,5 @@
 export {
-  UPDATE_STEPS, formatTransferPercent, isUpdateBusy, updateStepIndex, updateWaitWarning,
+  UPDATE_STEPS, formatTransferPercent, isUpdateBusy, updateHasDetails, updateStepIndex, updateWaitWarning,
 } from '../electron/update-state';
 export type { UpdateState, UpdateStatus } from '../electron/update-state';
 

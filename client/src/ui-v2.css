@@ -253,6 +253,13 @@ select:focus-visible {
   z-index: 100;
   overflow: visible;
   transition: padding 320ms var(--ease-layout);
+  /* 房间栏有自己固定的底色（浅色主题白、深色主题 #111923），不随房间背景渐变变化，
+     所以栏内文字必须按主题取值，而不是继承 .cove-shell 的 --room-fg / --room-muted
+     —— 那两个变量是跟随房间背景深浅翻转的，一旦继承下来，浅色主题配深色房间背景时
+     就会出现白字落在白底上。这里把两个变量重置为主题值，并显式声明 color 覆盖继承。 */
+  --room-fg: var(--ink);
+  --room-muted: var(--muted);
+  color: var(--ink);
 }
 .navigation-rail.expanded {
   padding-inline: 14px;
@@ -1173,6 +1180,22 @@ select:focus-visible {
 .fullscreen-stack {
   position: relative;
 }
+/* 悬停桥：浮层与按钮之间存在 5px 空隙，鼠标经过时会短暂离开 .fullscreen-stack
+   的命中区，导致 :hover 反复失效/恢复，浮层随之闪烁抖动。用一个透明伪元素把
+   这块空隙补上，让指针从按钮滑向浮层时始终停留在命中区内。 */
+.fullscreen-stack::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  height: 51px;
+  /* 透明但可命中，仅作为指针通道使用。层级压到浮层之下，
+     避免遮住“应用全屏”按钮导致无法点击。 */
+  background: transparent;
+  pointer-events: auto;
+  z-index: 0;
+}
 .fullscreen-stack .application-fullscreen {
   position: absolute;
   right: 0;
@@ -1185,8 +1208,14 @@ select:focus-visible {
   visibility: hidden;
   transform: translateY(8px);
   transition: 180ms var(--ease-enter);
+  /* 浮层本身也参与命中，指针停留其上时保持展开；层级高于悬停桥。 */
+  pointer-events: auto;
+  z-index: 1;
 }
-.fullscreen-stack:hover .application-fullscreen {
+/* 只要指针在堆栈（含悬停桥）或浮层上，浮层就保持可见；用 :focus-within 兼顾
+   键盘操作，避免纯 hover 判定在指针移动中抖动。 */
+.fullscreen-stack:hover .application-fullscreen,
+.fullscreen-stack:focus-within .application-fullscreen {
   opacity: 1;
   visibility: visible;
   transform: translateY(0);
@@ -5632,6 +5661,12 @@ body .cove-window-controls button {
   border-color: var(--line-strong);
   color: var(--ink);
 }
+/* 房间栏的「设置」按钮原来只有一条写死的 #596470，深浅主题共用；在深色栏
+   （#111923）上对比度仅约 3:1，明显偏暗。这里按主题补上取值，与 .icon-btn
+   的处理保持一致。 */
+:root[data-theme="dark"] .global-settings-button {
+  color: var(--muted);
+}
 :root[data-theme="dark"] .create-room:hover,
 :root[data-theme="dark"] .global-settings-button:hover {
   background: var(--surface-strong);
@@ -6078,10 +6113,6 @@ body .cove-window-controls button {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.soundpack-quick-list button svg {
-  flex: 0 0 auto;
-  color: #b78020;
-}
 .soundpack-quick-empty {
   margin: 3px 2px 1px;
   color: var(--muted);
@@ -6244,8 +6275,17 @@ body .cove-window-controls button {
   border-color: #cbdaf3;
   background: #f8fbff;
 }
-.soundpack-item.dragged {
-  opacity: 0.42;
+.soundpack-item-placeholder {
+  min-height: 50px;
+  border: 1px dashed color-mix(in srgb, var(--blue) 32%, var(--line));
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--blue) 5%, transparent);
+}
+.soundpack-item-lifted {
+  position: relative;
+  z-index: 5;
+  border-color: color-mix(in srgb, var(--blue) 45%, var(--line));
+  box-shadow: 0 14px 30px rgba(15, 23, 42, 0.22);
 }
 .soundpack-drag-handle {
   flex: 0 0 auto;
@@ -7163,20 +7203,28 @@ body .cove-window-controls button {
 
 /* Sound-pack cards use the name as their primary control label. Centering it
    and giving it two lines keeps longer names readable without colliding with
-   the favorite button. */
-.soundpack-management-popover .soundpack-item {
+   the favorite button.
+
+   The lifted card is portaled to <body> so it escapes the popover's scroll
+   clipping, which means these popover-scoped rules would no longer reach it.
+   `.soundpack-item-overlay.soundpack-item` re-attaches the same declarations so
+   the picked-up card keeps the exact geometry and type of the resting card. */
+.soundpack-management-popover .soundpack-item,
+.soundpack-item-overlay.soundpack-item {
   min-height: 68px;
   align-items: center;
   justify-content: center;
 }
-.soundpack-management-popover .soundpack-item-copy {
+.soundpack-management-popover .soundpack-item-copy,
+.soundpack-item-overlay.soundpack-item .soundpack-item-copy {
   width: 100%;
   padding: 0 28px;
   justify-items: center;
   text-align: center;
   gap: 5px;
 }
-.soundpack-management-popover .soundpack-item-copy b {
+.soundpack-management-popover .soundpack-item-copy b,
+.soundpack-item-overlay.soundpack-item .soundpack-item-copy b {
   max-width: 100%;
   display: block;
   overflow: hidden;
@@ -7186,7 +7234,8 @@ body .cove-window-controls button {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.soundpack-management-popover .soundpack-item-copy small {
+.soundpack-management-popover .soundpack-item-copy small,
+.soundpack-item-overlay.soundpack-item .soundpack-item-copy small {
   max-width: 100%;
   font-size: 11px;
   text-align: center;
@@ -8203,23 +8252,24 @@ html:has(.cove-v2-page) {
   box-shadow: 0 14px 28px rgba(53, 120, 229, 0.18);
 }
 .global-settings .about-settings h3 {
-  margin: 8px 0 0;
+  margin: 16px 0 0;
   color: var(--ink);
   font-size: 24px;
   line-height: 1.2;
 }
 .global-settings .about-settings p {
-  margin: 0;
+  margin: 8px 0 0;
   color: var(--muted);
   font-size: 14px;
   line-height: 1.45;
 }
-.global-settings .about-settings > small {
+.global-settings .about-settings small {
+  margin-top: 12px;
   color: var(--muted);
   font-size: 12px;
 }
 .about-links {
-  margin-top: 14px;
+  margin-top: 18px;
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
@@ -8312,16 +8362,28 @@ html:has(.cove-v2-page) {
   justify-content: center;
   text-align: center;
 }
+/* 这条彩蛋可以点一下换一句：整体保持安静的页脚观感，只靠指针形状、轻微提亮
+   和 title 提示来暗示可点。margin 保持原值不动，避免影响已调好的版面节奏。 */
 .global-settings .about-settings > .about-quote {
   flex: 0 0 auto;
   align-self: center;
   width: min(720px, calc(100% - 32px));
-  margin: 18px 0 10px;
+  margin: 22px 0 10px;
+  padding: 0;
   color: var(--muted);
   font-size: 11px;
   font-style: italic;
   line-height: 1.55;
+  text-align: center;
   opacity: 0.86;
+  transition:
+    color 160ms ease,
+    opacity 160ms ease;
+}
+.global-settings .about-settings > .about-quote:hover,
+.global-settings .about-settings > .about-quote:focus-visible {
+  color: var(--ink);
+  opacity: 1;
 }
 .about-quote span {
   margin-left: 8px;

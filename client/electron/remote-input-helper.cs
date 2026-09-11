@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
@@ -50,6 +51,63 @@ internal static class RemoteInputHelper
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint SendInput(uint count, INPUT[] inputs, int size);
+
+    // ── 本机鼠标活动监测 ─────────────────────────────────────────────────────────
+    // 低层鼠标钩子可以区分真实硬件输入与 SendInput 注入（LLMHF_INJECTED）。
+    // 只要本机用户在操作鼠标，就短暂丢弃远控的鼠标输入，让本机操作始终优先。
+    private const int WH_MOUSE_LL = 14;
+    private const uint LLMHF_INJECTED = 0x00000001;
+    private const uint MouseSuppressionMs = 400;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MSLLHOOKSTRUCT {
+        public POINT pt;
+        public uint mouseData;
+        public uint flags;
+        public uint time;
+        public UIntPtr dwExtraInfo;
+    }
+
+    private delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelMouseProc callback, IntPtr module, uint threadId);
+    [DllImport("user32.dll")]
+    private static extern bool UnhookWindowsHookEx(IntPtr hook);
+    [DllImport("user32.dll")]
+    private static extern IntPtr CallNextHookEx(IntPtr hook, int nCode, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    private static extern IntPtr GetModuleHandle(string moduleName);
+
+    private static IntPtr MouseHook = IntPtr.Zero;
+    private static LowLevelMouseProc MouseHookCallback;
+    private static volatile int LastLocalMouseTick;
+
+    private static bool LocalMouseActive() {
+        // Environment.TickCount 是 32 位并会回绕，用无符号差值规避回绕问题。
+        return LastLocalMouseTick != 0 && unchecked((uint)(Environment.TickCount - LastLocalMouseTick)) < MouseSuppressionMs;
+    }
+
+    private static IntPtr MouseHookProc(int nCode, IntPtr wParam, IntPtr lParam) {
+        if (nCode >= 0) {
+            var info = (MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(MSLLHOOKSTRUCT));
+            if ((info.flags & LLMHF_INJECTED) == 0) LastLocalMouseTick = Environment.TickCount;
+        }
+        return CallNextHookEx(IntPtr.Zero, nCode, wParam, lParam);
+    }
+
+    private static void StartMouseActivityHook() {
+        MouseHookCallback = MouseHookProc;
+        var thread = new Thread(delegate() {
+            MouseHook = SetWindowsHookEx(WH_MOUSE_LL, MouseHookCallback, GetModuleHandle(null), 0);
+            if (MouseHook == IntPtr.Zero) return;
+            try { Application.Run(); }
+            finally { UnhookWindowsHookEx(MouseHook); MouseHook = IntPtr.Zero; }
+        });
+        thread.IsBackground = true;
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct POINT { public int x; public int y; }
@@ -149,6 +207,13 @@ internal static class RemoteInputHelper
 
     private static void Handle(Message message) {
         if (message == null || String.IsNullOrEmpty(message.type)) return;
+        var isMouse = message.type == "pointer" || message.type == "button" || message.type == "wheel";
+        if (isMouse && LocalMouseActive()) {
+            // 本机用户正在操作鼠标：立即释放远控按下的鼠标键并丢弃本次远控输入。
+            PendingMinimize = IntPtr.Zero;
+            if (PressedButtons.Count > 0) ReleaseMouseButtons();
+            return;
+        }
         if (message.type == "pointer") {
             SendMouse(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, 0, message.x, message.y);
         } else if (message.type == "button") {
@@ -176,8 +241,12 @@ internal static class RemoteInputHelper
             if (message.button == "right") flag = message.down ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP;
             if (message.button == "middle") flag = message.down ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_MIDDLEUP;
             if (flag != 0) {
-                if (message.down) PressedButtons.Add(message.button); else PressedButtons.Remove(message.button);
-                SendMouse(flag, 0, message.x, message.y);
+                if (message.down) {
+                    PressedButtons.Add(message.button);
+                    SendMouse(flag, 0, message.x, message.y);
+                } else if (PressedButtons.Remove(message.button)) {
+                    SendMouse(flag, 0, message.x, message.y);
+                }
             }
         } else if (message.type == "wheel") {
             SendMouse(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, 0, message.x, message.y);
@@ -188,21 +257,27 @@ internal static class RemoteInputHelper
         }
     }
 
+    private static void ReleaseMouseButtons() {
+        foreach (var button in new List<string>(PressedButtons)) {
+            uint flag = button == "left" ? MOUSEEVENTF_LEFTUP : button == "right" ? MOUSEEVENTF_RIGHTUP : MOUSEEVENTF_MIDDLEUP;
+            SendMouse(flag, 0, 0, 0);
+        }
+        PressedButtons.Clear();
+    }
+
     private static void ReleaseAll() {
         PendingMinimize = IntPtr.Zero;
         foreach (var key in new List<ushort>(PressedKeys)) {
             var input = new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = key, dwFlags = KEYEVENTF_KEYUP } } };
             SendInput(1, new[] { input }, Marshal.SizeOf(typeof(INPUT)));
         }
-        foreach (var button in new List<string>(PressedButtons)) {
-            uint flag = button == "left" ? MOUSEEVENTF_LEFTUP : button == "right" ? MOUSEEVENTF_RIGHTUP : MOUSEEVENTF_MIDDLEUP;
-            SendMouse(flag, 0, 0, 0);
-        }
+        ReleaseMouseButtons();
         PressedKeys.Clear(); PressedButtons.Clear();
     }
 
     public static void Main(string[] args) {
         if (args.Length > 0) UInt32.TryParse(args[0], out CoveProcessId);
+        StartMouseActivityHook();
         var serializer = new JavaScriptSerializer { MaxJsonLength = 8192 };
         try {
             string line;

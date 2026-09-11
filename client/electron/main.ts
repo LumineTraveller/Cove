@@ -25,6 +25,15 @@ import {
   type ApplicationAudioSource,
 } from "./application-audio";
 
+// 开发/测试运行的 stdout 可能指向已经关闭的终端管道。此时任何 console 输出都会
+// 触发 EPIPE，并被 Electron 当作未捕获异常弹出“main process error”对话框。
+// 把断管当成日志丢失忽略掉，保证主进程和屏幕共享接收等功能不受影响。
+for (const stream of [process.stdout, process.stderr]) {
+  stream?.on("error", (error: NodeJS.ErrnoException) => {
+    if (error.code !== "EPIPE") return;
+  });
+}
+
 // Electron 29 / Chromium 122 在 Windows 上默认关闭 WGC 屏幕捕获，回退到
 // 较慢的 DXGI/GDI 抓屏路径。WGC 直接使用 Windows.Graphics.Capture 与
 // D3D11 图形链路；不受支持时 WebRTC 会安全回退到默认捕获器。

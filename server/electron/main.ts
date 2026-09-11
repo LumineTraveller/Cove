@@ -4,6 +4,14 @@ import os from 'os';
 import fs from 'fs';
 import { networkInterfaces } from 'os';
 
+// GUI 进程的 stdout/stderr 可能指向已关闭的管道；忽略 EPIPE，避免任何日志输出
+// 让主进程弹出未捕获异常对话框。
+for (const stream of [process.stdout, process.stderr]) {
+  stream?.on('error', (error: NodeJS.ErrnoException) => {
+    if (error.code !== 'EPIPE') return;
+  });
+}
+
 if (!app.requestSingleInstanceLock()) { app.quit(); }
 
 app.setAppUserModelId('com.cove.server');

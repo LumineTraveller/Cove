@@ -19,6 +19,41 @@ test('sentence punctuation is not included in the link target', () => {
   ]);
 });
 
+test('www-prefixed addresses become https links', () => {
+  assert.deepEqual(parseChatText('去 www.baidu.com 看看'), [
+    { kind: 'text', text: '去 ' },
+    { kind: 'link', text: 'www.baidu.com', href: 'https://www.baidu.com' },
+    { kind: 'text', text: ' 看看' },
+  ]);
+  assert.deepEqual(parseChatText('WWW.Example.COM/a。'), [
+    { kind: 'link', text: 'WWW.Example.COM/a', href: 'https://WWW.Example.COM/a' },
+    { kind: 'text', text: '。' },
+  ]);
+});
+
+test('bare domains with common TLDs become https links', () => {
+  assert.deepEqual(parseChatText('baidu.com/s?wd=cove'), [
+    { kind: 'link', text: 'baidu.com/s?wd=cove', href: 'https://baidu.com/s?wd=cove' },
+  ]);
+  assert.deepEqual(parseChatText('打开 example.com:8080/x，谢谢'), [
+    { kind: 'text', text: '打开 ' },
+    { kind: 'link', text: 'example.com:8080/x', href: 'https://example.com:8080/x' },
+    { kind: 'text', text: '，谢谢' },
+  ]);
+});
+
+test('dotted text, emails and file paths stay plain', () => {
+  assert.deepEqual(parseChatText('index.ts 和 1.5 和 foo.bar'), [
+    { kind: 'text', text: 'index.ts 和 1.5 和 foo.bar' },
+  ]);
+  assert.deepEqual(parseChatText('mail: user@example.com'), [
+    { kind: 'text', text: 'mail: user@example.com' },
+  ]);
+  assert.deepEqual(parseChatText('路径 src/index.com/x'), [
+    { kind: 'text', text: '路径 src/index.com/x' },
+  ]);
+});
+
 test('external URL gate accepts only absolute HTTP and HTTPS URLs', () => {
   assert.equal(normalizeExternalHttpUrl('https://example.com/a'), 'https://example.com/a');
   assert.equal(normalizeExternalHttpUrl('http://example.com'), 'http://example.com/');
