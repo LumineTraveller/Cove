@@ -150,16 +150,32 @@ test('packaged builds configure automatic checks and downloads', async () => {
   assert.equal(h.updater.feedCalls[0].url, githubSource.feedUrl);
 });
 
-test('release discovery selects the newest version, then the faster mirror', async () => {
+test('release discovery checks GitHub first and keeps Gitee as the fallback', async () => {
+  const calls = [];
   const fetchImpl = async input => {
     const url = String(input);
+    calls.push(url);
     const tag_name = url.includes('gitee.com') ? 'v0.7.1' : 'v0.7.0';
     return new Response(JSON.stringify({ tag_name }), { status: 200 });
   };
   const sources = await discoverUpdateSources(fetchImpl, 1_000);
-  assert.deepEqual(sources.map(source => [source.id, source.version]), [['gitee', '0.7.1'], ['github', '0.7.0']]);
+  assert.deepEqual(calls.map(url => url.includes('gitee.com') ? 'gitee' : 'github'), ['github', 'gitee']);
+  assert.deepEqual(sources.map(source => [source.id, source.version]), [['github', '0.7.0'], ['gitee', '0.7.1']]);
   assert.equal(compareReleaseVersions('0.7.0', '0.6.9') > 0, true);
-  assert.match(sources[0].feedUrl, /gitee\.com\/LumineTraveller\/Cove\/releases\/download\/v0\.7\.1\/$/);
+  assert.match(sources[0].feedUrl, /github\.com\/LumineTraveller\/Cove\/releases\/download\/v0\.7\.0\/$/);
+});
+
+test('release discovery probes Gitee only after the GitHub result is known', async () => {
+  const calls = [];
+  const fetchImpl = async input => {
+    const url = String(input);
+    calls.push(url);
+    if (url.includes('github.com')) throw new Error('GitHub offline');
+    return new Response(JSON.stringify({ tag_name: 'v0.7.1' }), { status: 200 });
+  };
+  const sources = await discoverUpdateSources(fetchImpl, 1_000);
+  assert.deepEqual(calls.map(url => url.includes('gitee.com') ? 'gitee' : 'github'), ['github', 'gitee']);
+  assert.deepEqual(sources.map(source => source.id), ['gitee']);
 });
 
 test('a failed primary source automatically falls back to the other release mirror', async () => {

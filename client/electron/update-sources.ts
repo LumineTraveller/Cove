@@ -79,18 +79,25 @@ async function discoverSource(
 }
 
 /**
- * 同时探测国内外两个 Release API。优先选择版本较新者；版本相同时选择
- * 响应更快者，另一个保留为下载失败时的自动回退源。
+ * 按固定优先级探测 Release API。
+ *
+ * GitHub 是首选更新源：electron-updater 可以优先使用其差分包，且发布内容
+ * 通常更完整。Gitee 会在 GitHub 探测完成后再探测，用作 GitHub 下载失败时
+ * 的回退源；但不会因为响应更快或版本号暂时领先而把 Gitee 提到前面。
  */
 export async function discoverUpdateSources(
   fetchImpl: FetchLike = fetch,
   timeoutMs = 6_000,
   now: () => number = Date.now,
 ): Promise<UpdateSourceCandidate[]> {
-  const results = await Promise.allSettled(
-    SOURCES.map(source => discoverSource(source, fetchImpl, timeoutMs, now)),
-  );
-  return results
-    .flatMap(result => result.status === 'fulfilled' ? [result.value] : [])
-    .sort((left, right) => compareReleaseVersions(right.version, left.version) || left.latencyMs - right.latencyMs);
+  const discovered: UpdateSourceCandidate[] = [];
+  for (const source of SOURCES) {
+    try {
+      discovered.push(await discoverSource(source, fetchImpl, timeoutMs, now));
+    } catch {
+      // Keep probing the lower-priority mirror when the preferred source is
+      // unavailable. The updater will report an error only if both fail.
+    }
+  }
+  return discovered;
 }
