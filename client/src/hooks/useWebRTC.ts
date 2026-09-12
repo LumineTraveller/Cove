@@ -248,86 +248,187 @@ const MASTER_OUTPUT_VOLUME_KEY = "cove_master_output_volume_v1";
 // 与旧版麦克风处理链保持一致的基础增益；用户音量设置在此基础上调整。
 const MICROPHONE_BASE_GAIN = 0.92;
 
-// Chromium 的系统降噪负责处理连续噪声；这个轻量自适应噪声门只在用户不说话时
-// 继续衰减残留底噪，让 Opus DTX 能真正进入静音状态。门限会缓慢跟随本机噪声底，
-// 并保留 140ms，避免切掉句尾或短暂停顿。
-const MIC_NOISE_GATE_WORKLET = `
-class CoveMicNoiseGate extends AudioWorkletProcessor {
+// Chromium 的 WebRTC APM 负责回声消除和基础语音降噪；这里补一层保守的
+// 自适应频谱抑制：它估计每个频段的噪声功率，在人声存在时只衰减低 SNR 频段，
+// 而不是像旧版噪声门那样把整段音频一起切掉。静音时再使用较轻的软门限，
+// 保留句尾和呼吸声，避免产生明显的开关感。
+const MIC_NOISE_SUPPRESSOR_WORKLET = `
+class CoveMicNoiseSuppressor extends AudioWorkletProcessor {
   constructor() {
     super();
-    this.gain = 1;
-    this.envelope = 0;
-    this.noiseFloor = 0.0035;
-    this.holdBlocks = 0;
+    this.frameSize = 256;
+    this.hopSize = 128;
+    this.frame = new Float32Array(this.frameSize);
+    this.inputBlock = new Float32Array(this.hopSize);
+    this.inputCount = 0;
+    // AudioWorklet 通常以 128 个采样为一个量子。用固定缓冲区交接相邻
+    // 量子，避免每个采样调用 Array.shift() 造成实时线程的额外 GC/搬移。
+    this.outputBlock = new Float32Array(this.hopSize);
+    this.outputIndex = this.hopSize;
+    this.overlap = new Float32Array(this.frameSize);
+    this.window = new Float32Array(this.frameSize);
+    this.real = new Float32Array(this.frameSize);
+    this.imag = new Float32Array(this.frameSize);
+    this.noisePower = new Float32Array(this.frameSize / 2 + 1);
+    this.binGain = new Float32Array(this.frameSize / 2 + 1);
+    this.binGain.fill(1);
+    this.noiseRms = 0.0035;
+    this.speechHold = 0;
+    this.warmupFrames = 0;
+
+    for (let i = 0; i < this.frameSize; i++) {
+      this.window[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (this.frameSize - 1));
+    }
+  }
+
+  fft(real, imag, inverse) {
+    let j = 0;
+    for (let i = 1; i < this.frameSize; i++) {
+      let bit = this.frameSize >> 1;
+      while (j & bit) {
+        j ^= bit;
+        bit >>= 1;
+      }
+      j ^= bit;
+      if (i < j) {
+        const realValue = real[i];
+        real[i] = real[j];
+        real[j] = realValue;
+        const imagValue = imag[i];
+        imag[i] = imag[j];
+        imag[j] = imagValue;
+      }
+    }
+
+    for (let length = 2; length <= this.frameSize; length <<= 1) {
+      const angle = (inverse ? 2 : -2) * Math.PI / length;
+      const stepReal = Math.cos(angle);
+      const stepImag = Math.sin(angle);
+      for (let start = 0; start < this.frameSize; start += length) {
+        let currentReal = 1;
+        let currentImag = 0;
+        const half = length >> 1;
+        for (let offset = 0; offset < half; offset++) {
+          const even = start + offset;
+          const odd = even + half;
+          const oddReal = real[odd] * currentReal - imag[odd] * currentImag;
+          const oddImag = real[odd] * currentImag + imag[odd] * currentReal;
+          const evenReal = real[even];
+          const evenImag = imag[even];
+          real[even] = evenReal + oddReal;
+          imag[even] = evenImag + oddImag;
+          real[odd] = evenReal - oddReal;
+          imag[odd] = evenImag - oddImag;
+          const nextReal = currentReal * stepReal - currentImag * stepImag;
+          currentImag = currentReal * stepImag + currentImag * stepReal;
+          currentReal = nextReal;
+        }
+      }
+    }
+
+    if (inverse) {
+      for (let i = 0; i < this.frameSize; i++) {
+        real[i] /= this.frameSize;
+        imag[i] /= this.frameSize;
+      }
+    }
+  }
+
+  processFrame(block) {
+    this.frame.copyWithin(0, this.hopSize);
+    this.frame.set(block, this.frameSize - this.hopSize);
+
+    let sumSquares = 0;
+    for (let i = 0; i < this.frameSize; i++) {
+      sumSquares += this.frame[i] * this.frame[i];
+      this.real[i] = this.frame[i] * this.window[i];
+      this.imag[i] = 0;
+    }
+    const rms = Math.sqrt(sumSquares / this.frameSize);
+    const activity = rms / Math.max(this.noiseRms, 0.001);
+    const speech = activity > 1.65;
+    if (speech) this.speechHold = Math.min(8, this.speechHold + 2);
+    else this.speechHold = Math.max(0, this.speechHold - 1);
+    const speechActive = speech || this.speechHold > 0;
+
+    this.fft(this.real, this.imag, false);
+    const bins = this.frameSize / 2;
+    for (let bin = 0; bin <= bins; bin++) {
+      const power = this.real[bin] * this.real[bin] + this.imag[bin] * this.imag[bin];
+      const previousNoise = this.noisePower[bin];
+      // 只在非语音帧较快学习；语音帧仅极慢跟随，避免把人声学成噪声。
+      const learnRate = speechActive ? 0.001 : (this.warmupFrames < 24 ? 0.12 : 0.045);
+      this.noisePower[bin] = previousNoise + (power - previousNoise) * learnRate;
+      const noise = Math.max(this.noisePower[bin], 1e-8);
+      const snr = power / noise;
+      // 过抑制系数 1.25，增益下限 0.28，优先减少音乐噪声和语音失真。
+      let targetGain = 1 - 1.25 / Math.max(snr, 1.25);
+      targetGain = Math.max(0.28, Math.min(1, targetGain));
+      // 低频人声基频留出更高下限，避免男声变薄。
+      if (bin <= 3) targetGain = Math.max(targetGain, 0.5);
+      if (!speechActive) {
+        // 静音段采用软门，而不是直接归零；保留呼吸声和句尾的自然衰减。
+        const softGate = Math.max(0.18, Math.min(1, (activity - 0.55) / 0.9));
+        targetGain = Math.min(targetGain, softGate);
+      }
+      this.binGain[bin] += (targetGain - this.binGain[bin]) * 0.35;
+      const gain = this.binGain[bin];
+      this.real[bin] *= gain;
+      this.imag[bin] *= gain;
+      if (bin > 0 && bin < bins) {
+        this.real[this.frameSize - bin] *= gain;
+        this.imag[this.frameSize - bin] *= gain;
+      }
+    }
+    this.warmupFrames = Math.min(24, this.warmupFrames + 1);
+    if (!speechActive) this.noiseRms += (rms - this.noiseRms) * 0.04;
+    this.noiseRms = Math.max(0.0008, Math.min(0.018, this.noiseRms));
+
+    this.fft(this.real, this.imag, true);
+    // Hann 窗 50% overlap 的平方和约为 0.75，做归一化避免整体音量下降。
+    for (let i = 0; i < this.frameSize; i++) {
+      this.overlap[i] += this.real[i] * this.window[i] / 0.75;
+    }
+    this.outputBlock.set(this.overlap.subarray(0, this.hopSize));
+    this.outputIndex = 0;
+    this.overlap.copyWithin(0, this.hopSize);
+    this.overlap.fill(0, this.frameSize - this.hopSize);
   }
 
   process(inputs, outputs) {
-    const input = inputs[0];
+    const input = inputs[0] && inputs[0][0];
     const output = outputs[0];
-    const firstChannel = input && input[0];
-    if (!firstChannel) {
-      for (const channel of output) channel.fill(0);
-      return true;
-    }
+    const firstOutput = output && output[0];
+    if (!firstOutput) return true;
 
-    let sumSquares = 0;
-    for (let i = 0; i < firstChannel.length; i++) {
-      const sample = firstChannel[i];
-      sumSquares += sample * sample;
-    }
-    const rms = Math.sqrt(sumSquares / Math.max(1, firstChannel.length));
-    const envelopeRate = rms > this.envelope ? 0.45 : 0.08;
-    this.envelope += (rms - this.envelope) * envelopeRate;
-
-    // 只在低电平区域学习噪声底；正常说话不会把门限越推越高。
-    if (rms < 0.035) {
-      const learnRate = rms < this.noiseFloor ? 0.08 : 0.002;
-      this.noiseFloor += (rms - this.noiseFloor) * learnRate;
-      this.noiseFloor = Math.max(0.0008, Math.min(0.018, this.noiseFloor));
-    }
-
-    const openThreshold = Math.max(0.0065, this.noiseFloor * 2.2);
-    const closeThreshold = openThreshold * 0.68;
-    let targetGain;
-    if (this.envelope >= openThreshold) {
-      this.holdBlocks = Math.ceil(sampleRate * 0.14 / firstChannel.length);
-      targetGain = 1;
-    } else if (this.holdBlocks > 0) {
-      this.holdBlocks -= 1;
-      targetGain = 1;
-    } else if (this.envelope <= closeThreshold) {
-      targetGain = 0.045;
-    } else {
-      const position = (this.envelope - closeThreshold) / (openThreshold - closeThreshold);
-      targetGain = 0.045 + position * 0.955;
-    }
-
-    const attack = Math.exp(-1 / (sampleRate * 0.004));
-    const release = Math.exp(-1 / (sampleRate * 0.18));
-    for (let i = 0; i < firstChannel.length; i++) {
-      const smoothing = targetGain > this.gain ? attack : release;
-      this.gain = targetGain + (this.gain - targetGain) * smoothing;
-      for (let channelIndex = 0; channelIndex < output.length; channelIndex++) {
-        const source = input[channelIndex] || firstChannel;
-        output[channelIndex][i] = source[i] * this.gain;
+    for (let i = 0; i < firstOutput.length; i++) {
+      firstOutput[i] =
+        this.outputIndex < this.hopSize ? this.outputBlock[this.outputIndex++] : 0;
+      this.inputBlock[this.inputCount++] = input ? input[i] : 0;
+      if (this.inputCount === this.hopSize) {
+        this.processFrame(this.inputBlock);
+        this.inputCount = 0;
       }
+    }
+    for (let channel = 1; channel < output.length; channel++) {
+      output[channel].set(firstOutput);
     }
     return true;
   }
 }
-registerProcessor('cove-mic-noise-gate', CoveMicNoiseGate);
+registerProcessor('cove-mic-noise-suppressor', CoveMicNoiseSuppressor);
 `;
 
-async function createMicNoiseGate(
+async function createMicNoiseSuppressor(
   context: AudioContext,
 ): Promise<AudioWorkletNode | null> {
   if (!context.audioWorklet) return null;
   const moduleUrl = URL.createObjectURL(
-    new Blob([MIC_NOISE_GATE_WORKLET], { type: "text/javascript" }),
+    new Blob([MIC_NOISE_SUPPRESSOR_WORKLET], { type: "text/javascript" }),
   );
   try {
     await context.audioWorklet.addModule(moduleUrl);
-    return new AudioWorkletNode(context, "cove-mic-noise-gate", {
+    return new AudioWorkletNode(context, "cove-mic-noise-suppressor", {
       numberOfInputs: 1,
       numberOfOutputs: 1,
       outputChannelCount: [1],
@@ -335,7 +436,7 @@ async function createMicNoiseGate(
       channelCountMode: "explicit",
     });
   } catch (error) {
-    console.warn("[mic] 自适应降噪模块不可用，继续使用系统降噪", error);
+    console.warn("[mic] 自适应频谱降噪模块不可用，继续使用系统降噪", error);
     return null;
   } finally {
     URL.revokeObjectURL(moduleUrl);
@@ -2211,13 +2312,13 @@ export function useWebRTC(socket: Socket, roomId: string) {
         tail = notch;
       }
 
-      const noiseGate = await createMicNoiseGate(context);
+      const noiseSuppressor = await createMicNoiseSuppressor(context);
       const outputGain = context.createGain();
       outputGain.gain.value = MICROPHONE_BASE_GAIN * microphoneVolumeRef.current;
       const destination = context.createMediaStreamDestination();
       destination.channelCount = 1;
-      if (noiseGate)
-        tail.connect(noiseGate).connect(outputGain).connect(destination);
+      if (noiseSuppressor)
+        tail.connect(noiseSuppressor).connect(outputGain).connect(destination);
       else tail.connect(outputGain).connect(destination);
       await context.resume();
       const processedTrack = destination.stream.getAudioTracks()[0];
@@ -2268,12 +2369,21 @@ export function useWebRTC(socket: Socket, roomId: string) {
       try {
         nextRaw = await requestMicrophone(deviceId);
         nextProcessed = await createProcessedMicStream(nextRaw);
-        // Producer 直接使用 getUserMedia 原始轨道。Electron 的 Web Audio
-        // MediaStreamDestination 偶尔会保持 live 但输出全静音；处理后的轨道
-        // 仅用于本地电平显示，不能再阻断真实麦克风上行。
-        const nextTrack = nextRaw.getAudioTracks()[0];
-        if (!nextTrack) throw new Error("选择的设备没有提供音频轨道");
+        // Windows 上优先发送经过 WebRTC APM 和自适应频谱抑制的轨道；
+        // createProcessedMicStream 在 AudioContext/Worklet 不可用时已经回退
+        // 到原始轨道，因此这里仍然保留一条可用的安全路径。
+        const rawTrack = nextRaw.getAudioTracks()[0];
+        const processedTrack = nextProcessed.stream.getAudioTracks()[0];
+        const nextTrack =
+          processedTrack?.readyState === "live" ? processedTrack : rawTrack;
+        if (!nextTrack || nextTrack.readyState !== "live")
+          throw new Error("选择的设备没有提供可用的音频轨道");
         nextTrack.contentHint = "speech";
+        console.info("[mic] 切换上行轨道", {
+          processed: nextTrack !== rawTrack,
+          label: nextTrack.label,
+          readyState: nextTrack.readyState,
+        });
         await producer.replaceTrack({ track: nextTrack });
 
         const previousRaw = rawAudioRef.current;
@@ -2397,13 +2507,20 @@ export function useWebRTC(socket: Socket, roomId: string) {
         "color:#22c55e",
       );
 
-      // 直接发布原始采集轨道。处理流继续供本地音量计使用；这样即使
-      // AudioContext destination 在 Electron 中静默，远端仍能收到麦克风。
-      const microphoneTrack = rawStream.getAudioTracks()[0];
+      // 优先发布处理后的轨道。Windows 处理链不可用时，stream 就是
+      // createProcessedMicStream 返回的原始采集流，仍然可以正常上行。
+      const processedTrack = stream?.getAudioTracks()[0];
+      const microphoneTrack =
+        processedTrack?.readyState === "live" ? processedTrack : rawTrack;
       if (!microphoneTrack || microphoneTrack.readyState !== "live") {
         throw new Error("麦克风音轨未就绪，请检查输入设备");
       }
       microphoneTrack.enabled = true;
+      console.info("[mic] 上行轨道", {
+        processed: microphoneTrack !== rawTrack,
+        label: microphoneTrack.label,
+        readyState: microphoneTrack.readyState,
+      });
 
       // 先登记为语音成员，再发布麦克风。
       // 服务端只会把新 Producer 广播给当前已在 voiceRooms 中的成员；
