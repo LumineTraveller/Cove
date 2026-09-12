@@ -238,7 +238,13 @@ export function useSortableList({
 
   const computeTarget = useCallback((drag: PointerDragState, x: number, y: number) => {
     const row = drag.rows.find((item) => item.id === drag.id);
-    if (layoutRef.current === 'grid') return gridTargetIndex(drag.rows, drag.id, x, y);
+    if (layoutRef.current === 'grid') {
+      // 网格命中应以被拖卡片的中心，而不是鼠标按下的偏移点为准。
+      // 这样从卡片左侧/右侧抓取时，横向落位仍与视觉上的卡片位置一致。
+      const centerX = x - drag.offsetX + (row?.width ?? 0) / 2;
+      const centerY = y - drag.offsetY + (row?.height ?? 0) / 2;
+      return gridTargetIndex(drag.rows, drag.id, centerX, centerY);
+    }
     const centerY = y - drag.offsetY + (row?.height ?? 0) / 2;
     return verticalTargetIndex(drag.rows, drag.id, centerY);
   }, []);

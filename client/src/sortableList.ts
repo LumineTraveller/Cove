@@ -46,7 +46,8 @@ export function groupRowsIntoLines(rows: readonly SortableRowGeometry[]): Sortab
 
 /**
  * 网格布局：先按指针的 Y 找到目标行（最近的一行），再在该行内按 X 决定插到
- * 哪张卡片的左/右侧，从而支持“停在同一行的两张卡片之间”。
+ * 哪张卡片的左/右侧，从而支持“停在同一行的两张卡片之间”。横向分割线取
+ * 相邻卡片实际间隙的中点，而不是左侧卡片的中心，避免卡片还没有拖到间隙就提前换位。
  */
 export function gridTargetIndex(
   rows: readonly SortableRowGeometry[],
@@ -73,9 +74,18 @@ export function gridTargetIndex(
   for (let i = 0; i < lineIndex; i += 1) {
     for (const row of lines[i]) if (row.id !== draggingId) index += 1;
   }
-  for (const row of lines[lineIndex]) {
-    if (row.id === draggingId) continue;
-    if (pointX > row.left + row.width / 2) index += 1;
+  const line = lines[lineIndex].filter((row) => row.id !== draggingId);
+  for (let rowIndex = 0; rowIndex < line.length; rowIndex += 1) {
+    const row = line[rowIndex];
+    const next = line[rowIndex + 1];
+    if (next) {
+      const rowRight = row.left + row.width;
+      const gapCenter = rowRight + Math.max(0, next.left - rowRight) / 2;
+      if (pointX >= gapCenter) index += 1;
+    } else if (pointX >= row.left + row.width) {
+      // 最后一张卡片没有右侧相邻卡片，用卡片右边缘作为“放到末尾”的分割线。
+      index += 1;
+    }
   }
   return index;
 }

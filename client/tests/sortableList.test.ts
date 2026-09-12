@@ -50,16 +50,18 @@ test('groupRowsIntoLines groups grid cards into visual rows', () => {
 });
 
 test('gridTargetIndex can target between two cards in the same row', () => {
-  // 拖 a：指针停在同一行 b 和 c 之间。
-  assert.equal(gridTargetIndex(grid, 'a', 200, 40), 1);
+  // 拖 a：指针停在 b 的卡片内部，尚未进入 b/c 的间隙，不应提前越过 b。
+  assert.equal(gridTargetIndex(grid, 'a', 200, 40), 0);
+  // 拖 a：指针进入 b/c 间隙的中点后，才插到 b 后面。
+  assert.equal(gridTargetIndex(grid, 'a', 216, 40), 1);
   // 拖 a：指针停在 b 之前（a 原位右侧）。
   assert.equal(gridTargetIndex(grid, 'a', 80, 40), 0);
-  // 拖 a：指针停在第二行 d 和 e 之间。
-  assert.equal(gridTargetIndex(grid, 'a', 120, 130), 3);
-  // 拖 a：指针停在所有卡片之后。
-  assert.equal(gridTargetIndex(grid, 'a', 320, 130), 5);
-  // 拖 d：指针停在第一行 a 和 b 之间（源在第二行，索引换算正确）。
-  assert.equal(gridTargetIndex(grid, 'd', 120, 40), 1);
+  // 拖 a：指针进入第二行 d/e 间隙的中点后。
+  assert.equal(gridTargetIndex(grid, 'a', 106, 130), 3);
+  // 拖 a：指针越过最后一张卡片的右边缘后。
+  assert.equal(gridTargetIndex(grid, 'a', 321, 130), 5);
+  // 拖 d：指针进入第一行 a/b 间隙（源在第二行，索引换算正确）。
+  assert.equal(gridTargetIndex(grid, 'd', 106, 40), 1);
   // 拖 d：指针在网格上方，留在最前。
   assert.equal(gridTargetIndex(grid, 'd', 50, -20), 0);
 });
