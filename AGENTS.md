@@ -8,7 +8,7 @@
 2. 读取 `mobile/android/app/build.gradle` 的 `versionName` 和 `versionCode`。
 3. 读取现有 `mobile/update.json` 的 `release.versionName` 和 `release.versionCode`。
 4. 确认 `package.json.version` 与 Android `versionName` 完全一致，并且新的 Android `versionCode` 严格大于线上清单中的旧值；只改显示版本号、不递增 Android `versionCode` 时必须停止。
-5. 构建 APK 后，使用 `output-metadata.json` 再次核对 `applicationId`、`versionName`、`versionCode`、最低 Android API 和 APK 架构。
+5. 构建 APK 后，使用 `output-metadata.json` 核对 `applicationId`、`versionName`、`versionCode` 及对应的最终 APK 文件；再用 `apkanalyzer` 或 `aapt` 从这个 APK 本身核对包名、版本号和最低 Android API，并检查 APK 内的 `lib/<ABI>/` 条目确认实际包含的架构。不能仅凭 `output-metadata.json` 推断最低 API 或 APK 架构。
 6. 从最终 APK 计算实际文件大小和 SHA-256，生成更新清单；清单中的版本和校验值必须来自这一个最终 APK，不能手填或沿用旧值。
 7. 先确认 GitHub 手机版 Release 已公开并且 APK 附件可下载，再同步 Gitee Release；更新清单推送到 GitHub 和 Gitee 的 `main` 后，分别核验两个 raw 地址返回的新版本。
 

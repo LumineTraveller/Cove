@@ -9,6 +9,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import { useNavigate, useParams } from "react-router-dom";
 import { Phone } from "lucide-react";
 import {
@@ -806,6 +807,8 @@ function ChatPanelV2({
   messages,
   profile,
   serverURL,
+  roomBottom,
+  roomForeground,
   input,
   setInput,
   onSend,
@@ -824,6 +827,8 @@ function ChatPanelV2({
   messages: Message[];
   profile: UserProfile;
   serverURL: string;
+  roomBottom: string;
+  roomForeground: string;
   input: string;
   setInput: (value: string) => void;
   onSend: () => void;
@@ -1501,71 +1506,91 @@ function ChatPanelV2({
           </button>
         </div>
       </div>
-      {imageContextMenu && (
-        <div
-          ref={imageMenuRef}
-          className="chat-image-context-menu"
-          style={{ left: imageContextMenu.x, top: imageContextMenu.y }}
-          role="menu"
-        >
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => {
-              const src = imageContextMenu.src;
-              setImageContextMenu(null);
-              void downloadImage(src);
-            }}
+      {/* 坐标来自 clientX/clientY，必须挂在 body 上：共享态的 .chat-slot 带
+          transform，会把 fixed 后代的包含块改成聊天区，菜单会整体偏移并被裁掉。 */}
+      {imageContextMenu &&
+        createPortal(
+          <div
+            ref={imageMenuRef}
+            className="chat-image-context-menu"
+            style={
+              {
+                left: imageContextMenu.x,
+                top: imageContextMenu.y,
+                // Portals mount under body, so carry the room-scoped tokens
+                // that the menu normally inherits from .cove-shell.
+                "--room-bottom": roomBottom,
+                "--room-fg": roomForeground,
+              } as React.CSSProperties
+            }
+            role="menu"
           >
-            <DownloadSimple size={16} />
-            <span>下载图片</span>
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => {
-              const src = imageContextMenu.src;
-              setImageContextMenu(null);
-              void copyImage(src);
-            }}
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                const src = imageContextMenu.src;
+                setImageContextMenu(null);
+                void downloadImage(src);
+              }}
+            >
+              <DownloadSimple size={16} />
+              <span>下载图片</span>
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                const src = imageContextMenu.src;
+                setImageContextMenu(null);
+                void copyImage(src);
+              }}
+            >
+              <Clipboard size={16} />
+              <span>复制图片</span>
+            </button>
+          </div>,
+          document.body,
+        )}
+      {/* 大图查看必须挂到 body：共享态的 .chat-slot 带 transform 与
+          will-change:transform，会为 position:fixed 后代建立包含块，否则查看器
+          只能铺满聊天区而不是整个窗口。 */}
+      {lightboxImage &&
+        createPortal(
+          <div
+            ref={lightboxRef}
+            className="image-lightbox"
+            role="dialog"
+            aria-modal="true"
+            aria-label="查看聊天图片"
+            onClick={() => setLightboxImage(null)}
           >
-            <Clipboard size={16} />
-            <span>复制图片</span>
-          </button>
-        </div>
-      )}
-      {lightboxImage && (
-        <div
-          ref={lightboxRef}
-          className="image-lightbox"
-          role="dialog"
-          aria-modal="true"
-          aria-label="查看聊天图片"
-          onClick={() => setLightboxImage(null)}
-        >
-          <img
-            ref={lightboxImageRef}
-            src={lightboxImage}
-            alt="放大的聊天图片"
-            className={lightboxZoom > 1 ? "is-zoomed" : ""}
-            title="滚轮缩放，按住拖动查看其他区域，点击空白处关闭"
-            style={{
-              transform: `translate(${lightboxOffset.x}px, ${lightboxOffset.y}px) scale(${lightboxZoom})`,
-            }}
-            onContextMenu={(event) => openImageContextMenu(event, lightboxImage)}
-            onClick={(event) => event.stopPropagation()}
-            onPointerDown={startLightboxDrag}
-            onPointerMove={moveLightboxDrag}
-            onPointerUp={endLightboxDrag}
-            onPointerCancel={endLightboxDrag}
-            onDoubleClick={(event) => {
-              event.stopPropagation();
-              setLightboxZoom(1);
-              setLightboxOffset({ x: 0, y: 0 });
-            }}
-          />
-        </div>
-      )}
+            <img
+              ref={lightboxImageRef}
+              src={lightboxImage}
+              alt="放大的聊天图片"
+              className={lightboxZoom > 1 ? "is-zoomed" : ""}
+              title="滚轮缩放，按住拖动查看其他区域，点击空白处关闭"
+              style={{
+                transform: `translate(${lightboxOffset.x}px, ${lightboxOffset.y}px) scale(${lightboxZoom})`,
+              }}
+              onContextMenu={(event) =>
+                openImageContextMenu(event, lightboxImage)
+              }
+              onClick={(event) => event.stopPropagation()}
+              onPointerDown={startLightboxDrag}
+              onPointerMove={moveLightboxDrag}
+              onPointerUp={endLightboxDrag}
+              onPointerCancel={endLightboxDrag}
+              onDoubleClick={(event) => {
+                event.stopPropagation();
+                setLightboxZoom(1);
+                setLightboxOffset({ x: 0, y: 0 });
+              }}
+            />
+          </div>,
+          document.body,
+        )}
     </aside>
   );
 }
@@ -2624,7 +2649,11 @@ function ScreenShareSettingsV2({
             onChange={(event) => onNativeResolution(event.target.checked)}
           />
         </label>
-        <section className="media-choice-section">
+        {/* 游戏模式把帧率锁在 60，与原生分辨率锁定分辨率档位是同一种情况，
+            整行灰化并禁用两个按钮，保持两行的禁用表现一致。 */}
+        <section
+          className={`media-choice-section ${gameMode ? "disabled" : ""}`}
+        >
           <span>帧率</span>
           <div className="choice-grid">
             <button
@@ -2636,6 +2665,7 @@ function ScreenShareSettingsV2({
             </button>
             <button
               className={fps === 60 ? "active" : ""}
+              disabled={gameMode}
               onClick={() => onFps(60)}
             >
               60 fps
@@ -4731,13 +4761,15 @@ export default function ChatRoomV2({
           )}
         </section>
         <div id="shared-chat-panel" className="chat-slot">
-          {/* 共享态下聊天区固定在最终宽度、只做 translateX 平移；面板必须保持挂载，
-              否则滑出动画只会带走一块空背景。未共享时它一直是可见的。 */}
+          {/* 面板必须保持挂载：窄窗口的共享态靠 translateX 把抽屉移出视野，卸载后
+              滑出动画只会带走一块空背景。未共享时它一直是可见的。 */}
           <ChatPanelV2
             key={roomId}
             messages={messages}
             profile={profile}
             serverURL={serverURL}
+            roomBottom={roomBottom}
+            roomForeground={foreground === "light" ? "#fff" : "#15191f"}
             input={input}
             setInput={setInput}
             onSend={sendMessage}

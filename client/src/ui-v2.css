@@ -1185,6 +1185,10 @@ select:focus-visible {
   color: #4f5a66;
   font-size: 10px;
   white-space: nowrap;
+  /* 悬停桥（.fullscreen-stack::after）是带 z-index 的定位伪元素，会盖在未定位的
+     按钮之上并吃掉点击。按钮升到同一层并靠 DOM 顺序压过它，浮层仍然更高。 */
+  position: relative;
+  z-index: 1;
 }
 .share-status-actions > button:hover,
 .fullscreen-stack > button:hover {
@@ -1262,8 +1266,8 @@ select:focus-visible {
 .mode-watching .control-ball-anchor,
 .mode-self .control-ball-anchor {
   bottom: 15px;
-  /* left 统一由 --control-center 决定；共享态聊天区已不占列宽，
-     这里再按 --chat-width 偏移会与覆盖层布局互相矛盾。 */
+  /* left 统一由 --control-center 决定，它已经按当前聊天列宽（或抽屉形态）算好
+     工作区中心，这里不要再叠加一次 --chat-width 偏移。 */
 }
 .cove-shell.mode-watching .chat-slot,
 .cove-shell.mode-self .chat-slot {
@@ -1373,19 +1377,11 @@ select:focus-visible {
   width: 14px;
   height: 14px;
 }
-.message-list p {
-  margin: 5px 0 3px;
-  padding: 9px 11px;
-  border-radius: 6px 13px 13px 13px;
-  background: rgba(255, 255, 255, 0.5);
-  backdrop-filter: blur(10px);
-  font-size: 13px;
-  line-height: 1.5;
-}
-.message-list .mine p {
-  background: #edf4ff;
-  border-radius: 13px 6px 13px 13px;
-}
+/* 消息气泡的样式统一由 .message-bubble 承担。这里原来还有 .message-list p /
+   .message-list .mine p 两条按旧标记（消息是 <p>）写的规则，消息改用
+   .message-bubble 后它们已不生效，却会误命中空聊天状态的说明段落，把它渲染成
+   带毛玻璃底的气泡。已删除；深色房间的气泡改由 .foreground-light .message-bubble
+   接管。 */
 .message-list time {
   color: #9aa2ac;
   font-size: 10px;
@@ -2272,10 +2268,6 @@ select:focus-visible {
   .cove-shell.mode-self.chat-open {
     --chat-width: 270px;
   }
-  .cove-shell.mode-watching,
-  .cove-shell.mode-self {
-    --chat-overlay-width: 270px;
-  }
   .member-row {
     grid-template-columns: 150px minmax(180px, 1fr) auto 38px;
     gap: 10px;
@@ -2296,11 +2288,6 @@ select:focus-visible {
     width: 100%;
     overflow: hidden;
   }
-  /* 共享态聊天区在所有宽度下都已是覆盖层，这里只需按窄窗口收窄它的宽度。 */
-  .cove-shell.mode-watching,
-  .cove-shell.mode-self {
-    --chat-overlay-width: min(360px, 52vw);
-  }
   .navigation-rail.expanded {
     width: 280px;
     position: relative;
@@ -2310,8 +2297,9 @@ select:focus-visible {
 /* September review: chat-first room layout and anchored controls. */
 .cove-shell.mode-watching,
 .cove-shell.mode-self {
-  /* 共享态聊天区是覆盖层、不占列宽，控制球以工作区（rail 右侧的整块）居中。 */
-  --control-center: calc(50% + var(--rail-width) / 2);
+  /* 控制球以工作区（rail 与聊天列之间那块）居中。窄窗口下聊天区退化为覆盖式
+     抽屉、不占列宽，公式改回「rail 右侧整块居中」，见 max-width: 1023px 分支。 */
+  --control-center: calc(50% + (var(--rail-width) - var(--chat-width)) / 2);
 }
 .cove-shell.mode-idle,
 .cove-shell.mode-available {
@@ -2668,11 +2656,16 @@ select:focus-visible {
   border-radius: 10px;
   font-size: 11px;
 }
-.choice-grid button:hover,
+.choice-grid button:hover:not(:disabled),
 .choice-grid button.active {
   border-color: #8db1ed;
   background: #edf4ff;
   color: var(--blue);
+}
+/* 与 .member-context / .audio-device-actions 等既有约定保持一致：禁用档位既不该
+   给指针反馈，也不该在悬停时亮起。原生分辨率与游戏模式锁定的两行都靠这里。 */
+.choice-grid button:disabled {
+  cursor: not-allowed;
 }
 .media-choice-section.disabled {
   opacity: 0.42;
@@ -2690,12 +2683,19 @@ select:focus-visible {
   background: #fff;
   color: var(--ink);
 }
-.foreground-light .message-list p {
+/* 房间背景偏暗（foreground-light）时气泡必须换成低不透明度底色：默认的
+   rgba(255,255,255,.5) 压在深色房间上会变成中灰，而文字色来自 --room-fg（浅色），
+   两者叠在一起几乎读不清。选择器必须跟着真实标记用 .message-bubble，
+   原来挂在 p 上的版本对现在的消息完全无效。 */
+.foreground-light .message-bubble {
   background: rgba(255, 255, 255, 0.12);
   color: #fff;
 }
-.foreground-light .message-list .mine p {
+.foreground-light .message-row.mine .message-bubble {
   background: rgba(53, 120, 229, 0.42);
+  /* 这里必须显式给白字：.message-row.mine .message-bubble 会把 color 设成
+     var(--ink)，深色墨色压在 42% 蓝上对比度不足 2:1。 */
+  color: #fff;
 }
 .foreground-light .message-list time,
 .foreground-light .chat-panel header small {
@@ -3536,11 +3536,13 @@ body .cove-window-controls button {
   height: 20px;
   font-size: 10px;
 }
+/* 输入框预览的就是即将发出的消息，字号跟随「消息字号」设置（默认 medium=16px），
+   行高同步缩放；默认档算出来仍是原来的 24px，版面不变。 */
 .chat-composer textarea {
   flex: 1;
   min-width: 0;
-  height: 24px;
-  min-height: 24px;
+  height: calc(var(--chat-message-font-size, 14px) * 1.5);
+  min-height: calc(var(--chat-message-font-size, 14px) * 1.5);
   max-height: 96px;
   padding: 0;
   resize: none;
@@ -3548,8 +3550,8 @@ body .cove-window-controls button {
   outline: 0;
   background: transparent;
   color: inherit;
-  font-size: 12px;
-  line-height: 24px;
+  font-size: var(--chat-message-font-size, 14px);
+  line-height: 1.5;
   align-self: center;
 }
 .chat-composer .icon-btn:disabled {
@@ -6703,33 +6705,18 @@ body .cove-window-controls button {
   bottom: 0;
 }
 
-/* 共享态的聊天区是覆盖层，用 transform 平移开合。
-   如果让它参与 grid 列宽过渡，开合期间每一帧都会以内层新宽度重新布局消息
-   气泡与图片，观看共享时就是肉眼可见的卡顿。固定宽度 + translateX 只动合成
-   层，面板本身在动画期间不再重排。 */
+/* 共享态的聊天区在宽窗口下仍然是主骨架里的一列（沿用 .cove-shell 的三列网格，
+   开合用 --chat-width 参与列宽过渡）；只有窗口过窄时才退化为覆盖式抽屉，
+   见文件下方 max-width: 1023px 的分支。 */
 .cove-shell.mode-watching,
 .cove-shell.mode-self {
   --chat-overlay-width: 320px;
-  grid-template-columns: var(--rail-width) minmax(0, 1fr);
 }
 .mode-watching .chat-slot,
 .mode-self .chat-slot {
-  position: absolute;
-  z-index: 420;
-  right: 0;
-  top: 0;
-  bottom: 0;
-  width: var(--chat-overlay-width);
   min-width: 0;
-  background: linear-gradient(180deg, var(--room-top), var(--room-bottom));
-  box-shadow: -18px 0 40px rgba(28, 40, 55, 0.12);
-  transform: translateX(0);
-  transition: transform 320ms var(--ease-layout);
-  will-change: transform;
-}
-.cove-shell.mode-watching.chat-closed .chat-slot,
-.cove-shell.mode-self.chat-closed .chat-slot {
-  transform: translateX(100%);
+  background: transparent;
+  box-shadow: none;
 }
 .mode-watching .chat-slot .chat-panel,
 .mode-self .chat-slot .chat-panel {
@@ -6786,8 +6773,9 @@ body .cove-window-controls button {
   width: 44px;
   z-index: 500;
   pointer-events: none;
-  /* 跟聊天区一样用 transform 跟随接缝，避免动画期间反复计算 right。 */
-  transform: translateX(calc(-1 * var(--chat-overlay-width)));
+  /* 跟随聊天列宽移动接缝，避免动画期间反复计算 right。窄窗口退化为抽屉时
+     改为跟随 --chat-overlay-width，见下方 max-width: 1023px 分支。 */
+  transform: translateX(calc(-1 * var(--chat-width)));
   transition: transform 320ms var(--ease-layout);
   -webkit-app-region: no-drag;
 }
@@ -6822,6 +6810,41 @@ body .cove-window-controls button {
   stroke: var(--line);
   stroke-width: 1;
   vector-effect: non-scaling-stroke;
+}
+
+/* 窄窗口放不下「视频 + 聊天」两列，共享态聊天区退化为覆盖式抽屉。
+   用固定宽度 + translateX 开合：如果让它参与 grid 列宽过渡，开合期间每一帧
+   都会以内层新宽度重新布局消息气泡与图片，观看共享时就是肉眼可见的卡顿；
+   只动合成层则面板本身不再重排。宽窗口下聊天区仍是主骨架的一列。 */
+@media (max-width: 1023px) {
+  .cove-shell.mode-watching,
+  .cove-shell.mode-self {
+    --chat-overlay-width: min(360px, 52vw);
+    grid-template-columns: var(--rail-width) minmax(0, 1fr);
+    /* 抽屉不占列宽，控制球按整块工作区居中。 */
+    --control-center: calc(50% + var(--rail-width) / 2);
+  }
+  .mode-watching .chat-slot,
+  .mode-self .chat-slot {
+    position: absolute;
+    z-index: 420;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    width: var(--chat-overlay-width);
+    background: linear-gradient(180deg, var(--room-top), var(--room-bottom));
+    box-shadow: -18px 0 40px rgba(28, 40, 55, 0.12);
+    transform: translateX(0);
+    transition: transform 320ms var(--ease-layout);
+    will-change: transform;
+  }
+  .cove-shell.mode-watching.chat-closed .chat-slot,
+  .cove-shell.mode-self.chat-closed .chat-slot {
+    transform: translateX(100%);
+  }
+  .chat-edge-toggle-anchor {
+    transform: translateX(calc(-1 * var(--chat-overlay-width)));
+  }
 }
 .strip-chat-font-menu {
   top: 100%;
