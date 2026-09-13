@@ -3,6 +3,14 @@ import { Socket } from "socket.io-client";
 import { Device, types as MsTypes } from "mediasoup-client";
 import { DisconnectGrace } from "../utils/disconnectGrace";
 import { createVoiceConnectionRecovery } from "../voiceConnectionRecovery";
+import {
+  createProcessedMicrophone,
+  setMicrophoneGain,
+  syncMicrophoneMute,
+  type ProcessedMicrophone,
+} from "../microphoneProcessing";
+import { acquireMicrophoneCandidate, type MicrophoneNoiseMode } from "../microphoneCandidate";
+import { requestEchoCancelledMicrophone } from "../microphoneEcho";
 
 type Transport = MsTypes.Transport;
 type Producer = MsTypes.Producer;
@@ -15,7 +23,6 @@ import {
   AUDIO_INPUT_DEVICE_KEY,
   AUDIO_OUTPUT_DEVICE_KEY,
   AudioDeviceOption,
-  createMicrophoneConstraints,
   createRemoteAudioOutput,
   isMemberVoiceAudio,
   DEFAULT_AUDIO_DEVICE_ID,
@@ -230,11 +237,6 @@ interface RemoteApplicationAudio {
   producerId: string;
   label: string;
 }
-interface ProcessedMicrophone {
-  stream: MediaStream;
-  context: AudioContext | null;
-  gain: GainNode | null;
-}
 
 const MEMBER_VOLUME_KEY = "cove_member_volumes_v1";
 const SCREEN_RECEIVE_VOLUME_KEY = "cove_screen_receive_volume_v1";
@@ -245,204 +247,6 @@ const APPLICATION_AUDIO_RECEIVE_VOLUME_KEY =
   "cove_application_audio_receive_volume_v1";
 const MICROPHONE_VOLUME_KEY = "cove_microphone_volume_v1";
 const MASTER_OUTPUT_VOLUME_KEY = "cove_master_output_volume_v1";
-// 与旧版麦克风处理链保持一致的基础增益；用户音量设置在此基础上调整。
-const MICROPHONE_BASE_GAIN = 0.92;
-
-// Chromium 的 WebRTC APM 负责回声消除和基础语音降噪；这里补一层保守的
-// 自适应频谱抑制：它估计每个频段的噪声功率，在人声存在时只衰减低 SNR 频段，
-// 而不是像旧版噪声门那样把整段音频一起切掉。静音时再使用较轻的软门限，
-// 保留句尾和呼吸声，避免产生明显的开关感。
-const MIC_NOISE_SUPPRESSOR_WORKLET = `
-class CoveMicNoiseSuppressor extends AudioWorkletProcessor {
-  constructor() {
-    super();
-    this.frameSize = 256;
-    this.hopSize = 128;
-    this.frame = new Float32Array(this.frameSize);
-    this.inputBlock = new Float32Array(this.hopSize);
-    this.inputCount = 0;
-    // AudioWorklet 通常以 128 个采样为一个量子。用固定缓冲区交接相邻
-    // 量子，避免每个采样调用 Array.shift() 造成实时线程的额外 GC/搬移。
-    this.outputBlock = new Float32Array(this.hopSize);
-    this.outputIndex = this.hopSize;
-    this.overlap = new Float32Array(this.frameSize);
-    this.window = new Float32Array(this.frameSize);
-    this.real = new Float32Array(this.frameSize);
-    this.imag = new Float32Array(this.frameSize);
-    this.noisePower = new Float32Array(this.frameSize / 2 + 1);
-    this.binGain = new Float32Array(this.frameSize / 2 + 1);
-    this.binGain.fill(1);
-    this.noiseRms = 0.0035;
-    this.speechHold = 0;
-    this.warmupFrames = 0;
-
-    for (let i = 0; i < this.frameSize; i++) {
-      this.window[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (this.frameSize - 1));
-    }
-  }
-
-  fft(real, imag, inverse) {
-    let j = 0;
-    for (let i = 1; i < this.frameSize; i++) {
-      let bit = this.frameSize >> 1;
-      while (j & bit) {
-        j ^= bit;
-        bit >>= 1;
-      }
-      j ^= bit;
-      if (i < j) {
-        const realValue = real[i];
-        real[i] = real[j];
-        real[j] = realValue;
-        const imagValue = imag[i];
-        imag[i] = imag[j];
-        imag[j] = imagValue;
-      }
-    }
-
-    for (let length = 2; length <= this.frameSize; length <<= 1) {
-      const angle = (inverse ? 2 : -2) * Math.PI / length;
-      const stepReal = Math.cos(angle);
-      const stepImag = Math.sin(angle);
-      for (let start = 0; start < this.frameSize; start += length) {
-        let currentReal = 1;
-        let currentImag = 0;
-        const half = length >> 1;
-        for (let offset = 0; offset < half; offset++) {
-          const even = start + offset;
-          const odd = even + half;
-          const oddReal = real[odd] * currentReal - imag[odd] * currentImag;
-          const oddImag = real[odd] * currentImag + imag[odd] * currentReal;
-          const evenReal = real[even];
-          const evenImag = imag[even];
-          real[even] = evenReal + oddReal;
-          imag[even] = evenImag + oddImag;
-          real[odd] = evenReal - oddReal;
-          imag[odd] = evenImag - oddImag;
-          const nextReal = currentReal * stepReal - currentImag * stepImag;
-          currentImag = currentReal * stepImag + currentImag * stepReal;
-          currentReal = nextReal;
-        }
-      }
-    }
-
-    if (inverse) {
-      for (let i = 0; i < this.frameSize; i++) {
-        real[i] /= this.frameSize;
-        imag[i] /= this.frameSize;
-      }
-    }
-  }
-
-  processFrame(block) {
-    this.frame.copyWithin(0, this.hopSize);
-    this.frame.set(block, this.frameSize - this.hopSize);
-
-    let sumSquares = 0;
-    for (let i = 0; i < this.frameSize; i++) {
-      sumSquares += this.frame[i] * this.frame[i];
-      this.real[i] = this.frame[i] * this.window[i];
-      this.imag[i] = 0;
-    }
-    const rms = Math.sqrt(sumSquares / this.frameSize);
-    const activity = rms / Math.max(this.noiseRms, 0.001);
-    const speech = activity > 1.65;
-    if (speech) this.speechHold = Math.min(8, this.speechHold + 2);
-    else this.speechHold = Math.max(0, this.speechHold - 1);
-    const speechActive = speech || this.speechHold > 0;
-
-    this.fft(this.real, this.imag, false);
-    const bins = this.frameSize / 2;
-    for (let bin = 0; bin <= bins; bin++) {
-      const power = this.real[bin] * this.real[bin] + this.imag[bin] * this.imag[bin];
-      const previousNoise = this.noisePower[bin];
-      // 只在非语音帧较快学习；语音帧仅极慢跟随，避免把人声学成噪声。
-      const learnRate = speechActive ? 0.001 : (this.warmupFrames < 24 ? 0.12 : 0.045);
-      this.noisePower[bin] = previousNoise + (power - previousNoise) * learnRate;
-      const noise = Math.max(this.noisePower[bin], 1e-8);
-      const snr = power / noise;
-      // 过抑制系数 1.25，增益下限 0.28，优先减少音乐噪声和语音失真。
-      let targetGain = 1 - 1.25 / Math.max(snr, 1.25);
-      targetGain = Math.max(0.28, Math.min(1, targetGain));
-      // 低频人声基频留出更高下限，避免男声变薄。
-      if (bin <= 3) targetGain = Math.max(targetGain, 0.5);
-      if (!speechActive) {
-        // 静音段采用软门，而不是直接归零；保留呼吸声和句尾的自然衰减。
-        const softGate = Math.max(0.18, Math.min(1, (activity - 0.55) / 0.9));
-        targetGain = Math.min(targetGain, softGate);
-      }
-      this.binGain[bin] += (targetGain - this.binGain[bin]) * 0.35;
-      const gain = this.binGain[bin];
-      this.real[bin] *= gain;
-      this.imag[bin] *= gain;
-      if (bin > 0 && bin < bins) {
-        this.real[this.frameSize - bin] *= gain;
-        this.imag[this.frameSize - bin] *= gain;
-      }
-    }
-    this.warmupFrames = Math.min(24, this.warmupFrames + 1);
-    if (!speechActive) this.noiseRms += (rms - this.noiseRms) * 0.04;
-    this.noiseRms = Math.max(0.0008, Math.min(0.018, this.noiseRms));
-
-    this.fft(this.real, this.imag, true);
-    // Hann 窗 50% overlap 的平方和约为 0.75，做归一化避免整体音量下降。
-    for (let i = 0; i < this.frameSize; i++) {
-      this.overlap[i] += this.real[i] * this.window[i] / 0.75;
-    }
-    this.outputBlock.set(this.overlap.subarray(0, this.hopSize));
-    this.outputIndex = 0;
-    this.overlap.copyWithin(0, this.hopSize);
-    this.overlap.fill(0, this.frameSize - this.hopSize);
-  }
-
-  process(inputs, outputs) {
-    const input = inputs[0] && inputs[0][0];
-    const output = outputs[0];
-    const firstOutput = output && output[0];
-    if (!firstOutput) return true;
-
-    for (let i = 0; i < firstOutput.length; i++) {
-      firstOutput[i] =
-        this.outputIndex < this.hopSize ? this.outputBlock[this.outputIndex++] : 0;
-      this.inputBlock[this.inputCount++] = input ? input[i] : 0;
-      if (this.inputCount === this.hopSize) {
-        this.processFrame(this.inputBlock);
-        this.inputCount = 0;
-      }
-    }
-    for (let channel = 1; channel < output.length; channel++) {
-      output[channel].set(firstOutput);
-    }
-    return true;
-  }
-}
-registerProcessor('cove-mic-noise-suppressor', CoveMicNoiseSuppressor);
-`;
-
-async function createMicNoiseSuppressor(
-  context: AudioContext,
-): Promise<AudioWorkletNode | null> {
-  if (!context.audioWorklet) return null;
-  const moduleUrl = URL.createObjectURL(
-    new Blob([MIC_NOISE_SUPPRESSOR_WORKLET], { type: "text/javascript" }),
-  );
-  try {
-    await context.audioWorklet.addModule(moduleUrl);
-    return new AudioWorkletNode(context, "cove-mic-noise-suppressor", {
-      numberOfInputs: 1,
-      numberOfOutputs: 1,
-      outputChannelCount: [1],
-      channelCount: 1,
-      channelCountMode: "explicit",
-    });
-  } catch (error) {
-    console.warn("[mic] 自适应频谱降噪模块不可用，继续使用系统降噪", error);
-    return null;
-  } finally {
-    URL.revokeObjectURL(moduleUrl);
-  }
-}
-
 function loadNumber(key: string, fallback: number, maximum = 1) {
   try {
     const stored = localStorage.getItem(key);
@@ -557,6 +361,11 @@ export function useWebRTC(socket: Socket, roomId: string) {
   const [audioDevicesRefreshing, setAudioDevicesRefreshing] = useState(false);
   const [audioInputSwitching, setAudioInputSwitching] = useState(false);
   const [audioDeviceError, setAudioDeviceError] = useState<string | null>(null);
+  // Experimental choice is deliberately not persisted. Restarting the app
+  // always restores the existing system processing path.
+  const [microphoneNoiseMode, setMicrophoneNoiseMode] = useState<MicrophoneNoiseMode>('system');
+  const [microphoneNoiseSwitching, setMicrophoneNoiseSwitching] = useState(false);
+  const [microphoneNoiseError, setMicrophoneNoiseError] = useState<string | null>(null);
 
   // 实时统计（帧率 / 延迟 / 丢包），开关控制是否采集
   const [statsEnabled, setStatsEnabled] = useState(false);
@@ -643,7 +452,12 @@ export function useWebRTC(socket: Socket, roomId: string) {
   const rawAudioRef = useRef<MediaStream | null>(null);
   const micProcessingContext = useRef<AudioContext | null>(null);
   const micProcessingGain = useRef<GainNode | null>(null);
+  const micProcessingRecoveryBusy = useRef(false);
+  const recoverMicrophoneProcessingRef = useRef<() => void>(() => {});
   const microphoneVolumeRef = useRef(microphoneVolume);
+  const microphoneNoiseModeRef = useRef<MicrophoneNoiseMode>('system');
+  const microphoneNoiseBusyRef = useRef(false);
+  const rnnoiseFailureRef = useRef<() => void>(() => {});
   const masterOutputVolumeRef = useRef(masterOutputVolume);
   const masterOutputGain = useRef<GainNode | null>(null);
   const localScreenRef = useRef<MediaStream | null>(null);
@@ -884,9 +698,30 @@ export function useWebRTC(socket: Socket, roomId: string) {
     } catch {
       /* 保留本次会话设置。 */
     }
-    if (micProcessingGain.current)
-      micProcessingGain.current.gain.value =
-        MICROPHONE_BASE_GAIN * normalized;
+    if (micProcessingGain.current) {
+      try {
+        setMicrophoneGain(micProcessingGain.current, normalized);
+      } catch (error) {
+        // A closed AudioContext or an older Web Audio implementation can make
+        // the existing automation node unusable. Rebuild the send track from
+        // the still-live raw capture instead of leaving the slider cosmetic.
+        console.warn("[mic] 更新发送音量失败，尝试恢复音量处理链", error);
+        micProcessingGain.current = null;
+        if (normalized > 0) recoverMicrophoneProcessingRef.current();
+      }
+    } else if (normalized > 0) {
+      // createProcessedMicrophone deliberately keeps voice usable by falling
+      // back to the raw track. Promote that track back to a gain-controlled
+      // one on the next user gesture, so volume still affects remote peers.
+      recoverMicrophoneProcessingRef.current();
+    }
+    if (audioProducer.current)
+      syncMicrophoneMute(
+        audioProducer.current,
+        selfMutedRef.current,
+        forceMutedRef.current,
+        normalized,
+      );
   }, []);
 
   const setMasterOutputVolume = useCallback((volume: number) => {
@@ -2269,7 +2104,13 @@ export function useWebRTC(socket: Socket, roomId: string) {
         screenAudioProducer.current?.pause();
         applicationAudioProducer.current?.pause();
       } else {
-        if (!selfMutedRef.current) audioProducer.current?.resume();
+        if (audioProducer.current)
+          syncMicrophoneMute(
+            audioProducer.current,
+            selfMutedRef.current,
+            false,
+            microphoneVolumeRef.current,
+          );
         if (screenDemandActiveRef.current)
           screenAudioProducer.current?.resume();
         applicationAudioProducer.current?.resume();
@@ -2283,101 +2124,83 @@ export function useWebRTC(socket: Socket, roomId: string) {
   }, [socket, roomId]);
 
   const createProcessedMicStream = useCallback(
-    async (rawStream: MediaStream): Promise<ProcessedMicrophone> => {
-      if (!/Windows/i.test(navigator.userAgent))
-        return { stream: rawStream, context: null, gain: null };
+    async (rawStream: MediaStream, mode: MicrophoneNoiseMode = 'system'): Promise<ProcessedMicrophone> => {
+      if (mode === 'rnnoise') {
+        const { createRnnoiseMicrophone } = await import('../rnnoiseMicrophone');
+        const processed = await createRnnoiseMicrophone(rawStream, microphoneVolumeRef.current);
+        processed.processor.onprocessorerror = () => {
+          if (micProcessingContext.current === processed.context) rnnoiseFailureRef.current();
+        };
+        if (processed.gain) setMicrophoneGain(processed.gain, microphoneVolumeRef.current);
+        return processed;
+      }
       const Ctx =
         window.AudioContext ??
         (window as unknown as { webkitAudioContext: typeof AudioContext })
           .webkitAudioContext;
-      const context = new Ctx({
-        sampleRate: 48_000,
-        latencyHint: "interactive",
-      });
-      const source = context.createMediaStreamSource(rawStream);
-      const highPass = context.createBiquadFilter();
-      highPass.type = "highpass";
-      highPass.frequency.value = 72;
-      highPass.Q.value = 0.7;
-
-      let tail: AudioNode = highPass;
-      source.connect(highPass);
-      // 中国电网基频为50Hz，常见电流嗡声还会出现在100/150Hz谐波。
-      for (const frequency of [50, 100, 150]) {
-        const notch = context.createBiquadFilter();
-        notch.type = "notch";
-        notch.frequency.value = frequency;
-        notch.Q.value = frequency === 50 ? 18 : 24;
-        tail.connect(notch);
-        tail = notch;
-      }
-
-      const noiseSuppressor = await createMicNoiseSuppressor(context);
-      const outputGain = context.createGain();
-      outputGain.gain.value = MICROPHONE_BASE_GAIN * microphoneVolumeRef.current;
-      const destination = context.createMediaStreamDestination();
-      destination.channelCount = 1;
-      if (noiseSuppressor)
-        tail.connect(noiseSuppressor).connect(outputGain).connect(destination);
-      else tail.connect(outputGain).connect(destination);
-      await context.resume();
-      const processedTrack = destination.stream.getAudioTracks()[0];
-      // 某些 Electron/Chromium 版本在 AudioContext 没有真正进入 running
-      // 状态时仍会返回一条 live 但无数据的 destination 音轨。回退到原始
-      // getUserMedia 音轨，确保加入语音至少能正常发送麦克风。
-      if (!processedTrack || context.state !== "running") {
-        await context.close().catch(() => {});
-        return { stream: rawStream, context: null, gain: null };
-      }
-      processedTrack.enabled = true;
-      processedTrack.contentHint = "speech";
-      return { stream: destination.stream, context, gain: outputGain };
+      const processed = await createProcessedMicrophone(
+        rawStream,
+        microphoneVolumeRef.current,
+        () => new Ctx({ sampleRate: 48_000, latencyHint: "interactive" }),
+      );
+      // The volume slider may have changed while resume() was pending.
+      if (processed.gain)
+        setMicrophoneGain(processed.gain, microphoneVolumeRef.current);
+      return processed;
     },
     [],
   );
 
-  const requestMicrophone = useCallback(async (deviceId: string) => {
-    return new Promise<MediaStream>((resolve, reject) => {
-      let expired = false;
-      const timer = setTimeout(() => {
-        expired = true;
-        reject(new Error("getUserMedia 超时（10s），请检查麦克风权限"));
-      }, 10_000);
-      navigator.mediaDevices
-        .getUserMedia({ audio: createMicrophoneConstraints(deviceId) })
-        .then(
-          (stream) => {
-            clearTimeout(timer);
-            if (expired) stream.getTracks().forEach((track) => track.stop());
-            else resolve(stream);
-          },
-          (error) => {
-            clearTimeout(timer);
-            reject(error);
-          },
-        );
-    });
-  }, []);
+  const requestMicrophone = useCallback(
+    (deviceId: string, mode: MicrophoneNoiseMode = 'system') =>
+      requestEchoCancelledMicrophone(deviceId, mode),
+    [],
+  );
+
+  const prepareMicrophone = useCallback((deviceId: string, mode: MicrophoneNoiseMode) =>
+    acquireMicrophoneCandidate(
+      mode,
+      (captureMode) => requestMicrophone(deviceId, captureMode),
+      createProcessedMicStream,
+    ), [requestMicrophone, createProcessedMicStream]);
 
   const replaceMicrophone = useCallback(
-    async (deviceId: string) => {
+    async (deviceId: string, mode = microphoneNoiseModeRef.current) => {
       const producer = audioProducer.current;
       if (!producer) return;
 
+      const generation = mediaGeneration.current;
+      const ensureCurrent = () => {
+        if (
+          generation !== mediaGeneration.current ||
+          audioProducer.current !== producer ||
+          producer.closed
+        )
+          throw new Error("麦克风切换已取消");
+      };
       let nextRaw: MediaStream | null = null;
       let nextProcessed: ProcessedMicrophone | null = null;
       try {
-        nextRaw = await requestMicrophone(deviceId);
-        nextProcessed = await createProcessedMicStream(nextRaw);
-        // Windows 上优先发送经过 WebRTC APM 和自适应频谱抑制的轨道；
-        // createProcessedMicStream 在 AudioContext/Worklet 不可用时已经回退
-        // 到原始轨道，因此这里仍然保留一条可用的安全路径。
+        const candidate = await prepareMicrophone(deviceId, mode);
+        nextRaw = candidate.raw;
+        nextProcessed = candidate.processed;
+        ensureCurrent();
+        // A failed experiment has already reacquired system-processed input;
+        // never publish an unprocessed raw RNNoise capture as the fallback.
         const rawTrack = nextRaw.getAudioTracks()[0];
         const processedTrack = nextProcessed.stream.getAudioTracks()[0];
-        const nextTrack =
-          processedTrack?.readyState === "live" ? processedTrack : rawTrack;
+        // The candidate already selected a safe fallback. If its output ends
+        // now, do not replace it with an RNNoise capture whose native NS is off.
+        const nextTrack = processedTrack;
         if (!nextTrack || nextTrack.readyState !== "live")
           throw new Error("选择的设备没有提供可用的音频轨道");
+        // replaceTrack() is async: preserve silence throughout negotiation,
+        // not just after mediasoup has adopted the new track.
+        nextTrack.enabled =
+          !producer.paused &&
+          !selfMutedRef.current &&
+          !forceMutedRef.current &&
+          microphoneVolumeRef.current > 0;
         nextTrack.contentHint = "speech";
         console.info("[mic] 切换上行轨道", {
           processed: nextTrack !== rawTrack,
@@ -2385,6 +2208,13 @@ export function useWebRTC(socket: Socket, roomId: string) {
           readyState: nextTrack.readyState,
         });
         await producer.replaceTrack({ track: nextTrack });
+        ensureCurrent();
+        syncMicrophoneMute(
+          producer,
+          selfMutedRef.current,
+          forceMutedRef.current,
+          microphoneVolumeRef.current,
+        );
 
         const previousRaw = rawAudioRef.current;
         const previousProcessed = localAudioRef.current;
@@ -2393,13 +2223,22 @@ export function useWebRTC(socket: Socket, roomId: string) {
         localAudioRef.current = nextProcessed.stream;
         micProcessingContext.current = nextProcessed.context;
         micProcessingGain.current = nextProcessed.gain;
+        microphoneNoiseModeRef.current = candidate.mode;
+        setMicrophoneNoiseMode(candidate.mode);
+        setMicrophoneNoiseError(candidate.warning);
 
-        detachAnalyser("local");
-        attachAnalyser("local", nextProcessed.stream, socket.id ?? "local");
         previousProcessed?.getTracks().forEach((track) => track.stop());
         if (previousRaw && previousRaw !== previousProcessed)
           previousRaw.getTracks().forEach((track) => track.stop());
         previousContext?.close().catch(() => {});
+        // Replacement is committed. A meter/UI error must not tear down the
+        // new live track or claim that the previous mode is still sending.
+        try {
+          detachAnalyser("local");
+          attachAnalyser("local", nextProcessed.stream, socket.id ?? "local");
+        } catch (error) {
+          console.warn('[mic] 音轨已切换，但电平显示未能刷新', error);
+        }
         refreshAudioDevices(false);
       } catch (error) {
         nextProcessed?.stream.getTracks().forEach((track) => track.stop());
@@ -2410,15 +2249,104 @@ export function useWebRTC(socket: Socket, roomId: string) {
       }
     },
     [
-      createProcessedMicStream,
+      prepareMicrophone,
       refreshAudioDevices,
-      requestMicrophone,
       socket.id,
     ],
   );
 
+  const recoverMicrophoneProcessing = useCallback(async () => {
+    const producer = audioProducer.current;
+    const rawStream = rawAudioRef.current;
+    if (
+      micProcessingRecoveryBusy.current ||
+      !producer ||
+      producer.closed ||
+      !rawStream ||
+      micProcessingGain.current
+    )
+      return;
+
+    const generation = mediaGeneration.current;
+    const ensureCurrent = () => {
+      if (
+        generation !== mediaGeneration.current ||
+        audioProducer.current !== producer ||
+        producer.closed ||
+        rawAudioRef.current !== rawStream
+      )
+        throw new Error("麦克风音量处理恢复已取消");
+    };
+    let processed: ProcessedMicrophone | null = null;
+    let committed = false;
+    micProcessingRecoveryBusy.current = true;
+    try {
+      processed = await createProcessedMicStream(
+        rawStream,
+        microphoneNoiseModeRef.current,
+      );
+      ensureCurrent();
+      const nextTrack = processed.stream.getAudioTracks()[0];
+      if (
+        !processed.gain ||
+        processed.stream === rawStream ||
+        !nextTrack ||
+        nextTrack.readyState !== "live"
+      )
+        throw new Error("发送音量处理链仍不可用");
+
+      nextTrack.enabled =
+        !producer.paused &&
+        !selfMutedRef.current &&
+        !forceMutedRef.current &&
+        microphoneVolumeRef.current > 0;
+      nextTrack.contentHint = "speech";
+      await producer.replaceTrack({ track: nextTrack });
+      ensureCurrent();
+      syncMicrophoneMute(
+        producer,
+        selfMutedRef.current,
+        forceMutedRef.current,
+        microphoneVolumeRef.current,
+      );
+
+      const previousStream = localAudioRef.current;
+      const previousContext = micProcessingContext.current;
+      localAudioRef.current = processed.stream;
+      micProcessingContext.current = processed.context;
+      micProcessingGain.current = processed.gain;
+      committed = true;
+
+      if (previousStream && previousStream !== rawStream)
+        previousStream.getTracks().forEach((track) => track.stop());
+      if (previousContext && previousContext !== processed.context)
+        previousContext.close().catch(() => {});
+      try {
+        detachAnalyser("local");
+        attachAnalyser("local", processed.stream, socket.id ?? "local");
+      } catch (error) {
+        console.warn("[mic] 音量处理已恢复，但电平显示未能刷新", error);
+      }
+      console.info("[mic] 已将上行音轨恢复为可调音量处理链");
+    } catch (error) {
+      console.warn("[mic] 无法恢复发送音量处理链，继续使用当前音轨", error);
+    } finally {
+      if (!committed) {
+        if (processed && processed.stream !== rawStream)
+          processed.stream.getTracks().forEach((track) => track.stop());
+        if (processed?.context) processed.context.close().catch(() => {});
+      }
+      micProcessingRecoveryBusy.current = false;
+    }
+  }, [attachAnalyser, createProcessedMicStream, detachAnalyser, socket.id]);
+
+  recoverMicrophoneProcessingRef.current = () => {
+    void recoverMicrophoneProcessing();
+  };
+
   const selectAudioInput = useCallback(
     async (deviceId: string) => {
+      if (microphoneNoiseBusyRef.current) return;
       const nextDeviceId = normalizeMicrophoneDeviceId(deviceId);
       const previousDeviceId = selectedAudioInputRef.current;
       if (nextDeviceId === previousDeviceId) return;
@@ -2446,6 +2374,38 @@ export function useWebRTC(socket: Socket, roomId: string) {
     [inVoice, replaceMicrophone],
   );
 
+  const selectMicrophoneNoiseMode = useCallback(async (mode: MicrophoneNoiseMode) => {
+    if (!['system', 'rnnoise'].includes(mode) || microphoneNoiseBusyRef.current || joiningRef.current) return;
+    if (mode === microphoneNoiseModeRef.current) return;
+    if (audioInputSwitching) {
+      setMicrophoneNoiseError('请等待麦克风切换完成后再切换降噪模式。');
+      return;
+    }
+    setMicrophoneNoiseError(null);
+    if (!audioProducer.current) {
+      microphoneNoiseModeRef.current = mode;
+      setMicrophoneNoiseMode(mode);
+      return;
+    }
+    microphoneNoiseBusyRef.current = true;
+    setMicrophoneNoiseSwitching(true);
+    try {
+      await replaceMicrophone(selectedAudioInputRef.current, mode);
+    } catch (error) {
+      // The previous stream is still owned by its producer; retain the
+      // actual mode and permit another attempt instead of changing the label.
+      setMicrophoneNoiseError(`降噪切换失败，已保留原模式：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      microphoneNoiseBusyRef.current = false;
+      setMicrophoneNoiseSwitching(false);
+    }
+  }, [audioInputSwitching, replaceMicrophone]);
+
+  rnnoiseFailureRef.current = () => {
+    setMicrophoneNoiseError('RNNoise 运行中断，正在尝试恢复系统降噪；也可手动选择系统降噪重试。');
+    void selectMicrophoneNoiseMode('system');
+  };
+
   // ── 加入语音 ───────────────────────────────────────────────────────────────
 
   const joinVoice = useCallback(async () => {
@@ -2469,8 +2429,15 @@ export function useWebRTC(socket: Socket, roomId: string) {
     try {
       console.log("[joinVoice] 请求麦克风权限 getUserMedia…");
       // 超时保护：Electron 权限挂起时 getUserMedia 会永不返回，加 10s 超时把问题暴露出来
-      rawStream = await requestMicrophone(selectedAudioInputRef.current);
+      const candidate = await prepareMicrophone(selectedAudioInputRef.current, microphoneNoiseModeRef.current);
+      rawStream = candidate.raw;
+      const processed = candidate.processed;
+      stream = processed.stream;
+      if (generation !== mediaGeneration.current) void processed.context?.close().catch(() => {});
       ensureCurrent();
+      microphoneNoiseModeRef.current = candidate.mode;
+      setMicrophoneNoiseMode(candidate.mode);
+      setMicrophoneNoiseError(candidate.warning);
       console.log("%c[joinVoice] [OK] 已获取麦克风", "color:#22c55e");
       const rawTrack = rawStream.getAudioTracks()[0];
       if (rawTrack) {
@@ -2485,12 +2452,6 @@ export function useWebRTC(socket: Socket, roomId: string) {
         });
       }
       rawAudioRef.current = rawStream;
-      const processed = await createProcessedMicStream(rawStream);
-      stream = processed.stream;
-      if (generation !== mediaGeneration.current) {
-        void processed.context?.close();
-        ensureCurrent();
-      }
       micProcessingContext.current = processed.context;
       micProcessingGain.current = processed.gain;
       localAudioRef.current = stream;
@@ -2507,15 +2468,18 @@ export function useWebRTC(socket: Socket, roomId: string) {
         "color:#22c55e",
       );
 
-      // 优先发布处理后的轨道。Windows 处理链不可用时，stream 就是
-      // createProcessedMicStream 返回的原始采集流，仍然可以正常上行。
+      // candidate 已完成安全回退。系统音量处理不可用时 stream 本身就是
+      // 系统降噪采集流；RNNoise 输出中途结束时不能改发未处理的 rawTrack。
       const processedTrack = stream?.getAudioTracks()[0];
-      const microphoneTrack =
-        processedTrack?.readyState === "live" ? processedTrack : rawTrack;
+      const microphoneTrack = processedTrack;
       if (!microphoneTrack || microphoneTrack.readyState !== "live") {
         throw new Error("麦克风音轨未就绪，请检查输入设备");
       }
-      microphoneTrack.enabled = true;
+      // Honor mute before the first packet, including the raw-track fallback.
+      microphoneTrack.enabled =
+        !selfMutedRef.current &&
+        !forceMutedRef.current &&
+        microphoneVolumeRef.current > 0;
       console.info("[mic] 上行轨道", {
         processed: microphoneTrack !== rawTrack,
         label: microphoneTrack.label,
@@ -2542,7 +2506,12 @@ export function useWebRTC(socket: Socket, roomId: string) {
         ensureCurrent();
       }
       audioProducer.current = producer;
-      if (forceMutedRef.current) producer.pause();
+      syncMicrophoneMute(
+        producer,
+        selfMutedRef.current,
+        forceMutedRef.current,
+        microphoneVolumeRef.current,
+      );
 
       // 输出一组可直接从启动终端读取的上行统计，后续无需再猜测音轨
       // 是否真正进入 WebRTC sender。
@@ -2673,9 +2642,8 @@ export function useWebRTC(socket: Socket, roomId: string) {
     consumeProducer,
     storeAvailableScreen,
     storeRemoteApplicationAudio,
-    createProcessedMicStream,
+    prepareMicrophone,
     refreshAudioDevices,
-    requestMicrophone,
   ]);
 
   // ── 离开语音 ───────────────────────────────────────────────────────────────
@@ -2791,6 +2759,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
   resetVoiceRef.current = resetVoice;
   const leaveVoice = useCallback(() => resetVoice(), [resetVoice]);
   const refreshAudioConnection = useCallback(async () => {
+    if (microphoneNoiseBusyRef.current) return;
     if (!socket.connected) {
       setAudioDeviceError("当前服务器连接已断开，暂时无法刷新语音连接。");
       return;
@@ -2850,8 +2819,12 @@ export function useWebRTC(socket: Socket, roomId: string) {
     const producer = audioProducer.current;
     if (!producer || forceMutedRef.current) return;
     selfMutedRef.current = !selfMutedRef.current;
-    if (selfMutedRef.current) producer.pause();
-    else producer.resume();
+    syncMicrophoneMute(
+      producer,
+      selfMutedRef.current,
+      forceMutedRef.current,
+      microphoneVolumeRef.current,
+    );
     setIsMuted(selfMutedRef.current);
     socket.emit("voice:mute-state", { roomId, muted: selfMutedRef.current });
   }, [socket, roomId]);
@@ -3672,6 +3645,10 @@ export function useWebRTC(socket: Socket, roomId: string) {
     setApplicationAudioReceiveVolume,
     microphoneVolume,
     setMicrophoneVolume,
+    microphoneNoiseMode,
+    microphoneNoiseSwitching,
+    microphoneNoiseError,
+    selectMicrophoneNoiseMode,
     masterOutputVolume,
     setMasterOutputVolume,
     audioInputDevices,

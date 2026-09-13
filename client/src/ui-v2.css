@@ -1586,6 +1586,10 @@ select:focus-visible {
   background: rgba(35, 52, 70, 0.26);
   transition: background 200ms ease;
 }
+:root[data-theme="dark"] .quad-lamp {
+  /* 深色球面上暗灰不可见，未激活灯改用浅灰保持辨识度。 */
+  background: rgba(255, 255, 255, 0.32);
+}
 .quad-lamp.mic.on {
   background: var(--blue);
 }
@@ -2009,7 +2013,8 @@ select:focus-visible {
   font-weight: 650;
 }
 .field input,
-.field select {
+.field select,
+.field > .field-select {
   width: 100%;
   height: 42px;
   padding: 0 12px;
@@ -2023,6 +2028,86 @@ select:focus-visible {
 .field select:focus {
   border-color: #8eb0e8;
   box-shadow: 0 0 0 3px rgba(53, 120, 229, 0.1);
+}
+
+/* 原生 <select> 的弹出列表由系统绘制，既跟不上 Cove 主题，也和其余浮层的
+   圆角、阴影、选中态不是一套语言。设置页里需要主题化的字段改用
+   「.field > .field-select 按钮 + .noise-mode-menu 浮层菜单」实现：
+   收起时和 .field select 外观完全一致，展开时是 Cove 的浮层卡片。 */
+.field > .field-select {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  text-align: left;
+}
+.field > .field-select:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.field > .field-select:focus-visible {
+  outline: none;
+  border-color: #8eb0e8;
+  box-shadow: 0 0 0 3px rgba(53, 120, 229, 0.1);
+}
+.field > .field-select > span {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.field > .field-select > svg {
+  flex: 0 0 auto;
+  color: var(--muted);
+  transition: transform 200ms var(--ease-enter);
+}
+.field > .field-select[aria-expanded="true"] > svg {
+  transform: rotate(180deg);
+}
+.noise-mode-menu {
+  position: fixed;
+  z-index: 900;
+  padding: 6px;
+  border-radius: 14px;
+  display: grid;
+  gap: 2px;
+  /* 菜单挂在 body 上，而 index.css 给 body 设了浅色的 color；不显式指定就会
+     继承到那层浅色，浅色模式下未选中项看不见。 */
+  color: var(--ink);
+}
+.noise-mode-menu > button {
+  width: 100%;
+  height: 38px;
+  padding: 0 10px;
+  border-radius: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 9px;
+  font-size: 12.5px;
+  text-align: left;
+}
+.noise-mode-menu > button:hover:not(:disabled),
+.noise-mode-menu > button:focus-visible {
+  background: var(--surface);
+  outline: none;
+}
+.noise-mode-menu > button[aria-selected="true"] {
+  color: var(--blue);
+  font-weight: 650;
+}
+.noise-mode-menu > button > span {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.noise-mode-menu > button > svg {
+  flex: 0 0 auto;
+  opacity: 0;
+}
+.noise-mode-menu > button[aria-selected="true"] > svg {
+  opacity: 1;
 }
 .two-fields {
   display: grid;
@@ -5826,7 +5911,9 @@ body .cove-window-controls button {
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.4);
 }
 :root[data-theme="dark"] .control-ball .ball-side button:hover,
-:root[data-theme="dark"] .member-context > button:hover {
+:root[data-theme="dark"] .member-context > button:hover,
+:root[data-theme="dark"] .noise-mode-menu > button:hover:not(:disabled),
+:root[data-theme="dark"] .noise-mode-menu > button:focus-visible {
   background: var(--surface-strong);
 }
 :root[data-theme="dark"] .control-ball .ball-side button.danger:hover {
@@ -5884,6 +5971,7 @@ body .cove-window-controls button {
 }
 :root[data-theme="dark"] .field input,
 :root[data-theme="dark"] .field select,
+:root[data-theme="dark"] .field > .field-select,
 :root[data-theme="dark"] .color-code-row input,
 :root[data-theme="dark"] .cove-v2-loading input,
 :root[data-theme="dark"] .create-room-input-wrap,
@@ -7797,7 +7885,8 @@ body .cove-window-controls button {
   font-size: 12px;
 }
 .global-settings .settings-page .field input,
-.global-settings .settings-page .field select {
+.global-settings .settings-page .field select,
+.global-settings .settings-page .field > .field-select {
   font-size: 14px;
 }
 .global-settings .settings-page .audio-device-action-hint,
@@ -8766,4 +8855,26 @@ body:has(
 :root[data-theme="dark"] .soundpack-quick-list button b {
   background: color-mix(in srgb, var(--purple) 20%, #202e3e);
   color: #e0d2ff;
+}
+
+/* ── 屏幕共享弹层统一使用共享屏幕的黄色系（与控制球“结束共享”一致） ── */
+.share-dialog .settings-toggle-card input {
+  accent-color: var(--screen-yellow);
+}
+.share-dialog .choice-grid button.active {
+  border-color: color-mix(in srgb, var(--screen-yellow) 55%, var(--line));
+  background: var(--screen-yellow-soft);
+  color: var(--screen-yellow-control);
+}
+:root[data-theme="dark"] .share-dialog .choice-grid button.active {
+  background: color-mix(in srgb, var(--screen-yellow) 16%, #151e29);
+  border-color: color-mix(in srgb, var(--screen-yellow) 55%, #232f3d);
+}
+:root[data-theme="dark"] .share-dialog .settings-toggle-card input {
+  accent-color: var(--screen-yellow);
+}
+:root[data-theme="dark"] .share-dialog .primary-wide,
+:root[data-theme="dark"] .share-dialog .primary-wide:hover {
+  background: var(--screen-yellow-control) !important;
+  color: var(--screen-yellow-soft) !important;
 }

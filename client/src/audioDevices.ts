@@ -35,11 +35,16 @@ export function normalizeMicrophoneDeviceId(deviceId: string): string {
 
 export function createMicrophoneConstraints(
   deviceId: string,
+  noiseMode: 'system' | 'rnnoise' = 'system',
+  echoScope: 'all' | 'browser' = 'all',
 ): MediaTrackConstraints {
   const normalizedDeviceId = normalizeMicrophoneDeviceId(deviceId);
   return {
-    echoCancellation: true,
-    noiseSuppression: true,
+    // `true` lets Chromium choose browser-only AEC. Explicit `all` selects
+    // the system-playback reference, including Web Audio and other apps.
+    // TypeScript's bundled DOM types predate ConstrainBooleanOrDOMString.
+    echoCancellation: (echoScope === 'all' ? { exact: 'all' } : { exact: true }) as MediaTrackConstraints['echoCancellation'],
+    noiseSuppression: noiseMode === 'rnnoise' ? { exact: false } : true,
     // Realtek microphone arrays can expose a live WebRTC track whose raw
     // samples are effectively silent when Chromium's capture AGC is disabled.
     autoGainControl: true,

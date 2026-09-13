@@ -10,6 +10,7 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
+import { MicrophoneNoiseControl } from "../components/MicrophoneNoiseControl";
 import { useNavigate, useParams } from "react-router-dom";
 import { Phone } from "lucide-react";
 import {
@@ -809,6 +810,7 @@ function ChatPanelV2({
   serverURL,
   roomBottom,
   roomForeground,
+  getMemberAvatar,
   input,
   setInput,
   onSend,
@@ -829,6 +831,7 @@ function ChatPanelV2({
   serverURL: string;
   roomBottom: string;
   roomForeground: string;
+  getMemberAvatar: (username: string) => string | null | undefined;
   input: string;
   setInput: (value: string) => void;
   onSend: () => void;
@@ -1010,7 +1013,13 @@ function ChatPanelV2({
   }, [historyLoadVersion, messages.length]);
   useEffect(() => {
     const previousCount = previousMessageCountRef.current;
-    const addedCount = messages.length - previousCount;
+    // 语音包播放与人员进出播报不算新消息，不计入提醒。
+    const addedCount = messages
+      .slice(previousCount)
+      .filter(
+        (message) =>
+          message.type !== "system" && message.type !== "soundpack",
+      ).length;
     previousMessageCountRef.current = messages.length;
     const isHistoryLoad =
       historyLoadVersion !== handledHistoryLoadVersionRef.current;
@@ -1310,7 +1319,7 @@ function ChatPanelV2({
                     avatarUrl={
                       message.author === profile.username
                         ? profile.avatarUrl
-                        : undefined
+                        : getMemberAvatar(message.author)
                     }
                     size="sm"
                     className="message-avatar"
@@ -2004,7 +2013,7 @@ export function GlobalSettingsV2({
     if (
       audioActionBusy ||
       rtc.audioDevicesRefreshing ||
-      rtc.audioInputSwitching
+      rtc.audioInputSwitching || rtc.microphoneNoiseSwitching
     )
       return;
 
@@ -2092,7 +2101,7 @@ export function GlobalSettingsV2({
                   disabled={
                     audioActionBusy ||
                     rtc.audioDevicesRefreshing ||
-                    rtc.audioInputSwitching
+                    rtc.audioInputSwitching || rtc.microphoneNoiseSwitching
                   }
                   onChange={(event) => setDraftAudioInputId(event.target.value)}
                 >
@@ -2117,6 +2126,13 @@ export function GlobalSettingsV2({
                 onChange={setInputVolume}
                 icon="mic"
                 label="默认输入音量"
+              />
+              <MicrophoneNoiseControl
+                mode={rtc.microphoneNoiseMode}
+                busy={rtc.microphoneNoiseSwitching}
+                disabled={audioActionBusy || rtc.audioInputSwitching || rtc.isJoining}
+                error={rtc.microphoneNoiseError}
+                onChange={(mode) => void rtc.selectMicrophoneNoiseMode(mode)}
               />
               <label className="field">
                 <span>默认输出设备</span>
@@ -2166,7 +2182,7 @@ export function GlobalSettingsV2({
                   disabled={
                     audioActionBusy ||
                     rtc.audioDevicesRefreshing ||
-                    rtc.audioInputSwitching
+                    rtc.audioInputSwitching || rtc.microphoneNoiseSwitching
                   }
                   onClick={() => void handleAudioDeviceAction()}
                 >
@@ -4770,6 +4786,10 @@ export default function ChatRoomV2({
             serverURL={serverURL}
             roomBottom={roomBottom}
             roomForeground={foreground === "light" ? "#fff" : "#15191f"}
+            getMemberAvatar={(username) =>
+              roomMembers.find((member) => member.username === username)
+                ?.avatarUrl
+            }
             input={input}
             setInput={setInput}
             onSend={sendMessage}

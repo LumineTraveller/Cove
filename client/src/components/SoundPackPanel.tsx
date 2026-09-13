@@ -974,8 +974,7 @@ export function SoundPackPanel({
                     <Volume2 size={18} />
                   </span>
                   <div>
-                    <small>语音包</small>
-                    <h2 id="soundpack-management-title">房间语音包</h2>
+                    <h2 id="soundpack-management-title">语音包</h2>
                   </div>
                 </div>
                 <div className="soundpack-management-actions">
@@ -1313,7 +1312,7 @@ export function SoundPackPanel({
                     id="soundpack-title"
                     className="text-lg font-bold text-white"
                   >
-                    房间语音包
+                    语音包
                   </h2>
                   <p className="text-sm text-white/40">
                     {inVoice
