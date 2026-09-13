@@ -10,12 +10,13 @@ const watchdog = setTimeout(() => { console.error('RNNoise test timeout'); app.e
 
 app.whenReady().then(async () => {
   const win = new BrowserWindow({ show: false, webPreferences: { offscreen: true, backgroundThrottling: false } });
-  async function inject(name, file, loader) {
+  async function inject(name, file, loader, wasmUrl) {
     const compiled = ts.transpileModule(fs.readFileSync(path.join(__dirname, '../src/', file), 'utf8'), {
       compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS },
     }).outputText;
     const raw = {
-      '@jitsi/rnnoise-wasm/dist/rnnoise-sync.js?raw': loader,
+      './rnnoiseWasmLoader.js?raw': loader,
+      './rnnoise-v2.wasm?url': wasmUrl,
       './rnnoiseProcessor.js?raw': fs.readFileSync(path.join(__dirname, '../src/rnnoiseProcessor.js'), 'utf8'),
     };
     await win.webContents.executeJavaScript(`(() => {
@@ -28,8 +29,10 @@ app.whenReady().then(async () => {
   try {
     await win.loadFile(path.join(__dirname, 'fixtures/audio-host.html'));
     await inject('mic', 'microphoneProcessing.ts');
-    await inject('rn', 'rnnoiseMicrophone.ts', fs.readFileSync(require.resolve('@jitsi/rnnoise-wasm/dist/rnnoise-sync.js'), 'utf8'));
-    await inject('brokenRn', 'rnnoiseMicrophone.ts', 'function createRNNWasmModuleSync() { throw new Error("Deliberately broken model"); }');
+    const wasmUrl = `data:application/wasm;base64,${fs.readFileSync(path.join(__dirname, '../src/rnnoise-v2.wasm')).toString('base64')}`;
+    const loader = fs.readFileSync(path.join(__dirname, '../src/rnnoiseWasmLoader.js'), 'utf8');
+    await inject('rn', 'rnnoiseMicrophone.ts', loader, wasmUrl);
+    await inject('brokenRn', 'rnnoiseMicrophone.ts', 'function createRNNWasmModuleSync() { throw new Error("Deliberately broken model"); }', wasmUrl);
     // Optional locally generated speech WAV, never a microphone recording.
     if (process.argv[2]) await win.webContents.executeJavaScript(`window.speechWav = ${JSON.stringify(fs.readFileSync(process.argv[2]).toString('base64'))}; true`);
     const result = await win.webContents.executeJavaScript(`(${runAudioChecks.toString()})()`);

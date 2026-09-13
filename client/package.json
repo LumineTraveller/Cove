@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "vite",
     "remote-input:build": "node electron/build-remote-input.cjs",
+    "prepare:rnnoise-assets": "node tools/prepare-rnnoise-assets.cjs",
     "electron:compile": "npm run remote-input:build && tsc -p electron/tsconfig.json",
     "test:updater": "npm run electron:compile && node --test tests/updater.test.cjs tests/gitee-installer-cache.test.cjs tests/server-certificate-policy.test.cjs",
     "test:connection": "tsx --test tests/connectionDeadline.test.ts tests/sessionRegistration.test.ts tests/voiceConnectionRecovery.test.ts",
@@ -28,7 +29,7 @@
     "test:update-center": "tsx --test tests/updateCenter.test.ts",
     "test": "npm run test:updater && npm run test:connection && npm run test:audio-devices && npm run test:chat-images && npm run test:chat-links && npm run test:media-diagnostics && npm run test:screen-capture && npm run test:member-ordering && npm run test:account-auth && npm run test:remote-control && npm run test:rooms && npm run test:sortable && npm run test:soundpack-download && npm run test:update-center",
     "electron:dev": "npm run electron:compile && electron .",
-    "build": "tsc && vite build",
+    "build": "npm run prepare:rnnoise-assets && tsc && vite build",
     "build:electron": "npm run build && npm run electron:compile && electron-builder",
     "preview": "vite preview"
   },

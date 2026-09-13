@@ -1,10 +1,18 @@
-import wasmLoader from '@jitsi/rnnoise-wasm/dist/rnnoise-sync.js?raw';
+import wasmLoader from './rnnoiseWasmLoader.js?raw';
+import wasmUrl from './rnnoise-v2.wasm?url';
 import processorSource from './rnnoiseProcessor.js?raw';
 import { connectMicrophoneGain, type ProcessedMicrophone } from './microphoneProcessing';
 
-// The sync build uses the RNNoise 0.2 model. Do not import the package's main
-// entry: its asynchronous build intentionally uses the older detection model.
-const workletSource = wasmLoader.replace('export default createRNNWasmModuleSync;', '') + '\n' + processorSource;
+// The generated loader keeps the RNNoise 0.2 model's WASM separate from the
+// glue code. The binary is fetched by the renderer and transferred to the
+// AudioWorklet, which avoids the multi-megabyte base64 installer overhead.
+const workletSource = wasmLoader + '\n' + processorSource;
+
+async function loadRnnoiseWasm(): Promise<ArrayBuffer> {
+  const response = await fetch(wasmUrl);
+  if (!response.ok) throw new Error(`RNNoise WASM 加载失败（HTTP ${response.status}）`);
+  return response.arrayBuffer();
+}
 
 export async function createRnnoiseMicrophone(
   rawStream: MediaStream,
@@ -22,14 +30,19 @@ export async function createRnnoiseMicrophone(
       await context!.audioWorklet.addModule(url);
       // The timeout may have closed the context while addModule was pending.
       if (context!.state === 'closed') throw new Error('RNNoise 初始化已取消');
+      const wasmBinary = await loadRnnoiseWasm();
       processor = new AudioWorkletNode(context!, 'cove-rnnoise', {
         numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1],
         channelCount: 1, channelCountMode: 'explicit',
       });
       const initialized = new Promise<void>((resolve, reject) => {
-        processor!.port.onmessage = ({ data }) => { if (data?.type === 'ready') resolve(); };
+        processor!.port.onmessage = ({ data }) => {
+          if (data?.type === 'ready') resolve();
+          else if (data?.type === 'error') reject(new Error(data.message || 'RNNoise 模型初始化失败'));
+        };
         processor!.onprocessorerror = () => reject(new Error('RNNoise 模型初始化失败'));
       });
+      processor.port.postMessage({ type: 'wasm', wasmBinary }, [wasmBinary]);
       destination = context!.createMediaStreamDestination();
       destination.channelCount = 1;
       const source = context!.createMediaStreamSource(rawStream);

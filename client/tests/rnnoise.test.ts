@@ -70,7 +70,7 @@ test('if both modes fail, the caller receives an error and may retain its existi
   assert.equal(fallback.stopped(), true);
 });
 
-test('RNNoise frame bridge preserves every sample and constant delay across quantum boundaries', () => {
+test('RNNoise frame bridge preserves every sample and constant delay across quantum boundaries', async () => {
   let Processor: any;
   const heap = new Float32Array(4096);
   const messages: unknown[] = [];
@@ -84,12 +84,21 @@ test('RNNoise frame bridge preserves every sample and constant delay across quan
     },
     _rnnoise_destroy() { frees++; }, _free() { frees++; },
   };
+  const moduleOptions: { wasmBinary?: ArrayBuffer }[] = [];
   runInNewContext(readFileSync(new URL('../src/rnnoiseProcessor.js', import.meta.url), 'utf8'), {
-    sampleRate: 48000, createRNNWasmModuleSync: () => module,
+    sampleRate: 48000,
+    createRNNWasmModuleSync: (options: { wasmBinary?: ArrayBuffer }) => {
+      moduleOptions.push(options);
+      return module;
+    },
     AudioWorkletProcessor: class { port = { onmessage: (_: unknown) => {}, postMessage: (data: unknown) => messages.push(data) }; },
     registerProcessor: (_: string, value: unknown) => { Processor = value; },
   });
   const p = new Processor();
+  p.port.onmessage({ data: { type: 'wasm', wasmBinary: new ArrayBuffer(0) } });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(moduleOptions.length, 1);
+  assert.ok(moduleOptions[0].wasmBinary instanceof ArrayBuffer);
   const input = Float32Array.from({ length: 48_000 }, (_, i) => Math.sin(i * 0.137) * 0.2);
   const output = new Float32Array(input.length);
   let offset = 0;
