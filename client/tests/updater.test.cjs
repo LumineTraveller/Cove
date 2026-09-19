@@ -168,7 +168,7 @@ test('the updater binds automatic checks to the server address supplied by the r
   h.controller.dispose();
 });
 
-test('release discovery checks the cloud mirror first and keeps GitHub as the fallback', async () => {
+test('release discovery probes the cloud mirror first and prioritizes the newest version', async () => {
   const calls = [];
   const fetchImpl = async input => {
     const url = String(input);
@@ -181,6 +181,15 @@ test('release discovery checks the cloud mirror first and keeps GitHub as the fa
   assert.deepEqual(sources.map(source => [source.id, source.version]), [['cloud', '0.7.1'], ['github', '0.7.0']]);
   assert.equal(compareReleaseVersions('0.7.0', '0.6.9') > 0, true);
   assert.equal(sources[0].feedUrl, `${cloudServerUrl}/releases/v0.7.1/`);
+});
+
+test('a stale but reachable cloud mirror cannot hide a newer GitHub release', async () => {
+  const fetchImpl = async input => {
+    const tag_name = String(input).includes(cloudServerUrl) ? 'v0.7.0' : 'v0.7.1';
+    return new Response(JSON.stringify({ tag_name }), { status: 200 });
+  };
+  const sources = await discoverUpdateSources(cloudServerUrl, fetchImpl, 1_000);
+  assert.deepEqual(sources.map(source => [source.id, source.version]), [['github', '0.7.1'], ['cloud', '0.7.0']]);
 });
 
 test('release discovery probes GitHub only after the cloud result is known', async () => {

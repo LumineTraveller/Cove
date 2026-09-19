@@ -4,6 +4,7 @@ import {
   CLIENT_PROTOCOL_VERSION,
   ensureServerAccess,
   readServerSecurityStatus,
+  requiresServerAccessRecovery,
   serverRequestInit,
 } from '../src/serverSecurity';
 
@@ -57,4 +58,13 @@ test('explicitly disabled security status skips the password exchange', async ()
 test('client requests continue to advertise protocol 2 for an enabled server', () => {
   const init = serverRequestInit('https://enabled.test');
   assert.equal(new Headers(init.headers).get('x-cove-client-protocol'), String(CLIENT_PROTOCOL_VERSION));
+});
+
+test('server access recovery includes an enabled but uninitialized server', () => {
+  assert.equal(requiresServerAccessRecovery('SERVER_NOT_INITIALIZED'), true);
+  assert.equal(requiresServerAccessRecovery('SERVER_ACCESS_REQUIRED'), true);
+  assert.equal(requiresServerAccessRecovery('SERVER_ACCESS_INVALID'), true);
+  assert.equal(requiresServerAccessRecovery('INSECURE_TRANSPORT'), true);
+  assert.equal(requiresServerAccessRecovery('CLIENT_VERSION_TOO_OLD'), false);
+  assert.equal(requiresServerAccessRecovery(undefined), false);
 });

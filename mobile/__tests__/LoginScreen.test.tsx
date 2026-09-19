@@ -1,6 +1,6 @@
 import React from 'react';
 import TestRenderer, { act } from 'react-test-renderer';
-import { Platform, Switch, TextInput, TouchableOpacity } from 'react-native';
+import { Platform, Switch, Text, TextInput, TouchableOpacity } from 'react-native';
 import { LoginScreen } from '../src/screens/LoginScreen';
 
 jest.mock('lucide-react-native', () => ({ LockKeyhole: 'LockKeyhole', LogIn: 'LogIn', Mail: 'Mail', Server: 'Server', UserRound: 'UserRound' }));
@@ -93,5 +93,18 @@ test('disabled server keeps the legacy login form and does not require a server 
     serverPassword: '',
     bootstrapToken: '',
   }));
+  await act(async () => renderer.unmount());
+});
+
+test('uninitialized server requires an available bootstrap credential before submit', async () => {
+  const unavailable = { ...enabledSecurity, configured: false, bootstrapAvailable: false };
+  let renderer!: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<LoginScreen saving={false} onSubmit={jest.fn()} onProbeServerSecurity={async () => unavailable} />); });
+  const inputs = () => renderer.root.findAllByType(TextInput);
+  await act(async () => inputs().find(input => input.props.keyboardType === 'url')!.props.onChangeText('https://new.test'));
+  await finishProbe();
+  expect(inputs().some(input => input.props.placeholder === '一次性凭据')).toBe(false);
+  expect(renderer.root.findAllByType(TouchableOpacity).at(-1)!.props.disabled).toBe(true);
+  expect(renderer.root.findAllByType(Text).some(item => String(item.props.children).includes('尚未配置一次性初始化凭据'))).toBe(true);
   await act(async () => renderer.unmount());
 });

@@ -37,6 +37,17 @@ export class ServerSecurityClientError extends Error {
   }
 }
 
+const SERVER_ACCESS_RECOVERY_CODES = new Set<ServerSecurityErrorCode>([
+  'SERVER_NOT_INITIALIZED',
+  'SERVER_ACCESS_REQUIRED',
+  'SERVER_ACCESS_INVALID',
+  'INSECURE_TRANSPORT',
+]);
+
+export function requiresServerAccessRecovery(code: unknown): boolean {
+  return typeof code === 'string' && SERVER_ACCESS_RECOVERY_CODES.has(code as ServerSecurityErrorCode);
+}
+
 // Keep the bearer token only for the current process. Account credentials and
 // server addresses can be remembered; the server-wide unlock token cannot.
 const accessTokens = new Map<string, ServerAccessGrant>();

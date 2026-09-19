@@ -55,17 +55,24 @@ export function canonicalAddressSet(values: readonly string[]): string[] {
   return [...unique].sort((left, right) => (left.includes('.') ? 0 : 1) - (right.includes('.') ? 0 : 1) || left.localeCompare(right));
 }
 
+function endpointSuffix(url: URL): string {
+  const port = url.port || (url.protocol === 'https:' ? '443' : '80');
+  return `${port}${url.pathname.replace(/\/+$/, '')}`;
+}
+
 function fallbackKey(url: URL): string {
   const host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
-  const port = url.port || (url.protocol === 'https:' ? '443' : '80');
-  return `host:${host}:${port}${url.pathname.replace(/\/+$/, '')}`;
+  return `host:${host}:${endpointSuffix(url)}`;
 }
 
 export function serverIdentityKey(serverURL: string, addresses: readonly string[] = []): string {
   const normalized = canonicalAddressSet(addresses);
-  if (normalized.length) return `ip:${normalized.join(',')}`;
   const candidate = normalizeServerSecurityURL(serverURL);
-  try { return fallbackKey(new URL(candidate)); } catch { return `host:${candidate.toLowerCase()}`; }
+  try {
+    const parsed = new URL(candidate);
+    if (normalized.length) return `ip:${normalized.join(',')}|${endpointSuffix(parsed)}`;
+    return fallbackKey(parsed);
+  } catch { return `host:${candidate.toLowerCase()}`; }
 }
 
 export async function resolveServerIdentity(

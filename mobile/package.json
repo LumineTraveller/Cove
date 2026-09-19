@@ -1,10 +1,10 @@
 {
   "name": "cove-mobile",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "private": true,
   "scripts": {
     "android": "react-native run-android",
-    "android:apk": "cd android && gradlew.bat assembleRelease",
+    "android:apk": "cd android && gradlew.bat assembleRelease -PreactNativeArchitectures=armeabi-v7a,arm64-v8a",
     "android:apk:debug": "cd android && gradlew.bat assembleDebug",
     "ios": "react-native run-ios",
     "lint": "eslint .",

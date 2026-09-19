@@ -100,11 +100,11 @@ async function discoverSource(
 }
 
 /**
- * 按固定优先级探测更新源。
+ * 先按固定顺序探测更新源，再优先返回版本较新的正式发行版。
  *
- * 当前服务器是首选更新源：由服务器地址变量派生更新路径，适合桌面客户端直连下载。
- * GitHub 在当前服务器不可用或下载失败时作为回退源；两者都使用同一份
- * electron-builder 更新清单和校验值。
+ * 当前服务器和 GitHub 使用同一份 electron-builder 更新清单和校验值。
+ * 同版本时当前服务器优先；如果服务器镜像落后，则先用 GitHub，避免可访问但
+ * 尚未同步的镜像把新版本隐藏掉。
  */
 export async function discoverUpdateSources(
   serverUrl = '',
@@ -124,5 +124,8 @@ export async function discoverUpdateSources(
       // unavailable. The updater will report an error only if both fail.
     }
   }
-  return discovered;
+  return discovered
+    .map((source, order) => ({ source, order }))
+    .sort((left, right) => compareReleaseVersions(right.source.version, left.source.version) || left.order - right.order)
+    .map(({ source }) => source);
 }

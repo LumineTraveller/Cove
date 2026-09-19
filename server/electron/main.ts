@@ -19,10 +19,12 @@ if (process.platform === 'darwin') app.dock?.hide();
 
 let tray: Tray | null = null;
 const HTTP_PORT = 3001;
+const DEFAULT_DATA_DIR = path.join(os.homedir(), '.cove');
+const DATA_DIR = process.env.COVE_DATA_DIR?.trim() || DEFAULT_DATA_DIR;
 
-// ── 日志文件 (~/.cove/server.log) ─────────────────────────────────────────────
+// ── 日志文件（默认 ~/.cove/server.log，可由 COVE_DATA_DIR 覆盖）───────────────
 // 打包后的 GUI 程序不会往控制台输出，必须写文件才能排查启动失败原因。
-const LOG_PATH = path.join(os.homedir(), '.cove', 'server.log');
+const LOG_PATH = path.join(DATA_DIR, 'server.log');
 
 function setupLogging() {
   try {
@@ -65,7 +67,7 @@ function openLog() {
 //   "serverSecurityEnabled": false
 // }
 
-const CONFIG_PATH = path.join(os.homedir(), '.cove', 'server-config.json');
+const CONFIG_PATH = path.join(DEFAULT_DATA_DIR, 'server-config.json');
 
 function readConfig() {
   try {
@@ -178,12 +180,12 @@ function buildMenu(localIP: string): Electron.Menu {
     { type: 'separator' },
     {
       label: '打开数据目录',
-      click: () => shell.openPath(path.join(os.homedir(), '.cove')),
+      click: () => shell.openPath(DATA_DIR),
     },
     {
       label: '打开一次性初始化凭据（首次使用）',
-      enabled: fs.existsSync(path.join(os.homedir(), '.cove', 'bootstrap-token.txt')),
-      click: () => shell.openPath(path.join(os.homedir(), '.cove', 'bootstrap-token.txt')),
+      enabled: fs.existsSync(path.join(DATA_DIR, 'bootstrap-token.txt')),
+      click: () => shell.openPath(path.join(DATA_DIR, 'bootstrap-token.txt')),
     },
     { label: '查看日志', click: () => openLog() },
     {

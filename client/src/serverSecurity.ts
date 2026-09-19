@@ -41,6 +41,17 @@ export class ServerSecurityClientError extends Error {
   }
 }
 
+const SERVER_ACCESS_RECOVERY_CODES = new Set<ServerSecurityErrorCode>([
+  'SERVER_NOT_INITIALIZED',
+  'SERVER_ACCESS_REQUIRED',
+  'SERVER_ACCESS_INVALID',
+  'INSECURE_TRANSPORT',
+]);
+
+export function requiresServerAccessRecovery(code: unknown): boolean {
+  return typeof code === 'string' && SERVER_ACCESS_RECOVERY_CODES.has(code as ServerSecurityErrorCode);
+}
+
 // Account sessions may be remembered for convenience, but a bearer token that
 // unlocks every REST and Socket.IO operation is never written to localStorage.
 // A sessionStorage copy lets the renderer reload after the first login without

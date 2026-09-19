@@ -72,18 +72,25 @@ export function canonicalAddressSet(values: readonly string[]): string[] {
   });
 }
 
-function fallbackKey(url: URL): string {
-  const host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+function endpointSuffix(url: URL): string {
   const port = url.port || (url.protocol === 'https:' ? '443' : '80');
   const pathname = url.pathname.replace(/\/+$/, '');
-  return `host:${host}:${port}${pathname}`;
+  return `${port}${pathname}`;
+}
+
+function fallbackKey(url: URL): string {
+  const host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  return `host:${host}:${endpointSuffix(url)}`;
 }
 
 export function serverIdentityKey(url: string, addresses: readonly string[] = []): string {
   const normalized = canonicalAddressSet(addresses);
-  if (normalized.length) return `ip:${normalized.join(',')}`;
   const candidate = normalizeServerSecurityURL(url);
-  try { return fallbackKey(new URL(candidate)); }
+  try {
+    const parsed = new URL(candidate);
+    if (normalized.length) return `ip:${normalized.join(',')}|${endpointSuffix(parsed)}`;
+    return fallbackKey(parsed);
+  }
   catch { return `host:${candidate.toLowerCase()}`; }
 }
 

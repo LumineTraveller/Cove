@@ -231,6 +231,7 @@ test('server password rotation disconnects active sockets and rejects the old ac
   assert.equal((await active.register).ok, true);
 
   const oldAccessToken = serverAccessToken;
+  const accessInvalid = new Promise<any>(resolve => active.socket.once('server:access-invalid', resolve));
   const disconnected = new Promise<void>(resolve => active.socket.once('disconnect', () => resolve()));
   const response = await fetch(`${base}/api/security/rotate`, {
     method: 'POST',
@@ -239,6 +240,10 @@ test('server password rotation disconnects active sockets and rejects the old ac
   });
   assert.equal(response.status, 200);
   serverAccessToken = (await response.json()).accessToken;
+  assert.deepEqual(await accessInvalid, {
+    code: 'SERVER_ACCESS_INVALID',
+    message: '服务器访问令牌已失效，请重新验证服务器密码',
+  });
   await disconnected;
 
   const staleRooms = await fetch(`${base}/api/rooms`, { headers: serverHeaders(oldAccessToken) });

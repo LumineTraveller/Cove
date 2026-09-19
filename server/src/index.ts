@@ -1,6 +1,6 @@
 import express from 'express';
 import { createServer } from 'http';
-import { Server } from 'socket.io';
+import { Server, type Socket } from 'socket.io';
 import cors from 'cors';
 import Database from 'better-sqlite3';
 import path from 'path';
@@ -57,6 +57,26 @@ const io = new Server(httpServer, {
 });
 const disconnectGrace = new DisconnectGrace();
 const serverSecurityEnabled = isServerSecurityEnabled();
+const SERVER_ACCESS_INVALID_NOTICE = {
+  code: 'SERVER_ACCESS_INVALID',
+  message: '服务器访问令牌已失效，请重新验证服务器密码',
+} as const;
+
+function disconnectForInvalidServerAccess(targetSocket: Socket): void {
+  if (targetSocket.data.serverAccessInvalidated) return;
+  targetSocket.data.serverAccessInvalidated = true;
+  // Stop room broadcasts immediately. The short flush window below is only
+  // for delivering the recovery notice, not for retaining room membership.
+  for (const room of [...targetSocket.rooms]) {
+    if (room !== targetSocket.id) void targetSocket.leave(room);
+  }
+  targetSocket.emit('server:access-invalid', SERVER_ACCESS_INVALID_NOTICE);
+  // The database-backed middleware already rejects further packets. Yield one
+  // turn so Socket.IO can flush the reason before the server closes the socket.
+  setImmediate(() => {
+    if (targetSocket.connected) targetSocket.disconnect(true);
+  });
+}
 // Keep the recovery offset fresh even in a quiet voice room.
 const recoveryCheckpoint = setInterval(() => io.emit('session:checkpoint'), 2_000);
 recoveryCheckpoint.unref();
@@ -192,7 +212,7 @@ const serverSecurity = createServerSecurityStore(db, {
     // Password rotation must stop already-connected clients from continuing
     // to receive room traffic with a token that is no longer valid.
     if (serverSecurityEnabled)
-      for (const targetSocket of io.sockets.sockets.values()) targetSocket.disconnect(true);
+      for (const targetSocket of io.sockets.sockets.values()) disconnectForInvalidServerAccess(targetSocket);
   },
 });
 const accounts = createAccountStore(db);
@@ -1304,13 +1324,13 @@ io.on('connection', socket => {
         next();
         return;
       }
-      const error = new Error('服务器访问令牌已失效，请重新验证服务器密码') as Error & { data?: { code: string } };
-      error.data = { code: 'SERVER_ACCESS_INVALID' };
+      const error = new Error(SERVER_ACCESS_INVALID_NOTICE.message) as Error & { data?: { code: string } };
+      error.data = { code: SERVER_ACCESS_INVALID_NOTICE.code };
       next(error);
-      socket.disconnect(true);
+      disconnectForInvalidServerAccess(socket);
     });
     const accessExpiryTimer = setTimeout(() => {
-      if (!serverSecurity.accessForToken(socket.data.serverAccessToken)) socket.disconnect(true);
+      if (!serverSecurity.accessForToken(socket.data.serverAccessToken)) disconnectForInvalidServerAccess(socket);
     }, Math.max(1, Number(socket.data.serverAccessExpiresAt ?? Date.now()) - Date.now() + 1));
     accessExpiryTimer.unref();
     socket.once('disconnect', () => clearTimeout(accessExpiryTimer));

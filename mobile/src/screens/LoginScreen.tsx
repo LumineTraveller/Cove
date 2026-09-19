@@ -85,6 +85,8 @@ export function LoginScreen({ saving, error, onSubmit, rememberedServers = [], o
   }, [serverURL, certificateException, canUseException, onProbeServerSecurity]);
   const securityStatus = securityProbe.phase === 'ready' ? securityProbe.status : null;
   const securityEnabled = securityStatus?.enabled === true;
+  const bootstrapRequired = securityEnabled && securityStatus.configured === false;
+  const bootstrapAvailable = bootstrapRequired && securityStatus.bootstrapAvailable;
   const securityReady = securityProbe.phase === 'ready';
   const submit = () => onSubmit({
     mode,
@@ -100,6 +102,7 @@ export function LoginScreen({ saving, error, onSubmit, rememberedServers = [], o
     && password.length >= 8
     && securityReady
     && (!securityEnabled || serverPassword.length >= 8)
+    && (!bootstrapRequired || (bootstrapAvailable && !!bootstrapToken.trim()))
     && !!serverURL.trim()
     && (mode === 'login' || !!username.trim())
     && !saving;
@@ -212,7 +215,7 @@ export function LoginScreen({ saving, error, onSubmit, rememberedServers = [], o
               </View>
               <Text style={styles.help}>它独立于账号密码，用于解锁这个 Cove 服务器。</Text>
 
-              {securityStatus?.configured === false && <>
+              {bootstrapAvailable && <>
                 <Text style={[styles.label, styles.secondLabel]}>一次性初始化凭据</Text>
                 <View style={styles.inputShell}>
                   <LockKeyhole size={19} color={colors.textFaint} />
@@ -228,6 +231,9 @@ export function LoginScreen({ saving, error, onSubmit, rememberedServers = [], o
                   />
                 </View>
               </>}
+              {bootstrapRequired && !bootstrapAvailable && (
+                <Text style={styles.help}>服务器管理员尚未配置一次性初始化凭据，暂时无法完成初始化。</Text>
+              )}
             </>}
 
             <Text style={[styles.label, styles.secondLabel]}>服务器地址</Text>

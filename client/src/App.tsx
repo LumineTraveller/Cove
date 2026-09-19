@@ -13,7 +13,7 @@ import type { UserProfile } from './types';
 import { ServerCertificateToggle } from './components/ServerCertificateToggle';
 import { hasServerCertificateException, saveServerCertificateException } from './serverCertificate';
 import { clearAccountSession, enrichRememberedLoginIdentities, forgetRememberedLogin, loginAccount, normalizeLoginServer, readAccountSession, readRememberedLogins, registerAccount, rememberAccountSession, rememberAccountSessionResolved, validAccountEmail, type RememberedLogin } from './accountAuth';
-import { clearServerAccessToken, ensureServerAccess, normalizeServerSecurityURL, readServerSecurityStatus, serverFetch, type ServerSecurityStatus } from './serverSecurity';
+import { clearServerAccessToken, ensureServerAccess, normalizeServerSecurityURL, readServerSecurityStatus, requiresServerAccessRecovery, serverFetch, type ServerSecurityStatus } from './serverSecurity';
 import { applyTheme, readTheme, type AppTheme, THEME_STORAGE_KEY } from './theme';
 
 const DEFAULT_SERVER = 'http://localhost:3001';
@@ -245,18 +245,25 @@ export default function App() {
       registration.cancel();
       if (active) setConnected(false);
     };
+    const requireServerUnlock = (message?: string) => {
+      if (!active) return;
+      clearServerAccessToken(serverURL);
+      setAuthError(message || '服务器访问令牌已失效，请重新验证服务器密码。');
+      setConnected(false);
+      setInitialConnectionPending(false);
+      setServerUnlockRequired(true);
+      socket.disconnect();
+    };
     const connectError = (cause: Error & { data?: { code?: string } }) => {
       if (!active) return;
-      if (cause.data?.code === 'SERVER_ACCESS_REQUIRED' || cause.data?.code === 'SERVER_ACCESS_INVALID' || cause.data?.code === 'INSECURE_TRANSPORT') {
-        clearServerAccessToken(serverURL);
-        setAuthError(cause.message || '服务器访问令牌已失效，请重新验证服务器密码。');
-        setConnected(false);
-        setInitialConnectionPending(false);
-        setServerUnlockRequired(true);
-        socket.disconnect();
+      if (requiresServerAccessRecovery(cause.data?.code)) {
+        requireServerUnlock(cause.message);
         return;
       }
       setConnected(false);
+    };
+    const serverAccessInvalid = (notice?: { code?: string; message?: string }) => {
+      if (requiresServerAccessRecovery(notice?.code)) requireServerUnlock(notice?.message);
     };
     const sessionReplaced = () => {
       if (!active) return;
@@ -275,6 +282,7 @@ export default function App() {
     socket.on('connect', register);
     socket.on('disconnect', disconnect);
     socket.on('connect_error', connectError);
+    socket.on('server:access-invalid', serverAccessInvalid);
     socket.on('account:session-replaced', sessionReplaced);
     const connectToServer = async () => {
       try {
@@ -299,6 +307,7 @@ export default function App() {
       socket.off('connect', register);
       socket.off('disconnect', disconnect);
       socket.off('connect_error', connectError);
+      socket.off('server:access-invalid', serverAccessInvalid);
       socket.off('account:session-replaced', sessionReplaced);
       socket.disconnect();
     };
@@ -307,8 +316,11 @@ export default function App() {
   const handleLogin = async () => {
     const username = draftName.trim();
     const securityEnabled = serverSecurityProbe.phase === 'ready' && serverSecurityProbe.status.enabled;
+    const bootstrapRequired = securityEnabled && !serverSecurityProbe.status.configured;
     if (serverSecurityProbe.phase !== 'ready' || !validAccountEmail(draftEmail) || draftPassword.length < 8
-      || (securityEnabled && draftServerPassword.length < 8) || !draftUrl.trim()
+      || (securityEnabled && draftServerPassword.length < 8)
+      || (bootstrapRequired && (!serverSecurityProbe.status.bootstrapAvailable || !draftBootstrapToken.trim()))
+      || !draftUrl.trim()
       || (authMode === 'register' && !username)) return;
     const nextServerUrl = normalizeServerSecurityURL(draftUrl || DEFAULT_SERVER);
     if (!nextServerUrl) {
@@ -444,6 +456,7 @@ export default function App() {
   const serverSecurityEnabled = serverSecurityStatus?.enabled === true;
   const serverSecurityConfigured = serverSecurityEnabled && serverSecurityStatus.configured;
   const serverSecurityUnconfigured = serverSecurityEnabled && !serverSecurityStatus.configured;
+  const serverBootstrapAvailable = serverSecurityUnconfigured && serverSecurityStatus.bootstrapAvailable;
   const serverSecurityReady = serverSecurityProbe.phase === 'ready';
   const serverSecurityHint = serverSecurityProbe.phase === 'idle'
     ? '等待输入服务器地址'
@@ -455,7 +468,9 @@ export default function App() {
         ? '无法识别，请检查服务器是否启动'
           : serverSecurityConfigured
             ? '服务器已初始化，请输入已有的服务器访问密码'
-            : '检测到新服务器，请设置服务器访问密码';
+            : serverBootstrapAvailable
+              ? '检测到新服务器，请设置服务器访问密码'
+              : '服务器尚未提供一次性初始化凭据，请联系管理员';
 
   if (needLogin) {
     return (
@@ -589,7 +604,7 @@ export default function App() {
                     {serverSecurityUnconfigured && <span>首次连接</span>}
                   </div>
                   {serverSecurityReady && (
-                    <div className={`auth-server-security-fields ${serverSecurityConfigured ? 'is-single' : ''}`}>
+                    <div className={`auth-server-security-fields ${serverSecurityConfigured || !serverBootstrapAvailable ? 'is-single' : ''}`}>
                       <label className="auth-field" htmlFor="login-server-password">
                         <span>服务器访问密码</span>
                         <div className="auth-input-wrap">
@@ -597,7 +612,7 @@ export default function App() {
                           <input id="login-server-password" type="password" autoComplete="off" placeholder="至少 8 个字符" value={draftServerPassword} onChange={event => setDraftServerPassword(event.target.value)} />
                         </div>
                       </label>
-                      {serverSecurityUnconfigured && (
+                      {serverBootstrapAvailable && (
                         <label className="auth-field" htmlFor="login-bootstrap-token">
                           <span>一次性初始化凭据 <em>（新服务器必填）</em></span>
                           <div className="auth-input-wrap">
@@ -607,6 +622,9 @@ export default function App() {
                         </label>
                       )}
                     </div>
+                  )}
+                  {serverSecurityUnconfigured && !serverBootstrapAvailable && (
+                    <p className="auth-warning" role="alert">服务器管理员尚未配置一次性初始化凭据，暂时无法完成初始化。</p>
                   )}
                 </section>}
                 <label className="auth-field" htmlFor="login-email">
@@ -629,7 +647,7 @@ export default function App() {
                 <button
                   type="submit"
                   className="auth-submit"
-                  disabled={authPending || !serverSecurityReady || !validAccountEmail(draftEmail) || draftPassword.length < 8 || (serverSecurityEnabled && draftServerPassword.length < 8) || !draftUrl.trim() || (authMode === 'register' && !draftName.trim())}
+                  disabled={authPending || !serverSecurityReady || !validAccountEmail(draftEmail) || draftPassword.length < 8 || (serverSecurityEnabled && draftServerPassword.length < 8) || (serverSecurityUnconfigured && (!serverBootstrapAvailable || !draftBootstrapToken.trim())) || !draftUrl.trim() || (authMode === 'register' && !draftName.trim())}
                 >
                   {authPending ? <LoaderCircle size={19} className="animate-spin" /> : <LogIn size={19} />}
                   {authMode === 'login' ? '登录 Cove' : '注册并进入'}

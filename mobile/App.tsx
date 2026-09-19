@@ -19,7 +19,7 @@ import type { Room, SessionConfig } from './src/types';
 import { configureServerCertificate } from './src/serverCertificate';
 import { MobileUpdateProvider } from './src/components/MobileUpdater';
 import { authenticateAccount, type AccountAuthRequest } from './src/accountAuth';
-import { clearServerAccessToken, ensureServerAccess, normalizeServerSecurityURL, readServerSecurityStatus, serverFetch, type ServerSecurityStatus } from './src/serverSecurity';
+import { clearServerAccessToken, ensureServerAccess, normalizeServerSecurityURL, readServerSecurityStatus, requiresServerAccessRecovery, serverFetch, type ServerSecurityStatus } from './src/serverSecurity';
 import { resolveServerIdentity } from './src/serverIdentity';
 
 export default function App() {
@@ -104,19 +104,27 @@ function CoveSession() {
       setSessionReady(false);
       setConnectionError('服务器连接已中断，正在自动重试');
     };
+    const requireServerUnlock = (message?: string) => {
+      if (!active) return;
+      setSessionReady(false);
+      clearServerAccessToken(config.serverURL);
+      setSelectedRoom(null);
+      setConfig(null);
+      setAuthError(message || '服务器访问令牌已失效，请重新验证服务器密码。');
+      nextSocket.disconnect();
+    };
     const connectError = (cause: Error) => {
       if (!active) return;
       setSessionReady(false);
       const code = (cause as Error & { data?: { code?: string } }).data?.code;
-      if (code === 'SERVER_ACCESS_REQUIRED' || code === 'SERVER_ACCESS_INVALID' || code === 'INSECURE_TRANSPORT') {
-        clearServerAccessToken(config.serverURL);
-        setSelectedRoom(null);
-        setConfig(null);
-        setAuthError(cause.message || '服务器访问令牌已失效，请重新验证服务器密码。');
-        nextSocket.disconnect();
+      if (requiresServerAccessRecovery(code)) {
+        requireServerUnlock(cause.message);
         return;
       }
       setConnectionError(`无法连接服务器：${cause.message}`);
+    };
+    const serverAccessInvalid = (notice?: { code?: string; message?: string }) => {
+      if (requiresServerAccessRecovery(notice?.code)) requireServerUnlock(notice?.message);
     };
     const sessionReplaced = () => {
       if (!active) return;
@@ -135,6 +143,7 @@ function CoveSession() {
     nextSocket.on('connect', register);
     nextSocket.on('disconnect', disconnect);
     nextSocket.on('connect_error', connectError);
+    nextSocket.on('server:access-invalid', serverAccessInvalid);
     nextSocket.on('account:session-replaced', sessionReplaced);
     setSocket(nextSocket);
     // Native HTTPS policy must be ready before HTTP polling or WSS starts.
@@ -147,6 +156,7 @@ function CoveSession() {
       nextSocket.off('connect', register);
       nextSocket.off('disconnect', disconnect);
       nextSocket.off('connect_error', connectError);
+      nextSocket.off('server:access-invalid', serverAccessInvalid);
       nextSocket.off('account:session-replaced', sessionReplaced);
       nextSocket.disconnect();
     };
