@@ -128,6 +128,8 @@ interface RemoteControlRequest {
   roomId: string;
   controllerName: string;
 }
+
+const REMOTE_CONTROL_APPROVAL_DELAY_SECONDS = 10;
 interface MessageHistoryCursor {
   timestamp: number;
   id: string;
@@ -3014,6 +3016,7 @@ function ShareViewV2({
   debug,
   onToggleDebug,
   remoteControl,
+  sharerName,
   onInput,
   onRequestRemote,
   onStopRemote,
@@ -3029,6 +3032,7 @@ function ShareViewV2({
     sharerActive?: boolean;
     controllerName?: string;
   };
+  sharerName: string;
   onInput: (input: RemoteControlInput) => void;
   onRequestRemote: () => void;
   onStopRemote: () => void;
@@ -3047,10 +3051,7 @@ function ShareViewV2({
     toggleFullscreen,
     toggleNativeFullscreen,
   } = useScreenFullscreen(Boolean(rtc.localScreen || rtc.remoteScreen));
-  const sharer = remote
-    ? (rtc.voiceMembers.find((member) => member.socketId === remote.socketId)
-        ?.username ?? "成员")
-    : "你";
+  const sharer = sharerName;
   const end = () => {
     if (nativeFullscreen) void toggleNativeFullscreen();
     if (screenMaximized) toggleFullscreen();
@@ -3185,6 +3186,7 @@ function ControlBallV2({
   onOpenDevices,
   onOpenSoundboard,
   soundboardButtonRef,
+  soundboardAnchorRef,
   onSoundboardHoverStart,
   onSoundboardHoverEnd,
 }: {
@@ -3201,6 +3203,9 @@ function ControlBallV2({
   onOpenSoundboard: () => void;
   soundboardButtonRef: {
     current: HTMLButtonElement | null;
+  };
+  soundboardAnchorRef: {
+    current: HTMLDivElement | null;
   };
   onSoundboardHoverStart: () => void;
   onSoundboardHoverEnd: () => void;
@@ -3240,6 +3245,7 @@ function ControlBallV2({
 
   return (
     <div
+      ref={soundboardAnchorRef}
       className={`control-ball-anchor ${expanded ? "expanded" : "collapsed"}`}
       onMouseEnter={() => {
         window.clearTimeout(leaveTimer.current);
@@ -3501,6 +3507,9 @@ export default function ChatRoomV2({
   const [pendingRemoteRequestId, setPendingRemoteRequestId] = useState<
     string | null
   >(null);
+  const [remoteApprovalSeconds, setRemoteApprovalSeconds] = useState<
+    number | null
+  >(null);
   const [remoteSession, setRemoteSession] =
     useState<RemoteControlSession | null>(null);
   const [remoteNotice, setRemoteNotice] = useState("");
@@ -3550,6 +3559,8 @@ export default function ChatRoomV2({
   const historyGenerationRef = useRef(0);
   const imageBusy = useRef(false);
   const soundboardButtonRef = useRef<HTMLButtonElement>(null);
+  // 面板定位锚点必须用球体外壳（几何恒定）；球侧栏内的按钮会随展开/收起平移。
+  const soundboardAnchorRef = useRef<HTMLDivElement>(null);
   const soundboardHoverTimer = useRef<number | null>(null);
   joinPasswordRef.current = joinPassword;
   const shareLayout = Boolean(rtc.localScreen || rtc.remoteScreen);
@@ -3614,6 +3625,7 @@ export default function ChatRoomV2({
     setPendingRemote(null);
     setPendingRemoteRequest(false);
     setPendingRemoteRequestId(null);
+    setRemoteApprovalSeconds(null);
     setRemoteSession(null);
   }, [shareLayout]);
   useEffect(() => {
@@ -4023,13 +4035,16 @@ export default function ChatRoomV2({
         setRemoteSession(session);
         setPendingRemoteRequest(false);
         setPendingRemoteRequestId(null);
+        setRemoteApprovalSeconds(null);
         setPendingRemote(null);
       },
       onNotice: setRemoteNotice,
     });
     remoteLifecycleRef.current = lifecycle;
     const onRequested = (request: RemoteControlRequest) => {
-      if (request.roomId === roomId) setPendingRemote(request);
+      if (request.roomId !== roomId) return;
+      setRemoteApprovalSeconds(null);
+      setPendingRemote(request);
     };
     const onResult = ({
       requestId,
@@ -4057,6 +4072,7 @@ export default function ChatRoomV2({
       reason?: string;
     }) => {
       lifecycle.cancelExpectedStart();
+      setRemoteApprovalSeconds(null);
       setPendingRemote((current) =>
         current?.requestId === requestId ? null : current,
       );
@@ -4076,6 +4092,34 @@ export default function ChatRoomV2({
       if (remoteLifecycleRef.current === lifecycle) remoteLifecycleRef.current = null;
     };
   }, [roomId]);
+  useEffect(() => {
+    if (remoteApprovalSeconds === null) return;
+    if (remoteApprovalSeconds === 0) {
+      if (!pendingRemote) {
+        setRemoteApprovalSeconds(null);
+        return;
+      }
+      if (!remoteLifecycleRef.current?.expectStart("sharer")) {
+        setRemoteApprovalSeconds(null);
+        setPendingRemote(null);
+        setRemoteNotice("连接已断开，远程控制未启动");
+        return;
+      }
+      socket.emit("remote-control:respond", {
+        requestId: pendingRemote.requestId,
+        accepted: true,
+      });
+      setRemoteApprovalSeconds(null);
+      setPendingRemote(null);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setRemoteApprovalSeconds((current) =>
+        current === null ? null : Math.max(0, current - 1),
+      );
+    }, 1000);
+    return () => window.clearTimeout(timer);
+  }, [pendingRemote, remoteApprovalSeconds]);
   const sortedMembers = useMemo(
     () =>
       sortRoomMembers(
@@ -4238,11 +4282,16 @@ export default function ChatRoomV2({
   };
   const respondRemote = (accepted: boolean) => {
     if (!pendingRemote) return;
-    if (accepted && !remoteLifecycleRef.current?.expectStart("sharer")) return;
+    if (accepted) {
+      if (remoteApprovalSeconds !== null) return;
+      setRemoteApprovalSeconds(REMOTE_CONTROL_APPROVAL_DELAY_SECONDS);
+      return;
+    }
     socket.emit("remote-control:respond", {
       requestId: pendingRemote.requestId,
       accepted,
     });
+    setRemoteApprovalSeconds(null);
     setPendingRemote(null);
   };
   const stopRemote = () => {
@@ -4254,6 +4303,7 @@ export default function ChatRoomV2({
     const cancelledRequest = !remoteSession && Boolean(pendingRemoteRequestId);
     setPendingRemoteRequest(false);
     setPendingRemoteRequestId(null);
+    setRemoteApprovalSeconds(null);
     setPendingRemote(null);
     setRemoteSession(null);
     if (cancelledRequest) setRemoteNotice("远程控制请求已取消");
@@ -4419,6 +4469,16 @@ export default function ChatRoomV2({
             window.coveRemoteControl?.supported
           ? "available"
           : "unsupported";
+  const remoteSharer = rtc.remoteScreen
+    ? roomMembers.find((member) => member.socketId === rtc.remoteScreen?.socketId)
+    : null;
+  const sharedScreenSharerName = rtc.remoteScreen
+    ? remoteSharer
+      ? profileRemarks[remoteSharer.userId] || remoteSharer.username
+      : rtc.voiceMembers.find(
+          (member) => member.socketId === rtc.remoteScreen?.socketId,
+        )?.username ?? "成员"
+    : "你";
   return (
     <main className={`prototype-page cove-v2-page foreground-${foreground}`}>
       <div
@@ -4689,7 +4749,7 @@ export default function ChatRoomV2({
                           <b>
                             {member.socketId === socket.id
                               ? `${member.username}（你）`
-                              : member.username}
+                              : profileRemarks[member.userId] || member.username}
                           </b>
                           <SharedBadges screen={screen} audio={audio} />
                         </button>
@@ -4759,6 +4819,7 @@ export default function ChatRoomV2({
               <div className="share-layout-body">
                 <ShareViewV2
                   rtc={rtc}
+                  sharerName={sharedScreenSharerName}
                   debug={debug}
                   onToggleDebug={() => {
                     setDebug((value) => !value);
@@ -4902,6 +4963,7 @@ export default function ChatRoomV2({
           }}
           onOpenSoundboard={openSoundboard}
           soundboardButtonRef={soundboardButtonRef}
+          soundboardAnchorRef={soundboardAnchorRef}
           onSoundboardHoverStart={openSoundboardQuick}
           onSoundboardHoverEnd={closeSoundboardQuick}
         />
@@ -4976,7 +5038,7 @@ export default function ChatRoomV2({
         open={showSoundboard}
         onClose={() => setShowSoundboard(false)}
         compact
-        anchorRef={soundboardButtonRef}
+        anchorRef={soundboardAnchorRef}
         quickOpen={showSoundboardQuick}
         onQuickOpen={openSoundboardQuick}
         onQuickClose={closeSoundboardQuick}
@@ -5115,7 +5177,7 @@ export default function ChatRoomV2({
       )}
       {pendingRemote && (
         <div
-          className="modal-scrim"
+          className="modal-scrim remote-request-scrim"
           onMouseDown={(event) => {
             // 点击外部等同拒绝：绝不会因为误触而授权控制。
             if (event.target === event.currentTarget) respondRemote(false);
@@ -5127,14 +5189,27 @@ export default function ChatRoomV2({
           >
             <MousePointer2 size={25} />
             <h2>远程控制请求</h2>
-            <p>{pendingRemote.controllerName} 请求控制你正在共享的屏幕。</p>
+            <p aria-live="polite">
+              {remoteApprovalSeconds === null
+                ? `${pendingRemote.controllerName} 请求控制你正在共享的屏幕。`
+                : remoteApprovalSeconds > 0
+                  ? `已允许，将在 ${remoteApprovalSeconds} 秒后开始远程控制。`
+                  : "正在启动远程控制…"}
+            </p>
             <div>
-              <button onClick={() => respondRemote(false)}>拒绝</button>
+              <button onClick={() => respondRemote(false)}>
+                {remoteApprovalSeconds === null ? "拒绝" : "取消启动"}
+              </button>
               <button
                 className="primary-wide"
+                disabled={remoteApprovalSeconds !== null}
                 onClick={() => respondRemote(true)}
               >
-                允许本次控制
+                {remoteApprovalSeconds === null
+                  ? "允许本次控制"
+                  : remoteApprovalSeconds > 0
+                    ? `${remoteApprovalSeconds} 秒后开始`
+                    : "正在启动…"}
               </button>
             </div>
           </section>

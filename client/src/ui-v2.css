@@ -3891,6 +3891,11 @@ body .cove-window-controls button {
   text-align: center;
   border-radius: 22px;
 }
+.remote-request-scrim {
+  z-index: 1400;
+  align-items: start;
+  padding-top: clamp(24px, 8vh, 88px);
+}
 .remote-request h2 {
   margin: 14px 0 6px;
   font-size: 20px;
@@ -8965,4 +8970,67 @@ body:has(
 :root[data-theme="dark"] .share-dialog .primary-wide:hover {
   background: var(--screen-yellow-control) !important;
   color: var(--screen-yellow-soft) !important;
+}
+
+/* 窄窗口抽屉（z 420）会盖住功能栏；功能栏提层到抽屉之上，
+   仍低于模态遮罩（800）与各类弹出菜单。 */
+@media (max-width: 1023px) {
+  .mode-watching .control-ball-anchor,
+  .mode-self .control-ball-anchor {
+    z-index: 430;
+  }
+}
+
+/* ── 聊天开合方案 B：列宽瞬时切换（一次重排），面板只用 transform 滑动 ──
+   旧实现把 --chat-width 0↔288 的变化放进 grid-template-columns 过渡，
+   每一帧都让全部消息重新折行，消息多时严重卡顿。现在：
+   1) 去掉 shell 的网格过渡（rail 展开改为瞬时切换）；
+   2) 聊天列宽只在 class 切换瞬间变化一次；
+   3) 面板用 translateX 滑入滑出（纯合成器动画，零重排）。 */
+.cove-shell {
+  transition: none;
+  --chat-panel-width: 380px;
+  --chat-width: var(--chat-panel-width);
+}
+.cove-shell.mode-available.chat-open {
+  --chat-panel-width: 286px;
+}
+.cove-shell.mode-watching.chat-open,
+.cove-shell.mode-self.chat-open {
+  --chat-panel-width: 288px;
+}
+@media (max-width: 1220px) {
+  .cove-shell {
+    --chat-panel-width: 300px;
+  }
+  .cove-shell.mode-available.chat-open,
+  .cove-shell.mode-watching.chat-open,
+  .cove-shell.mode-self.chat-open {
+    --chat-panel-width: 270px;
+  }
+}
+.chat-slot {
+  transform: translateX(0);
+  transition: transform 320ms var(--ease-layout);
+}
+/* 收起：聊天槽脱离网格流（主区瞬时补位），面板滑出到右缘外。 */
+.cove-shell.chat-closed .chat-slot {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 300;
+  width: var(--chat-overlay-width, var(--chat-panel-width));
+  background: linear-gradient(180deg, var(--room-top), var(--room-bottom));
+  box-shadow: -18px 0 40px rgba(28, 40, 55, 0.12);
+  transform: translateX(100%);
+}
+/* 接缝把手跟随面板滑动（宽窗口用面板宽，窄抽屉分支沿用 --chat-overlay-width）。 */
+@media (min-width: 1024px) {
+  .chat-edge-toggle-anchor {
+    transform: translateX(calc(-1 * var(--chat-panel-width)));
+  }
+}
+.cove-shell.chat-closed .chat-edge-toggle-anchor {
+  transform: translateX(0);
 }
