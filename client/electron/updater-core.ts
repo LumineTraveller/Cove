@@ -18,8 +18,8 @@ export interface UpdateCheckResultLike {
 }
 
 export interface UpdateSourceCandidate {
-  id: 'github' | 'gitee';
-  label: 'GitHub' | 'Gitee';
+  id: 'github' | 'cloud' | 'gitee';
+  label: 'GitHub' | '当前服务器' | 'Gitee';
   version: string;
   feedUrl: string;
   latencyMs: number;
@@ -64,14 +64,15 @@ export interface AutoUpdaterOptions {
   clearScheduled?: (timer: TimerLike) => void;
   startupDelayMs?: number;
   checkIntervalMs?: number;
-  resolveSources?: () => Promise<UpdateSourceCandidate[]>;
+  resolveSources?: (serverUrl: string) => Promise<UpdateSourceCandidate[]>;
   onInstallerReady?: (info: UpdateInfoLike, source?: UpdateSourceCandidate['id']) => void;
   now?: () => number;
 }
 
 export interface AutoUpdaterController {
   enabled: boolean;
-  checkNow: () => Promise<UpdateState>;
+  checkNow: (serverUrl?: string) => Promise<UpdateState>;
+  setServerUrl: (serverUrl: string) => void;
   getState: () => UpdateState;
   installNow: () => boolean;
   dispose: () => void;
@@ -122,6 +123,7 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
     return {
       enabled: false,
       checkNow: async () => state,
+      setServerUrl: () => undefined,
       getState: () => state,
       installNow: () => false,
       dispose: () => undefined,
@@ -137,6 +139,7 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
   let probingSources = false;
   let retryingDownload = false;
   let sources: UpdateSourceCandidate[] = [];
+  let configuredServerUrl = '';
   let sourceIndex = -1;
   let activeSource: UpdateSourceCandidate | undefined;
   let sourceGeneration = 0;
@@ -168,8 +171,9 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
     deferredDownloadError = null;
     activeDownloadPromise = null;
     activeSource = source;
-    // Gitee's attachment redirect can ignore Range and return the entire EXE.
-    // Disabling multi-range requests alone still leaves single-range diffs on.
+    // Keep the legacy Gitee path conservative for older metadata/tests. The
+    // controlled cloud mirror supports normal Range requests and retains the
+    // differential update path.
     updater.disableDifferentialDownload = source.id === 'gitee';
     updater.setFeedURL?.({ provider: 'generic', url: source.feedUrl, useMultipleRangeRequest: false });
     logger.info(`[updater] 使用 ${source.label} 更新源 ${source.feedUrl}`);
@@ -185,7 +189,8 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
     checking = false;
     logger.info(`[updater] 发现新版本 ${info.version}，开始后台下载`);
     setState(stateForSource({ status: 'available', version: info.version, percent: 0,
-      message: activeSource?.id === 'gitee' ? '发现新版本，准备从 Gitee 下载完整安装包。' : '发现新版本，准备下载。',
+      message: activeSource?.id === 'cloud' ? '发现新版本，准备从当前服务器下载。'
+        : activeSource?.id === 'gitee' ? '发现新版本，准备从 Gitee 下载完整安装包。' : '发现新版本，准备下载。',
     }));
   };
   const onNotAvailable = (info: UpdateInfoLike) => {
@@ -302,7 +307,14 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
   updater.on('update-cancelled', onCancelled);
   updater.on('error', onError);
 
-  const checkNow = async (): Promise<UpdateState> => {
+  const setServerUrl = (serverUrl: string): void => {
+    if (configuredServerUrl === serverUrl) return;
+    configuredServerUrl = serverUrl;
+    logger.info('[updater] 已更新当前服务器更新源绑定');
+  };
+
+  const checkNow = async (serverUrl?: string): Promise<UpdateState> => {
+    if (typeof serverUrl === 'string') setServerUrl(serverUrl);
     if (disposed || checking || isUpdateBusy(state.status) || state.status === 'downloaded') return state;
     checking = true;
     activeSource = undefined;
@@ -310,9 +322,9 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
     deferredDownloadError = null;
     setState({ status: 'checking', message: '正在连接更新服务器…' });
     try {
-      sources = await resolveSources();
+      sources = await resolveSources(configuredServerUrl);
       if (disposed) return state;
-      if (!sources.length) throw new Error('GitHub 与 Gitee 更新源均无法访问，请检查网络后重试。');
+      if (!sources.length) throw new Error('当前服务器与 GitHub 更新源均无法访问，请检查网络后重试。');
       probingSources = true;
       let lastError: Error | null = null;
       for (let index = 0; index < sources.length; index += 1) {
@@ -356,6 +368,7 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
   return {
     enabled: true,
     checkNow,
+    setServerUrl,
     getState: () => state,
     installNow: () => {
       if (disposed || state.status !== 'downloaded') return false;

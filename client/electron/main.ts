@@ -313,8 +313,20 @@ app.whenReady().then(() => {
     () => updaterController?.getState() ?? unavailableUpdateState,
   );
   ipcMain.handle(
+    "cove:update:set-server-url",
+    (event, serverUrl: unknown) => {
+      if (event.sender !== mainWindow?.webContents || typeof serverUrl !== "string") return false;
+      updaterController?.setServerUrl(serverUrl);
+      return true;
+    },
+  );
+  ipcMain.handle(
     "cove:update:check",
-    () => updaterController?.checkNow() ?? unavailableUpdateState,
+    (event, serverUrl: unknown) => {
+      if (event.sender !== mainWindow?.webContents) return unavailableUpdateState;
+      if (typeof serverUrl === "string") updaterController?.setServerUrl(serverUrl);
+      return updaterController?.checkNow() ?? unavailableUpdateState;
+    },
   );
   ipcMain.handle(
     "cove:update:install",

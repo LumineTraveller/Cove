@@ -17,7 +17,9 @@ for (const mode of ['system', 'rnnoise'] as const) {
       const constraints = audio as MediaTrackConstraints;
       assert.deepEqual(constraints.echoCancellation, { exact: 'all' });
       assert.deepEqual(constraints.deviceId, { exact: 'usb' });
-      assert.deepEqual(constraints.noiseSuppression, mode === 'rnnoise' ? { exact: false } : true);
+      // rnnoise 用理想值请求关闭原生 NS；实际是否关闭在拿到音轨后校验，
+      // 避免无法关闭 NS 的设备直接 OverconstrainedError。
+      assert.deepEqual(constraints.noiseSuppression, mode === 'rnnoise' ? false : true);
       assert.equal(constraints.autoGainControl, true);
       return mic.stream;
     });

@@ -21,7 +21,9 @@ export async function acquireMicrophoneCandidate(
     let processed: ProcessedMicrophone | undefined;
     try {
       if (mode === 'rnnoise' && raw.getAudioTracks()[0]?.getSettings().noiseSuppression === true)
-        throw new Error('设备未关闭系统降噪，已取消双重降噪');
+        throw new Error(
+          '当前麦克风无法关闭系统降噪（该设备/驱动强制开启），双重降噪会损伤语音，已取消实验模式',
+        );
       processed = await process(raw, mode);
       if (processed.stream.getAudioTracks()[0]?.readyState !== 'live') throw new Error('麦克风音轨不可用');
       return { raw, processed, mode, warning: microphoneEchoWarning(raw) };

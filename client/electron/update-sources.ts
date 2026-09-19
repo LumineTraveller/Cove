@@ -1,8 +1,10 @@
-export type UpdateSourceId = 'github' | 'gitee';
+// Keep the legacy Gitee id for cleanup metadata written by older builds. New
+// releases discover the selected server's mirror first and GitHub as fallback.
+export type UpdateSourceId = 'github' | 'cloud' | 'gitee';
 
 export interface UpdateSourceCandidate {
   id: UpdateSourceId;
-  label: 'GitHub' | 'Gitee';
+  label: 'GitHub' | '当前服务器' | 'Gitee';
   version: string;
   feedUrl: string;
   latencyMs: number;
@@ -17,20 +19,39 @@ interface SourceDefinition {
 
 type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
-const SOURCES: SourceDefinition[] = [
-  {
-    id: 'github',
-    label: 'GitHub',
-    apiUrl: 'https://api.github.com/repos/LumineTraveller/Cove/releases/latest',
-    releaseBaseUrl: 'https://github.com/LumineTraveller/Cove/releases/download/',
-  },
-  {
-    id: 'gitee',
-    label: 'Gitee',
-    apiUrl: 'https://gitee.com/api/v5/repos/LumineTraveller/Cove/releases/latest',
-    releaseBaseUrl: 'https://gitee.com/LumineTraveller/Cove/releases/download/',
-  },
-];
+const GITHUB_SOURCE: SourceDefinition = {
+  id: 'github',
+  label: 'GitHub',
+  apiUrl: 'https://api.github.com/repos/LumineTraveller/Cove/releases/latest',
+  releaseBaseUrl: 'https://github.com/LumineTraveller/Cove/releases/download/',
+};
+
+/**
+ * Convert the user-selected Cove server into the only base URL accepted by
+ * the server-hosted update source. The updater deliberately requires HTTPS:
+ * a user-entered HTTP server must not replace the trusted release path with a
+ * plaintext download path.
+ */
+export function getServerUpdateBaseUrl(serverUrl: string): string | null {
+  try {
+    const url = new URL(serverUrl.trim());
+    if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) return null;
+    return `${url.origin}${url.pathname.replace(/\/+$/, '')}`;
+  } catch {
+    return null;
+  }
+}
+
+function createServerSource(serverUrl: string): SourceDefinition | null {
+  const baseUrl = getServerUpdateBaseUrl(serverUrl);
+  if (!baseUrl) return null;
+  return {
+    id: 'cloud',
+    label: '当前服务器',
+    apiUrl: `${baseUrl}/releases/latest.json`,
+    releaseBaseUrl: `${baseUrl}/releases/`,
+  };
+}
 
 function numericVersion(version: string): number[] {
   return version.replace(/^v/i, '').split(/[.-]/).map(part => Number.parseInt(part, 10) || 0);
@@ -79,19 +100,23 @@ async function discoverSource(
 }
 
 /**
- * 按固定优先级探测 Release API。
+ * 按固定优先级探测更新源。
  *
- * GitHub 是首选更新源：electron-updater 可以优先使用其差分包，且发布内容
- * 通常更完整。Gitee 会在 GitHub 探测完成后再探测，用作 GitHub 下载失败时
- * 的回退源；但不会因为响应更快或版本号暂时领先而把 Gitee 提到前面。
+ * 当前服务器是首选更新源：由服务器地址变量派生更新路径，适合桌面客户端直连下载。
+ * GitHub 在当前服务器不可用或下载失败时作为回退源；两者都使用同一份
+ * electron-builder 更新清单和校验值。
  */
 export async function discoverUpdateSources(
+  serverUrl = '',
   fetchImpl: FetchLike = fetch,
   timeoutMs = 6_000,
   now: () => number = Date.now,
 ): Promise<UpdateSourceCandidate[]> {
+  const sources = [createServerSource(serverUrl), GITHUB_SOURCE].filter(
+    (source): source is SourceDefinition => source !== null,
+  );
   const discovered: UpdateSourceCandidate[] = [];
-  for (const source of SOURCES) {
+  for (const source of sources) {
     try {
       discovered.push(await discoverSource(source, fetchImpl, timeoutMs, now));
     } catch {

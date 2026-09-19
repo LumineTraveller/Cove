@@ -5,7 +5,8 @@ import type { RemoteControlActivation } from '../electron/remote-control-activat
 
 interface CoveUpdaterApi {
   getState(): Promise<UpdateState>;
-  checkNow(): Promise<UpdateState>;
+  setServerUrl(serverUrl: string): Promise<boolean>;
+  checkNow(serverUrl?: string): Promise<UpdateState>;
   installNow(): Promise<boolean>;
   openLog(): Promise<boolean>;
   onState(listener: (state: UpdateState) => void): () => void;

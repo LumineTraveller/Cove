@@ -44,7 +44,13 @@ export function createMicrophoneConstraints(
     // the system-playback reference, including Web Audio and other apps.
     // TypeScript's bundled DOM types predate ConstrainBooleanOrDOMString.
     echoCancellation: (echoScope === 'all' ? { exact: 'all' } : { exact: true }) as MediaTrackConstraints['echoCancellation'],
-    noiseSuppression: noiseMode === 'rnnoise' ? { exact: false } : true,
+    // 实验模式必须关掉原生 NS，否则会与 RNNoise 双重降噪。
+    // 用理想值而非 `{ exact: false }`：部分设备/驱动（尤其是 Windows 上的
+    // Realtek、蓝牙耳机、虚拟声卡）无法关闭原生降噪，硬约束会让整个
+    // getUserMedia 直接 OverconstrainedError，用户看到的就是“RNNoise 用不了”。
+    // 改成理想值后先拿到音轨，再由 microphoneCandidate 校验实际是否关闭：
+    // 真正关不掉时给出明确原因，而不是让采集本身失败。
+    noiseSuppression: noiseMode === 'rnnoise' ? false : true,
     // Realtek microphone arrays can expose a live WebRTC track whose raw
     // samples are effectively silent when Chromium's capture AGC is disabled.
     autoGainControl: true,

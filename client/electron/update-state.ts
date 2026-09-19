@@ -14,8 +14,8 @@ export interface UpdateState {
   stageStartedAt?: number;
   lastActivityAt?: number;
   message?: string;
-  source?: 'github' | 'gitee';
-  sourceLabel?: 'GitHub' | 'Gitee';
+  source?: 'github' | 'cloud' | 'gitee';
+  sourceLabel?: 'GitHub' | '当前服务器' | 'Gitee';
   failedStage?: UpdateStatus;
   errorDetail?: string;
   errorCode?: string;

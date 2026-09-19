@@ -67,7 +67,7 @@ export function startAutoUpdater(isPackaged: boolean): AutoUpdaterController {
     logger,
     // Serialize startup cleanup with ALL checks (including a manual check) so a
     // cleanup cannot race this process's next download into the same directory.
-    resolveSources: async () => { await cleanup; return discoverUpdateSources(); },
+    resolveSources: async (serverUrl) => { await cleanup; return discoverUpdateSources(serverUrl); },
     onInstallerReady: (info, source) => installerCache?.remember(info, source),
   });
 }

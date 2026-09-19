@@ -101,6 +101,7 @@ import type { ApplicationAudioSource } from "../applicationAudio";
 import { RemoteControlLifecycle, type RemoteControlSession } from "../remoteControlSession";
 import type { AppTheme } from "../theme";
 import { pickAboutQuote, type AboutQuote } from "../aboutQuotes";
+import { getServerDownloadUrl, SERVER_DOWNLOAD_LINKS_ENABLED } from "../serverUpdateUrl";
 import "../ui-v2.css";
 
 export type RoomWithAppearance = Room & {
@@ -1945,6 +1946,7 @@ export function GlobalSettingsV2({
   accountId,
   onProfileChange,
   onLogout,
+  serverURL,
   inputVolume,
   outputVolume,
   setInputVolume,
@@ -1959,6 +1961,7 @@ export function GlobalSettingsV2({
   accountId: string;
   onProfileChange: (profile: UserProfile) => void;
   onLogout: () => void;
+  serverURL: string;
   inputVolume: number;
   outputVolume: number;
   setInputVolume: (value: number) => void;
@@ -1984,6 +1987,7 @@ export function GlobalSettingsV2({
     rtc.selectedAudioOutputId,
   );
   const [audioActionBusy, setAudioActionBusy] = useState(false);
+  const serverDownloadUrl = getServerDownloadUrl(serverURL);
   const audioDeviceSelectionChanged =
     draftAudioInputId !== rtc.selectedAudioInputId ||
     draftAudioOutputId !== rtc.selectedAudioOutputId;
@@ -2294,7 +2298,7 @@ export function GlobalSettingsV2({
           )}
           {page === "update" && (
             <div className="settings-page update-settings-page">
-              <UpdateCenter embedded />
+              <UpdateCenter embedded serverURL={serverURL} />
             </div>
           )}
           {page === "about" && (
@@ -2335,19 +2339,22 @@ export function GlobalSettingsV2({
                   >
                     Gitee
                   </a>
-                  <a
-                    href="https://download.cove-cove.space"
-                    target="_blank"
-                    rel="noreferrer noopener"
-                    onClick={(event) =>
-                      openExternalLink(
-                        event,
-                        "https://download.cove-cove.space",
-                      )
-                    }
-                  >
-                    下载站
-                  </a>
+                  {SERVER_DOWNLOAD_LINKS_ENABLED && (
+                    <a
+                      href={serverDownloadUrl ?? '#'}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                      onClick={(event) => {
+                        if (!serverDownloadUrl) {
+                          event.preventDefault();
+                          return;
+                        }
+                        openExternalLink(event, serverDownloadUrl);
+                      }}
+                    >
+                      下载站
+                    </a>
+                  )}
                 </nav>
               </div>
               <button
@@ -4943,6 +4950,7 @@ export default function ChatRoomV2({
           accountId={accountId}
           onProfileChange={onProfileChange}
           onLogout={onLogout}
+          serverURL={serverURL}
           inputVolume={inputVolume}
           outputVolume={outputVolume}
           setInputVolume={setInputVolume}

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { updateHasDetails } from '../electron/update-state';
+import { getServerDownloadUrl } from '../src/serverUpdateUrl';
 
 const now = Date.now();
 
@@ -26,4 +27,13 @@ test('update detail card stays visible for errors and stalled stages', () => {
     updateHasDetails({ status: 'downloading', percent: 40, lastActivityAt: now - 31_000 }, now),
     true,
   );
+});
+
+test('manual download links are derived from the selected server address', () => {
+  assert.equal(
+    getServerDownloadUrl('https://server.example.test/cove/'),
+    'https://server.example.test/cove/downloads/Cove-Setup.exe',
+  );
+  assert.equal(getServerDownloadUrl('ftp://server.example.test'), null);
+  assert.equal(getServerDownloadUrl('https://user:secret@server.example.test'), null);
 });

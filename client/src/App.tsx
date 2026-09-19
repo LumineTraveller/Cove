@@ -74,6 +74,10 @@ export default function App() {
   const needLogin = !profile.username || !serverUrl || !accountSession;
 
   useEffect(() => {
+    void window.coveUpdater?.setServerUrl(serverURL).catch(() => undefined);
+  }, [serverURL]);
+
+  useEffect(() => {
     try {
       window.localStorage.setItem(THEME_STORAGE_KEY, theme);
     } catch {
@@ -521,7 +525,7 @@ export default function App() {
         <Route path="/room/:roomId" element={<ChatRoomV2 profile={profile} accountId={accountSession?.accountId ?? ''} onProfileChange={handleProfileChange} onLogout={handleLogout} sessionReady={sessionReady} serverURL={serverURL} theme={theme} onThemeChange={handleThemeChange} />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
-      <UpdateCenter />
+      <UpdateCenter serverURL={serverURL} />
       {connected !== true && (
         <div className="cove-connection-scrim" role="dialog" aria-modal="true" aria-labelledby="connection-title">
           <div className="cove-connection-modal">

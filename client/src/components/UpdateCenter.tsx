@@ -13,6 +13,10 @@ import {
 } from 'lucide-react';
 import packageInfo from '../../package.json';
 import {
+  getServerDownloadUrl,
+  SERVER_DOWNLOAD_LINKS_ENABLED,
+} from '../serverUpdateUrl';
+import {
   UPDATE_CENTER_OPEN_EVENT,
   UPDATE_STEPS,
   formatTransferPercent,
@@ -225,7 +229,7 @@ function UpdateProgress({
   );
 }
 
-export function UpdateCenter({ embedded = false }: { embedded?: boolean }) {
+export function UpdateCenter({ embedded = false, serverURL = '' }: { embedded?: boolean; serverURL?: string }) {
   const [state, setState] = useState<UpdateState>(initialState);
   const [open, setOpen] = useState(false);
   const [clock, setClock] = useState(Date.now);
@@ -246,7 +250,7 @@ export function UpdateCenter({ embedded = false }: { embedded?: boolean }) {
       return;
     }
     try {
-      setState(await updater.checkNow());
+      setState(await updater.checkNow(serverURL));
     } catch (cause) {
       setState({
         status: 'error',
@@ -254,10 +258,11 @@ export function UpdateCenter({ embedded = false }: { embedded?: boolean }) {
         message: cause instanceof Error ? cause.message : '检查更新失败，请稍后重试。',
       });
     }
-  }, [embedded]);
+  }, [embedded, serverURL]);
 
   useEffect(() => {
     const updater = window.coveUpdater;
+    void updater?.setServerUrl(serverURL).catch(() => undefined);
     let active = true;
     if (updater) {
       void updater.getState().then((next) => {
@@ -284,7 +289,7 @@ export function UpdateCenter({ embedded = false }: { embedded?: boolean }) {
       unsubscribe?.();
       window.removeEventListener(UPDATE_CENTER_OPEN_EVENT, handleOpen);
     };
-  }, [checkNow, embedded]);
+  }, [checkNow, embedded, serverURL]);
 
   useEffect(() => {
     if ((!embedded && !open) || !isUpdateBusy(state.status)) return;
@@ -329,12 +334,18 @@ export function UpdateCenter({ embedded = false }: { embedded?: boolean }) {
     }
   };
 
-  const openRelease = async (source: 'github' | 'gitee') => {
+  const openRelease = async (source: 'github' | 'cloud') => {
     setActionError('');
-    const base = `https://${source}.com/LumineTraveller/Cove/releases`;
-    const url = state.version && /^\d+\.\d+\.\d+$/.test(state.version)
-      ? `${base}/${source === 'github' ? 'tag/' : ''}v${state.version}`
-      : base;
+    const githubBase = 'https://github.com/LumineTraveller/Cove/releases';
+    const url = source === 'cloud'
+      ? getServerDownloadUrl(serverURL)
+      : state.version && /^\d+\.\d+\.\d+$/.test(state.version)
+        ? `${githubBase}/tag/v${state.version}`
+        : githubBase;
+    if (!url) {
+      setActionError('当前服务器地址无效，无法打开服务器下载地址。');
+      return;
+    }
     try {
       if (window.coveShell) {
         if (!await window.coveShell.openExternal(url)) throw new Error();
@@ -404,7 +415,9 @@ export function UpdateCenter({ embedded = false }: { embedded?: boolean }) {
           <div>
             <button type="button" onClick={() => { void openLog(); }}><FileText size={14} />打开更新日志</button>
             <button type="button" onClick={() => { void openRelease('github'); }}><ExternalLink size={14} />GitHub 发布页</button>
-            <button type="button" onClick={() => { void openRelease('gitee'); }}><ExternalLink size={14} />Gitee 发布页</button>
+            {SERVER_DOWNLOAD_LINKS_ENABLED && (
+              <button type="button" onClick={() => { void openRelease('cloud'); }}><ExternalLink size={14} />当前服务器下载</button>
+            )}
           </div>
           <p>分享错误详情或 updater.log 可帮助定位停在何处。手动下载请选择 Windows 客户端 .exe 安装包；这不会取消当前后台更新。</p>
         </details>

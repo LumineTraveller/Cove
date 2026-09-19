@@ -10,7 +10,12 @@ const githubSource = {
   id: 'github', label: 'GitHub', version: '0.7.0',
   feedUrl: 'https://github.com/LumineTraveller/Cove/releases/download/v0.7.0/', latencyMs: 30,
 };
-const giteeSource = {
+const cloudServerUrl = 'https://server.example.test';
+const cloudSource = {
+  id: 'cloud', label: '当前服务器', version: '0.7.0',
+  feedUrl: `${cloudServerUrl}/releases/v0.7.0/`, latencyMs: 10,
+};
+const legacyGiteeSource = {
   id: 'gitee', label: 'Gitee', version: '0.7.0',
   feedUrl: 'https://gitee.com/LumineTraveller/Cove/releases/download/v0.7.0/', latencyMs: 10,
 };
@@ -150,64 +155,93 @@ test('packaged builds configure automatic checks and downloads', async () => {
   assert.equal(h.updater.feedCalls[0].url, githubSource.feedUrl);
 });
 
-test('release discovery checks GitHub first and keeps Gitee as the fallback', async () => {
-  const calls = [];
-  const fetchImpl = async input => {
-    const url = String(input);
-    calls.push(url);
-    const tag_name = url.includes('gitee.com') ? 'v0.7.1' : 'v0.7.0';
-    return new Response(JSON.stringify({ tag_name }), { status: 200 });
-  };
-  const sources = await discoverUpdateSources(fetchImpl, 1_000);
-  assert.deepEqual(calls.map(url => url.includes('gitee.com') ? 'gitee' : 'github'), ['github', 'gitee']);
-  assert.deepEqual(sources.map(source => [source.id, source.version]), [['github', '0.7.0'], ['gitee', '0.7.1']]);
-  assert.equal(compareReleaseVersions('0.7.0', '0.6.9') > 0, true);
-  assert.match(sources[0].feedUrl, /github\.com\/LumineTraveller\/Cove\/releases\/download\/v0\.7\.0\/$/);
+test('the updater binds automatic checks to the server address supplied by the renderer', async () => {
+  const received = [];
+  const h = createHarness({
+    resolveSources: async serverUrl => {
+      received.push(serverUrl);
+      return [githubSource];
+    },
+  });
+  await h.controller.checkNow(cloudServerUrl);
+  assert.deepEqual(received, [cloudServerUrl]);
+  h.controller.dispose();
 });
 
-test('release discovery probes Gitee only after the GitHub result is known', async () => {
+test('release discovery checks the cloud mirror first and keeps GitHub as the fallback', async () => {
   const calls = [];
   const fetchImpl = async input => {
     const url = String(input);
     calls.push(url);
-    if (url.includes('github.com')) throw new Error('GitHub offline');
-    return new Response(JSON.stringify({ tag_name: 'v0.7.1' }), { status: 200 });
+    const tag_name = url.includes(cloudServerUrl) ? 'v0.7.1' : 'v0.7.0';
+    return new Response(JSON.stringify({ tag_name }), { status: 200 });
   };
-  const sources = await discoverUpdateSources(fetchImpl, 1_000);
-  assert.deepEqual(calls.map(url => url.includes('gitee.com') ? 'gitee' : 'github'), ['github', 'gitee']);
-  assert.deepEqual(sources.map(source => source.id), ['gitee']);
+  const sources = await discoverUpdateSources(cloudServerUrl, fetchImpl, 1_000);
+  assert.deepEqual(calls.map(url => url.includes(cloudServerUrl) ? 'cloud' : 'github'), ['cloud', 'github']);
+  assert.deepEqual(sources.map(source => [source.id, source.version]), [['cloud', '0.7.1'], ['github', '0.7.0']]);
+  assert.equal(compareReleaseVersions('0.7.0', '0.6.9') > 0, true);
+  assert.equal(sources[0].feedUrl, `${cloudServerUrl}/releases/v0.7.1/`);
+});
+
+test('release discovery probes GitHub only after the cloud result is known', async () => {
+  const calls = [];
+  const fetchImpl = async input => {
+    const url = String(input);
+    calls.push(url);
+    if (url.includes(cloudServerUrl)) return new Response(JSON.stringify({ tag_name: 'v0.7.1' }), { status: 200 });
+    throw new Error('GitHub offline');
+  };
+  const sources = await discoverUpdateSources(cloudServerUrl, fetchImpl, 1_000);
+  assert.deepEqual(calls.map(url => url.includes(cloudServerUrl) ? 'cloud' : 'github'), ['cloud', 'github']);
+  assert.deepEqual(sources.map(source => source.id), ['cloud']);
+});
+
+test('server update discovery rejects plaintext and malformed server addresses', async () => {
+  const calls = [];
+  const fetchImpl = async input => {
+    calls.push(String(input));
+    return new Response(JSON.stringify({ tag_name: 'v0.7.0' }), { status: 200 });
+  };
+  const httpsSources = await discoverUpdateSources('https://server.example.test/cove/', fetchImpl, 1_000);
+  assert.equal(httpsSources[0].id, 'cloud');
+  assert.equal(httpsSources[0].feedUrl, 'https://server.example.test/cove/releases/v0.7.0/');
+  const httpSources = await discoverUpdateSources('http://server.example.test', fetchImpl, 1_000);
+  assert.deepEqual(httpSources.map(source => source.id), ['github']);
+  const credentialSources = await discoverUpdateSources('https://user:secret@server.example.test', fetchImpl, 1_000);
+  assert.deepEqual(credentialSources.map(source => source.id), ['github']);
+  assert.equal(calls.some(url => url.includes('user:secret')), false);
 });
 
 test('a failed primary source automatically falls back to the other release mirror', async () => {
-  const h = createHarness({ resolveSources: async () => [giteeSource, githubSource] });
-  h.updater.checkErrors.push(new Error('gitee offline'));
+  const h = createHarness({ resolveSources: async () => [cloudSource, githubSource] });
+  h.updater.checkErrors.push(new Error('cloud offline'));
   await h.controller.checkNow();
   assert.equal(h.updater.checkCount, 2);
-  assert.deepEqual(h.updater.feedCalls.map(call => call.url), [giteeSource.feedUrl, githubSource.feedUrl]);
+  assert.deepEqual(h.updater.feedCalls.map(call => call.url), [cloudSource.feedUrl, githubSource.feedUrl]);
   assert.equal(h.controller.getState().sourceLabel, 'GitHub');
-  assert.deepEqual(h.updater.downloadModes, [true, false]);
+  assert.deepEqual(h.updater.downloadModes, [false, false]);
 });
 
-test('Gitee uses full downloads; GitHub retains differential downloads, including fallback', async () => {
-  for (const source of [giteeSource, githubSource]) {
+test('the cloud mirror and GitHub both retain differential downloads', async () => {
+  for (const source of [cloudSource, githubSource]) {
     const h = createHarness({ resolveSources: async () => [source] });
     await h.controller.checkNow();
-    assert.equal(h.updater.disableDifferentialDownload, source.id === 'gitee');
+    assert.equal(h.updater.disableDifferentialDownload, false);
     h.updater.emit('update-available', { version: '0.8.3' });
-    if (source.id === 'gitee') assert.match(h.controller.getState().message, /完整安装包/);
+     if (source.id === 'cloud') assert.match(h.controller.getState().message, /当前服务器/);
     h.controller.dispose();
   }
-  const h = createHarness({ resolveSources: async () => [githubSource, giteeSource] });
+  const h = createHarness({ resolveSources: async () => [githubSource, cloudSource] });
   h.updater.checkErrors.push(new Error('github unavailable'));
   await h.controller.checkNow();
-  assert.deepEqual(h.updater.downloadModes, [false, true]);
+  assert.deepEqual(h.updater.downloadModes, [false, false]);
 });
 
-test('Gitee mode makes the real NSIS download branch bypass blockmaps and range downloads', async () => {
+test('legacy Gitee mode still makes the real NSIS download branch bypass blockmaps and range downloads', async () => {
   const { NsisUpdater } = require('electron-updater/out/NsisUpdater');
-  const h = createHarness({ resolveSources: async () => [giteeSource] });
+  const h = createHarness({ resolveSources: async () => [legacyGiteeSource] });
   await h.controller.checkNow();
-  const fileInfo = { url: new URL(giteeSource.feedUrl + 'Cove-Setup-0.8.3.exe'), info: { url: 'Cove-Setup-0.8.3.exe', sha512: 'expected-digest' } };
+  const fileInfo = { url: new URL(legacyGiteeSource.feedUrl + 'Cove-Setup-0.8.3.exe'), info: { url: 'Cove-Setup-0.8.3.exe', sha512: 'expected-digest' } };
   let fullDownloads = 0;
   let differentialDownloads = 0;
   let signatureChecks = 0;
@@ -234,7 +268,7 @@ test('Gitee mode makes the real NSIS download branch bypass blockmaps and range 
 test('cleanup eligibility is recorded only after installer validation and before install is offered', async () => {
   const ready = [];
   const h = createHarness({
-    resolveSources: async () => [giteeSource],
+    resolveSources: async () => [cloudSource],
     onInstallerReady: (info, source) => {
       assert.notEqual(h.controller.getState().status, 'downloaded');
       ready.push({ info, source });
@@ -247,7 +281,7 @@ test('cleanup eligibility is recorded only after installer validation and before
   assert.equal(h.controller.installNow(), false);
   const info = { version: '0.8.3', downloadedFile: 'verified.exe' };
   h.updater.emit('update-downloaded', info);
-  assert.deepEqual(ready, [{ info, source: 'gitee' }]);
+  assert.deepEqual(ready, [{ info, source: 'cloud' }]);
   assert.equal(h.controller.installNow(), true);
 });
 
@@ -276,7 +310,7 @@ test('Electron adapter waits for startup cleanup before any update check and wir
       assert.equal(options.installedVersion, '0.8.3');
       return { cleanupInstalledUpdate: () => cleanup, remember: (...args) => remembered.push(args) };
     } },
-    './update-sources': { discoverUpdateSources: async () => { discoveries++; return [giteeSource]; } },
+    './update-sources': { discoverUpdateSources: async () => { discoveries++; return [cloudSource]; } },
   };
   vm.runInNewContext(fs.readFileSync(require.resolve('../dist-electron/updater.js'), 'utf8'), {
     exports, require: id => mocks[id] ?? require(id),
@@ -294,7 +328,7 @@ test('Electron adapter waits for startup cleanup before any update check and wir
     assert.equal(updater.checkCount, 1);
     const info = { version: '0.8.4', downloadedFile: 'verified.exe' };
     updater.emit('update-downloaded', info);
-    assert.deepEqual(remembered, [[info, 'gitee']]);
+    assert.deepEqual(remembered, [[info, 'cloud']]);
   } finally { controller.dispose(); }
 });
 
@@ -437,7 +471,7 @@ test('errors during source probing are not lost, including rejected automatic do
 });
 
 test('fallback waits for failed download cleanup and clears old transfer metrics', async () => {
-  const h = createHarness({ resolveSources: async () => [giteeSource, githubSource] });
+  const h = createHarness({ resolveSources: async () => [cloudSource, githubSource] });
   let rejectDownload;
   let cleaned = false;
   h.updater.checkForUpdates = async () => {
@@ -453,12 +487,12 @@ test('fallback waits for failed download cleanup and clears old transfer metrics
   };
   await h.controller.checkNow();
   h.updater.emit('download-progress', { percent: 100, transferred: 1000, total: 1000 });
-  rejectDownload(new Error('gitee checksum failed'));
+  rejectDownload(new Error('cloud checksum failed'));
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(h.updater.checkCount, 2);
   assert.equal(h.controller.getState().sourceLabel, 'GitHub');
   assert.equal(h.controller.getState().status, 'available');
-  assert.deepEqual(h.updater.downloadModes, [true, false]);
+  assert.deepEqual(h.updater.downloadModes, [false, false]);
   assert.equal(h.controller.getState().transferred, undefined);
   assert.equal(h.controller.getState().percent, 0);
   h.updater.emit('update-downloaded', { version: '0.8.1' });

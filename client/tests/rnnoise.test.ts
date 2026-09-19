@@ -9,7 +9,9 @@ import type { ProcessedMicrophone } from '../src/microphoneProcessing';
 test('experimental capture disables native NS but retains AEC/AGC and device identity', () => {
   const system = createMicrophoneConstraints('usb');
   assert.equal(system.noiseSuppression, true);
-  assert.deepEqual(createMicrophoneConstraints('usb', 'rnnoise'), { ...system, noiseSuppression: { exact: false } });
+  // 理想值而非硬约束：无法关闭原生 NS 的设备不应让整个 getUserMedia 失败，
+  // 实际是否关闭由 microphoneCandidate 在拿到音轨后校验。
+  assert.deepEqual(createMicrophoneConstraints('usb', 'rnnoise'), { ...system, noiseSuppression: false });
 });
 
 function stream(ns: boolean) {
@@ -34,6 +36,27 @@ test('working RNNoise candidate stays experimental and returns its processed str
   assert.equal(candidate.mode, 'rnnoise');
   assert.equal(candidate.processed.stream, output.value);
   assert.equal(raw.stopped(), false);
+});
+
+test('a device that cannot disable native NS explains why the experiment is unavailable', async () => {
+  // 采集能成功返回音轨，但设备的 noiseSuppression 依然是 true（驱动强制开启）。
+  // 以前这里会一路冒泡成通用错误，用户只看到“无法使用并回退”；现在必须说明原因。
+  const raw = stream(false), fallback = stream(true);
+  const result = await acquireMicrophoneCandidate(
+    'rnnoise',
+    async (mode) => (mode === 'system' ? fallback.value : raw.value),
+    async (input) => processed(input),
+  );
+  assert.equal(result.mode, 'rnnoise');
+  // 该用例里 stream(false) 报告 NS 已关闭，因此不应触发拒绝；反向验证 true 的情况：
+  const stillOn = stream(true), stillOnFallback = stream(true);
+  const rejected = await acquireMicrophoneCandidate(
+    'rnnoise',
+    async (mode) => (mode === 'system' ? stillOnFallback.value : stillOn.value),
+    async (input) => processed(input),
+  );
+  assert.equal(rejected.mode, 'system');
+  assert.match(rejected.warning!, /无法关闭系统降噪/);
 });
 
 for (const failure of ['capture', 'processor', 'double-ns', 'ended']) {

@@ -362,6 +362,7 @@ export default function RoomList({ profile, onProfileChange, accountId, onLogout
           accountId={accountId}
           onProfileChange={onProfileChange}
           onLogout={onLogout}
+          serverURL={serverURL}
           inputVolume={inputVolume}
           outputVolume={outputVolume}
           setInputVolume={setInputVolume}

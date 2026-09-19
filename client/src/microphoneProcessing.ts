@@ -131,7 +131,10 @@ export async function createProcessedMicrophone(
     // this graph; stopping rawStream here would also break the fallback.
     destination?.stream.getTracks().forEach((track) => track.stop());
     if (context) await context.close().catch(() => {});
-    console.warn("[mic] 音量处理不可用，回退到系统降噪音轨", error);
+    // Returned stream is the untouched capture: still audible, but the volume
+    // slider no longer acts on it. Surface it so the caller can tell the user
+    // instead of silently degrading the send chain.
+    console.warn("[mic] 音量处理链不可用，已回退到原始采集音轨（音量与降噪设置不会生效）", error);
     return { stream: rawStream, context: null, gain: null };
   } finally {
     if (resumeTimer !== undefined) clearTimeout(resumeTimer);

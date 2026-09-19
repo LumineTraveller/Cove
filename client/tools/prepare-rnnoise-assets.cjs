@@ -11,7 +11,8 @@ if (!inlineWasm) throw new Error('Could not find the RNNoise 0.2 inline WASM pay
 
 const loader = syncLoader
   .replace(inlineWasm[0], 'wasmBinaryFile = "rnnoise-v2.wasm";')
-  .replace('export default createRNNWasmModuleSync;', '');
+  .replace('export default createRNNWasmModuleSync;', '')
+  .replace(/[ \t]+$/gm, '');
 const outputDir = path.join(__dirname, '..', 'src');
 fs.writeFileSync(path.join(outputDir, 'rnnoiseWasmLoader.js'), `${loader.trim()}\n`);
 fs.writeFileSync(path.join(outputDir, 'rnnoise-v2.wasm'), Buffer.from(inlineWasm[1], 'base64'));
