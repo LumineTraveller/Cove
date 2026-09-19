@@ -9,6 +9,8 @@ import android.media.ToneGenerator
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import java.net.InetAddress
+import java.util.concurrent.Executors
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
@@ -18,6 +20,7 @@ class CoveNativeModule(private val reactContext: ReactApplicationContext) :
   ReactContextBaseJavaModule(reactContext) {
 
   private val mainHandler = Handler(Looper.getMainLooper())
+  private val dnsExecutor = Executors.newCachedThreadPool()
   private val audioManager = reactContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
   private var speakerphoneRequested = false
   private var audioDeviceCallbackRegistered = false
@@ -43,6 +46,22 @@ class CoveNativeModule(private val reactContext: ReactApplicationContext) :
       promise.resolve(null)
     } catch (error: Exception) {
       promise.reject("CERTIFICATE_POLICY", error.message, error)
+    }
+  }
+
+  @ReactMethod
+  fun resolveServerAddresses(hostname: String, promise: Promise) {
+    val value = hostname.trim().removePrefix("[").removeSuffix("]")
+    if (value.isEmpty() || value.length > 253 || value.any { it.isWhitespace() || it == '/' || it == '\\' }) {
+      promise.resolve(emptyList<String>())
+      return
+    }
+    dnsExecutor.execute {
+      try {
+        promise.resolve(InetAddress.getAllByName(value).mapNotNull { it.hostAddress })
+      } catch (_: Exception) {
+        promise.resolve(emptyList<String>())
+      }
     }
   }
 
@@ -142,6 +161,7 @@ class CoveNativeModule(private val reactContext: ReactApplicationContext) :
     mainHandler.removeCallbacks(reapplySpeakerphone)
     unregisterAudioDeviceCallback()
     releaseSpeakerphoneRoute()
+    dnsExecutor.shutdownNow()
     super.invalidate()
   }
 }

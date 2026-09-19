@@ -11,11 +11,11 @@ import {
   toAudioDeviceOptions,
 } from '../src/audioDevices';
 
-test('default microphone constraints follow the Windows system device', () => {
+test('default microphone constraints use RNNoise on the Windows system device', () => {
   const constraints = createMicrophoneConstraints(DEFAULT_AUDIO_DEVICE_ID);
   assert.equal(constraints.deviceId, undefined);
   assert.deepEqual(constraints.echoCancellation, { exact: 'all' });
-  assert.equal(constraints.noiseSuppression, true);
+  assert.equal(constraints.noiseSuppression, false);
   assert.equal(constraints.autoGainControl, true);
   assert.equal(constraints.channelCount, 1);
 });

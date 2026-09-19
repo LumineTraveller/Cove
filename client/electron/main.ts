@@ -11,6 +11,7 @@ import {
   shell,
 } from "electron";
 import path from "path";
+import { promises as dns } from "node:dns";
 import { openUpdaterLog, startAutoUpdater } from "./updater";
 import type { AutoUpdaterController, UpdateState } from "./updater-core";
 import { normalizeExternalHttpUrl } from "./external-links";
@@ -264,6 +265,20 @@ app.whenReady().then(() => {
     (event, serverUrl: unknown, enabled: unknown) => {
       if (event.sender !== mainWindow?.webContents) return null;
       return serverCertificatePolicy.configure(serverUrl, enabled);
+    },
+  );
+  ipcMain.handle(
+    "cove:security:resolve-server-addresses",
+    async (event, hostname: unknown): Promise<string[]> => {
+      if (event.sender !== mainWindow?.webContents || typeof hostname !== "string") return [];
+      const value = hostname.trim().replace(/^\[|\]$/g, "");
+      if (!value || value.length > 253 || /[\s/\\]/.test(value)) return [];
+      try {
+        const records = await dns.lookup(value, { all: true, verbatim: false });
+        return records.map(record => record.address);
+      } catch {
+        return [];
+      }
     },
   );
   ipcMain.handle(

@@ -54,6 +54,8 @@ contextBridge.exposeInMainWorld("coveSecurity", {
       serverUrl,
       enabled,
     ),
+  resolveServerAddresses: (hostname: string): Promise<string[]> =>
+    ipcRenderer.invoke("cove:security:resolve-server-addresses", hostname),
 });
 
 contextBridge.exposeInMainWorld("coveRemoteControl", {

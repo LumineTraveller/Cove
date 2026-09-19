@@ -361,9 +361,10 @@ export function useWebRTC(socket: Socket, roomId: string) {
   const [audioDevicesRefreshing, setAudioDevicesRefreshing] = useState(false);
   const [audioInputSwitching, setAudioInputSwitching] = useState(false);
   const [audioDeviceError, setAudioDeviceError] = useState<string | null>(null);
-  // Experimental choice is deliberately not persisted. Restarting the app
-  // always restores the existing system processing path.
-  const [microphoneNoiseMode, setMicrophoneNoiseMode] = useState<MicrophoneNoiseMode>('system');
+  // RNNoise is the default and is deliberately not persisted. Restarting the
+  // app starts with RNNoise again; an unavailable model falls back to system
+  // processing through acquireMicrophoneCandidate.
+  const [microphoneNoiseMode, setMicrophoneNoiseMode] = useState<MicrophoneNoiseMode>('rnnoise');
   const [microphoneNoiseSwitching, setMicrophoneNoiseSwitching] = useState(false);
   const [microphoneNoiseError, setMicrophoneNoiseError] = useState<string | null>(null);
 
@@ -455,7 +456,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
   const micProcessingRecoveryBusy = useRef(false);
   const recoverMicrophoneProcessingRef = useRef<() => void>(() => {});
   const microphoneVolumeRef = useRef(microphoneVolume);
-  const microphoneNoiseModeRef = useRef<MicrophoneNoiseMode>('system');
+  const microphoneNoiseModeRef = useRef<MicrophoneNoiseMode>('rnnoise');
   const microphoneNoiseBusyRef = useRef(false);
   const rnnoiseFailureRef = useRef<() => void>(() => {});
   const masterOutputVolumeRef = useRef(masterOutputVolume);
@@ -2124,7 +2125,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
   }, [socket, roomId]);
 
   const createProcessedMicStream = useCallback(
-    async (rawStream: MediaStream, mode: MicrophoneNoiseMode = 'system'): Promise<ProcessedMicrophone> => {
+    async (rawStream: MediaStream, mode: MicrophoneNoiseMode = 'rnnoise'): Promise<ProcessedMicrophone> => {
       if (mode === 'rnnoise') {
         const { createRnnoiseMicrophone } = await import('../rnnoiseMicrophone');
         const processed = await createRnnoiseMicrophone(rawStream, microphoneVolumeRef.current);
@@ -2152,7 +2153,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
   );
 
   const requestMicrophone = useCallback(
-    (deviceId: string, mode: MicrophoneNoiseMode = 'system') =>
+    (deviceId: string, mode: MicrophoneNoiseMode = 'rnnoise') =>
       requestEchoCancelledMicrophone(deviceId, mode),
     [],
   );

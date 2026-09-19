@@ -8,6 +8,7 @@ import { useWebRTC } from '../hooks/useWebRTC';
 import type { OnlineUser, Room, UserProfile } from '../types';
 import type { AppTheme } from '../theme';
 import { createRoomPayload } from '../roomSettings';
+import { serverFetch } from '../serverSecurity';
 import {
   GlobalSettingsV2,
   NavigationRailV2,
@@ -95,7 +96,7 @@ export default function RoomList({ profile, onProfileChange, accountId, onLogout
 
   useEffect(() => {
     if (!sessionReady) return;
-    fetch(`${serverURL}/api/rooms`)
+    serverFetch(serverURL, '/api/rooms')
       .then(response => response.json())
       .then((data: Room[]) => setRooms(data));
   }, [serverURL, sessionReady]);

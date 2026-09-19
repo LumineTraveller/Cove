@@ -5,7 +5,7 @@ import type { MicrophoneNoiseMode } from '../../src/microphoneCandidate';
 import '../../src/ui-v2.css';
 
 function Fixture() {
-  const [mode, setMode] = useState<MicrophoneNoiseMode>('system');
+  const [mode, setMode] = useState<MicrophoneNoiseMode>('rnnoise');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fail, setFail] = useState(false);

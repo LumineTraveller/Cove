@@ -1,3 +1,5 @@
+import { serverFetch } from './serverSecurity';
+
 export type AccountAuthMode = 'login' | 'register';
 
 export interface AccountAuthRequest {
@@ -6,6 +8,10 @@ export interface AccountAuthRequest {
   email: string;
   password: string;
   serverURL: string;
+  /** Server-wide access password; never sent to the account endpoint. */
+  serverPassword?: string;
+  /** Only needed when the server has not completed first-time setup. */
+  bootstrapToken?: string;
   allowInvalidServerCertificate: boolean;
 }
 
@@ -30,7 +36,7 @@ function normalizeServerURL(value: string) {
 
 export async function authenticateAccount(request: AccountAuthRequest): Promise<AuthResponse> {
   const serverURL = normalizeServerURL(request.serverURL);
-  const response = await fetch(`${serverURL}/api/auth/${request.mode}`, {
+  const response = await serverFetch(serverURL, `/api/auth/${request.mode}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(request.mode === 'register'

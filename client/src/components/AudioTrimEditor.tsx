@@ -9,7 +9,7 @@ interface Props {
   error?: string;
   onCancel: () => void;
   onConfirm: (start: number, end: number) => void;
-  onPreview: (start: number, end: number) => void;
+  onPreview: (start: number, end: number, onEnded: () => void) => void;
 }
 
 function formatTime(value: number) {
@@ -106,7 +106,7 @@ export function AudioTrimEditor({
   };
   const preview = () => {
     setPreviewing(true);
-    onPreview(start, end);
+    onPreview(start, end, () => setPreviewing(false));
   };
 
   const setZoomLevel = (nextZoom: number) => {

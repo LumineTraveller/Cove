@@ -31,6 +31,7 @@ interface CoveClipboardApi {
 
 interface CoveSecurityApi {
   setServerCertificateException(serverUrl: string, enabled: boolean): Promise<string | null>;
+  resolveServerAddresses(hostname: string): Promise<string[]>;
 }
 
 interface CoveApplicationAudioApi {

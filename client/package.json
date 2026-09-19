@@ -21,7 +21,7 @@
     "test:media-diagnostics": "tsx --test tests/mediaDiagnostics.test.ts",
     "test:screen-capture": "tsx --test tests/screenCapture.test.ts",
     "test:member-ordering": "tsx --test tests/memberOrdering.test.ts",
-    "test:account-auth": "tsx --test tests/accountAuth.test.ts",
+    "test:account-auth": "tsx --test tests/accountAuth.test.ts tests/serverIdentity.test.ts tests/serverSecurity.test.ts",
     "test:remote-control": "tsx --test tests/remoteControl.test.ts tests/remoteInputQueue.test.ts tests/remoteInputController.test.ts tests/remoteControlSession.test.ts tests/remoteInputHelper.test.ts",
     "test:rooms": "tsx --test tests/roomSettings.test.ts",
     "test:sortable": "tsx --test tests/sortableList.test.ts",

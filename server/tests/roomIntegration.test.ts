@@ -41,22 +41,32 @@ const fake = { peers: new Map<string, any>() };
 };
 let dataDir = '';
 let base = '';
+let serverAccessToken = '';
 let startServer: (port?: number) => Promise<number>;
 let stopServer: () => Promise<void>;
+const bootstrapToken = 'integration-bootstrap-credential-123456789';
+const clientProtocol = 2;
+const originalDataDir = process.env.COVE_DATA_DIR;
+const originalBootstrapToken = process.env.COVE_BOOTSTRAP_TOKEN;
+const originalServerSecurityEnabled = process.env.COVE_SERVER_SECURITY_ENABLED;
 
 type Account = { token: string; account: { id: string; email: string; username: string } };
+const serverHeaders = (token = serverAccessToken) => ({
+  authorization: `Bearer ${token}`,
+  'x-cove-client-protocol': String(clientProtocol),
+});
 async function register(email: string, username: string): Promise<Account> {
-  const response = await fetch(`${base}/api/auth/register`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email, password: 'password-123', username }) });
+  const response = await fetch(`${base}/api/auth/register`, { method: 'POST', headers: { 'content-type': 'application/json', ...serverHeaders() }, body: JSON.stringify({ email, password: 'password-123', username }) });
   assert.equal(response.status, 201);
   return response.json() as Promise<Account>;
 }
 async function login(email: string): Promise<Account> {
-  const response = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email, password: 'password-123' }) });
+  const response = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json', ...serverHeaders() }, body: JSON.stringify({ email, password: 'password-123' }) });
   assert.equal(response.status, 200);
   return response.json() as Promise<Account>;
 }
 function socketFor(account: Account) {
-  const socket = connectSocket(base, { autoConnect: false, reconnection: false });
+  const socket = connectSocket(base, { autoConnect: false, reconnection: false, auth: { serverAccessToken, clientProtocol } });
   const register = new Promise<any>(resolve => socket.on('connect', () => socket.emit('user:register', { username: account.account.username, clientId: `client-${account.account.id}-1234`, authToken: account.token }, resolve)));
   socket.connect();
   return { socket, register };
@@ -69,16 +79,70 @@ const sockets: Socket[] = [];
 before(async () => {
   dataDir = await mkdtemp(path.join(tmpdir(), 'cove-room-integration-'));
   process.env.COVE_DATA_DIR = dataDir;
+  process.env.COVE_BOOTSTRAP_TOKEN = bootstrapToken;
+  process.env.COVE_SERVER_SECURITY_ENABLED = 'true';
   ({ startServer, stopServer } = await import('../src/index'));
   const port = await startServer(0);
   base = `http://127.0.0.1:${port}`;
+  const status = await fetch(`${base}/api/security/status`);
+  assert.equal(status.status, 200);
+  assert.deepEqual(await status.json(), {
+    enabled: true,
+    configured: false,
+    bootstrapAvailable: true,
+    tokenEpoch: 1,
+    authorized: false,
+    secureTransportRequired: false,
+  });
+  const bootstrap = await fetch(`${base}/api/security/bootstrap`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ bootstrapToken, password: 'server-password-123' }),
+  });
+  assert.equal(bootstrap.status, 201);
+  serverAccessToken = (await bootstrap.json()).accessToken;
+  assert.ok(serverAccessToken);
 });
 after(async () => {
   sockets.forEach(socket => socket.disconnect());
   await stopServer();
+  if (originalBootstrapToken === undefined) delete process.env.COVE_BOOTSTRAP_TOKEN;
+  else process.env.COVE_BOOTSTRAP_TOKEN = originalBootstrapToken;
+  if (originalServerSecurityEnabled === undefined) delete process.env.COVE_SERVER_SECURITY_ENABLED;
+  else process.env.COVE_SERVER_SECURITY_ENABLED = originalServerSecurityEnabled;
+  if (originalDataDir === undefined) delete process.env.COVE_DATA_DIR;
+  else process.env.COVE_DATA_DIR = originalDataDir;
   (Module as any)._load = originalLoad;
   if (dataDir && path.dirname(dataDir) === path.resolve(tmpdir()) && path.basename(dataDir).startsWith('cove-room-integration-'))
     await rm(dataDir, { recursive: true, force: true });
+});
+
+test('server access gates sensitive REST and Socket.IO operations', { timeout: 15_000 }, async () => {
+  const rooms = await fetch(`${base}/api/rooms`);
+  assert.equal(rooms.status, 426);
+  const legacyResponse = await rooms.json() as { code?: string; error?: string };
+  assert.equal(legacyResponse.code, 'CLIENT_VERSION_TOO_OLD');
+  assert.match(legacyResponse.error ?? '', /客户端版本过旧/);
+  const legacyLogin = await fetch(`${base}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email: 'legacy@example.com', password: 'password-123' }),
+  });
+  assert.equal(legacyLogin.status, 426);
+  assert.equal((await legacyLogin.json()).code, 'CLIENT_VERSION_TOO_OLD');
+  const status = await fetch(`${base}/api/security/status`, { headers: { authorization: `Bearer ${serverAccessToken}` } });
+  assert.equal((await status.json()).authorized, true);
+  const wrongPassword = await fetch(`${base}/api/security/access`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'not-the-server-password' }),
+  });
+  assert.equal(wrongPassword.status, 401);
+
+  const denied = connectSocket(base, { autoConnect: false, reconnection: false });
+  const deniedError = new Promise<any>(resolve => denied.once('connect_error', resolve));
+  denied.connect();
+  const error = await deniedError;
+  assert.equal(error.data?.code, 'CLIENT_VERSION_TOO_OLD');
+  denied.disconnect();
 });
 
 test('room join enforces password/capacity, preserves current members and restricts settings/history', { timeout: 15_000 }, async () => {
@@ -92,7 +156,7 @@ test('room join enforces password/capacity, preserves current members and restri
   assert.equal(created.room.maxMembers, 2); assert.equal(created.room.hasPassword, true);
   assert.equal((await emit<any>(ownerSocket.socket, 'room:join', { roomId: created.room.id })).ok, true);
   assert.equal((await emit<any>(aSocket.socket, 'room:history', { roomId: created.room.id })).code, 'FORBIDDEN');
-  const historyResponse = await fetch(`${base}/api/rooms/${created.room.id}/messages`);
+  const historyResponse = await fetch(`${base}/api/rooms/${created.room.id}/messages`, { headers: serverHeaders() });
   assert.equal(historyResponse.status, 403);
   assert.equal((await emit<any>(aSocket.socket, 'room:join', { roomId: created.room.id, password: 'wrong' })).code, 'INVALID_PASSWORD');
   const concurrentJoins = await Promise.all([
@@ -115,7 +179,7 @@ test('room join enforces password/capacity, preserves current members and restri
   assert.equal(cleared.room.hasPassword, false);
   assert.equal(cleared.room.maxMembers, null);
   assert.equal('passwordHash' in cleared.room, false);
-  const list = await (await fetch(`${base}/api/rooms`)).json() as any[];
+  const list = await (await fetch(`${base}/api/rooms`, { headers: serverHeaders() })).json() as any[];
   assert.equal(list.some(room => 'passwordHash' in room || 'passwordSalt' in room), false);
 });
 
@@ -158,4 +222,26 @@ test('REST takeover clears a disconnected voice grace peer and frees room capaci
   assert.equal((await stale.register).error, '登录已失效，请重新登录');
   stale.socket.disconnect();
   assert.notEqual(next.token, owner.token);
+});
+
+test('server password rotation disconnects active sockets and rejects the old access token', { timeout: 15_000 }, async () => {
+  const account = await register('rotate-server@example.com', 'Rotate Server');
+  const active = socketFor(account);
+  sockets.push(active.socket);
+  assert.equal((await active.register).ok, true);
+
+  const oldAccessToken = serverAccessToken;
+  const disconnected = new Promise<void>(resolve => active.socket.once('disconnect', () => resolve()));
+  const response = await fetch(`${base}/api/security/rotate`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...serverHeaders(oldAccessToken) },
+    body: JSON.stringify({ currentPassword: 'server-password-123', newPassword: 'rotated-server-123' }),
+  });
+  assert.equal(response.status, 200);
+  serverAccessToken = (await response.json()).accessToken;
+  await disconnected;
+
+  const staleRooms = await fetch(`${base}/api/rooms`, { headers: serverHeaders(oldAccessToken) });
+  assert.equal(staleRooms.status, 401);
+  assert.ok(serverAccessToken);
 });

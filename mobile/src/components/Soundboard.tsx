@@ -5,6 +5,7 @@ import Video from 'react-native-video';
 import type { Socket } from 'socket.io-client';
 import { colors } from '../theme';
 import type { Soundpack } from '../types';
+import { authorizedResourceURL, serverFetch } from '../serverSecurity';
 
 interface Props {
   socket: Socket;
@@ -46,7 +47,7 @@ export function Soundboard({ socket, roomId, serverURL, ready, inVoice, showHead
     if (!ready || !socket.id) return;
     let active = true;
     setLoading(true);
-    fetch(`${serverURL}/api/soundpacks?socketId=${encodeURIComponent(socket.id)}&roomId=${encodeURIComponent(roomId)}`)
+    serverFetch(serverURL, `/api/soundpacks?socketId=${encodeURIComponent(socket.id)}&roomId=${encodeURIComponent(roomId)}`)
       .then(response => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return response.json() as Promise<Soundpack[]>;
@@ -65,7 +66,7 @@ export function Soundboard({ socket, roomId, serverURL, ready, inVoice, showHead
     setPlayback({
       key: playSequence.current,
       soundId,
-      uri: `${serverURL}/sounds/${encodeURIComponent(sound.filename)}`,
+      uri: authorizedResourceURL(serverURL, `/sounds/${encodeURIComponent(sound.filename)}`),
     });
   }, [serverURL]);
 

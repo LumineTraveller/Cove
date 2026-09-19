@@ -35,7 +35,7 @@ export function normalizeMicrophoneDeviceId(deviceId: string): string {
 
 export function createMicrophoneConstraints(
   deviceId: string,
-  noiseMode: 'system' | 'rnnoise' = 'system',
+  noiseMode: 'system' | 'rnnoise' = 'rnnoise',
   echoScope: 'all' | 'browser' = 'all',
 ): MediaTrackConstraints {
   const normalizedDeviceId = normalizeMicrophoneDeviceId(deviceId);

@@ -18,6 +18,7 @@ import { colors } from '../theme';
 import type { Room, SessionConfig } from '../types';
 import { MobileUpdateButton } from '../components/MobileUpdater';
 import { roomLimit, roomPassword } from '../roomSettings';
+import { serverFetch } from '../serverSecurity';
 
 interface Props {
   socket: Socket;
@@ -70,7 +71,7 @@ export function RoomListScreen({
     setLoading(true);
     setLoadError(null);
     try {
-      const response = await fetch(`${config.serverURL}/api/rooms`);
+      const response = await serverFetch(config.serverURL, '/api/rooms');
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       setRooms(await response.json() as Room[]);
     } catch (cause) {

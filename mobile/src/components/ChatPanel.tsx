@@ -17,6 +17,7 @@ import { MessageCircle, Send, X } from 'lucide-react-native';
 import type { Socket } from 'socket.io-client';
 import { colors } from '../theme';
 import type { Message } from '../types';
+import { authorizedResourceURL } from '../serverSecurity';
 
 interface Props {
   visible: boolean;
@@ -82,7 +83,8 @@ export function ChatPanel({ visible, socket, roomId, serverURL, username, ready,
 
   const resolveImageURL = useCallback((content: string) => {
     if (/^https?:\/\//i.test(content) || content.startsWith('data:')) return content;
-    return `${serverURL.replace(/\/$/, '')}${content.startsWith('/') ? content : `/${content}`}`;
+    const target = `${serverURL.replace(/\/$/, '')}${content.startsWith('/') ? content : `/${content}`}`;
+    return authorizedResourceURL(serverURL, target);
   }, [serverURL]);
 
   return (

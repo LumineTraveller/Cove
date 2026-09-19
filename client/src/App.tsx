@@ -8,15 +8,19 @@ import { UpdateCenter } from './components/UpdateCenter';
 import { createConnectionDeadline } from './connectionDeadline';
 import { createSessionRegistration } from './sessionRegistration';
 import { clearProfile, MAX_PERSISTED_AVATAR_DATA_URL_LENGTH, persistProfile, readProfile } from './profile';
-import { socket, getClientId, getServerURL, normalizeURL } from './socket';
+import { applyServerAccessToSocket, socket, getClientId, getServerURL } from './socket';
 import type { UserProfile } from './types';
 import { ServerCertificateToggle } from './components/ServerCertificateToggle';
 import { hasServerCertificateException, saveServerCertificateException } from './serverCertificate';
-import { clearAccountSession, forgetRememberedLogin, loginAccount, normalizeLoginServer, readAccountSession, readRememberedLogins, registerAccount, rememberAccountSession, validAccountEmail, type RememberedLogin } from './accountAuth';
+import { clearAccountSession, enrichRememberedLoginIdentities, forgetRememberedLogin, loginAccount, normalizeLoginServer, readAccountSession, readRememberedLogins, registerAccount, rememberAccountSession, rememberAccountSessionResolved, validAccountEmail, type RememberedLogin } from './accountAuth';
+import { clearServerAccessToken, ensureServerAccess, normalizeServerSecurityURL, readServerSecurityStatus, serverFetch, type ServerSecurityStatus } from './serverSecurity';
 import { applyTheme, readTheme, type AppTheme, THEME_STORAGE_KEY } from './theme';
 
 const DEFAULT_SERVER = 'http://localhost:3001';
 type ConnectionProblem = 'timeout' | 'registration' | null;
+type ServerSecurityProbe =
+  | { phase: 'idle' | 'checking' | 'invalid' | 'unavailable'; status?: undefined }
+  | { phase: 'ready'; status: ServerSecurityStatus };
 
 function WindowTitleBar({ showBrand = true }: { showBrand?: boolean }) {
   const [maximized, setMaximized] = useState(false);
@@ -59,6 +63,10 @@ export default function App() {
   const [draftName, setDraftName] = useState('');
   const [draftEmail, setDraftEmail] = useState(() => rememberedLogins.find(entry => entry.serverUrl === normalizeLoginServer(getServerURL()))?.email ?? rememberedLogins[0]?.email ?? '');
   const [draftPassword, setDraftPassword] = useState('');
+  const [draftServerPassword, setDraftServerPassword] = useState('');
+  const [draftBootstrapToken, setDraftBootstrapToken] = useState('');
+  const [serverSecurityProbe, setServerSecurityProbe] = useState<ServerSecurityProbe>({ phase: 'idle' });
+  const [serverUnlockRequired, setServerUnlockRequired] = useState(false);
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
   const [showServerHistory, setShowServerHistory] = useState(false);
   const [authPending, setAuthPending] = useState(false);
@@ -71,7 +79,7 @@ export default function App() {
   const [connectionProblem, setConnectionProblem] = useState<ConnectionProblem>(null);
   const serverURL = getServerURL();
   const accountSession = readAccountSession(serverURL);
-  const needLogin = !profile.username || !serverUrl || !accountSession;
+  const needLogin = !profile.username || !serverUrl || !accountSession || serverUnlockRequired;
 
   useEffect(() => {
     void window.coveUpdater?.setServerUrl(serverURL).catch(() => undefined);
@@ -84,6 +92,44 @@ export default function App() {
       // 即使本地存储不可用，本次运行仍保持主题切换。
     }
   }, [theme]);
+
+  useEffect(() => {
+    let active = true;
+    void enrichRememberedLoginIdentities().then(entries => {
+      if (active) setRememberedLogins(entries);
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    setDraftServerPassword('');
+    setDraftBootstrapToken('');
+    const normalizedServerUrl = normalizeServerSecurityURL(draftUrl);
+    if (!draftUrl.trim()) {
+      setServerSecurityProbe({ phase: 'idle' });
+      return;
+    }
+    if (!normalizedServerUrl) {
+      setServerSecurityProbe({ phase: 'invalid' });
+      return;
+    }
+
+    let active = true;
+    setServerSecurityProbe({ phase: 'checking' });
+    const timer = window.setTimeout(() => {
+      void readServerSecurityStatus(normalizedServerUrl).then(status => {
+        if (!active) return;
+        setServerSecurityProbe({ phase: 'ready', status });
+        if (!status.enabled || status.configured) setDraftBootstrapToken('');
+      }).catch(() => {
+        if (active) setServerSecurityProbe({ phase: 'unavailable' });
+      });
+    }, 300);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [draftUrl]);
 
   const handleThemeChange = useCallback((next: AppTheme) => {
     // Capture the old surface BEFORE React changes theme-dependent gradients
@@ -137,6 +183,7 @@ export default function App() {
       onPending: () => setConnected(null),
       send: acknowledge => {
         const currentProfile = readAccountSession(serverURL)?.profile ?? readProfile();
+        applyServerAccessToSocket(serverURL);
         socket.timeout(8_000).emit('user:register', {
           username: currentProfile.username,
           avatarUrl: currentProfile.avatarUrl,
@@ -198,7 +245,19 @@ export default function App() {
       registration.cancel();
       if (active) setConnected(false);
     };
-    const connectError = () => active && setConnected(false);
+    const connectError = (cause: Error & { data?: { code?: string } }) => {
+      if (!active) return;
+      if (cause.data?.code === 'SERVER_ACCESS_REQUIRED' || cause.data?.code === 'SERVER_ACCESS_INVALID' || cause.data?.code === 'INSECURE_TRANSPORT') {
+        clearServerAccessToken(serverURL);
+        setAuthError(cause.message || '服务器访问令牌已失效，请重新验证服务器密码。');
+        setConnected(false);
+        setInitialConnectionPending(false);
+        setServerUnlockRequired(true);
+        socket.disconnect();
+        return;
+      }
+      setConnected(false);
+    };
     const sessionReplaced = () => {
       if (!active) return;
       if (sessionRetryTimer) {
@@ -227,6 +286,7 @@ export default function App() {
         console.warn('[security] 无法配置服务器证书例外:', error);
       }
       if (!active) return;
+      applyServerAccessToSocket(serverURL);
       socket.connect();
       if (socket.connected) register();
     };
@@ -242,21 +302,34 @@ export default function App() {
       socket.off('account:session-replaced', sessionReplaced);
       socket.disconnect();
     };
-  }, [editingServer, needLogin]);
+  }, [editingServer, needLogin, serverURL]);
 
   const handleLogin = async () => {
     const username = draftName.trim();
-    if (!validAccountEmail(draftEmail) || draftPassword.length < 8 || !draftUrl.trim() || (authMode === 'register' && !username)) return;
-    const nextServerUrl = normalizeURL(draftUrl || DEFAULT_SERVER);
+    const securityEnabled = serverSecurityProbe.phase === 'ready' && serverSecurityProbe.status.enabled;
+    if (serverSecurityProbe.phase !== 'ready' || !validAccountEmail(draftEmail) || draftPassword.length < 8
+      || (securityEnabled && draftServerPassword.length < 8) || !draftUrl.trim()
+      || (authMode === 'register' && !username)) return;
+    const nextServerUrl = normalizeServerSecurityURL(draftUrl || DEFAULT_SERVER);
+    if (!nextServerUrl) {
+      setAuthError('服务器地址无效，请使用 http:// 或 https:// 地址，且不要包含账号、查询参数或片段');
+      setAuthPending(false);
+      return;
+    }
     setAuthPending(true);
     setAuthError('');
     try {
       await window.coveSecurity?.setServerCertificateException(nextServerUrl, allowUntrustedCertificate);
+      await ensureServerAccess({
+        serverURL: nextServerUrl,
+        password: draftServerPassword,
+        bootstrapToken: draftBootstrapToken,
+      });
       const result = authMode === 'register'
         ? await registerAccount(nextServerUrl, draftEmail, draftPassword, username)
         : await loginAccount(nextServerUrl, draftEmail, draftPassword);
       persistProfile(result.profile);
-      rememberAccountSession({ ...result.session, allowInvalidServerCertificate: allowUntrustedCertificate });
+      await rememberAccountSessionResolved({ ...result.session, allowInvalidServerCertificate: allowUntrustedCertificate });
       localStorage.setItem('cove_server_url', result.session.serverUrl);
       saveServerCertificateException(nextServerUrl, allowUntrustedCertificate);
       window.location.reload();
@@ -268,11 +341,12 @@ export default function App() {
 
   const handleLogout = () => {
     const session = readAccountSession(serverURL);
-    if (session) void fetch(`${serverURL}/api/auth/logout`, {
+    if (session) void serverFetch(serverURL, '/api/auth/logout', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token: session.token }), keepalive: true,
     }).catch(() => {});
     socket.disconnect();
+    clearServerAccessToken(serverURL);
     clearProfile();
     clearAccountSession(serverURL);
     window.location.reload();
@@ -289,7 +363,12 @@ export default function App() {
 
   const saveServerAndReconnect = () => {
     if (!draftUrl.trim()) return;
-    const nextServerUrl = normalizeURL(draftUrl);
+    const nextServerUrl = normalizeServerSecurityURL(draftUrl);
+    if (!nextServerUrl) {
+      setAuthError('服务器地址无效，请使用 http:// 或 https:// 地址，且不要包含账号、查询参数或片段');
+      return;
+    }
+    clearServerAccessToken(serverURL);
     localStorage.setItem('cove_server_url', nextServerUrl);
     saveServerCertificateException(nextServerUrl, allowUntrustedCertificate);
     window.location.reload();
@@ -305,7 +384,7 @@ export default function App() {
       // Keep multi-megabyte animated GIFs out of the real-time packet path.
       // Older Socket.IO proxies commonly close the connection when a single
       // profile packet exceeds their payload limit.
-      void fetch(`${session.serverUrl}/api/auth/profile`, {
+      void serverFetch(session.serverUrl, '/api/auth/profile', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token: session.token, username: next.username, avatarUrl: next.avatarUrl }),
@@ -325,6 +404,8 @@ export default function App() {
     setDraftUrl(entry.serverUrl);
     setDraftEmail(entry.email);
     setDraftPassword('');
+    setDraftServerPassword('');
+    setDraftBootstrapToken('');
     setAllowUntrustedCertificate(entry.allowInvalidServerCertificate === true);
     setAuthError('');
     setShowServerHistory(false);
@@ -332,7 +413,7 @@ export default function App() {
 
   const forgetLogin = (entry: RememberedLogin) => {
     const saved = readAccountSession(entry.serverUrl);
-    if (saved) void fetch(`${saved.serverUrl}/api/auth/logout`, {
+    if (saved) void serverFetch(saved.serverUrl, '/api/auth/logout', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token: saved.token }), keepalive: true,
     }).catch(() => {});
@@ -359,10 +440,28 @@ export default function App() {
     return () => video.cancelVideoFrameCallback(callbackId);
   }, [needLogin]);
 
+  const serverSecurityStatus = serverSecurityProbe.phase === 'ready' ? serverSecurityProbe.status : null;
+  const serverSecurityEnabled = serverSecurityStatus?.enabled === true;
+  const serverSecurityConfigured = serverSecurityEnabled && serverSecurityStatus.configured;
+  const serverSecurityUnconfigured = serverSecurityEnabled && !serverSecurityStatus.configured;
+  const serverSecurityReady = serverSecurityProbe.phase === 'ready';
+  const serverSecurityHint = serverSecurityProbe.phase === 'idle'
+    ? '等待输入服务器地址'
+    : serverSecurityProbe.phase === 'checking'
+      ? '正在识别服务器状态…'
+      : serverSecurityProbe.phase === 'invalid'
+        ? '服务器地址格式无效'
+        : serverSecurityProbe.phase === 'unavailable'
+        ? '无法识别，请检查服务器是否启动'
+          : serverSecurityConfigured
+            ? '服务器已初始化，请输入已有的服务器访问密码'
+            : '检测到新服务器，请设置服务器访问密码';
+
   if (needLogin) {
     return (
       <main className="auth-page">
         <WindowTitleBar showBrand={false} />
+        <UpdateCenter allowDetails={false} serverURL={serverURL} />
         <div className="auth-shell">
           <section className="auth-showcase" aria-label="Cove 产品介绍">
             <div className="auth-brand">
@@ -481,6 +580,35 @@ export default function App() {
                   {/^http:\/\/(?!localhost(?::|\/|$)|127\.0\.0\.1(?::|\/|$))/i.test(draftUrl.trim()) && <small className="auth-warning">公网 HTTP 会明文传输登录凭据，正式使用账号前应配置 HTTPS。</small>}
                   <ServerCertificateToggle tone="light" serverUrl={draftUrl} checked={allowUntrustedCertificate} onChange={setAllowUntrustedCertificate} />
                 </div>
+                {serverSecurityEnabled && <section className="auth-server-security" aria-labelledby="login-server-security-title">
+                  <div className="auth-server-security-heading">
+                    <div>
+                      <strong id="login-server-security-title">服务器安全设置</strong>
+                      <small aria-live="polite">{serverSecurityHint}</small>
+                    </div>
+                    {serverSecurityUnconfigured && <span>首次连接</span>}
+                  </div>
+                  {serverSecurityReady && (
+                    <div className={`auth-server-security-fields ${serverSecurityConfigured ? 'is-single' : ''}`}>
+                      <label className="auth-field" htmlFor="login-server-password">
+                        <span>服务器访问密码</span>
+                        <div className="auth-input-wrap">
+                          <Server size={19} />
+                          <input id="login-server-password" type="password" autoComplete="off" placeholder="至少 8 个字符" value={draftServerPassword} onChange={event => setDraftServerPassword(event.target.value)} />
+                        </div>
+                      </label>
+                      {serverSecurityUnconfigured && (
+                        <label className="auth-field" htmlFor="login-bootstrap-token">
+                          <span>一次性初始化凭据 <em>（新服务器必填）</em></span>
+                          <div className="auth-input-wrap">
+                            <LockKeyhole size={19} />
+                            <input id="login-bootstrap-token" type="password" autoComplete="off" placeholder="一次性凭据" value={draftBootstrapToken} onChange={event => setDraftBootstrapToken(event.target.value)} />
+                          </div>
+                        </label>
+                      )}
+                    </div>
+                  )}
+                </section>}
                 <label className="auth-field" htmlFor="login-email">
                   <span>邮箱</span>
                   <div className="auth-input-wrap">
@@ -501,7 +629,7 @@ export default function App() {
                 <button
                   type="submit"
                   className="auth-submit"
-                  disabled={authPending || !validAccountEmail(draftEmail) || draftPassword.length < 8 || !draftUrl.trim() || (authMode === 'register' && !draftName.trim())}
+                  disabled={authPending || !serverSecurityReady || !validAccountEmail(draftEmail) || draftPassword.length < 8 || (serverSecurityEnabled && draftServerPassword.length < 8) || !draftUrl.trim() || (authMode === 'register' && !draftName.trim())}
                 >
                   {authPending ? <LoaderCircle size={19} className="animate-spin" /> : <LogIn size={19} />}
                   {authMode === 'login' ? '登录 Cove' : '注册并进入'}

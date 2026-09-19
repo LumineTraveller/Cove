@@ -32,6 +32,7 @@ import { encodeAudioBufferSegment } from "../audioTrim";
 import { soundpackDownloadFileName } from "../soundpackDownload";
 import { useSortableList } from "../hooks/useSortableList";
 import { AudioTrimEditor } from "./AudioTrimEditor";
+import { authorizedResourceURL, serverFetch } from "../serverSecurity";
 
 interface Soundpack {
   id: string;
@@ -326,8 +327,9 @@ export function SoundPackPanel({
 
   useEffect(() => {
     if (disabled || !socket.id) return;
-    fetch(
-      `${serverURL}/api/soundpacks?socketId=${encodeURIComponent(socket.id)}&roomId=${encodeURIComponent(roomId)}`,
+    serverFetch(
+      serverURL,
+      `/api/soundpacks?socketId=${encodeURIComponent(socket.id)}&roomId=${encodeURIComponent(roomId)}`,
     )
       .then((response) => response.json())
       .then((list: Soundpack[]) => setPacks(list))
@@ -361,7 +363,7 @@ export function SoundPackPanel({
         previous.pause();
         previous.src = "";
       }
-      const audio = new Audio(`${serverURL}/sounds/${sound.filename}`);
+      const audio = new Audio(authorizedResourceURL(serverURL, `/sounds/${encodeURIComponent(sound.filename)}`));
       audio.volume = soundpackVolumeRef.current / 100;
       audioRef.current = audio;
       setPlayingId(soundId);
@@ -464,7 +466,7 @@ export function SoundPackPanel({
     let binary = "";
     for (let index = 0; index < bytes.length; index += 8192)
       binary += String.fromCharCode(...bytes.slice(index, index + 8192));
-    const response = await fetch(`${serverURL}/api/soundpacks`, {
+    const response = await serverFetch(serverURL, '/api/soundpacks', {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -540,20 +542,39 @@ export function SoundPackPanel({
     void openAudioEditor(uploadQueueRef.current[nextIndex], nextIndex, total);
   };
 
-  const previewAudioSelection = (start: number, end: number) => {
+  const previewAudioSelection = (start: number, end: number, onEnded: () => void) => {
     const editor = audioEditor;
     const context = audioContextRef.current;
-    if (!editor || !context) return;
-    audioPreviewSourceRef.current?.stop();
+    if (!editor || !context) {
+      onEnded();
+      return;
+    }
+    const previous = audioPreviewSourceRef.current;
+    audioPreviewSourceRef.current = null;
+    previous?.stop();
     const source = context.createBufferSource();
     source.buffer = editor.buffer;
     source.connect(context.destination);
     source.onended = () => {
-      if (audioPreviewSourceRef.current === source) audioPreviewSourceRef.current = null;
+      if (audioPreviewSourceRef.current !== source) return;
+      audioPreviewSourceRef.current = null;
+      onEnded();
     };
     audioPreviewSourceRef.current = source;
-    void context.resume();
-    source.start(0, Math.max(0, start), Math.max(0.01, end - start));
+    void context.resume().catch(() => {
+      if (audioPreviewSourceRef.current !== source) return;
+      audioPreviewSourceRef.current = null;
+      source.onended = null;
+      onEnded();
+    });
+    try {
+      source.start(0, Math.max(0, start), Math.max(0.01, end - start));
+    } catch {
+      if (audioPreviewSourceRef.current !== source) return;
+      audioPreviewSourceRef.current = null;
+      source.onended = null;
+      onEnded();
+    }
   };
 
   const confirmAudioSelection = async (start: number, end: number) => {
@@ -678,7 +699,7 @@ export function SoundPackPanel({
 
   /** 下载语音包源文件到本机。服务端把上传的音频原样存在 /sounds 下，直接取回即可。 */
   const downloadSound = async (sound: Soundpack) => {
-    const url = `${serverURL}/sounds/${encodeURIComponent(sound.filename)}`;
+    const url = authorizedResourceURL(serverURL, `/sounds/${encodeURIComponent(sound.filename)}`);
     setDownloadNotice("");
     try {
       const response = await fetch(url);

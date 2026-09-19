@@ -20,23 +20,31 @@ import { colors } from '../theme';
 import { httpsOrigin } from '../serverCertificate';
 import { MobileUpdateButton } from '../components/MobileUpdater';
 import type { RememberedServer } from '../storage';
+import { normalizeServerSecurityURL, readServerSecurityStatus, type ServerSecurityStatus } from '../serverSecurity';
+
+type ServerSecurityProbe =
+  | { phase: 'idle' | 'checking' | 'invalid' | 'unavailable'; status?: undefined }
+  | { phase: 'ready'; status: ServerSecurityStatus };
 
 interface Props {
   saving: boolean;
   error?: string | null;
   onSubmit: (request: AccountAuthRequest) => void;
   rememberedServers?: RememberedServer[];
-  onResume?: (server: RememberedServer) => void;
   onForget?: (server: RememberedServer) => void;
+  onProbeServerSecurity?: (serverURL: string, allowInvalidServerCertificate: boolean) => Promise<ServerSecurityStatus>;
 }
 
-export function LoginScreen({ saving, error, onSubmit, rememberedServers = [], onResume, onForget }: Props) {
+export function LoginScreen({ saving, error, onSubmit, rememberedServers = [], onForget, onProbeServerSecurity }: Props) {
   const [mode, setMode] = useState<AccountAuthMode>('login');
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState(rememberedServers[0]?.email ?? '');
   const [password, setPassword] = useState('');
+  const [serverPassword, setServerPassword] = useState('');
+  const [bootstrapToken, setBootstrapToken] = useState('');
   const [serverURL, setServerURL] = useState(rememberedServers[0]?.serverURL ?? '');
   const [certificateException, setCertificateException] = useState(rememberedServers[0]?.allowInvalidServerCertificate === true);
+  const [securityProbe, setSecurityProbe] = useState<ServerSecurityProbe>({ phase: 'idle' });
   useEffect(() => {
     const saved = rememberedServers[0];
     if (saved && !serverURL.trim() && !email.trim()) {
@@ -45,16 +53,53 @@ export function LoginScreen({ saving, error, onSubmit, rememberedServers = [], o
     }
   }, [rememberedServers, serverURL, email]);
   const canUseException = Platform.OS === 'android' && !!httpsOrigin(serverURL);
+  useEffect(() => {
+    const normalized = normalizeServerSecurityURL(serverURL);
+    if (!serverURL.trim()) {
+      setSecurityProbe({ phase: 'idle' });
+      return;
+    }
+    if (!normalized) {
+      setSecurityProbe({ phase: 'invalid' });
+      return;
+    }
+    let active = true;
+    setSecurityProbe({ phase: 'checking' });
+    const timer = setTimeout(() => {
+      const probe = onProbeServerSecurity
+        ? onProbeServerSecurity(normalized, canUseException && certificateException)
+        : readServerSecurityStatus(normalized);
+      void probe.then(status => {
+        if (!active) return;
+        setSecurityProbe({ phase: 'ready', status });
+        if (!status.enabled || status.configured) setBootstrapToken('');
+        if (!status.enabled) setServerPassword('');
+      }).catch(() => {
+        if (active) setSecurityProbe({ phase: 'unavailable' });
+      });
+    }, 300);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [serverURL, certificateException, canUseException, onProbeServerSecurity]);
+  const securityStatus = securityProbe.phase === 'ready' ? securityProbe.status : null;
+  const securityEnabled = securityStatus?.enabled === true;
+  const securityReady = securityProbe.phase === 'ready';
   const submit = () => onSubmit({
     mode,
     username,
     email,
     password,
     serverURL,
+    serverPassword,
+    bootstrapToken,
     allowInvalidServerCertificate: canUseException && certificateException,
   });
   const canSubmit = validAccountEmail(email)
     && password.length >= 8
+    && securityReady
+    && (!securityEnabled || serverPassword.length >= 8)
     && !!serverURL.trim()
     && (mode === 'login' || !!username.trim())
     && !saving;
@@ -74,15 +119,14 @@ export function LoginScreen({ saving, error, onSubmit, rememberedServers = [], o
 
           <View style={styles.card}>
             {mode === 'login' && rememberedServers.length > 0 && <View style={styles.rememberedList}>
-              <Text style={styles.help}>记住的服务器 · 有效登录可直接恢复</Text>
+              <Text style={styles.help}>记住的服务器 · 地址和账号已保留</Text>
               {rememberedServers.map(saved => <View key={saved.serverURL} style={styles.rememberedRow}>
                 <TouchableOpacity style={styles.rememberedEntry} disabled={saving} onPress={() => {
-                  setServerURL(saved.serverURL); setEmail(saved.email); setPassword('');
+                  setServerURL(saved.serverURL); setEmail(saved.email); setPassword(''); setServerPassword(''); setBootstrapToken('');
                   setCertificateException(saved.allowInvalidServerCertificate === true);
-                  if (saved.accountToken) onResume?.(saved);
-                }} accessibilityLabel={`${saved.accountToken ? '继续连接' : '填入账号'} ${saved.serverURL}`}>
+                }} accessibilityLabel={`填写并连接 ${saved.serverURL}`}>
                   <Text style={styles.rememberedTitle} numberOfLines={1}>{saved.serverURL}</Text>
-                  <Text style={styles.help} numberOfLines={1}>{saved.email} · {saved.accountToken ? '继续连接' : '填入账号'}</Text>
+                  <Text style={styles.help} numberOfLines={1}>{saved.email} · 点击继续</Text>
                 </TouchableOpacity>
                 {onForget && <TouchableOpacity disabled={saving} onPress={() => onForget(saved)} accessibilityLabel={`忘记 ${saved.serverURL}`}><Text style={styles.forget}>忘记</Text></TouchableOpacity>}
               </View>)}
@@ -151,6 +195,41 @@ export function LoginScreen({ saving, error, onSubmit, rememberedServers = [], o
               />
             </View>
 
+            {securityEnabled && <>
+              <Text style={[styles.label, styles.secondLabel]}>服务器访问密码</Text>
+              <View style={styles.inputShell}>
+                <Server size={19} color={colors.textFaint} />
+                <TextInput
+                  style={styles.input}
+                  value={serverPassword}
+                  onChangeText={setServerPassword}
+                  placeholder="至少 8 个字符"
+                  placeholderTextColor={colors.textFaint}
+                  secureTextEntry
+                  textContentType="password"
+                  autoCapitalize="none"
+                />
+              </View>
+              <Text style={styles.help}>它独立于账号密码，用于解锁这个 Cove 服务器。</Text>
+
+              {securityStatus?.configured === false && <>
+                <Text style={[styles.label, styles.secondLabel]}>一次性初始化凭据</Text>
+                <View style={styles.inputShell}>
+                  <LockKeyhole size={19} color={colors.textFaint} />
+                  <TextInput
+                    style={styles.input}
+                    value={bootstrapToken}
+                    onChangeText={setBootstrapToken}
+                    placeholder="一次性凭据"
+                    placeholderTextColor={colors.textFaint}
+                    secureTextEntry
+                    textContentType="password"
+                    autoCapitalize="none"
+                  />
+                </View>
+              </>}
+            </>}
+
             <Text style={[styles.label, styles.secondLabel]}>服务器地址</Text>
             <View style={styles.inputShell}>
               <Server size={19} color={colors.textFaint} />
@@ -171,7 +250,9 @@ export function LoginScreen({ saving, error, onSubmit, rememberedServers = [], o
               />
             </View>
             <Text style={styles.help}>填写与桌面客户端相同的 Cove 服务器地址，此项不会被隐藏。</Text>
-            {publicHttp && <Text style={styles.httpWarning}>公网 HTTP 会明文传输登录凭据，正式使用账号前应配置 HTTPS。</Text>}
+            {securityProbe.phase === 'checking' && <Text style={styles.help}>正在识别服务器状态…</Text>}
+            {securityProbe.phase === 'unavailable' && <Text style={styles.httpWarning}>无法识别服务器状态，请检查地址和网络。</Text>}
+            {publicHttp && <Text style={styles.httpWarning}>公网 HTTP 会明文传输服务器和账号凭据，正式使用前应配置 HTTPS。</Text>}
             {canUseException && (
               <>
                 <View style={styles.certificateRow}>

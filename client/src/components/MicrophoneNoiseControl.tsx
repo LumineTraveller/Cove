@@ -13,8 +13,8 @@ import type { MicrophoneNoiseMode } from "../microphoneCandidate";
 
 const NOISE_MODES: ReadonlyArray<{ value: MicrophoneNoiseMode; label: string }> =
   [
-    { value: "system", label: "系统降噪（默认）" },
-    { value: "rnnoise", label: "RNNoise（实验）" },
+    { value: "system", label: "系统降噪" },
+    { value: "rnnoise", label: "RNNoise" },
   ];
 
 const MENU_GAP = 6;

@@ -19,6 +19,8 @@ import type { Room, SessionConfig } from './src/types';
 import { configureServerCertificate } from './src/serverCertificate';
 import { MobileUpdateProvider } from './src/components/MobileUpdater';
 import { authenticateAccount, type AccountAuthRequest } from './src/accountAuth';
+import { clearServerAccessToken, ensureServerAccess, normalizeServerSecurityURL, readServerSecurityStatus, serverFetch, type ServerSecurityStatus } from './src/serverSecurity';
+import { resolveServerIdentity } from './src/serverIdentity';
 
 export default function App() {
   return <SafeAreaProvider><MobileUpdateProvider><CoveSession /></MobileUpdateProvider></SafeAreaProvider>;
@@ -38,7 +40,13 @@ function CoveSession() {
 
   useEffect(() => {
     readSessionConfig()
-      .then(async saved => { setConfig(saved); setRememberedServers(await readRememberedServers()); })
+      .then(async saved => {
+        // In the default password-free mode the remembered account can resume
+        // immediately. An enabled server will reject the first socket attempt
+        // without an access token and return the user to the unlock form.
+        setConfig(saved);
+        setRememberedServers(await readRememberedServers());
+      })
       .catch(() => setAuthError('无法读取本机登录信息，请重新登录。'))
       .finally(() => setLoadingConfig(false));
   }, []);
@@ -99,6 +107,15 @@ function CoveSession() {
     const connectError = (cause: Error) => {
       if (!active) return;
       setSessionReady(false);
+      const code = (cause as Error & { data?: { code?: string } }).data?.code;
+      if (code === 'SERVER_ACCESS_REQUIRED' || code === 'SERVER_ACCESS_INVALID' || code === 'INSECURE_TRANSPORT') {
+        clearServerAccessToken(config.serverURL);
+        setSelectedRoom(null);
+        setConfig(null);
+        setAuthError(cause.message || '服务器访问令牌已失效，请重新验证服务器密码。');
+        nextSocket.disconnect();
+        return;
+      }
       setConnectionError(`无法连接服务器：${cause.message}`);
     };
     const sessionReplaced = () => {
@@ -139,15 +156,25 @@ function CoveSession() {
     setSavingConfig(true);
     setAuthError(null);
     try {
-      await configureServerCertificate(request.serverURL, request.allowInvalidServerCertificate);
-      const result = await authenticateAccount(request);
+      const serverURL = normalizeServerSecurityURL(request.serverURL);
+      if (!serverURL) throw new Error('服务器地址无效');
+      const normalizedRequest = { ...request, serverURL };
+      await configureServerCertificate(serverURL, normalizedRequest.allowInvalidServerCertificate);
+      await ensureServerAccess({
+        serverURL,
+        password: normalizedRequest.serverPassword ?? '',
+        bootstrapToken: normalizedRequest.bootstrapToken,
+      });
+      const result = await authenticateAccount(normalizedRequest);
+      const identity = await resolveServerIdentity(serverURL);
       setConfig(await saveSessionConfig({
         username: result.account.username,
-        serverURL: request.serverURL,
+        serverURL,
         accountToken: result.token,
         accountId: result.account.id,
         email: result.account.email,
-        allowInvalidServerCertificate: request.allowInvalidServerCertificate,
+        serverKey: identity.key,
+        allowInvalidServerCertificate: normalizedRequest.allowInvalidServerCertificate,
       }));
     } catch (cause) {
       setAuthError(cause instanceof Error ? cause.message : String(cause));
@@ -156,11 +183,22 @@ function CoveSession() {
     }
   };
 
+  const probeServerSecurity = useCallback(async (
+    serverURLValue: string,
+    allowInvalidServerCertificate: boolean,
+  ): Promise<ServerSecurityStatus> => {
+    const serverURL = normalizeServerSecurityURL(serverURLValue);
+    if (!serverURL) throw new Error('服务器地址无效');
+    await configureServerCertificate(serverURL, allowInvalidServerCertificate);
+    return readServerSecurityStatus(serverURL);
+  }, []);
+
   const handleChangeServer = async () => {
     if (savingConfig) return;
     setSavingConfig(true);
     try {
       // Switching servers disconnects this session, but keeps its valid login token.
+      if (config) clearServerAccessToken(config.serverURL);
       await clearServerConfig({ forgetSession: false });
       setRememberedServers(await readRememberedServers());
       setSelectedRoom(null);
@@ -171,21 +209,11 @@ function CoveSession() {
     finally { setSavingConfig(false); }
   };
 
-  const handleResume = async (saved: RememberedServer) => {
-    if (!saved.accountToken || savingConfig) return;
-    setSavingConfig(true); setAuthError(null);
-    try {
-      await configureServerCertificate(saved.serverURL, saved.allowInvalidServerCertificate === true);
-      setConfig(await saveSessionConfig({ ...saved, accountToken: saved.accountToken }));
-    } catch (error) { setAuthError(error instanceof Error ? error.message : '无法恢复登录'); }
-    finally { setSavingConfig(false); }
-  };
-
   const handleForget = async (saved: RememberedServer) => {
     if (savingConfig) return;
     setSavingConfig(true); setAuthError(null);
     try {
-      if (saved.accountToken) fetch(`${saved.serverURL}/api/auth/logout`, {
+      if (saved.accountToken) serverFetch(saved.serverURL, '/api/auth/logout', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: saved.accountToken }),
       }).catch(() => {});
       await forgetRememberedServer(saved.serverURL);
@@ -208,7 +236,7 @@ function CoveSession() {
 
   if (!config) {
     return <LoginScreen saving={savingConfig} error={authError} onSubmit={handleLogin}
-      rememberedServers={rememberedServers} onResume={handleResume} onForget={handleForget} />;
+      rememberedServers={rememberedServers} onForget={handleForget} onProbeServerSecurity={probeServerSecurity} />;
   }
 
   return (

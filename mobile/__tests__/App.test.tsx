@@ -18,6 +18,12 @@ jest.mock('../src/storage', () => ({
   readRememberedServers: async () => [], forgetRememberedServer: jest.fn(),
 }));
 jest.mock('../src/accountAuth', () => ({ authenticateAccount: jest.fn() }));
+jest.mock('../src/serverSecurity', () => ({
+  getServerAccessToken: jest.fn(() => 'server-access-token'),
+  clearServerAccessToken: jest.fn(),
+  ensureServerAccess: jest.fn(),
+  serverFetch: jest.fn(),
+}));
 const mockSocket = { on: jest.fn(), off: jest.fn(), connect: jest.fn(), disconnect: jest.fn() };
 jest.mock('../src/socket', () => ({ createCoveSocket: () => mockSocket }));
 jest.mock('../src/serverCertificate', () => ({ configureServerCertificate: jest.fn() }));

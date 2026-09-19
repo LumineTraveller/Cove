@@ -229,7 +229,15 @@ function UpdateProgress({
   );
 }
 
-export function UpdateCenter({ embedded = false, serverURL = '' }: { embedded?: boolean; serverURL?: string }) {
+export function UpdateCenter({
+  embedded = false,
+  serverURL = '',
+  allowDetails = true,
+}: {
+  embedded?: boolean;
+  serverURL?: string;
+  allowDetails?: boolean;
+}) {
   const [state, setState] = useState<UpdateState>(initialState);
   const [open, setOpen] = useState(false);
   const [clock, setClock] = useState(Date.now);
@@ -456,9 +464,11 @@ export function UpdateCenter({ embedded = false, serverURL = '' }: { embedded?: 
             <RefreshCw size={15} />{retryLabel}
           </button>
         )}
-        <button type="button" className="update-details-action" onClick={showDetails}>
-          <FileText size={15} />详细信息
-        </button>
+        {allowDetails && (
+          <button type="button" className="update-details-action" onClick={showDetails}>
+            <FileText size={15} />详细信息
+          </button>
+        )}
       </div>
     </aside>
   );

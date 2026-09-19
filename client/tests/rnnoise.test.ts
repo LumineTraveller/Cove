@@ -6,12 +6,12 @@ import { acquireMicrophoneCandidate } from '../src/microphoneCandidate';
 import { createMicrophoneConstraints } from '../src/audioDevices';
 import type { ProcessedMicrophone } from '../src/microphoneProcessing';
 
-test('experimental capture disables native NS but retains AEC/AGC and device identity', () => {
-  const system = createMicrophoneConstraints('usb');
+test('default capture uses RNNoise while retaining AEC/AGC and device identity', () => {
+  const system = createMicrophoneConstraints('usb', 'system');
   assert.equal(system.noiseSuppression, true);
   // 理想值而非硬约束：无法关闭原生 NS 的设备不应让整个 getUserMedia 失败，
   // 实际是否关闭由 microphoneCandidate 在拿到音轨后校验。
-  assert.deepEqual(createMicrophoneConstraints('usb', 'rnnoise'), { ...system, noiseSuppression: false });
+  assert.deepEqual(createMicrophoneConstraints('usb'), { ...system, noiseSuppression: false });
 });
 
 function stream(ns: boolean) {
@@ -21,7 +21,7 @@ function stream(ns: boolean) {
 }
 const processed = (raw: MediaStream): ProcessedMicrophone => ({ stream: raw, context: null, gain: null });
 
-test('system default does not load the RNNoise path', async () => {
+test('system mode does not load the RNNoise path', async () => {
   const raw = stream(true);
   const candidate = await acquireMicrophoneCandidate('system', async (mode) => {
     assert.equal(mode, 'system'); return raw.value;

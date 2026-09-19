@@ -1,11 +1,15 @@
 import type { UserProfile } from './types';
 import { profileForStorage, readProfile } from './profile';
+import { serverFetch } from './serverSecurity';
+import { resolveServerIdentity } from './serverIdentity';
 
 const SESSION_KEY = 'cove_account_session';
 const HISTORY_KEY = 'cove_remembered_logins';
 
 export interface AccountSession {
   serverUrl: string;
+  /** Stable DNS/IP identity used only for server-history deduplication. */
+  serverKey?: string;
   token: string;
   accountId: string;
   email: string;
@@ -14,6 +18,39 @@ export interface AccountSession {
 }
 
 export type RememberedLogin = Omit<AccountSession, 'token'> & { token?: string };
+
+function profileFromValue(value: unknown): UserProfile | undefined {
+  const candidate = value as { username?: unknown; avatarUrl?: unknown } | null;
+  if (typeof candidate?.username !== 'string') return undefined;
+  return profileForStorage({
+    username: candidate.username,
+    avatarUrl: typeof candidate.avatarUrl === 'string' ? candidate.avatarUrl : null,
+  });
+}
+
+function rememberedFromValue(value: unknown): RememberedLogin | null {
+  const candidate = value as {
+    serverUrl?: unknown;
+    token?: unknown;
+    serverKey?: unknown;
+    accountId?: unknown;
+    email?: unknown;
+    profile?: unknown;
+    allowInvalidServerCertificate?: unknown;
+  } | null;
+  if (typeof candidate?.serverUrl !== 'string' || typeof candidate.accountId !== 'string' || typeof candidate.email !== 'string') return null;
+  const serverUrl = normalizeLoginServer(candidate.serverUrl);
+  if (!serverUrl) return null;
+  return {
+    serverUrl,
+    ...(typeof candidate.serverKey === 'string' && candidate.serverKey ? { serverKey: candidate.serverKey } : {}),
+    ...(typeof candidate.token === 'string' && candidate.token ? { token: candidate.token } : {}),
+    accountId: candidate.accountId,
+    email: candidate.email,
+    profile: profileFromValue(candidate.profile),
+    allowInvalidServerCertificate: candidate.allowInvalidServerCertificate === true,
+  };
+}
 
 export function normalizeLoginServer(value: string): string {
   try {
@@ -28,16 +65,17 @@ export function normalizeLoginServer(value: string): string {
 
 function legacySession(): AccountSession | null {
   try {
-    const value = JSON.parse(localStorage.getItem(SESSION_KEY) ?? 'null');
-    if (typeof value?.token !== 'string' || !value.token || typeof value.accountId !== 'string' || typeof value.email !== 'string' || typeof value.serverUrl !== 'string') return null;
-    const serverUrl = normalizeLoginServer(value.serverUrl);
-    const profile = value.profile && typeof value.profile.username === 'string'
-      ? profileForStorage({
-        username: value.profile.username,
-        avatarUrl: typeof value.profile.avatarUrl === 'string' ? value.profile.avatarUrl : null,
-      })
-      : readProfile();
-    return serverUrl ? { ...value, serverUrl, profile } : null;
+    const value = rememberedFromValue(JSON.parse(localStorage.getItem(SESSION_KEY) ?? 'null'));
+    if (!value?.token) return null;
+    return {
+      serverUrl: value.serverUrl,
+      ...(value.serverKey ? { serverKey: value.serverKey } : {}),
+      token: value.token,
+      accountId: value.accountId,
+      email: value.email,
+      profile: value.profile ?? readProfile(),
+      allowInvalidServerCertificate: value.allowInvalidServerCertificate === true,
+    };
   } catch { return null; }
 }
 
@@ -45,11 +83,10 @@ export function readRememberedLogins(): RememberedLogin[] {
   let entries: RememberedLogin[] = [];
   try {
     const parsed = JSON.parse(localStorage.getItem(HISTORY_KEY) ?? '[]');
-    if (Array.isArray(parsed)) entries = parsed
-      .filter(value => typeof value?.serverUrl === 'string' && normalizeLoginServer(value.serverUrl) === value.serverUrl && typeof value.email === 'string' && typeof value.accountId === 'string')
-      .map(value => value.profile && typeof value.profile.username === 'string'
-        ? { ...value, profile: profileForStorage({ username: value.profile.username, avatarUrl: typeof value.profile.avatarUrl === 'string' ? value.profile.avatarUrl : null }) }
-        : value);
+    if (Array.isArray(parsed)) entries = parsed.flatMap(value => {
+      const entry = rememberedFromValue(value);
+      return entry ? [entry] : [];
+    });
   } catch { /* Keep the current login usable if history is damaged. */ }
   const current = legacySession();
   if (current && !entries.some(entry => entry.serverUrl === current.serverUrl)) {
@@ -68,10 +105,12 @@ export function rememberAccountSession(session: AccountSession) {
   const serverUrl = normalizeLoginServer(session.serverUrl);
   if (!serverUrl) throw new Error('服务器地址无效');
   // Whitelist persisted fields: never store a login form or its password.
-  const saved: AccountSession = { serverUrl, token: session.token, accountId: session.accountId, email: session.email,
+  const saved: AccountSession = { serverUrl, ...(session.serverKey ? { serverKey: session.serverKey } : {}), token: session.token, accountId: session.accountId, email: session.email,
     profile: session.profile ? profileForStorage(session.profile) : undefined,
     allowInvalidServerCertificate: session.allowInvalidServerCertificate === true };
-  const history = readRememberedLogins().filter(entry => entry.serverUrl !== serverUrl);
+  const history = readRememberedLogins().filter(entry =>
+    saved.serverKey && entry.serverKey ? entry.serverKey !== saved.serverKey : entry.serverUrl !== serverUrl,
+  );
   try {
     localStorage.setItem(HISTORY_KEY, JSON.stringify([saved, ...history].slice(0, 8)));
     localStorage.setItem(SESSION_KEY, JSON.stringify(saved));
@@ -138,10 +177,46 @@ export function disconnectAccountSession() {
   localStorage.removeItem(SESSION_KEY);
 }
 
+/**
+ * Resolve and persist the stable server identity without replacing the URL
+ * used for actual requests. This also upgrades older history rows and merges
+ * a domain/IP alias when both resolve to the same canonical address set.
+ */
+export async function enrichRememberedLoginIdentities(): Promise<RememberedLogin[]> {
+  const entries = readRememberedLogins();
+  const enriched = await Promise.all(entries.map(async entry => {
+    if (entry.serverKey) return entry;
+    const identity = await resolveServerIdentity(entry.serverUrl);
+    return { ...entry, serverKey: identity.key };
+  }));
+  const seen = new Set<string>();
+  const merged = enriched.filter(entry => {
+    const key = entry.serverKey ?? `url:${entry.serverUrl}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(merged));
+    const current = legacySession();
+    if (current && !current.serverKey) {
+      const matching = merged.find(entry => entry.serverUrl === current.serverUrl);
+      if (matching?.serverKey) localStorage.setItem(SESSION_KEY, JSON.stringify({ ...current, serverKey: matching.serverKey }));
+    }
+  } catch { /* History migration is best effort. */ }
+  return merged;
+}
+
+export async function rememberAccountSessionResolved(session: AccountSession): Promise<void> {
+  await enrichRememberedLoginIdentities();
+  const identity = await resolveServerIdentity(session.serverUrl);
+  rememberAccountSession({ ...session, serverKey: identity.key });
+}
+
 async function authRequest(serverUrl: string, endpoint: 'register' | 'login', body: Record<string, string>) {
   serverUrl = normalizeLoginServer(serverUrl);
   if (!serverUrl) throw new Error('服务器地址无效');
-  const response = await fetch(`${serverUrl}/api/auth/${endpoint}`, {
+  const response = await serverFetch(serverUrl, `/api/auth/${endpoint}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -156,7 +231,6 @@ async function authRequest(serverUrl: string, endpoint: 'register' | 'login', bo
     email: payload.account.email,
     profile: { username: payload.account.username, avatarUrl: payload.account.avatarUrl },
   };
-  rememberAccountSession(session);
   return { session, profile: { username: payload.account.username, avatarUrl: payload.account.avatarUrl } };
 }
 

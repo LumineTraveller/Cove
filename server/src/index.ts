@@ -6,7 +6,7 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
-import { createHash, randomUUID } from 'crypto';
+import { createHash, randomBytes, randomUUID } from 'crypto';
 import {
   initMediasoup, router, webRtcServer,
   peers, createPeer, removePeer, getRoomProducers,
@@ -17,6 +17,17 @@ import { soundpackVoiceAudience } from './soundpackAudience';
 import { createVoicePresenceEvent, voicePresenceMessage, type VoicePresenceAction } from './voicePresence';
 import { summarizeRtpStat, summarizeTransportStat } from './mediaDiagnostics';
 import { AccountAuthError, createAccountStore } from './accountAuth';
+import {
+  createServerSecurityStore,
+  isClientProtocolSupported,
+  isServerSecurityEnabled,
+  isSecureHttpRequest,
+  isSecureSocket,
+  readBearerToken,
+  requestAttemptKey,
+  securityErrorResponse,
+  ServerSecurityError,
+} from './serverSecurity';
 import { DisconnectGrace, DISCONNECT_GRACE_MS } from './disconnectGrace';
 import { RoomSettingsError, parseRoomLimit, validateRoomPassword, hashRoomPassword, verifyRoomPassword, assertRoomCapacity } from './roomSettings';
 import {
@@ -45,6 +56,7 @@ const io = new Server(httpServer, {
   connectionStateRecovery: { maxDisconnectionDuration: DISCONNECT_GRACE_MS * 2, skipMiddlewares: false },
 });
 const disconnectGrace = new DisconnectGrace();
+const serverSecurityEnabled = isServerSecurityEnabled();
 // Keep the recovery offset fresh even in a quiet voice room.
 const recoveryCheckpoint = setInterval(() => io.emit('session:checkpoint'), 2_000);
 recoveryCheckpoint.unref();
@@ -138,6 +150,51 @@ if (!soundpackColumns.some(column => column.name === 'sortOrder')) {
   })(existing);
 }
 
+// A fresh server receives a one-time administrator bootstrap credential. It is
+// never sent by the status endpoint and is removed after successful setup. In
+// production, prefer COVE_BOOTSTRAP_TOKEN (or COVE_BOOTSTRAP_TOKEN_FILE) so
+// the operator can provision it through their secret manager.
+const bootstrapTokenFile = process.env.COVE_BOOTSTRAP_TOKEN_FILE?.trim()
+  || path.join(dataDir, 'bootstrap-token.txt');
+const securityWasConfigured = (() => {
+  try {
+    const row = db.prepare('SELECT passwordHash FROM server_security WHERE id = 1').get() as { passwordHash?: string | null } | undefined;
+    return !!row?.passwordHash;
+  } catch { return false; }
+})();
+const loadBootstrapToken = (): string | undefined => {
+  const configured = process.env.COVE_BOOTSTRAP_TOKEN?.trim();
+  if (configured) return configured;
+  try {
+    const fromFile = fs.readFileSync(bootstrapTokenFile, 'utf8').trim();
+    if (fromFile) return fromFile;
+  } catch { /* A new local server may need a generated credential. */ }
+  if (securityWasConfigured || process.env.COVE_BOOTSTRAP_TOKEN_FILE?.trim()) return undefined;
+  const generated = randomBytes(32).toString('base64url');
+  try {
+    fs.writeFileSync(bootstrapTokenFile, `${generated}\n`, { flag: 'wx', mode: 0o600 });
+    return generated;
+  } catch {
+    try {
+      const existing = fs.readFileSync(bootstrapTokenFile, 'utf8').trim();
+      return existing || undefined;
+    } catch { return undefined; }
+  }
+};
+const bootstrapToken = serverSecurityEnabled ? loadBootstrapToken() : undefined;
+const serverSecurity = createServerSecurityStore(db, {
+  bootstrapToken,
+  onBootstrapConsumed: () => {
+    if (process.env.COVE_BOOTSTRAP_TOKEN?.trim()) return;
+    try { fs.rmSync(bootstrapTokenFile, { force: true }); } catch { /* best effort */ }
+  },
+  onAccessTokensRevoked: () => {
+    // Password rotation must stop already-connected clients from continuing
+    // to receive room traffic with a token that is no longer valid.
+    if (serverSecurityEnabled)
+      for (const targetSocket of io.sockets.sockets.values()) targetSocket.disconnect(true);
+  },
+});
 const accounts = createAccountStore(db);
 
 // ownerId 是本地持久身份凭据，不通过 API 或 Socket 广播给其他客户端。
@@ -395,13 +452,187 @@ function broadcastSoundpackAdded(pack: SoundpackRecord) {
   }
 }
 
+// ── Server access gate ───────────────────────────────────────────────────────
+
+const securityDenied = (res: express.Response, error: ServerSecurityError) => {
+  res.status(error.status).json({ error: error.message, code: error.code });
+};
+
+const outdatedClient = () => new ServerSecurityError(
+  426,
+  'CLIENT_VERSION_TOO_OLD',
+  '客户端版本过旧，无法登录，请升级到最新版本',
+);
+
+const requireSecureTransport = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (!isSecureHttpRequest(req)) {
+    securityDenied(res, new ServerSecurityError(
+      426,
+      'INSECURE_TRANSPORT',
+      '公网连接必须使用 HTTPS，请改用安全的服务器地址',
+    ));
+    return;
+  }
+  next();
+};
+
+const requireServerSecurityEnabled = (_req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (serverSecurityEnabled) {
+    next();
+    return;
+  }
+  securityDenied(res, new ServerSecurityError(
+    404,
+    'SERVER_SECURITY_DISABLED',
+    '服务器访问密码功能尚未启用',
+  ));
+};
+
+const requestServerAccessToken = (req: express.Request, allowQueryToken = false) => {
+  const headerToken = readBearerToken(req.get('authorization'));
+  if (headerToken) return headerToken;
+  if (!allowQueryToken) return null;
+  const queryToken = req.query.access_token;
+  return typeof queryToken === 'string' ? queryToken : null;
+};
+
+const requireServerAccess = (
+  req: express.Request,
+  res: express.Response,
+  next: express.NextFunction,
+  allowQueryToken = false,
+) => {
+  if (!serverSecurityEnabled) {
+    next();
+    return;
+  }
+  if (!isClientProtocolSupported(req.get('x-cove-client-protocol'))) {
+    securityDenied(res, outdatedClient());
+    return;
+  }
+  if (!isSecureHttpRequest(req)) {
+    securityDenied(res, new ServerSecurityError(
+      426,
+      'INSECURE_TRANSPORT',
+      '公网连接必须使用 HTTPS，请改用安全的服务器地址',
+    ));
+    return;
+  }
+  const token = requestServerAccessToken(req, allowQueryToken);
+  if (!serverSecurity.status().configured) {
+    securityDenied(res, new ServerSecurityError(
+      503,
+      'SERVER_NOT_INITIALIZED',
+      '服务器尚未初始化，请先设置服务器访问密码',
+    ));
+    return;
+  }
+  if (!serverSecurity.accessForToken(token)) {
+    securityDenied(res, new ServerSecurityError(
+      401,
+      'SERVER_ACCESS_REQUIRED',
+      '需要先验证服务器访问密码，请升级客户端或先完成服务器初始化',
+    ));
+    return;
+  }
+  next();
+};
+
+// Status is deliberately public and contains no secret material. Supplying a
+// bearer token only adds a boolean so the client can validate a remembered
+// access session without probing a business endpoint.
+app.get('/api/security/status', (req, res) => {
+  const bearer = readBearerToken(req.get('authorization'));
+  // A public status probe is safe over plaintext, but never accept a bearer
+  // token there: the token would otherwise be exposed while merely checking
+  // whether it is still valid.
+  if (serverSecurityEnabled && bearer && !isSecureHttpRequest(req)) {
+    securityDenied(res, new ServerSecurityError(
+      426,
+      'INSECURE_TRANSPORT',
+      '公网连接必须使用 HTTPS，请改用安全的服务器地址',
+    ));
+    return;
+  }
+  const current = serverSecurity.status();
+  res.json({
+    enabled: serverSecurityEnabled,
+    ...current,
+    authorized: serverSecurityEnabled && !!serverSecurity.accessForToken(bearer),
+    secureTransportRequired: serverSecurityEnabled && !isSecureHttpRequest(req),
+  });
+});
+
+app.post('/api/security/bootstrap', requireServerSecurityEnabled, requireSecureTransport, async (req, res) => {
+  const body = req.body as { bootstrapToken?: unknown; password?: unknown } | undefined;
+  if (typeof body?.bootstrapToken !== 'string' || typeof body.password !== 'string') {
+    res.status(400).json({ error: '请填写一次性初始化凭据和服务器访问密码', code: 'INVALID_REQUEST' });
+    return;
+  }
+  try {
+    const result = await serverSecurity.bootstrap(
+      body.bootstrapToken,
+      body.password,
+      requestAttemptKey(req, 'bootstrap'),
+    );
+    res.status(201).json(result);
+  } catch (error) { securityErrorResponse(error, res); }
+});
+
+app.post('/api/security/access', requireServerSecurityEnabled, requireSecureTransport, async (req, res) => {
+  const password = req.body?.password;
+  if (typeof password !== 'string') {
+    res.status(400).json({ error: '请填写服务器访问密码', code: 'INVALID_REQUEST' });
+    return;
+  }
+  try {
+    const result = await serverSecurity.unlock(password, requestAttemptKey(req, 'access'));
+    res.json(result);
+  } catch (error) { securityErrorResponse(error, res); }
+});
+
+app.post('/api/security/rotate', requireServerSecurityEnabled, requireSecureTransport, (req, res, next) => {
+  requireServerAccess(req, res, next);
+}, async (req, res) => {
+  const body = req.body as { currentPassword?: unknown; newPassword?: unknown } | undefined;
+  if (typeof body?.currentPassword !== 'string' || typeof body.newPassword !== 'string') {
+    res.status(400).json({ error: '请填写当前密码和新的服务器访问密码', code: 'INVALID_REQUEST' });
+    return;
+  }
+  try {
+    const result = await serverSecurity.rotate(
+      body.currentPassword,
+      body.newPassword,
+      requestAttemptKey(req, 'rotate'),
+    );
+    res.json(result);
+  } catch (error) { securityErrorResponse(error, res); }
+});
+
 // ── 语音包静态文件（必须在 catch-all 之前）────────────────────────────────────
-app.use('/sounds', express.static(SOUNDS_DIR));
-app.use('/chat-images', express.static(CHAT_IMAGES_DIR, {
+// Browser media elements cannot attach Authorization headers. The short-lived
+// token may be supplied as a query parameter only for these static resources;
+// all other REST requests require Authorization: Bearer. HTTPS is still
+// mandatory for non-loopback clients and the response is private/no-store.
+const requirePrivateStaticAccess = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (!serverSecurityEnabled) {
+    next();
+    return;
+  }
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  requireServerAccess(req, res, next, true);
+};
+app.use('/sounds', requirePrivateStaticAccess, express.static(SOUNDS_DIR, { cacheControl: false }));
+app.use('/chat-images', requirePrivateStaticAccess, express.static(CHAT_IMAGES_DIR, {
   fallthrough: false,
-  maxAge: '7d',
-  immutable: true,
+  cacheControl: false,
 }));
+
+// Every remaining API route, including account login/register, is behind the
+// server gate. The status/bootstrap/access endpoints above are the only public
+// exceptions.
+app.use('/api', requireServerAccess);
 
 // ── Static frontend ───────────────────────────────────────────────────────────
 
@@ -422,6 +653,12 @@ const authResponse = (error: unknown, res: express.Response) => {
     res.status(500).json({ error: '账号服务暂时不可用' });
   }
 };
+
+function accountTokenForRequest(req: express.Request, bodyToken?: unknown): string {
+  const headerToken = req.get('x-cove-account-token');
+  if (headerToken) return headerToken;
+  return typeof bodyToken === 'string' ? bodyToken : '';
+}
 
 app.post('/api/auth/register', async (req, res) => {
   const { email, password, username } = req.body as { email?: unknown; password?: unknown; username?: unknown };
@@ -450,7 +687,7 @@ app.post('/api/auth/login', async (req, res) => {
 // socket, when present, is updated and notified just like the socket path.
 app.post('/api/auth/profile', (req, res) => {
   const body = req.body as { token?: unknown; username?: unknown; avatarUrl?: unknown } | undefined;
-  const token = typeof body?.token === 'string' ? body.token : '';
+  const token = accountTokenForRequest(req, body?.token);
   const account = accounts.accountForToken(token);
   if (!account) { res.status(401).json({ error: '登录已失效，请重新登录' }); return; }
   if (typeof body?.username !== 'string' || !body.username.trim() || body.username.trim().length > 64) {
@@ -481,7 +718,7 @@ app.post('/api/auth/profile', (req, res) => {
 });
 
 app.post('/api/auth/logout', (req, res) => {
-  accounts.logout(req.body?.token);
+  accounts.logout(accountTokenForRequest(req, req.body?.token));
   res.status(204).end();
 });
 
@@ -982,14 +1219,64 @@ function replaceAccountSocket(accountId: string) {
 
 // ── Socket.io ─────────────────────────────────────────────────────────────────
 
+io.use((socket, next) => {
+  if (!serverSecurityEnabled) {
+    next();
+    return;
+  }
+  const deny = (error: ServerSecurityError) => {
+    const transportError = new Error(error.message) as Error & { data?: { code: string } };
+    transportError.data = { code: error.code };
+    next(transportError);
+  };
+  const auth = socket.handshake.auth as { serverAccessToken?: unknown; serverToken?: unknown; clientProtocol?: unknown } | undefined;
+  if (!isClientProtocolSupported(auth?.clientProtocol)) {
+    deny(outdatedClient());
+    return;
+  }
+  if (!isSecureSocket(socket)) {
+    deny(new ServerSecurityError(
+      426,
+      'INSECURE_TRANSPORT',
+      '公网连接必须使用 HTTPS/WSS，请改用安全的服务器地址',
+    ));
+    return;
+  }
+  const serverAccessToken = auth?.serverAccessToken ?? auth?.serverToken;
+  if (!serverSecurity.status().configured) {
+    deny(new ServerSecurityError(
+      503,
+      'SERVER_NOT_INITIALIZED',
+      '服务器尚未初始化，请先设置服务器访问密码',
+    ));
+    return;
+  }
+  const access = serverSecurity.accessForToken(serverAccessToken);
+  if (!access) {
+    deny(new ServerSecurityError(
+      401,
+      'SERVER_ACCESS_REQUIRED',
+      '需要先验证服务器访问密码，请升级客户端或先完成服务器初始化',
+    ));
+    return;
+  }
+  socket.data.serverAccessToken = serverAccessToken;
+  socket.data.serverAccessEpoch = access.epoch;
+  socket.data.serverAccessExpiresAt = access.expiresAt;
+  next();
+});
+
 // Reject expired/revoked snapshots before Socket.IO replays their buffered packets.
 const recoveryAdapter = io.of('/').adapter;
 const restoreSession = recoveryAdapter.restoreSession.bind(recoveryAdapter);
 recoveryAdapter.restoreSession = async (pid, offset) => {
   const session = await restoreSession(pid, offset);
   if (session) {
-    const token = (session.data as { authToken?: string })?.authToken;
+    const data = session.data as { authToken?: string; serverAccessToken?: string };
+    const token = data?.authToken;
+    const serverAccessToken = data?.serverAccessToken;
     if (!peers.has(session.sid)
+      || (serverSecurityEnabled && !serverSecurity.accessForToken(serverAccessToken))
       || (token && !accounts.accountForToken(token))) {
       // Socket.IO falls back to a fresh connection if snapshot restoration throws.
       throw new Error('Recovery session no longer valid');
@@ -1007,6 +1294,27 @@ recoveryAdapter.restoreSession = async (pid, offset) => {
 
 io.on('connection', socket => {
   console.log(`[+] ${socket.id} recovered=${socket.recovered}`);
+  // Handshake authentication alone would leave a long-lived socket usable
+  // after its bearer expires or after the server password is rotated. Check
+  // the database-backed session before every client packet as well, then
+  // force a reconnect so the client can obtain a fresh grant.
+  if (serverSecurityEnabled) {
+    socket.use((_packet, next) => {
+      if (serverSecurity.accessForToken(socket.data.serverAccessToken)) {
+        next();
+        return;
+      }
+      const error = new Error('服务器访问令牌已失效，请重新验证服务器密码') as Error & { data?: { code: string } };
+      error.data = { code: 'SERVER_ACCESS_INVALID' };
+      next(error);
+      socket.disconnect(true);
+    });
+    const accessExpiryTimer = setTimeout(() => {
+      if (!serverSecurity.accessForToken(socket.data.serverAccessToken)) socket.disconnect(true);
+    }, Math.max(1, Number(socket.data.serverAccessExpiresAt ?? Date.now()) - Date.now() + 1));
+    accessExpiryTimer.unref();
+    socket.once('disconnect', () => clearTimeout(accessExpiryTimer));
+  }
   disconnectGrace.recover(socket.id);
   if (!peers.has(socket.id)) createPeer(socket.id);
   // A kick/deletion during the outage must not restore stale room access.
@@ -1029,9 +1337,10 @@ io.on('connection', socket => {
     cb?: (result: { ok: boolean; error?: string; code?: string; profile?: { username: string; avatarUrl: string | null } }) => void,
   ) => {
     const account = typeof registration === 'string' ? null : accounts.accountForToken(registration?.authToken);
-    if (typeof registration !== 'string' && registration?.authToken && !account) {
-      cb?.({ ok: false, error: '登录已失效，请重新登录' }); return;
+    if (typeof registration === 'string' || !registration?.authToken) {
+      cb?.({ ok: false, error: '请升级客户端并先登录账号', code: 'ACCOUNT_AUTH_REQUIRED' }); return;
     }
+    if (!account) { cb?.({ ok: false, error: '登录已失效，请重新登录', code: 'ACCOUNT_SESSION_INVALID' }); return; }
     const boundAccountId = socket.data.accountId as string | undefined;
     if (boundAccountId && boundAccountId !== account?.id) {
       cb?.({ ok: false, error: '此连接已绑定其他账号，请重新连接', code: 'ACCOUNT_SWITCH_FORBIDDEN' }); return;

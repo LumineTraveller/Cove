@@ -85,6 +85,7 @@ import {
 } from "../chatImages";
 import { isScreenEncodingWithinPlan, screenEncodingPlanLabel } from "../screenCapture";
 import { diagnosticPacketLoss } from "../mediaDiagnostics";
+import { authorizedResourceURL, serverFetch } from "../serverSecurity";
 import type {
   Message,
   Room,
@@ -1101,10 +1102,11 @@ function ChatPanelV2({
       document.removeEventListener("keydown", handleKeyDown);
     };
   }, [fontMenuOpen, imageContextMenu]);
-  const imageUrl = (value: string) =>
-    /^https?:\/\//i.test(value) || value.startsWith("data:")
-      ? value
-      : `${serverURL.replace(/\/$/, "")}${value.startsWith("/") ? value : `/${value}`}`;
+  const imageUrl = (value: string) => {
+    if (/^https?:\/\//i.test(value) || value.startsWith("data:")) return value;
+    const target = `${serverURL.replace(/\/$/, "")}${value.startsWith("/") ? value : `/${value}`}`;
+    return authorizedResourceURL(serverURL, target);
+  };
   const showCopyNotice = (notice: string) => {
     setCopyNotice(notice);
     if (copyNoticeTimerRef.current !== null)
@@ -3631,7 +3633,7 @@ export default function ChatRoomV2({
       );
   }, []);
   const refreshRooms = useCallback(() => {
-    fetch(`${serverURL}/api/rooms`)
+    serverFetch(serverURL, '/api/rooms')
       .then((response) => (response.ok ? response.json() : []))
       .then((data) =>
         setRooms((current) =>
@@ -3696,7 +3698,7 @@ export default function ChatRoomV2({
   useEffect(() => {
     if (!roomId) return;
     let active = true;
-    fetch(`${serverURL}/api/rooms/${roomId}`)
+    serverFetch(serverURL, `/api/rooms/${roomId}`)
       .then((response) =>
         response.ok ? response.json() : Promise.reject(new Error("房间不存在")),
       )
@@ -4107,8 +4109,9 @@ export default function ChatRoomV2({
     try {
       for (const file of images) {
         const dataUrl = await readFileAsDataUrl(file);
-        const response = await fetch(
-          `${serverURL}/api/rooms/${roomId}/images`,
+        const response = await serverFetch(
+          serverURL,
+          `/api/rooms/${roomId}/images`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },

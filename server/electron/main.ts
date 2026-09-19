@@ -56,11 +56,13 @@ function openLog() {
 }
 
 // ── 配置文件 (~/.cove/server-config.json) ─────────────────────────────────────
-// 控制 mediasoup 的公网 IP 和端口（SakuraFrp 远程访问时需要设置）
+// 控制 mediasoup 的公网 IP 和端口（SakuraFrp 远程访问时需要设置），
+// 以及是否启用服务器访问密码。安全功能随代码发布但默认保持关闭。
 // 示例内容：
 // {
 //   "mediasoupIp": "114.51.4.19",
-//   "mediasoupPort": 40000
+//   "mediasoupPort": 40000,
+//   "serverSecurityEnabled": false
 // }
 
 const CONFIG_PATH = path.join(os.homedir(), '.cove', 'server-config.json');
@@ -71,6 +73,8 @@ function readConfig() {
     const cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
     if (cfg.mediasoupIp)   process.env.MEDIASOUP_IP   = cfg.mediasoupIp;
     if (cfg.mediasoupPort) process.env.MEDIASOUP_PORT  = String(cfg.mediasoupPort);
+    if (typeof cfg.serverSecurityEnabled === 'boolean')
+      process.env.COVE_SERVER_SECURITY_ENABLED = String(cfg.serverSecurityEnabled);
   } catch (e) {
     console.warn('[config] 读取配置失败:', e);
   }
@@ -176,6 +180,11 @@ function buildMenu(localIP: string): Electron.Menu {
       label: '打开数据目录',
       click: () => shell.openPath(path.join(os.homedir(), '.cove')),
     },
+    {
+      label: '打开一次性初始化凭据（首次使用）',
+      enabled: fs.existsSync(path.join(os.homedir(), '.cove', 'bootstrap-token.txt')),
+      click: () => shell.openPath(path.join(os.homedir(), '.cove', 'bootstrap-token.txt')),
+    },
     { label: '查看日志', click: () => openLog() },
     {
       label: '编辑配置文件',
@@ -186,6 +195,7 @@ function buildMenu(localIP: string): Electron.Menu {
           fs.writeFileSync(CONFIG_PATH, JSON.stringify({
             mediasoupIp: '127.0.0.1',
             mediasoupPort: 40000,
+            serverSecurityEnabled: false,
           }, null, 2));
         }
         shell.openPath(CONFIG_PATH);
