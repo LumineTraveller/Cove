@@ -1,6 +1,6 @@
 # Cove Mobile v0.6.0
 
-状态：待发布。Android versionCode：10。配套桌面端及服务端：1.4.0。
+发布日期：2026-09-20。Android versionCode：10。配套桌面端及服务端：1.4.0。
 
 ## 新增与修复
 
