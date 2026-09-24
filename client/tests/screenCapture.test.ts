@@ -1,8 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  applyScreenCaptureConstraints,
-  buildScreenCaptureConstraints,
   createScreenEncodingPlan,
   isScreenEncodingWithinPlan,
   screenEncodingPlanLabel,
@@ -12,15 +10,6 @@ import {
   type ScreenActivity,
   type ScreenPreset,
 } from '../src/screenCapture';
-
-test('game mode requests a 55-60 FPS capture range without pretending to resize the desktop source', () => {
-  assert.deepEqual(buildScreenCaptureConstraints({
-    fps: 60,
-    strictFrameRate: true,
-  }), {
-    frameRate: { min: 55, ideal: 60, max: 60 },
-  });
-});
 
 test('1080p keeps a 16:10 source inside 1920x1080 without cropping', () => {
   const plan = createScreenEncodingPlan({
@@ -168,24 +157,4 @@ test('turning native sharing off restores the selected preset without changing t
   assert.deepEqual([scaled.outputWidth, scaled.outputHeight], [1152, 720]);
   assert.deepEqual([scaled.sourceWidth, scaled.sourceHeight], [2560, 1600]);
   assert.equal(scaled.nativeResolution, false);
-});
-
-test('strict capture constraints fall back to ideal/max when Chromium rejects min', async () => {
-  const calls: MediaTrackConstraints[] = [];
-  const track = {
-    applyConstraints: async (constraints: MediaTrackConstraints) => {
-      calls.push(constraints);
-      if (calls.length === 1) throw new Error('Overconstrained');
-    },
-  } as unknown as MediaStreamTrack;
-
-  const result = await applyScreenCaptureConstraints(track, {
-    fps: 60,
-    strictFrameRate: true,
-  });
-
-  assert.equal(result.mode, 'preferred');
-  assert.equal(calls.length, 2);
-  assert.deepEqual(calls[0].frameRate, { min: 55, ideal: 60, max: 60 });
-  assert.deepEqual(calls[1].frameRate, { ideal: 60, max: 60 });
 });

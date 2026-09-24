@@ -683,23 +683,45 @@ function RemoteScreenVideo({
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
-    const retry = () => void video.play().catch((error) =>
-      console.warn("[screen-preview] 点击后仍无法播放远程共享", error));
-    const play = () => {
+    let retryPending = false;
+    let attemptPlayback: (allowMutedFallback: boolean) => void;
+    const retry = () => {
+      retryPending = false;
+      attemptPlayback(true);
+    };
+    const queueRetry = () => {
+      if (retryPending) return;
+      retryPending = true;
+      document.addEventListener("click", retry, { once: true });
+    };
+    attemptPlayback = (allowMutedFallback) => {
       syncPlaybackVolume();
       void video.play().catch((error: unknown) => {
         if (error instanceof DOMException && error.name === "AbortError") return;
         console.warn("[screen-preview] 远程共享预览播放失败", error);
-        if (error instanceof DOMException && error.name === "NotAllowedError")
-          document.addEventListener("click", retry, { once: true });
+        if (error instanceof DOMException && error.name === "NotAllowedError") {
+          if (allowMutedFallback) {
+            // 系统音轨与画面共用一个播放器后，有声自动播放可能被 Chromium
+            // 拒绝。先静音启动同一个播放器，避免连画面也一起黑掉；用户点击后
+            // 再在手势中恢复音量。
+            video.muted = true;
+            void video.play().then(queueRetry).catch((mutedError) => {
+              console.warn("[screen-preview] 静音回退仍无法播放远程画面", mutedError);
+              queueRetry();
+            });
+          } else {
+            queueRetry();
+          }
+        }
       });
     };
+    const onTrackAdded = () => attemptPlayback(true);
     video.srcObject = stream;
-    stream.addEventListener("addtrack", play);
+    stream.addEventListener("addtrack", onTrackAdded);
     stream.addEventListener("removetrack", syncPlaybackVolume);
-    play();
+    attemptPlayback(true);
     return () => {
-      stream.removeEventListener("addtrack", play);
+      stream.removeEventListener("addtrack", onTrackAdded);
       stream.removeEventListener("removetrack", syncPlaybackVolume);
       document.removeEventListener("click", retry);
       video.pause();

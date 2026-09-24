@@ -213,13 +213,30 @@ function createWindow() {
           callback({});
           return;
         }
+        // This flow shares the desktop, not an arbitrary first window. Electron
+        // does not guarantee that mixed screen/window sources are ordered with
+        // a screen first, so explicitly prefer a real display source.
+        const source =
+          sources.find((candidate) => candidate.id.startsWith("screen:")) ??
+          sources[0];
+        console.info("[screen share] Electron 选择采集源", {
+          id: source.id,
+          name: source.name,
+          screenSourceCount: sources.filter((candidate) =>
+            candidate.id.startsWith("screen:"),
+          ).length,
+          totalSourceCount: sources.length,
+        });
         // Do not expose Electron's global `loopback` source here. It includes
         // Cove's own rendered voice/chat audio. The renderer starts a native
         // process-loopback capture with Cove excluded when system audio is
         // requested, and the display stream itself remains video-only.
-        callback({ video: sources[0] });
+        callback({ video: source });
       })
-      .catch(() => callback({}));
+      .catch((error) => {
+        console.error("[screen share] Electron 无法枚举采集源", error);
+        callback({});
+      });
   });
 }
 

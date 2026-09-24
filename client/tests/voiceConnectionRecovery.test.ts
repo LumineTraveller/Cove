@@ -3,6 +3,7 @@ import test from 'node:test';
 import { createVoiceConnectionRecovery, type VoiceConnectionState } from '../src/voiceConnectionRecovery';
 import { DisconnectGrace, DISCONNECT_GRACE_MS } from '../src/utils/disconnectGrace';
 import { DisconnectGrace as ServerGrace } from '../../server/src/disconnectGrace';
+import { hasRecoverableMediaTransport, shouldResetVoiceForTransportState } from '../src/voiceTransportPolicy';
 
 function fixture() {
   const state: VoiceConnectionState = {
@@ -86,6 +87,26 @@ test('a voice room with no remote audio yet may retain its connected microphone'
   assert.equal(f.state.active, true);
   assert.deepEqual(f.resets, []);
   f.recovery.dispose();
+});
+
+test('a temporary media disconnect remains recoverable during signalling loss', t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture();
+  f.state.sendState = 'disconnected';
+  f.state.recvState = 'connected';
+  f.disconnect();
+  t.mock.timers.tick(DISCONNECT_GRACE_MS);
+  assert.deepEqual(f.resets, []);
+  assert.equal(hasRecoverableMediaTransport('disconnected', 'connected'), true);
+  assert.equal(shouldResetVoiceForTransportState('disconnected'), false);
+  f.recovery.dispose();
+});
+
+test('only a terminal media failure starts the automatic voice-reset path', () => {
+  assert.equal(shouldResetVoiceForTransportState('failed'), true);
+  assert.equal(shouldResetVoiceForTransportState('disconnected'), false);
+  assert.equal(shouldResetVoiceForTransportState('connecting'), false);
+  assert.equal(hasRecoverableMediaTransport('failed', 'closed'), false);
 });
 
 test('an unfinished voice join still times out instead of waiting indefinitely', t => {

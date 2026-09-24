@@ -1,4 +1,5 @@
 import { DisconnectGrace } from './utils/disconnectGrace';
+import { hasRecoverableMediaTransport } from './voiceTransportPolicy';
 
 export interface VoiceConnectionState {
   connected: boolean;
@@ -37,9 +38,7 @@ export function createVoiceConnectionRecovery(options: VoiceConnectionRecoveryOp
       // A late CONNECT packet must not make a signalling-only timeout destroy
       // working WebRTC. Transport failures retain their own five-second timers;
       // onConnect still rejects media belonging to a different server session.
-      if (latest.active && latest.sendState === 'connected'
-        && (latest.recvState === 'connected' || latest.recvState === 'new'
-          || latest.recvState === 'connecting')) {
+      if (latest.active && hasRecoverableMediaTransport(latest.sendState, latest.recvState)) {
         options.onEvent('signal-timeout-media-retained');
         return;
       }

@@ -3705,6 +3705,19 @@ body .cove-window-controls button {
   font-size: 15px;
   line-height: 1.6;
 }
+.cove-connection-diagnostic {
+  margin-top: 12px;
+  padding: 11px 13px;
+  border: 1px solid #dce5ef;
+  border-radius: 12px;
+  background: #f4f7fa;
+  color: #566679;
+  font-size: 13px;
+  line-height: 1.55;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.cove-connection-diagnostic strong { color: var(--ink); }
 .cove-connection-server {
   margin-top: 20px;
   overflow: hidden;
@@ -6202,6 +6215,11 @@ body .cove-window-controls button {
   background: rgba(2, 7, 13, 0.58);
 }
 :root[data-theme="dark"] .cove-connection-server {
+  background: #101821;
+  border-color: var(--line);
+  color: var(--muted);
+}
+:root[data-theme="dark"] .cove-connection-diagnostic {
   background: #101821;
   border-color: var(--line);
   color: var(--muted);

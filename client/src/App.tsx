@@ -17,10 +17,33 @@ import { clearServerAccessToken, ensureServerAccess, normalizeServerSecurityURL,
 import { applyTheme, readTheme, type AppTheme, THEME_STORAGE_KEY } from './theme';
 
 const DEFAULT_SERVER = 'http://localhost:3001';
-type ConnectionProblem = 'timeout' | 'registration' | null;
+// Engine.IO detects a half-open connection after its ping interval and timeout.
+// Keep retrying past that window and the server's 5s disconnect grace period.
+const SESSION_RETRY_LIMIT = 28;
+type ConnectionProblem = 'timeout' | 'registration' | 'session-in-use' | null;
 type ServerSecurityProbe =
   | { phase: 'idle' | 'checking' | 'invalid' | 'unavailable'; status?: undefined }
   | { phase: 'ready'; status: ServerSecurityStatus };
+
+function describeSocketDisconnect(reason: string): string {
+  const explanation = reason === 'ping timeout'
+    ? 'Socket.IO 心跳超时；可能是网络丢包/切换，也可能是代理或服务端未及时响应'
+    : reason === 'transport close'
+      ? '底层网络传输已关闭；可能是网络切换、代理断开或服务端关闭连接'
+      : reason === 'transport error'
+        ? '底层网络传输发生错误'
+        : reason === 'io server disconnect'
+          ? '服务器主动断开了 Socket.IO 信令连接（不是普通网络超时）'
+          : reason === 'io client disconnect'
+            ? '客户端代码主动关闭了 Socket.IO 信令连接'
+            : 'Socket.IO 信令连接断开';
+  return `${explanation}（${reason || '未提供原因'}）`;
+}
+
+function describeSocketConnectError(cause: Error & { data?: { code?: string } }): string {
+  const code = cause.data?.code;
+  return `Socket.IO 握手失败${code ? `（${code}）` : ''}：${cause.message || '未提供错误信息'}`;
+}
 
 function WindowTitleBar({ showBrand = true }: { showBrand?: boolean }) {
   const [maximized, setMaximized] = useState(false);
@@ -77,6 +100,8 @@ export default function App() {
   const [editingServer, setEditingServer] = useState(false);
   const [initialConnectionPending, setInitialConnectionPending] = useState(false);
   const [connectionProblem, setConnectionProblem] = useState<ConnectionProblem>(null);
+  const [connectionDiagnostic, setConnectionDiagnostic] = useState<string | null>(null);
+  const [connectionRetryVersion, setConnectionRetryVersion] = useState(0);
   const serverURL = getServerURL();
   const accountSession = readAccountSession(serverURL);
   const needLogin = !profile.username || !serverUrl || !accountSession || serverUnlockRequired;
@@ -146,6 +171,8 @@ export default function App() {
     setConnected(null);
     setInitialConnectionPending(true);
     setConnectionProblem(null);
+    setConnectionDiagnostic(null);
+    let lastConnectError: string | null = null;
 
     const deadline = createConnectionDeadline(() => {
       if (!active) return;
@@ -153,16 +180,19 @@ export default function App() {
       setConnected(false);
       setInitialConnectionPending(false);
       setConnectionProblem('timeout');
+      setConnectionDiagnostic(lastConnectError
+        ? `30 秒内未能建立信令连接；最后一次握手错误：${lastConnectError}`
+        : '30 秒内未能建立 Socket.IO 信令连接，未收到服务器连接确认');
       setEditingServer(true);
     });
 
     // During a short transport outage Socket.IO can establish the replacement
     // connection before the server has processed the old socket's disconnect.
-    // The server then briefly reports SESSION_IN_USE even though this is the
-    // same persisted login reconnecting. Retry for the disconnect grace window
-    // before treating the response as a real second-device login.
+    // Retry through the server's disconnect grace window. If SESSION_IN_USE
+    // persists, surface the conflict without clearing credentials: the code
+    // only proves that a same-token socket is marked connected, not why it is.
     const scheduleSessionRetry = (): boolean => {
-      if (!active || sessionRetryAttempt >= 6) return false;
+      if (!active || sessionRetryAttempt >= SESSION_RETRY_LIMIT) return false;
       // A duplicated acknowledgement from the same connection is already
       // covered by the pending retry; never fall through to logout here.
       if (sessionRetryTimer) return true;
@@ -172,6 +202,7 @@ export default function App() {
       setInitialConnectionPending(true);
       setConnectionProblem(null);
       socket.disconnect();
+      setConnectionDiagnostic(`账号登记返回 SESSION_IN_USE；正在等待旧信令连接释放并重试（${sessionRetryAttempt}/${SESSION_RETRY_LIMIT}）。`);
       sessionRetryTimer = setTimeout(() => {
         sessionRetryTimer = null;
         if (active) socket.connect();
@@ -181,6 +212,8 @@ export default function App() {
 
     const registration = createSessionRegistration({
       isConnected: () => active && socket.connected,
+      // Keep the last transport failure visible while the replacement socket
+      // is registering; clear it only after registration succeeds.
       onPending: () => setConnected(null),
       send: acknowledge => {
         const currentProfile = readAccountSession(serverURL)?.profile ?? readProfile();
@@ -195,6 +228,7 @@ export default function App() {
         }, acknowledge);
       },
       onTransientError: error => {
+        setConnectionDiagnostic(`已连接服务器，但登录登记确认未收到：${error.message}`);
         console.warn('[connection] 登录登记确认暂未收到，将自动重试:', error.message);
       },
       onSuccess: response => {
@@ -217,11 +251,13 @@ export default function App() {
         deadline.complete();
         setInitialConnectionPending(false);
         setConnectionProblem(null);
+        setConnectionDiagnostic(null);
       },
       onRejected: response => {
         setConnected(false);
         socket.disconnect();
         setInitialConnectionPending(false);
+        setConnectionDiagnostic(`服务器拒绝账号登记${response.code ? `（${response.code}）` : ''}：${response.error ?? '未提供原因'}`);
         if (response.error?.includes('登录已失效')) {
           clearAccountSession(serverURL);
           clearProfile();
@@ -229,11 +265,17 @@ export default function App() {
           return;
         }
         if (response.code === 'SESSION_IN_USE') {
+          // The active Socket.IO peer may not be declared dead until its ping
+          // timeout expires; don't let the shorter initial-connect deadline cut
+          // off this bounded stale-socket recovery window.
+          deadline.complete();
           if (scheduleSessionRetry()) return;
-          clearAccountSession(serverURL);
-          clearProfile();
-          setProfile({ username: '', avatarUrl: null });
-          setAuthError(response.error ?? '账号已在其他设备使用，请重新登录。');
+          // SESSION_IN_USE only means a same-token socket is still marked
+          // connected. That may be a stale half-open socket after a network
+          // outage; it does not prove a fresh login happened elsewhere.
+          setConnectionProblem('session-in-use');
+          setConnectionDiagnostic('服务端在多次重试后仍返回 SESSION_IN_USE：它认为同一登录令牌对应的旧信令连接仍在线。这不等同于“另一台设备刚刚登录”；本机登录凭据已保留。');
+          console.warn('[connection] SESSION_IN_USE 重试耗尽；保留本地账号会话，等待手动重试');
           setEditingServer(false);
           return;
         }
@@ -241,10 +283,19 @@ export default function App() {
         setEditingServer(true);
       },
     });
-    const register = () => registration.start();
-    const disconnect = () => {
+    const register = () => {
+      lastConnectError = null;
+      registration.start();
+    };
+    const disconnect = (reason: string) => {
       registration.cancel();
-      if (active) setConnected(false);
+      if (active) {
+        setConnected(false);
+        const summary = describeSocketDisconnect(reason);
+        setConnectionDiagnostic(lastConnectError
+          ? `${summary}；最近的握手错误：${lastConnectError}`
+          : summary);
+      }
     };
     const requireServerUnlock = (message?: string) => {
       if (!active) return;
@@ -254,9 +305,12 @@ export default function App() {
       setInitialConnectionPending(false);
       setServerUnlockRequired(true);
       socket.disconnect();
+      setConnectionDiagnostic(`服务器访问验证失败：${message || '访问令牌无效或已过期'}`);
     };
     const connectError = (cause: Error & { data?: { code?: string } }) => {
       if (!active) return;
+      lastConnectError = describeSocketConnectError(cause);
+      setConnectionDiagnostic(lastConnectError);
       if (requiresServerAccessRecovery(cause.data?.code)) {
         requireServerUnlock(cause.message);
         return;
@@ -268,6 +322,7 @@ export default function App() {
     };
     const sessionReplaced = () => {
       if (!active) return;
+      console.warn('[connection] 收到 account:session-replaced；服务端通知当前账号会话被替换');
       if (sessionRetryTimer) {
         clearTimeout(sessionRetryTimer);
         sessionRetryTimer = null;
@@ -277,7 +332,7 @@ export default function App() {
       socket.disconnect();
       setProfile({ username: '', avatarUrl: null });
       setConnected(false);
-      setAuthError('账号已在其他设备登录，本设备已退出，请重新登录。');
+      setAuthError('服务器发来 account:session-replaced 通知，表示当前账号会话被新登录替换。若你没有在其他设备登录，请检查是否有第二个 Cove 实例或不同服务器地址实际指向同一服务。');
       setEditingServer(false);
     };
     socket.on('connect', register);
@@ -312,7 +367,7 @@ export default function App() {
       socket.off('account:session-replaced', sessionReplaced);
       socket.disconnect();
     };
-  }, [editingServer, needLogin, serverURL]);
+  }, [connectionRetryVersion, editingServer, needLogin, serverURL]);
 
   const handleLogin = async () => {
     const username = draftName.trim();
@@ -366,12 +421,20 @@ export default function App() {
   };
 
   const editServer = () => {
+    const previousDiagnostic = connectionDiagnostic;
     socket.disconnect();
+    // Keep the failure that led here instead of replacing it with the expected
+    // io client disconnect caused by opening the server editor.
+    if (previousDiagnostic) setConnectionDiagnostic(previousDiagnostic);
     setDraftUrl(serverURL);
     setAllowUntrustedCertificate(hasServerCertificateException(serverURL));
     setInitialConnectionPending(false);
     setConnectionProblem(null);
     setEditingServer(true);
+  };
+
+  const retryServerConnection = () => {
+    setConnectionRetryVersion(version => version + 1);
   };
 
   const saveServerAndReconnect = () => {
@@ -679,8 +742,9 @@ export default function App() {
             {editingServer ? (
               <>
                 <div className="cove-connection-icon error"><WifiOff size={24} /></div>
-                <h2 id="connection-title" className="cove-connection-title">{connectionProblem === 'timeout' ? '连接超时' : connectionProblem === 'registration' ? '服务器拒绝了登录' : '修改服务器地址'}</h2>
-                <p className="cove-connection-copy">{connectionProblem === 'timeout' ? '30 秒内未能连接，Cove 已停止重试。请检查或修改地址。' : connectionProblem === 'registration' ? '身份验证没有成功，请检查服务器是否正常或更换地址。' : '当前连接已取消，保存新地址后会立即重新连接。'}</p>
+                <h2 id="connection-title" className="cove-connection-title">{connectionProblem === 'timeout' ? '连接超时' : connectionProblem === 'registration' ? '服务器拒绝了登录' : connectionProblem === 'session-in-use' ? '账号旧连接仍在线' : '修改服务器地址'}</h2>
+                <p className="cove-connection-copy">{connectionProblem === 'timeout' ? '30 秒内未能连接，Cove 已停止重试。请检查或修改地址。' : connectionProblem === 'registration' ? '身份验证没有成功，请检查服务器是否正常或更换地址。' : connectionProblem === 'session-in-use' ? '服务器仍认为同一账号的旧信令连接在线。此情况不一定代表发生了另一台设备登录；本机登录凭据已保留。' : '当前连接已取消，保存新地址后会立即重新连接。'}</p>
+                {connectionDiagnostic && <p className="cove-connection-diagnostic"><strong>连接诊断：</strong>{connectionDiagnostic}</p>}
                 <label className="cove-connection-label" htmlFor="reconnect-server">服务器地址</label>
                 <div className="cove-connection-input-wrap">
                   <Server size={18} />
@@ -693,9 +757,12 @@ export default function App() {
             ) : (
               <div className="text-center" aria-live="polite">
                 <div className={`cove-connection-icon ${connected === false ? 'error' : 'pending'}`}>{connected === false ? <WifiOff size={24} /> : <LoaderCircle size={24} className="animate-spin" />}</div>
-                <h2 id="connection-title" className="cove-connection-title">{connected === false ? '暂时无法连接' : '正在连接服务器'}</h2>
-                <p className="cove-connection-copy">{initialConnectionPending ? 'Cove 最多尝试 30 秒；你也可以立即取消并修改服务器地址。' : 'Cove 会自动重连并恢复你所在的房间。'}</p>
+                <h2 id="connection-title" className="cove-connection-title">{connectionProblem === 'session-in-use' ? '账号旧连接仍在线' : connected === false ? '暂时无法连接' : '正在连接服务器'}</h2>
+                <p className="cove-connection-copy">{connectionProblem === 'session-in-use' ? '服务器仍认为同一登录令牌对应的旧信令连接在线。Cove 会等待服务端完成旧连接超时检测；仍未恢复时会保留本机账号状态，不会误清登录凭据。' : initialConnectionPending ? 'Cove 最多尝试 30 秒；你也可以立即取消并修改服务器地址。' : 'Cove 会自动重连并恢复你所在的房间。'}</p>
+                {connectionDiagnostic && <p className="cove-connection-diagnostic"><strong>连接诊断：</strong>{connectionDiagnostic}</p>}
+                <p className="cove-connection-hint">此提示反映 Cove 与服务器的信令连接；已建立的语音媒体连接可能仍在传输，所以断联期间暂时还能听到声音。</p>
                 <p className="cove-connection-server" title={serverURL}>{serverURL}</p>
+                {connectionProblem === 'session-in-use' && <button className="cove-connection-primary" onClick={retryServerConnection}>再次尝试连接</button>}
                 <button className="cove-connection-secondary" onClick={editServer}>取消连接并修改地址</button>
               </div>
             )}

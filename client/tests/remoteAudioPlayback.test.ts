@@ -14,6 +14,7 @@ function playbackHarness() {
   const graph: { source: any; gain?: any; stream: any }[] = [];
   const streams: { tracks: { id: string }[] }[] = [];
   const consumed: { producerId: string; streamId: string }[] = [];
+  const consumerEvents = new Map<string, Record<string, Function>>();
   let storageBlocked = false;
   class FakeAudio {
     muted = false;
@@ -47,7 +48,14 @@ function playbackHarness() {
     id: 'transport', on() {},
     async consume(params: any) {
       consumed.push(params);
-      return { id: params.producerId, track: { id: params.producerId }, on() {}, close() {} };
+      const events: Record<string, Function> = {};
+      consumerEvents.set(params.producerId, events);
+      return {
+        id: params.producerId,
+        track: { id: params.producerId },
+        on(event: string, handler: Function) { events[event] = handler; },
+        close() {},
+      };
     },
   };
   const socket = {
@@ -120,6 +128,7 @@ function playbackHarness() {
   return {
     rtc, setup, consume, close, activations, streams, consumed, outputFor, audibleElementFor,
     blockStorage: () => { storageBlocked = true; },
+    endTrack: (id: string) => consumerEvents.get(id)?.trackended?.(),
   };
 }
 
@@ -148,6 +157,9 @@ test('screen audio joins the video stream and sync group without a duplicate aud
   assert.deepEqual(Array.from(screen?.tracks ?? [], track => track.id), ['video-1']);
   assert.equal(await h.consume('screen-2', 'alice', 'audio', { type: 'screen-audio' }), true);
   assert.deepEqual(Array.from(screen?.tracks ?? [], track => track.id), ['video-1', 'screen-2']);
+  h.endTrack('screen-2');
+  assert.deepEqual(Array.from(screen?.tracks ?? [], track => track.id), ['video-1'],
+    'an ended screen-audio track must be removed from the shared video stream');
   assert.equal(h.audibleElementFor('app-1').volume, 1);
   const voiceActivation = h.activations.find(element =>
     (element.srcObject as { tracks?: { id: string }[] } | null)?.tracks?.[0]?.id === 'mic-1');

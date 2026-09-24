@@ -3,6 +3,7 @@ import { Socket } from "socket.io-client";
 import { Device, types as MsTypes } from "mediasoup-client";
 import { DisconnectGrace } from "../utils/disconnectGrace";
 import { createVoiceConnectionRecovery } from "../voiceConnectionRecovery";
+import { shouldResetVoiceForTransportState } from "../voiceTransportPolicy";
 import {
   createProcessedMicrophone,
   setMicrophoneGain,
@@ -42,7 +43,6 @@ import {
   videoCounterSample,
 } from "../mediaDiagnostics";
 import {
-  applyScreenCaptureConstraints,
   createScreenEncodingPlan,
   toScreenRtpEncoding,
   withScreenEncodingPlan,
@@ -398,13 +398,17 @@ export function useWebRTC(socket: Socket, roomId: string) {
 
   const checkTransport = useCallback((key: string, state: string) => {
     if (state === "connected") connectionGrace.current.recover(key);
-    if (state === "failed" || state === "disconnected") {
+    if (shouldResetVoiceForTransportState(state)) {
       connectionGrace.current.fail(key, () => {
         resetVoiceRef.current(true, `media-${key}-timeout`);
         setAudioDeviceError(
           "语音连接中断超过 5 秒，可直接重新加入语音，无需重连服务器",
         );
       });
+    } else {
+      // A disconnected ICE/DTLS path may recover by itself. Cancel any stale
+      // failure timer instead of ejecting the user after a brief network flap.
+      connectionGrace.current.recover(key);
     }
   }, []);
   // 仅在已经建立语音会话后播放本地“离开”提示，避免组件卸载/重复清理时误播。
@@ -1584,6 +1588,22 @@ export function useWebRTC(socket: Socket, roomId: string) {
           return false;
         }
 
+        consumer.on("trackended", () => {
+          if (kind === "video")
+            setRemoteScreen((current) =>
+              current?.socketId === peerId ? null : current,
+            );
+          if (sourceType === "application-audio")
+            removeRemoteApplicationAudio(peerId, producerId);
+          if (
+            sourceType === "screen-audio" &&
+            screenAudioTracks.current.get(peerId) === consumer.track
+          ) {
+            screenStreams.current.get(peerId)?.removeTrack(consumer.track);
+            screenAudioTracks.current.delete(peerId);
+          }
+        });
+
         const stream = new MediaStream([consumer.track]);
 
         if (kind === "audio") {
@@ -1687,12 +1707,6 @@ export function useWebRTC(socket: Socket, roomId: string) {
           setRemoteScreen({ socketId: peerId, stream });
         }
 
-        consumer.on("trackended", () => {
-          if (kind === "video")
-            setRemoteScreen((p) => (p?.socketId === peerId ? null : p));
-          if (sourceType === "application-audio")
-            removeRemoteApplicationAudio(peerId, producerId);
-        });
         return true;
       } catch (e) {
         console.error("[mediasoup] consume 失败:", e);
@@ -1990,28 +2004,6 @@ export function useWebRTC(socket: Socket, roomId: string) {
         const producer = screenProducer.current;
         if (active) {
           producer?.resume();
-          if (producer?.track && producer.appData?.adaptation === "game") {
-            void applyScreenCaptureConstraints(producer.track, {
-              fps: 60,
-              strictFrameRate: true,
-            })
-              .then((result) => {
-                console.info(
-                  "[media-diag] 观看恢复后重新应用游戏模式采集约束",
-                  {
-                    mode: result.mode,
-                    constraints: result.constraints,
-                    settings: producer.track?.getSettings(),
-                  },
-                );
-              })
-              .catch((error) => {
-                console.warn(
-                  "[media-diag] 观看恢复后重新应用采集约束失败",
-                  error,
-                );
-              });
-          }
         } else producer?.pause();
       } else if (active && !forceMutedRef.current)
         screenAudioProducer.current?.resume();
@@ -2851,7 +2843,6 @@ export function useWebRTC(socket: Socket, roomId: string) {
       preset: ScreenPreset,
       maxFps: Fps,
       activity: ScreenActivity,
-      strictFrameRate = false,
       nativeResolution = false,
     ) => {
       const producer = screenProducer.current;
@@ -2869,24 +2860,10 @@ export function useWebRTC(socket: Socket, roomId: string) {
       screenActivityRef.current = activity;
       setScreenActivity(activity);
       setScreenEncodingPlan(plan);
-      if (track) {
-        track.contentHint = plan.contentHint;
-        void applyScreenCaptureConstraints(track, {
-          fps: plan.fps,
-          strictFrameRate: strictFrameRate && plan.fps === 60,
-        })
-          .then((result) => {
-            console.info("[media-diag] 已应用屏幕采集帧率约束", {
-              activity,
-              mode: result.mode,
-              constraints: result.constraints,
-              settings: track.getSettings(),
-            });
-          })
-          .catch((error) => {
-            console.warn("[media-diag] 更新屏幕采集帧率约束失败", error);
-          });
-      }
+      if (track) track.contentHint = plan.contentHint;
+      // getDisplayMedia requests the selected maximum FPS up front. Activity
+      // changes only need to alter sender encoding; applying constraints to a
+      // live Windows desktop track can restart WGC/DXGI and leave black frames.
       if (!producer) return;
       if (producer.track) producer.track.contentHint = plan.contentHint;
       try {
@@ -2942,7 +2919,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
       screenAnalysisVideo.current = video;
       screenAnalysisCanvas.current = canvas;
       video.play().catch(() => {});
-      applyScreenActivity(preset, maxFps, "active", false, nativeResolution);
+      applyScreenActivity(preset, maxFps, "active", nativeResolution);
 
       screenAnalysisTimer.current = setInterval(() => {
         if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
@@ -2989,7 +2966,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
             activityCandidate.current.count >= required &&
             screenActivityRef.current !== next
           )
-            applyScreenActivity(preset, maxFps, next, false, nativeResolution);
+            applyScreenActivity(preset, maxFps, next, nativeResolution);
         } catch {
           /* 采样失败不影响共享本身 */
         }
@@ -3093,6 +3070,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
 
       const initialActivity: ScreenActivity = gameMode ? "motion" : "active";
       let acquiredStream: MediaStream | null = null;
+      let startupStage = "申请屏幕采集";
       try {
         const stream = await navigator.mediaDevices.getDisplayMedia({
           // 桌面源保持原始尺寸，720p/1080p 由 RTP 编码缩放统一控制。
@@ -3105,18 +3083,14 @@ export function useWebRTC(socket: Socket, roomId: string) {
         acquiredStream = stream;
         const videoTrack = stream.getVideoTracks()[0];
         if (!videoTrack) throw new Error("没有取得屏幕视频轨道");
+        startupStage = "等待屏幕采集轨道就绪";
         await waitForMediaTrackWarmup(videoTrack);
         videoTrack.contentHint = gameMode ? "motion" : "detail";
-        const captureConstraints = await applyScreenCaptureConstraints(
-          videoTrack,
-          {
-            fps: currentFps,
-            strictFrameRate: gameMode,
-          },
-        );
-        // Applying capture constraints can recreate the underlying source;
-        // give the sender another renderer turn after that operation as well.
-        await waitForMediaTrackWarmup(videoTrack);
+        // getDisplayMedia already requested this frame rate. Reapplying even
+        // the same constraints here can restart Windows' capture source; on
+        // some WGC/DXGI paths Chromium then rejects with "Could not start video
+        // source" or leaves a live-but-black track. Keep the acquired source
+        // intact and only change capture constraints for later user changes.
         const trackSettings = videoTrack.getSettings();
         const initialPlan = createScreenEncodingPlan({
           preset,
@@ -3133,10 +3107,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
             fps: currentFps,
             gameMode,
           },
-          constraintMode: captureConstraints.mode,
-          strictConstraintError: captureConstraints.strictError
-            ? String(captureConstraints.strictError)
-            : null,
+          constraintMode: "getDisplayMedia",
           settings: trackSettings,
           constraints: videoTrack.getConstraints(),
           capabilities: videoTrack.getCapabilities(),
@@ -3158,8 +3129,9 @@ export function useWebRTC(socket: Socket, roomId: string) {
             Boolean(codec),
           );
 
-        // 直接发送实际应用采集约束的轨道。旧实现 clone() 后继续只约束原轨道，
-        // 会让 Producer 的轨道停留在 Chromium 自行选择的低采集帧率。
+        // 直接发送 getDisplayMedia 返回的原始轨道；旧实现 clone() 后继续约束原轨道，
+        // 会让 Producer 的轨道停留在 Chromium 自行选择的采集帧率。
+        startupStage = "初始化屏幕视频发送";
         let producer: Producer | null = null;
         let lastProduceError: unknown = null;
         for (const codec of [...codecCandidates, undefined]) {
@@ -3207,7 +3179,6 @@ export function useWebRTC(socket: Socket, roomId: string) {
           preset,
           currentFps,
           initialActivity,
-          gameMode,
           nativeResolution,
         );
         if (gameMode) stopScreenAnalysis();
@@ -3218,6 +3189,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
         // therefore uses only the native process-loopback capture in exclude
         // mode (Cove's process tree is removed at the WASAPI level).
         if (audio) {
+          startupStage = "启动共享系统音频";
           try {
             await startScreenAudio();
           } catch (e) {
@@ -3233,7 +3205,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
         // 用户在浏览器 UI 点"停止共享"
         stream.getVideoTracks()[0].onended = () => stopScreenShare();
       } catch (e) {
-        console.error("[screen share]", e);
+        console.error(`[screen share] ${startupStage}失败`, e);
         stopScreenAnalysis();
         if (screenProducer.current) {
           socket.emit("ms:close-producer", {
@@ -3323,10 +3295,9 @@ export function useWebRTC(socket: Socket, roomId: string) {
         const videoTrack = stream.getVideoTracks()[0];
         if (!videoTrack) throw new Error("没有取得屏幕视频轨道");
         videoTrack.contentHint = gameMode ? "motion" : "detail";
-        await applyScreenCaptureConstraints(videoTrack, {
-          fps: currentFps,
-          strictFrameRate: gameMode,
-        });
+        // The new getDisplayMedia request above already carries the preferred
+        // frame rate. Avoid restarting its Windows capture source before the
+        // existing producer can switch to it.
         const settings = videoTrack.getSettings();
         const plan = createScreenEncodingPlan({
           preset,
@@ -3371,7 +3342,6 @@ export function useWebRTC(socket: Socket, roomId: string) {
           preset,
           currentFps,
           gameMode ? "motion" : "active",
-          gameMode,
           nativeResolution,
         );
         if (gameMode) stopScreenAnalysis();

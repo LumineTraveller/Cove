@@ -9,17 +9,6 @@ export type ScreenPreset = keyof typeof SCREEN_PRESETS;
 export type ScreenFps = 30 | 60;
 export type ScreenActivity = 'static' | 'active' | 'motion';
 
-export interface ScreenCaptureConstraintOptions {
-  fps: number;
-  strictFrameRate: boolean;
-}
-
-export interface AppliedScreenCaptureConstraints {
-  mode: 'strict' | 'preferred';
-  constraints: MediaTrackConstraints;
-  strictError?: unknown;
-}
-
 export interface ScreenEncodingPlan {
   preset: ScreenPreset;
   nativeResolution: boolean;
@@ -141,40 +130,4 @@ export function withScreenEncodingPlan(
     }),
     degradationPreference: plan.degradationPreference,
   };
-}
-
-export function buildScreenCaptureConstraints(
-  options: ScreenCaptureConstraintOptions,
-  strict = options.strictFrameRate,
-): MediaTrackConstraints {
-  return {
-    frameRate: strict
-      ? { min: Math.max(1, options.fps - 5), ideal: options.fps, max: options.fps }
-      : { ideal: options.fps, max: options.fps },
-  };
-}
-
-/**
- * getDisplayMedia() 不能在选择屏幕前使用 min/exact，但选择完成后的轨道可以
- * 尝试严格帧率约束。分辨率不在这里处理：Chromium 的桌面轨道经常保持原生
- * 尺寸，实际传输尺寸由 RTCRtpSender.scaleResolutionDownBy 统一控制。
- */
-export async function applyScreenCaptureConstraints(
-  track: MediaStreamTrack,
-  options: ScreenCaptureConstraintOptions,
-): Promise<AppliedScreenCaptureConstraints> {
-  const preferred = buildScreenCaptureConstraints(options, false);
-  if (!options.strictFrameRate) {
-    await track.applyConstraints(preferred);
-    return { mode: 'preferred', constraints: preferred };
-  }
-
-  const strict = buildScreenCaptureConstraints(options, true);
-  try {
-    await track.applyConstraints(strict);
-    return { mode: 'strict', constraints: strict };
-  } catch (strictError) {
-    await track.applyConstraints(preferred);
-    return { mode: 'preferred', constraints: preferred, strictError };
-  }
 }
