@@ -1,12 +1,12 @@
 <#
 .SYNOPSIS
-    把 GitHub Release 的 Windows 更新文件发布到 Cove 云服务器静态下载源。
+    把 GitHub Release 的 Windows 更新文件发布到 Cove 云服务器下载源。
 
 .EXAMPLE
-    .\scripts\publish-release-to-cloud.ps1 -Tag v1.3.0 -PublicBaseUrl https://your-server.example.com
+    .\scripts\publish-release-to-cloud.ps1 -Tag v1.4.1
 
-    服务器需要能通过 ssh 别名 cove-cloud 连接，并允许当前用户写入
-    /var/www/cove-download。
+    默认使用本机已配置的 ssh 别名 Cove_server，发布到
+    /var/www/cove-download，再核验 https://cove-cove.space 的公开下载地址。
 #>
 [CmdletBinding()]
 param(
@@ -15,17 +15,16 @@ param(
     [string]$Tag,
     [string]$GitHubRepo = 'LumineTraveller/Cove',
     [ValidatePattern('^[A-Za-z0-9._@:-]+$')]
-    [string]$SshTarget = 'cove-cloud',
+    [string]$SshTarget = 'Cove_server',
     [ValidatePattern('^/[A-Za-z0-9._/-]+$')]
     [string]$RemoteRoot = '/var/www/cove-download',
-    [Parameter(Mandatory = $true)]
-    [uri]$PublicBaseUrl
+    [uri]$PublicBaseUrl = 'https://cove-cove.space'
 )
 
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-if ($RemoteRoot -eq '/') { throw '拒绝使用根目录作为下载站目录。' }
+if ($RemoteRoot -eq '/') { throw '拒绝使用根目录作为服务器下载目录。' }
 if ($PublicBaseUrl.Scheme -ne 'https' -or -not $PublicBaseUrl.Host -or $PublicBaseUrl.UserInfo) {
     throw 'PublicBaseUrl 必须是没有账号信息的 HTTPS 服务器地址。'
 }
@@ -44,10 +43,23 @@ function Invoke-Checked([string]$command, [string[]]$arguments) {
     if ($LASTEXITCODE -ne 0) { throw "$command 执行失败（退出码 $LASTEXITCODE）。" }
 }
 
+function Assert-PublicHead([string]$url) {
+    $nodeCode = @'
+const url = process.argv[1];
+fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(15000) })
+  .then(response => {
+    if (response.status !== 200) throw new Error(`HTTP ${response.status}: ${url}`);
+    console.log(`HTTP 200: ${url}`);
+  })
+  .catch(error => { console.error(error); process.exitCode = 1; });
+'@
+    Invoke-Checked 'node' @('-e', $nodeCode, $url)
+}
+
 function Get-GithubRelease([string]$repo, [string]$tag) {
     $uri = "https://api.github.com/repos/$repo/releases/tags/$tag"
     try {
-        return Invoke-RestMethod -Uri $uri -Headers @{ 'User-Agent' = 'cove-cloud-publisher' } -UseBasicParsing
+        return Invoke-RestMethod -Uri $uri -Headers @{ 'User-Agent' = 'cove-cloud-publisher' } -UseBasicParsing -NoProxy
     } catch {
         throw "GitHub 上找不到 $repo 的 $tag Release（$($_.Exception.Message)）"
     }
@@ -84,7 +96,7 @@ try {
             continue
         }
         Write-Output "下载 $($asset.name) ..."
-        Invoke-WebRequest -Uri $asset.browser_download_url -Headers @{ 'User-Agent' = 'cove-cloud-publisher' } -OutFile $destination -UseBasicParsing
+        Invoke-WebRequest -Uri $asset.browser_download_url -Headers @{ 'User-Agent' = 'cove-cloud-publisher' } -OutFile $destination -UseBasicParsing -NoProxy
         $actualSize = (Get-Item -LiteralPath $destination).Length
         if ($actualSize -ne $asset.size) { throw "$($asset.name) 下载不完整（$actualSize / $($asset.size) 字节）。" }
     }
@@ -110,23 +122,26 @@ try {
         "sudo install -m 0644 '$releaseDir/Cove-Setup-$version.exe' '$RemoteRoot/downloads/Cove-Setup.exe'",
         "sudo install -m 0644 '$releaseDir/Cove-Server-Setup-$version.exe' '$RemoteRoot/downloads/Cove-Server-Setup.exe'",
         "sudo install -m 0644 '$staging/latest.json' '$RemoteRoot/releases/latest.json'",
-        "rm -rf -- '$staging'"
+        "rm -f -- '$staging/latest.yml' '$staging/latest.json' '$staging/Cove-Setup-$version.exe' '$staging/Cove-Setup-$version.exe.blockmap' '$staging/Cove-Server-Setup-$version.exe' '$staging/Cove-Server-Setup-$version.exe.blockmap'",
+        "rmdir -- '$staging'"
     )
     Invoke-Checked 'ssh' @($SshTarget, ($remoteCommands -join '; '))
 
-    $publicMetadata = Invoke-RestMethod -Uri "$publicBase/releases/latest.json?check=$Tag" -UseBasicParsing
+    $publicMetadata = Invoke-RestMethod -Uri "$publicBase/releases/latest.json?check=$Tag" -UseBasicParsing -NoProxy
     if ($publicMetadata.tag_name -ne $Tag -or $publicMetadata.draft -or $publicMetadata.prerelease) {
         throw "公开 latest.json 未确认 $Tag。"
     }
     foreach ($name in @("releases/$Tag/latest.yml", 'downloads/Cove-Setup.exe', 'downloads/Cove-Server-Setup.exe')) {
-        $response = Invoke-WebRequest -Uri "$publicBase/$name`?check=$Tag" -Method Head -MaximumRedirection 5 -UseBasicParsing
-        if ($response.StatusCode -ne 200) { throw "公开文件不可访问：$name（HTTP $($response.StatusCode)）。" }
+        Assert-PublicHead "$publicBase/$name`?check=$Tag"
     }
     Write-Output "完成：$Tag 已发布到 $publicBase。"
     $completed = $true
 } finally {
-    if ($completed -and (Test-Path -LiteralPath $tempDir)) {
-        Remove-Item -LiteralPath $tempDir -Recurse -Force
+    $resolvedTemp = [System.IO.Path]::GetFullPath($tempDir)
+    $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
+    if ($completed -and $resolvedTemp.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase) -and
+        (Test-Path -LiteralPath $resolvedTemp)) {
+        Remove-Item -LiteralPath $resolvedTemp -Recurse -Force
         Write-Output '已清理本地下载临时目录。'
     } elseif (-not $completed) {
         Write-Output "发布未完成；本地临时文件保留在 $tempDir，远端暂存目录为 $staging（如已创建）。"

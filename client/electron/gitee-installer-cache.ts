@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { createHash } from 'crypto';
-import type { LoggerLike, UpdateInfoLike, UpdateSourceCandidate } from './updater-core';
+import type { LoggerLike } from './updater-core';
 
 const MARKER = 'pending/cove-gitee-cleanup.json';
 const UPDATE_INFO = 'pending/update-info.json';
@@ -91,18 +91,6 @@ export function createGiteeInstallerCache(options: {
     return info?.fileName === record.fileName && info?.sha512 === record.sha512;
   }
 
-  function remember(info: UpdateInfoLike, source?: UpdateSourceCandidate['id']): void {
-    if (source !== 'gitee' || !VERSION.test(info.version) || !info.downloadedFile) return;
-    const fileName = `Cove-Setup-${info.version}.exe`;
-    if (path.resolve(info.downloadedFile) !== path.join(pendingDir, fileName) || !cacheExists()) return;
-    const downloaded = safeFile(`pending/${fileName}`);
-    const metadata = readJson(UPDATE_INFO);
-    if (!downloaded.exists || metadata?.fileName !== fileName || !SHA512.test(metadata?.sha512 ?? '')) return;
-    const record: CleanupRecord = { schema: 1, source: 'gitee', version: info.version, fileName, sha512: metadata.sha512 };
-    fs.writeFileSync(safeFile(MARKER).file, JSON.stringify(record), { encoding: 'utf8', mode: 0o600 });
-    logger.info(`[updater] 已记录 Gitee 安装包清理任务，等待 ${info.version} 安装并启动`);
-  }
-
   async function cleanupOnce(): Promise<void> {
     if (!cacheExists()) return;
     const record = readJson(MARKER) as CleanupRecord | null;
@@ -148,5 +136,5 @@ export function createGiteeInstallerCache(options: {
     }
   }
 
-  return { remember, cleanupInstalledUpdate };
+  return { cleanupInstalledUpdate };
 }

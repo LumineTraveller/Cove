@@ -308,7 +308,14 @@ export function useMobileMedia(socket: Socket, roomId: string) {
         if (socket.connected && params.id) socket.emit('ms:close-consumer', { consumerId: params.id });
         return false;
       }
-      const consumer = await incoming.consume(params as never);
+      const sourceType = appData.type;
+      const streamGroup = sourceType === 'screen' || sourceType === 'screen-audio'
+        ? 'screen'
+        : sourceType === 'application-audio' ? 'application-audio' : 'mic';
+      const consumer = await incoming.consume({
+        ...params,
+        streamId: `${streamGroup}-${peerId}`,
+      } as never);
       createdConsumer = consumer;
       if (isStale()) {
         consumer.close();
@@ -584,6 +591,7 @@ export function useMobileMedia(socket: Socket, roomId: string) {
 
       const producer = await sendTransport.current!.produce({
         track: track as never,
+        streamId: `mic-${socket.id}`,
         codecOptions: { opusStereo: false, opusDtx: true, opusFec: true },
         appData: { type: 'mic', client: 'android' },
       });

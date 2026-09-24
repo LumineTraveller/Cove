@@ -18,8 +18,8 @@ export interface UpdateCheckResultLike {
 }
 
 export interface UpdateSourceCandidate {
-  id: 'github' | 'cloud' | 'gitee';
-  label: 'GitHub' | '当前服务器' | 'Gitee';
+  id: 'github' | 'cloud';
+  label: 'GitHub' | 'Cove 服务器' | '当前服务器';
   version: string;
   feedUrl: string;
   latencyMs: number;
@@ -65,7 +65,6 @@ export interface AutoUpdaterOptions {
   startupDelayMs?: number;
   checkIntervalMs?: number;
   resolveSources?: (serverUrl: string) => Promise<UpdateSourceCandidate[]>;
-  onInstallerReady?: (info: UpdateInfoLike, source?: UpdateSourceCandidate['id']) => void;
   now?: () => number;
 }
 
@@ -100,7 +99,6 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
     startupDelayMs = DEFAULT_STARTUP_DELAY_MS,
     checkIntervalMs = DEFAULT_CHECK_INTERVAL_MS,
     resolveSources = async () => [],
-    onInstallerReady,
     now = Date.now,
   } = options;
 
@@ -171,13 +169,10 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
     deferredDownloadError = null;
     activeDownloadPromise = null;
     activeSource = source;
-    // Keep the legacy Gitee path conservative for older metadata/tests. The
-    // controlled cloud mirror supports normal Range requests and retains the
-    // differential update path.
-    updater.disableDifferentialDownload = source.id === 'gitee';
+    updater.disableDifferentialDownload = false;
     updater.setFeedURL?.({ provider: 'generic', url: source.feedUrl, useMultipleRangeRequest: false });
     logger.info(`[updater] 使用 ${source.label} 更新源 ${source.feedUrl}`);
-    logger.info(`[updater] 下载方式：${updater.disableDifferentialDownload ? '全量安装包（禁用差分）' : '优先差分，失败时全量下载'}`);
+    logger.info('[updater] 下载方式：优先差分，失败时全量下载');
     return true;
   };
 
@@ -189,8 +184,7 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
     checking = false;
     logger.info(`[updater] 发现新版本 ${info.version}，开始后台下载`);
     setState(stateForSource({ status: 'available', version: info.version, percent: 0,
-      message: activeSource?.id === 'cloud' ? '发现新版本，准备从当前服务器下载。'
-        : activeSource?.id === 'gitee' ? '发现新版本，准备从 Gitee 下载完整安装包。' : '发现新版本，准备下载。',
+      message: activeSource?.id === 'cloud' ? '发现新版本，准备从当前服务器下载。' : '发现新版本，准备下载。',
     }));
   };
   const onNotAvailable = (info: UpdateInfoLike) => {
@@ -224,14 +218,9 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
     setWindowProgress(getWindow, -1);
     logger.info(`[updater] 版本 ${info.version} 下载完成`);
     if (disposed) return;
-    // Persist cleanup eligibility only after electron-updater has validated the
-    // package, and before the renderer can request installation.
-    try { onInstallerReady?.(info, activeSource?.id); }
-    catch (error) { logger.warn('[updater] 无法记录安装后清理任务，保留安装包', error); }
     setState(stateForSource({ status: 'downloaded', version: info.version, percent: 100,
       transferred: state.transferred, total: state.total,
-      message: '更新器已确认安装包就绪。可以立即重启安装，或退出 Cove 时安装。' +
-        (activeSource?.id === 'gitee' ? '新版本启动成功后自动清理本次安装包缓存。' : ''),
+      message: '更新器已确认安装包就绪。可以立即重启安装，或退出 Cove 时安装。',
     }));
   };
   const onCancelled = () => {
@@ -322,7 +311,8 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
     deferredDownloadError = null;
     setState({ status: 'checking', message: '正在连接更新服务器…' });
     try {
-      sources = await resolveSources(configuredServerUrl);
+      // Ignore obsolete source identifiers even if a stale resolver supplies one.
+      sources = (await resolveSources(configuredServerUrl)).filter(source => source.id === 'github' || source.id === 'cloud');
       if (disposed) return state;
       if (!sources.length) throw new Error('当前服务器与 GitHub 更新源均无法访问，请检查网络后重试。');
       probingSources = true;

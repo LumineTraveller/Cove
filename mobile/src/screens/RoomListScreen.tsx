@@ -19,6 +19,7 @@ import type { Room, SessionConfig } from '../types';
 import { MobileUpdateButton } from '../components/MobileUpdater';
 import { roomLimit, roomPassword } from '../roomSettings';
 import { serverFetch } from '../serverSecurity';
+import { getProfileDisplayName, loadProfileRemarks, type ProfileRemarks } from '../profileRemarks';
 
 interface Props {
   socket: Socket;
@@ -36,6 +37,8 @@ export function RoomListScreen({
   onChangeServer,
 }: Props) {
   const [rooms, setRooms] = useState<Room[]>([]);
+  const [profileRemarks, setProfileRemarks] = useState<ProfileRemarks>({});
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [membersByRoom, setMembersByRoom] = useState<Record<string, string[]>>({});
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -47,6 +50,30 @@ export function RoomListScreen({
   const [creating, setCreating] = useState(false);
   const creatingRef = useRef(false);
   const createGeneration = useRef(0);
+
+  useEffect(() => {
+    let active = true;
+    loadProfileRemarks().then(remarks => { if (active) setProfileRemarks(remarks); });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!sessionReady) {
+      setCurrentUserId(null);
+      return;
+    }
+    let active = true;
+    socket.timeout(5_000).emit('presence:get', (
+      error: Error | null,
+      snapshot?: { ok?: boolean; onlineUsers?: Array<{ socketId: string; userId?: string }> },
+    ) => {
+      if (!active || error || !snapshot?.ok) return;
+      setCurrentUserId(snapshot.onlineUsers?.find(user => user.socketId === socket.id)?.userId ?? null);
+    });
+    return () => { active = false; };
+  }, [sessionReady, socket]);
+
+  const displayName = getProfileDisplayName(config.username, currentUserId, profileRemarks);
 
   const createRoom = () => {
     if (creatingRef.current || !sessionReady || !socket.connected) return;
@@ -108,9 +135,9 @@ export function RoomListScreen({
       </View>
 
       <View style={styles.profileStrip}>
-        <View style={styles.avatar}><Text style={styles.avatarText}>{config.username.slice(0, 2)}</Text></View>
+        <View style={styles.avatar}><Text style={styles.avatarText}>{displayName.slice(0, 2)}</Text></View>
         <View style={styles.profileCopy}>
-          <Text style={styles.username} numberOfLines={1}>{config.username}</Text>
+          <Text style={styles.username} numberOfLines={1}>{displayName}</Text>
           <View style={styles.serverLine}>
             <Server size={11} color={colors.textFaint} />
             <Text style={styles.serverText} numberOfLines={1}>{config.serverURL}</Text>
@@ -158,7 +185,9 @@ export function RoomListScreen({
                 <View style={styles.roomCopy}>
                   <Text style={styles.roomName} numberOfLines={1}>{item.name}</Text>
                   <Text style={styles.ownerName} numberOfLines={1}>
-                    {item.ownerName ? `房主 ${item.ownerName}` : '等待房主进入'}
+                    {item.ownerName
+                      ? `房主 ${getProfileDisplayName(item.ownerName, item.ownerUserId, profileRemarks)}`
+                      : '等待房主进入'}
                   </Text>
                 </View>
                 {memberCount > 0 && (

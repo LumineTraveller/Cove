@@ -1,7 +1,7 @@
 import React from 'react';
 import TestRenderer, { act } from 'react-test-renderer';
 import { AppState, Linking, Modal, NativeModules, Platform, Text, TouchableOpacity, type AppStateStatus } from 'react-native';
-import { MobileUpdateButton, MobileUpdateProvider } from '../src/components/MobileUpdater';
+import { MobileUpdateButton, MobileUpdateProvider, useSetMobileUpdateServerURL } from '../src/components/MobileUpdater';
 
 jest.setTimeout(20000);
 
@@ -34,8 +34,14 @@ afterEach(async () => {
   jest.restoreAllMocks();
   jest.useRealTimers();
 });
-async function mount() {
-  await act(async () => { renderer = TestRenderer.create(<MobileUpdateProvider><MobileUpdateButton /></MobileUpdateProvider>); });
+function SelectedServer({ url }: { url: string }) {
+  const setServerURL = useSetMobileUpdateServerURL();
+  React.useEffect(() => { setServerURL?.(url); }, [setServerURL, url]);
+  return null;
+}
+
+async function mount(serverURL = 'https://selected.example.test/cove') {
+  await act(async () => { renderer = TestRenderer.create(<MobileUpdateProvider><SelectedServer url={serverURL} /><MobileUpdateButton /></MobileUpdateProvider>); });
 }
 
 test('automatically detects on launch, shows notes, allows mirror switch and browser APK download', async () => {
@@ -44,13 +50,22 @@ test('automatically detects on launch, shows notes, allows mirror switch and bro
   await act(async () => jest.advanceTimersByTimeAsync(1001));
   expect(getVersion).toHaveBeenCalledTimes(1);
   expect(fetchFeed).toHaveBeenCalledTimes(2);
+  expect(fetchFeed).toHaveBeenCalledWith('cloud', 'https://selected.example.test/cove');
   expect(visible()).toBe(true);
   expect(JSON.stringify(renderer.toJSON())).toContain('更新说明');
   expect(Linking.openURL).not.toHaveBeenCalled();
-  await press('Gitee');
+  await press('当前服务器');
   await press('在浏览器中下载更新');
-  expect(Linking.openURL).toHaveBeenCalledWith('https://gitee.com/LumineTraveller/Cove/releases/download/mobile-v0.4.0/Cove-Mobile-0.4.0.apk');
+  expect(Linking.openURL).toHaveBeenCalledWith('https://selected.example.test/cove/releases/mobile-v0.4.0/Cove-Mobile-0.4.0.apk');
   expect(visible()).toBe(false);
+});
+
+test('an HTTP current server is not used as a mobile update source', async () => {
+  await mount('http://selected.example.test');
+  await act(async () => jest.advanceTimersByTimeAsync(1001));
+  expect(fetchFeed).toHaveBeenCalledTimes(1);
+  expect(fetchFeed).toHaveBeenCalledWith('github', '');
+  expect(JSON.stringify(renderer.toJSON())).not.toContain('当前服务器');
 });
 
 test('automatic network failure stays silent; manual check explains failure', async () => {

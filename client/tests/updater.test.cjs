@@ -10,16 +10,11 @@ const githubSource = {
   id: 'github', label: 'GitHub', version: '0.7.0',
   feedUrl: 'https://github.com/LumineTraveller/Cove/releases/download/v0.7.0/', latencyMs: 30,
 };
-const cloudServerUrl = 'https://server.example.test';
+const cloudServerUrl = 'https://cove-cove.space';
 const cloudSource = {
   id: 'cloud', label: '当前服务器', version: '0.7.0',
   feedUrl: `${cloudServerUrl}/releases/v0.7.0/`, latencyMs: 10,
 };
-const legacyGiteeSource = {
-  id: 'gitee', label: 'Gitee', version: '0.7.0',
-  feedUrl: 'https://gitee.com/LumineTraveller/Cove/releases/download/v0.7.0/', latencyMs: 10,
-};
-
 test('compiled Electron adapter imports electron-updater at runtime', () => {
   assert.doesNotThrow(() => require('../dist-electron/updater.js'));
 });
@@ -155,7 +150,7 @@ test('packaged builds configure automatic checks and downloads', async () => {
   assert.equal(h.updater.feedCalls[0].url, githubSource.feedUrl);
 });
 
-test('the updater binds automatic checks to the server address supplied by the renderer', async () => {
+test('the updater preserves the renderer server argument for source-resolver compatibility', async () => {
   const received = [];
   const h = createHarness({
     resolveSources: async serverUrl => {
@@ -205,7 +200,7 @@ test('release discovery probes GitHub only after the cloud result is known', asy
   assert.deepEqual(sources.map(source => source.id), ['cloud']);
 });
 
-test('server update discovery rejects plaintext and malformed server addresses', async () => {
+test('server update discovery uses the selected HTTPS server and rejects unsafe URLs', async () => {
   const calls = [];
   const fetchImpl = async input => {
     calls.push(String(input));
@@ -214,6 +209,7 @@ test('server update discovery rejects plaintext and malformed server addresses',
   const httpsSources = await discoverUpdateSources('https://server.example.test/cove/', fetchImpl, 1_000);
   assert.equal(httpsSources[0].id, 'cloud');
   assert.equal(httpsSources[0].feedUrl, 'https://server.example.test/cove/releases/v0.7.0/');
+  assert.equal(calls[0], 'https://server.example.test/cove/releases/latest.json');
   const httpSources = await discoverUpdateSources('http://server.example.test', fetchImpl, 1_000);
   assert.deepEqual(httpSources.map(source => source.id), ['github']);
   const credentialSources = await discoverUpdateSources('https://user:secret@server.example.test', fetchImpl, 1_000);
@@ -246,66 +242,24 @@ test('the cloud mirror and GitHub both retain differential downloads', async () 
   assert.deepEqual(h.updater.downloadModes, [false, false]);
 });
 
-test('legacy Gitee mode still makes the real NSIS download branch bypass blockmaps and range downloads', async () => {
-  const { NsisUpdater } = require('electron-updater/out/NsisUpdater');
-  const h = createHarness({ resolveSources: async () => [legacyGiteeSource] });
+test('obsolete Gitee update sources are ignored before configuring a feed', async () => {
+  const oldSource = { id: 'gitee', label: 'Gitee', version: '0.7.0', feedUrl: 'https://gitee.com/example/release/', latencyMs: 10 };
+  const h = createHarness({ resolveSources: async () => [oldSource, githubSource] });
   await h.controller.checkNow();
-  const fileInfo = { url: new URL(legacyGiteeSource.feedUrl + 'Cove-Setup-0.8.3.exe'), info: { url: 'Cove-Setup-0.8.3.exe', sha512: 'expected-digest' } };
-  let fullDownloads = 0;
-  let differentialDownloads = 0;
-  let signatureChecks = 0;
-  const updater = {
-    executeDownload: task => task.task('test-installer.exe', { sha512: task.fileInfo.info.sha512 }),
-    differentialDownloadInstaller: async () => { differentialDownloads++; return false; },
-    httpExecutor: { download: async (url, target, options) => {
-      fullDownloads++;
-      assert.equal(url, fileInfo.url);
-      assert.equal(options.sha512, 'expected-digest', 'full download must retain checksum validation');
-    } },
-    verifySignature: async () => { signatureChecks++; return null; },
-  };
-  await NsisUpdater.prototype.doDownloadUpdate.call(updater, {
-    updateInfoAndProvider: { provider: { resolveFiles: () => [fileInfo] }, info: { version: '0.8.3' } },
-    disableDifferentialDownload: h.updater.disableDifferentialDownload,
-    disableWebInstaller: true,
-  });
-  assert.equal(fullDownloads, 1);
-  assert.equal(differentialDownloads, 0);
-  assert.equal(signatureChecks, 1);
+  assert.deepEqual(h.updater.feedCalls.map(call => call.url), [githubSource.feedUrl]);
+  assert.equal(h.controller.getState().source, 'github');
+  h.controller.dispose();
+
+  const oldOnly = createHarness({ resolveSources: async () => [oldSource] });
+  await oldOnly.controller.checkNow();
+  assert.equal(oldOnly.updater.checkCount, 0);
+  assert.equal(oldOnly.controller.getState().status, 'error');
+  oldOnly.controller.dispose();
 });
 
-test('cleanup eligibility is recorded only after installer validation and before install is offered', async () => {
-  const ready = [];
-  const h = createHarness({
-    resolveSources: async () => [cloudSource],
-    onInstallerReady: (info, source) => {
-      assert.notEqual(h.controller.getState().status, 'downloaded');
-      ready.push({ info, source });
-    },
-  });
-  await h.controller.checkNow();
-  h.updater.emit('update-available', { version: '0.8.3' });
-  h.updater.emit('download-progress', { percent: 100, transferred: 200, total: 200 });
-  assert.equal(ready.length, 0);
-  assert.equal(h.controller.installNow(), false);
-  const info = { version: '0.8.3', downloadedFile: 'verified.exe' };
-  h.updater.emit('update-downloaded', info);
-  assert.deepEqual(ready, [{ info, source: 'cloud' }]);
-  assert.equal(h.controller.installNow(), true);
-});
-
-test('a failed cleanup marker write does not break a validated update', () => {
-  const h = createHarness({ onInstallerReady: () => { throw new Error('read only'); } });
-  h.updater.emit('update-downloaded', { version: '0.8.3' });
-  assert.equal(h.controller.getState().status, 'downloaded');
-  assert.equal(h.controller.installNow(), true);
-  assert.ok(h.logs.some(entry => entry[0] === 'warn' && String(entry[1]).includes('清理任务')));
-});
-
-test('Electron adapter waits for startup cleanup before any update check and wires verified downloads', async () => {
+test('Electron adapter waits for legacy startup cleanup before any update check', async () => {
   const vm = require('node:vm');
   const updater = new FakeUpdater();
-  const remembered = [];
   let resolveCleanup;
   let discoveries = 0;
   const cleanup = new Promise(resolve => { resolveCleanup = resolve; });
@@ -317,7 +271,7 @@ test('Electron adapter waits for startup cleanup before any update check and wir
     './updater-core': { configureAutoUpdater },
     './gitee-installer-cache': { createGiteeInstallerCache: options => {
       assert.equal(options.installedVersion, '0.8.3');
-      return { cleanupInstalledUpdate: () => cleanup, remember: (...args) => remembered.push(args) };
+      return { cleanupInstalledUpdate: () => cleanup };
     } },
     './update-sources': { discoverUpdateSources: async () => { discoveries++; return [cloudSource]; } },
   };
@@ -335,9 +289,8 @@ test('Electron adapter waits for startup cleanup before any update check and wir
     await checking;
     assert.equal(discoveries, 1);
     assert.equal(updater.checkCount, 1);
-    const info = { version: '0.8.4', downloadedFile: 'verified.exe' };
-    updater.emit('update-downloaded', info);
-    assert.deepEqual(remembered, [[info, 'cloud']]);
+    updater.emit('update-downloaded', { version: '0.8.4', downloadedFile: 'verified.exe' });
+    assert.equal(controller.getState().status, 'downloaded');
   } finally { controller.dispose(); }
 });
 

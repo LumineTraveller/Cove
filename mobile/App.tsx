@@ -17,7 +17,7 @@ import { clearServerConfig, forgetRememberedServer, readRememberedServers, readS
 import { colors } from './src/theme';
 import type { Room, SessionConfig } from './src/types';
 import { configureServerCertificate } from './src/serverCertificate';
-import { MobileUpdateProvider } from './src/components/MobileUpdater';
+import { MobileUpdateProvider, useSetMobileUpdateServerURL } from './src/components/MobileUpdater';
 import { authenticateAccount, type AccountAuthRequest } from './src/accountAuth';
 import { clearServerAccessToken, ensureServerAccess, normalizeServerSecurityURL, readServerSecurityStatus, requiresServerAccessRecovery, serverFetch, type ServerSecurityStatus } from './src/serverSecurity';
 import { resolveServerIdentity } from './src/serverIdentity';
@@ -27,6 +27,7 @@ export default function App() {
 }
 
 function CoveSession() {
+  const setUpdateServerURL = useSetMobileUpdateServerURL();
   const insets = useSafeAreaInsets();
   const [loadingConfig, setLoadingConfig] = useState(true);
   const [savingConfig, setSavingConfig] = useState(false);
@@ -37,6 +38,10 @@ function CoveSession() {
   const [sessionReady, setSessionReady] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [selectedRoom, setSelectedRoom] = useState<Room | null>(null);
+
+  useEffect(() => {
+    if (config) setUpdateServerURL?.(config.serverURL);
+  }, [config?.serverURL, setUpdateServerURL]);
 
   useEffect(() => {
     readSessionConfig()

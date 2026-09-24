@@ -154,7 +154,13 @@ test('room join enforces password/capacity, preserves current members and restri
   assert.equal((await ownerSocket.register).ok, true); assert.equal((await aSocket.register).ok, true); assert.equal((await bSocket.register).ok, true);
   const created = await emit<any>(ownerSocket.socket, 'room:create', { name: 'Private', maxMembers: 2, password: '  secret  ' });
   assert.equal(created.room.maxMembers, 2); assert.equal(created.room.hasPassword, true);
+  assert.match(created.room.ownerUserId, /^[a-f0-9]{24}$/);
+  assert.equal('ownerId' in created.room, false);
   assert.equal((await emit<any>(ownerSocket.socket, 'room:join', { roomId: created.room.id })).ok, true);
+  ownerSocket.socket.emit('message:send', { roomId: created.room.id, content: 'remark identity check' });
+  const ownerHistory = await emit<any>(ownerSocket.socket, 'room:history', { roomId: created.room.id });
+  assert.equal(ownerHistory.messages[0].authorUserId, created.room.ownerUserId);
+  assert.equal('authorId' in ownerHistory.messages[0], false);
   assert.equal((await emit<any>(aSocket.socket, 'room:history', { roomId: created.room.id })).code, 'FORBIDDEN');
   const historyResponse = await fetch(`${base}/api/rooms/${created.room.id}/messages`, { headers: serverHeaders() });
   assert.equal(historyResponse.status, 403);
@@ -181,6 +187,8 @@ test('room join enforces password/capacity, preserves current members and restri
   assert.equal('passwordHash' in cleared.room, false);
   const list = await (await fetch(`${base}/api/rooms`, { headers: serverHeaders() })).json() as any[];
   assert.equal(list.some(room => 'passwordHash' in room || 'passwordSalt' in room), false);
+  assert.equal(list.find(room => room.id === created.room.id)?.ownerUserId, created.room.ownerUserId);
+  assert.equal(list.some(room => 'ownerId' in room), false);
 });
 
 test('successful REST login replaces the old socket and revokes its token', { timeout: 15_000 }, async () => {

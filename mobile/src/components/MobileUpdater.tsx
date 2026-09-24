@@ -3,15 +3,19 @@ import {
   ActivityIndicator, AppState, Linking, Modal, NativeModules, Platform,
   ScrollView, StyleSheet, Text, TouchableOpacity, View,
 } from 'react-native';
-import { checkAndroidUpdate, releaseURL, SOURCE_NAMES, withUpdateTimeout, type InstalledVersion, type UpdateCandidate, type UpdateSource } from '../mobileUpdate';
+import { checkAndroidUpdate, getMobileUpdateServerBaseUrl, releaseURL, SOURCE_NAMES, withUpdateTimeout, type InstalledVersion, type UpdateCandidate, type UpdateSource } from '../mobileUpdate';
 import { colors } from '../theme';
 
 interface UpdateBridge {
   getInstalledVersion(): Promise<InstalledVersion>;
-  fetchUpdateFeed(source: UpdateSource): Promise<string>;
+  fetchUpdateFeed(source: UpdateSource, serverURL: string): Promise<string>;
 }
-const UpdateContext = createContext<{ version: string; check: () => void } | null>(null);
+const UpdateContext = createContext<{ version: string; check: () => void; setServerURL: (serverURL: string) => void } | null>(null);
 const RECHECK_INTERVAL = 6 * 60 * 60 * 1000;
+
+export function useSetMobileUpdateServerURL() {
+  return useContext(UpdateContext)?.setServerURL;
+}
 
 export function MobileUpdateButton() {
   const updater = useContext(UpdateContext);
@@ -33,8 +37,17 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
   const [opening, setOpening] = useState(false);
   const mounted = useRef(false);
   const running = useRef(false);
+  const serverURLRef = useRef('');
   const nextAutomaticCheck = useRef(0);
   const prompted = useRef<number | null>(null);
+
+  const setServerURL = useCallback((value: string) => {
+    if (serverURLRef.current === value) return;
+    serverURLRef.current = value;
+    nextAutomaticCheck.current = 0;
+    setCandidate(null);
+    setVisible(false);
+  }, []);
 
   const check = useCallback(async (manual = false) => {
     if (Platform.OS !== 'android') return;
@@ -50,8 +63,13 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
       const installed = await withUpdateTimeout(bridge.getInstalledVersion(), 5000);
       if (!mounted.current) return;
       setVersion(installed.versionName);
-      const result = await checkAndroidUpdate(installed, s => bridge.fetchUpdateFeed(s));
+      const selectedServerURL = serverURLRef.current;
+      const updateServerURL = getMobileUpdateServerBaseUrl(selectedServerURL);
+      const sources: UpdateSource[] = updateServerURL ? ['github', 'cloud'] : ['github'];
+      const result = await checkAndroidUpdate(installed,
+        s => bridge.fetchUpdateFeed(s, s === 'cloud' ? updateServerURL ?? '' : ''), sources);
       if (!mounted.current) return;
+      if (serverURLRef.current !== selectedServerURL) return;
       // Retry soon when one mirror is unavailable; that mirror may carry a newer release.
       nextAutomaticCheck.current = Date.now() + (result.errors.length ? 60_000 : RECHECK_INTERVAL);
       setCandidate(result.candidate);
@@ -86,7 +104,7 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
     if (!candidate || opening) return;
     setOpening(true);
     try {
-      await Linking.openURL(releaseURL(candidate.release, source, download));
+      await Linking.openURL(releaseURL(candidate.release, source, download, serverURLRef.current));
       if (mounted.current) setVisible(false);
     } catch {
       if (mounted.current) setMessage('无法打开浏览器，请尝试另一更新源或打开发布页面。');
@@ -94,7 +112,7 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <UpdateContext.Provider value={{ version, check: () => { void check(true); } }}>
+    <UpdateContext.Provider value={{ version, check: () => { void check(true); }, setServerURL }}>
       {children}
       <Modal visible={visible} transparent animationType="fade" onRequestClose={() => setVisible(false)}>
         <View style={styles.overlay}>
@@ -116,9 +134,11 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
                 <TouchableOpacity accessibilityRole="button" disabled={opening} onPress={() => { void openDownload(true); }} style={styles.primary}>
                   <Text style={styles.primaryText}>{opening ? '正在打开' : '在浏览器中下载更新'}</Text>
                 </TouchableOpacity>
-                <TouchableOpacity accessibilityRole="button" disabled={opening} onPress={() => { void openDownload(false); }} style={styles.secondary}>
-                  <Text style={styles.body}>打开发布页面</Text>
-                </TouchableOpacity>
+                {source === 'github' && (
+                  <TouchableOpacity accessibilityRole="button" disabled={opening} onPress={() => { void openDownload(false); }} style={styles.secondary}>
+                    <Text style={styles.body}>打开发布页面</Text>
+                  </TouchableOpacity>
+                )}
               </>
             ) : <Text style={styles.body}>{message ? '未能完整确认更新状态。' : '未发现可用的手机端更新。'}</Text>}
             {!!message && !checking && <Text style={styles.hint}>{message}</Text>}

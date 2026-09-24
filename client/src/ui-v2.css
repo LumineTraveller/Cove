@@ -3315,6 +3315,11 @@ select:focus-visible {
   background: #263548 !important;
   color: #d9e4f2 !important;
 }
+:root[data-theme="dark"] .profile-modal-v2 [aria-label="关闭个人名片"]:hover,
+:root[data-theme="dark"] .user-profile-v2 [aria-label="关闭用户主页"]:hover {
+  background: #354b64 !important;
+  color: #fff !important;
+}
 :root[data-theme="dark"] .profile-modal-v2 button[class*="bg-white/"],
 :root[data-theme="dark"] .user-profile-v2 button[class*="bg-white/"] {
   background: #253548 !important;
@@ -3817,9 +3822,16 @@ body .cove-window-controls button {
 .user-profile-v2 [aria-label="关闭用户主页"] {
   background: #eef2f6 !important;
   color: #667483 !important;
+  transition: background-color 140ms ease, color 140ms ease, transform 140ms ease;
 }
 .profile-modal-v2 [aria-label="关闭个人名片"]:hover,
-.user-profile-v2 [aria-label="关闭用户主页"]:hover { background: #e2eaf2 !important; }
+.user-profile-v2 [aria-label="关闭用户主页"]:hover {
+  background: #e2eaf2 !important;
+  color: #355d96 !important;
+  transform: scale(1.06);
+}
+.profile-modal-v2 [aria-label="关闭个人名片"]:active,
+.user-profile-v2 [aria-label="关闭用户主页"]:active { transform: scale(0.96); }
 .profile-modal-v2 button.bg-white,
 .user-profile-v2 button.bg-white,
 .profile-modal-v2 button[class*="bg-white"],
@@ -6476,6 +6488,7 @@ body .cove-window-controls button {
   justify-content: center;
   border-radius: 8px;
   color: var(--muted);
+  transition: background-color 140ms ease, color 140ms ease, transform 140ms ease;
 }
 .soundpack-upload-button {
   gap: 5px;
@@ -7458,6 +7471,13 @@ body .cove-window-controls button {
 :root[data-theme="dark"] .soundpack-upload-button:hover,
 :root[data-theme="dark"] .soundpack-edit-button:hover {
   color: var(--blue);
+}
+:root[data-theme="dark"] .soundpack-upload-button:hover:not(:disabled) {
+  background: #263b52;
+}
+:root[data-theme="dark"] .soundpack-close-button:hover {
+  background: #2b3a4d;
+  color: var(--ink);
 }
 :root[data-theme="dark"] .soundpack-quick-list button b {
   background: #3c3018;
@@ -8733,6 +8753,7 @@ html:has(.cove-v2-page) {
   width: min(720px, calc(100% - 32px));
   margin: 22px 0 10px;
   padding: 0;
+  background: transparent;
   color: var(--muted);
   font-size: 11px;
   font-style: italic;
@@ -9010,7 +9031,8 @@ body:has(
   }
 }
 .chat-slot {
-  transform: translateX(0);
+  /* An identity transform would trap the font picker below the titlebar's drag layer. */
+  transform: none;
   transition: transform 320ms var(--ease-layout);
 }
 /* 收起：聊天槽脱离网格流（主区瞬时补位），面板滑出到右缘外。 */

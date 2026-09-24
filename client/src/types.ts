@@ -5,6 +5,7 @@ export interface Room {
   name: string;
   createdAt: number;
   ownerName: string | null;
+  ownerUserId?: string | null;
   maxMembers: number | null;
   hasPassword: boolean;
   isOwner?: boolean;
@@ -19,6 +20,9 @@ export interface Message {
   id: string;
   roomId: string;
   author: string;
+  authorUserId?: string | null;
+  contentUserId?: string;
+  contentUsername?: string;
   content: string;
   type?: "chat" | "soundpack" | "image" | "system";
   timestamp: number;
@@ -54,6 +58,7 @@ export interface UserProfile {
 
 export interface OnlineUser extends UserProfile {
   socketId: string;
+  userId?: string;
   platform?: ClientPlatform | null;
 }
 
@@ -61,6 +66,7 @@ export interface RoomState {
   roomId: string;
   name?: string;
   ownerName: string | null;
+  ownerUserId?: string | null;
   isOwner: boolean;
   members: RoomMember[];
   maxMembers: number | null;

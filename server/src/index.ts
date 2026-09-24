@@ -87,6 +87,12 @@ httpServer.on('close', () => { clearInterval(recoveryCheckpoint); disconnectGrac
 const dataDir = process.env.COVE_DATA_DIR?.trim() || path.join(os.homedir(), '.cove');
 const dbPath = path.join(dataDir, 'cove.db');
 fs.mkdirSync(dataDir, { recursive: true });
+const configuredReleaseFilesDir = process.env.COVE_DOWNLOAD_DIR?.trim();
+const releaseFilesDir = configuredReleaseFilesDir
+  ? path.resolve(configuredReleaseFilesDir)
+  : process.platform === 'linux'
+    ? '/var/www/cove-download'
+    : path.join(dataDir, 'public');
 
 const db = new Database(dbPath);
 db.pragma('journal_mode = WAL');
@@ -109,6 +115,7 @@ db.exec(`
     id TEXT PRIMARY KEY,
     roomId TEXT NOT NULL,
     author TEXT NOT NULL,
+    authorId TEXT,
     content TEXT NOT NULL,
     type TEXT NOT NULL DEFAULT 'chat',
     timestamp INTEGER NOT NULL,
@@ -158,6 +165,8 @@ if (!roomColumns.some(column => column.name === 'backgroundBottomDark'))
 const messageColumns = db.prepare('PRAGMA table_info(messages)').all() as { name: string }[];
 if (!messageColumns.some(column => column.name === 'type'))
   db.exec("ALTER TABLE messages ADD COLUMN type TEXT NOT NULL DEFAULT 'chat'");
+if (!messageColumns.some(column => column.name === 'authorId'))
+  db.exec('ALTER TABLE messages ADD COLUMN authorId TEXT');
 const soundpackColumns = db.prepare('PRAGMA table_info(soundpacks)').all() as { name: string }[];
 if (!soundpackColumns.some(column => column.name === 'uploaderId'))
   db.exec('ALTER TABLE soundpacks ADD COLUMN uploaderId TEXT');
@@ -218,13 +227,13 @@ const serverSecurity = createServerSecurityStore(db, {
 const accounts = createAccountStore(db);
 
 // ownerId 是本地持久身份凭据，不通过 API 或 Socket 广播给其他客户端。
-const publicRoomColumns = 'id, name, createdAt, ownerName, maxMembers, (passwordHash IS NOT NULL) AS hasPassword, avatarUrl, backgroundTop, backgroundBottom, backgroundTopDark, backgroundBottomDark';
+const publicRoomColumns = 'id, name, createdAt, ownerName, ownerId, maxMembers, (passwordHash IS NOT NULL) AS hasPassword, avatarUrl, backgroundTop, backgroundBottom, backgroundTopDark, backgroundBottomDark';
 const roomListQuery = db.prepare(`SELECT ${publicRoomColumns} FROM rooms ORDER BY createdAt ASC`);
 const roomQuery = db.prepare(`SELECT ${publicRoomColumns} FROM rooms WHERE id = ?`);
-const stmtGetRooms = { all: () => roomListQuery.all().map(row => ({ ...row as Room, hasPassword: !!(row as Room).hasPassword })) };
+const stmtGetRooms = { all: () => roomListQuery.all().map(row => toPublicRoom(row as StoredRoom)) };
 const stmtGetRoom = { get: (id: string) => {
-  const row = roomQuery.get(id) as Room | undefined;
-  return row ? { ...row, hasPassword: !!row.hasPassword } : undefined;
+  const row = roomQuery.get(id) as StoredRoom | undefined;
+  return row ? toPublicRoom(row) : undefined;
 } };
 const stmtGetRoomPrivate = db.prepare('SELECT id, name, createdAt, ownerId, ownerName, maxMembers, passwordHash, passwordSalt, avatarUrl, backgroundTop, backgroundBottom, backgroundTopDark, backgroundBottomDark FROM rooms WHERE id = ?');
 const stmtGetRoomOwners = db.prepare('SELECT id, ownerId FROM rooms');
@@ -244,20 +253,20 @@ const stmtDeleteRoomMutes = db.prepare('DELETE FROM room_mutes WHERE roomId = ?'
 // 过滤这里也能兼容升级前已经写入数据库的旧播报记录。
 const CHAT_HISTORY_PAGE_SIZE = 50;
 const stmtGetLatestMessagesPage = db.prepare(`
-  SELECT * FROM messages
+  SELECT id, roomId, author, authorId, content, type, timestamp FROM messages
   WHERE roomId = ? AND type NOT IN ('system', 'soundpack')
   ORDER BY timestamp DESC, id DESC
   LIMIT ?
 `);
 const stmtGetOlderMessagesPage = db.prepare(`
-  SELECT * FROM messages
+  SELECT id, roomId, author, authorId, content, type, timestamp FROM messages
   WHERE roomId = ?
     AND type NOT IN ('system', 'soundpack')
     AND (timestamp < ? OR (timestamp = ? AND id < ?))
   ORDER BY timestamp DESC, id DESC
   LIMIT ?
 `);
-const stmtInsertMsg      = db.prepare('INSERT INTO messages (id, roomId, author, content, type, timestamp) VALUES (?, ?, ?, ?, ?, ?)');
+const stmtInsertMsg      = db.prepare('INSERT INTO messages (id, roomId, author, authorId, content, type, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)');
 const stmtIsRoomMuted    = db.prepare('SELECT 1 FROM room_mutes WHERE roomId = ? AND clientId = ?');
 const stmtMuteMember     = db.prepare('INSERT OR REPLACE INTO room_mutes (roomId, clientId, username, createdAt) VALUES (?, ?, ?, ?)');
 const stmtUnmuteMember   = db.prepare('DELETE FROM room_mutes WHERE roomId = ? AND clientId = ?');
@@ -284,12 +293,14 @@ const deleteRoomData = db.transaction((roomId: string) => {
   stmtDeleteRoom.run(roomId);
 });
 
-interface Room      { id: string; name: string; createdAt: number; ownerName: string | null; maxMembers: number | null; hasPassword: boolean; avatarUrl: string | null; backgroundTop: string | null; backgroundBottom: string | null; backgroundTopDark: string | null; backgroundBottomDark: string | null }
+interface Room      { id: string; name: string; createdAt: number; ownerName: string | null; ownerUserId?: string | null; maxMembers: number | null; hasPassword: boolean; avatarUrl: string | null; backgroundTop: string | null; backgroundBottom: string | null; backgroundTopDark: string | null; backgroundBottomDark: string | null }
+interface StoredRoom extends Omit<Room, 'ownerUserId'> { ownerId: string | null }
 interface PrivateRoom extends Omit<Room, 'hasPassword'> { ownerId: string | null; passwordHash: string | null; passwordSalt: string | null }
-interface Message   { id: string; roomId: string; author: string; content: string; type: 'chat' | 'soundpack' | 'image' | 'system'; timestamp: number }
+interface Message   { id: string; roomId: string; author: string; authorUserId?: string | null; content: string; contentUserId?: string; contentUsername?: string; type: 'chat' | 'soundpack' | 'image' | 'system'; timestamp: number }
+interface StoredMessage extends Omit<Message, 'authorUserId' | 'contentUserId' | 'contentUsername'> { authorId: string | null }
 interface MessageHistoryCursor { timestamp: number; id: string }
 interface SoundpackRecord { id: string; name: string; filename: string; uploader: string; uploaderId: string | null; createdAt: number; sortOrder: number }
-interface PublicSoundpack { id: string; name: string; filename: string; uploader: string; createdAt: number; sortOrder: number; canDelete: boolean }
+interface PublicSoundpack { id: string; name: string; filename: string; uploader: string; uploaderUserId: string | null; createdAt: number; sortOrder: number; canDelete: boolean }
 interface RoomMember {
   socketId: string;
   userId: string;
@@ -323,9 +334,12 @@ function getMessageHistory(roomId: string, before?: MessageHistoryCursor) {
     : stmtGetLatestMessagesPage.all(
       roomId,
       CHAT_HISTORY_PAGE_SIZE + 1,
-    )) as Message[];
+    )) as StoredMessage[];
   const hasMore = rows.length > CHAT_HISTORY_PAGE_SIZE;
-  const messages = rows.slice(0, CHAT_HISTORY_PAGE_SIZE).reverse();
+  const messages = rows.slice(0, CHAT_HISTORY_PAGE_SIZE).reverse().map(({ authorId, ...message }) => ({
+    ...message,
+    authorUserId: authorId ? publicUserIdForStableId(authorId) : null,
+  }));
   const oldest = messages[0];
   return {
     messages,
@@ -358,7 +372,19 @@ const selfMutedVoiceMembers = new Set<string>(); // 主动关闭麦克风的 soc
 function publicUserId(socketId: string): string {
   const stableId = userClientIds.get(socketId) ?? `socket:${socketId}`;
   // 房主凭据本身绝不能广播；只暴露不可逆摘要供客户端保存个人音量。
+  return publicUserIdForStableId(stableId);
+}
+
+function publicUserIdForStableId(stableId: string): string {
   return createHash('sha256').update(stableId).digest('hex').slice(0, 24);
+}
+
+function toPublicRoom({ ownerId, ...room }: StoredRoom): Room {
+  return {
+    ...room,
+    ownerUserId: ownerId ? publicUserIdForStableId(ownerId) : null,
+    hasPassword: !!room.hasPassword,
+  };
 }
 
 function isRoomOwner(roomId: string | undefined, socketId: string | undefined): boolean {
@@ -416,6 +442,7 @@ async function createRoomForSocket(socketId: unknown, data: { name?: unknown; ma
       throw new RoomSettingsError('NOT_REGISTERED', '登录连接已失效，请重试');
     const room: Room = {
       id: randomUUID(), name, createdAt: Date.now(), ownerName: userNames.get(socketId) ?? '',
+      ownerUserId: publicUserId(socketId),
       maxMembers, hasPassword: secret.passwordHash !== null,
       avatarUrl: sanitizeRoomAvatar(data?.avatarUrl),
       backgroundTop: sanitizeRoomColor(data?.backgroundTop, DEFAULT_ROOM_COLOR),
@@ -456,6 +483,7 @@ function toPublicSoundpack(pack: SoundpackRecord, requesterSocketId?: string, ro
     name: pack.name,
     filename: pack.filename,
     uploader: pack.uploader,
+    uploaderUserId: pack.uploaderId ? publicUserIdForStableId(pack.uploaderId) : null,
     createdAt: pack.createdAt,
     sortOrder: pack.sortOrder,
     canDelete,
@@ -647,6 +675,18 @@ app.use('/sounds', requirePrivateStaticAccess, express.static(SOUNDS_DIR, { cach
 app.use('/chat-images', requirePrivateStaticAccess, express.static(CHAT_IMAGES_DIR, {
   fallthrough: false,
   cacheControl: false,
+}));
+
+// Public release files must be available before a client can authenticate to
+// the selected server. On Linux, the default matches the release mirror path;
+// deployments can override it with COVE_DOWNLOAD_DIR.
+app.use('/downloads', express.static(path.join(releaseFilesDir, 'downloads'), {
+  fallthrough: false,
+  index: false,
+}));
+app.use('/releases', express.static(path.join(releaseFilesDir, 'releases'), {
+  fallthrough: false,
+  index: false,
 }));
 
 // Every remaining API route, including account login/register, is behind the
@@ -859,12 +899,13 @@ app.post('/api/rooms/:id/images', (req, res) => {
     id: Math.random().toString(36).slice(2, 9),
     roomId,
     author: userNames.get(socketId) ?? 'Unknown',
+    authorUserId: publicUserId(socketId),
     content: `/chat-images/${roomId}/${filename}`,
     type: 'image',
     timestamp: Date.now(),
   };
   try {
-    stmtInsertMsg.run(msg.id, msg.roomId, msg.author, msg.content, msg.type, msg.timestamp);
+    stmtInsertMsg.run(msg.id, msg.roomId, msg.author, userClientIds.get(socketId) ?? null, msg.content, msg.type, msg.timestamp);
     io.to(roomId).emit('message:new', msg);
     res.json(msg);
   } catch {
@@ -1037,6 +1078,8 @@ function announceVoicePresence(
     id: Math.random().toString(36).slice(2, 9),
     roomId,
     author: 'Cove',
+    contentUserId: publicUserId(socketId),
+    contentUsername: username,
     content: voicePresenceMessage(username, action),
     type: 'system',
     timestamp: event.timestamp,
@@ -1102,6 +1145,7 @@ function broadcastRoomMembers(roomId: string) {
       roomId,
       name: room.name,
       ownerName: room.ownerName,
+      ownerUserId: room.ownerId ? publicUserIdForStableId(room.ownerId) : null,
       isOwner: !!clientId && clientId === room.ownerId,
       maxMembers: room.maxMembers,
       hasPassword: !!room.passwordHash,
@@ -1200,8 +1244,12 @@ function stopRemoteControlForRoom(roomId: string, reason: string) {
 
 function broadcastOnlineUsers() {
   io.emit('users:online', createLobbyPresenceSnapshot(
-    userNames, userAvatars, roomMembers, voiceRooms, userPlatforms,
+    userNames, userAvatars, roomMembers, voiceRooms, userPlatforms, publicUserIdsBySocket(),
   ).onlineUsers);
+}
+
+function publicUserIdsBySocket() {
+  return new Map([...userNames.keys()].map(socketId => [socketId, publicUserId(socketId)]));
 }
 
 // Shared by normal disconnect expiry and account takeover. It deliberately
@@ -1449,7 +1497,7 @@ io.on('connection', socket => {
     if (!userNames.has(socket.id)) return;
     cb?.({
       ok: true,
-      ...createLobbyPresenceSnapshot(userNames, userAvatars, roomMembers, voiceRooms, userPlatforms),
+      ...createLobbyPresenceSnapshot(userNames, userAvatars, roomMembers, voiceRooms, userPlatforms, publicUserIdsBySocket()),
     });
   });
 
@@ -1610,6 +1658,7 @@ io.on('connection', socket => {
       roomId,
       controllerSocketId: socket.id,
       controllerName: userNames.get(socket.id) ?? '成员',
+      controllerUserId: publicUserId(socket.id),
       expiresAt: request.expiresAt,
     });
     setTimeout(() => {
@@ -1664,6 +1713,7 @@ io.on('connection', socket => {
       role: 'controller',
       sharerSocketId: session.sharerSocketId,
       sharerName: userNames.get(session.sharerSocketId) ?? '共享者',
+      sharerUserId: publicUserId(session.sharerSocketId),
     });
     io.to(session.sharerSocketId).emit('remote-control:started', {
       sessionId: session.sessionId,
@@ -1671,6 +1721,7 @@ io.on('connection', socket => {
       role: 'sharer',
       controllerSocketId: session.controllerSocketId,
       controllerName: userNames.get(session.controllerSocketId) ?? '成员',
+      controllerUserId: publicUserId(session.controllerSocketId),
     });
     cb?.({ ok: true });
   });
@@ -1769,7 +1820,11 @@ io.on('connection', socket => {
     targetSocket?.leave(roomId);
     const peer = peers.get(targetSocketId);
     if (peer?.roomId === roomId) peer.roomId = null;
-    io.to(targetSocketId).emit('room:kicked', { roomId, by: userNames.get(socket.id) ?? '房主' });
+    io.to(targetSocketId).emit('room:kicked', {
+      roomId,
+      by: userNames.get(socket.id) ?? '房主',
+      byUserId: publicUserId(socket.id),
+    });
     broadcastRoomMembers(roomId);
     cb?.({ ok: true });
   });
@@ -1811,11 +1866,12 @@ io.on('connection', socket => {
       id: Math.random().toString(36).slice(2, 9),
       roomId,
       author: userNames.get(socket.id) ?? 'Unknown',
+      authorUserId: publicUserId(socket.id),
       content: content.trim(),
       type: 'chat',
       timestamp: Date.now(),
     };
-    stmtInsertMsg.run(msg.id, msg.roomId, msg.author, msg.content, msg.type, msg.timestamp);
+    stmtInsertMsg.run(msg.id, msg.roomId, msg.author, userClientIds.get(socket.id) ?? null, msg.content, msg.type, msg.timestamp);
     io.to(roomId).emit('message:new', msg);
   });
 
@@ -2223,12 +2279,20 @@ io.on('connection', socket => {
     // 包括发送者在内，只有当前仍在语音中的成员会收到音频播放事件。
     // 发送者也等待此权威事件再播放，避免频道成员通过篡改客户端绕过限制。
     for (const targetSocketId of audience)
-      io.to(targetSocketId).emit('soundpack:play', { soundId, playedBy, soundName: pack.name });
+      io.to(targetSocketId).emit('soundpack:play', {
+        soundId,
+        playedBy,
+        playedByUserId: publicUserId(socket.id),
+        soundName: pack.name,
+      });
 
     const msg: Message = {
       id: Math.random().toString(36).slice(2, 9),
       roomId,
       author: playedBy,
+      authorUserId: publicUserId(socket.id),
+      contentUserId: publicUserId(socket.id),
+      contentUsername: playedBy,
       content: `${playedBy} 播放了「${pack.name}」`,
       type: 'soundpack',
       timestamp: Date.now(),

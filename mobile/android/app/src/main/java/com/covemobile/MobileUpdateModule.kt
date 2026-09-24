@@ -11,15 +11,21 @@ import java.util.concurrent.TimeUnit
 import java.io.ByteArrayOutputStream
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 // Deliberately NOT OkHttpClientProvider: server certificate exceptions never affect updates.
 internal fun createMobileUpdateClient(): OkHttpClient = OkHttpClient.Builder()
   .connectTimeout(5, TimeUnit.SECONDS).readTimeout(10, TimeUnit.SECONDS)
   .callTimeout(15, TimeUnit.SECONDS).followSslRedirects(false).build()
 
-internal fun mobileUpdateFeedUrl(source: String): String? = when (source) {
+internal fun mobileUpdateFeedUrl(source: String, serverURL: String): String? = when (source) {
   "github" -> "https://raw.githubusercontent.com/LumineTraveller/Cove/main/mobile/update.json"
-  "gitee" -> "https://gitee.com/LumineTraveller/Cove/raw/main/mobile/update.json"
+  "cloud" -> {
+    val base = serverURL.trim().toHttpUrlOrNull()
+    if (base?.scheme != "https" || base.username.isNotEmpty() || base.password.isNotEmpty()
+      || base.query != null || base.fragment != null) null
+    else base.newBuilder().addPathSegments("releases/mobile/update.json").build().toString()
+  }
   else -> null
 }
 
@@ -42,8 +48,8 @@ class MobileUpdateModule(context: ReactApplicationContext) : ReactContextBaseJav
     } catch (error: Exception) { promise.reject("VERSION_READ", "无法读取已安装 APK 版本", error) }
   }
 
-  @ReactMethod fun fetchUpdateFeed(source: String, promise: Promise) {
-    val url = mobileUpdateFeedUrl(source)
+  @ReactMethod fun fetchUpdateFeed(source: String, serverURL: String, promise: Promise) {
+    val url = mobileUpdateFeedUrl(source, serverURL)
     if (url == null) { promise.reject("UPDATE_SOURCE", "未知更新源"); return }
     executor.execute {
       try {

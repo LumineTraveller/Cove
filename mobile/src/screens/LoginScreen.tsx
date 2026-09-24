@@ -18,7 +18,7 @@ import type { AccountAuthRequest, AccountAuthMode } from '../accountAuth';
 import { validAccountEmail } from '../accountAuth';
 import { colors } from '../theme';
 import { httpsOrigin } from '../serverCertificate';
-import { MobileUpdateButton } from '../components/MobileUpdater';
+import { MobileUpdateButton, useSetMobileUpdateServerURL } from '../components/MobileUpdater';
 import type { RememberedServer } from '../storage';
 import { normalizeServerSecurityURL, readServerSecurityStatus, type ServerSecurityStatus } from '../serverSecurity';
 
@@ -36,6 +36,7 @@ interface Props {
 }
 
 export function LoginScreen({ saving, error, onSubmit, rememberedServers = [], onForget, onProbeServerSecurity }: Props) {
+  const setUpdateServerURL = useSetMobileUpdateServerURL();
   const [mode, setMode] = useState<AccountAuthMode>('login');
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState(rememberedServers[0]?.email ?? '');
@@ -43,6 +44,7 @@ export function LoginScreen({ saving, error, onSubmit, rememberedServers = [], o
   const [serverPassword, setServerPassword] = useState('');
   const [bootstrapToken, setBootstrapToken] = useState('');
   const [serverURL, setServerURL] = useState(rememberedServers[0]?.serverURL ?? '');
+  useEffect(() => { setUpdateServerURL?.(serverURL); }, [serverURL, setUpdateServerURL]);
   const [certificateException, setCertificateException] = useState(rememberedServers[0]?.allowInvalidServerCertificate === true);
   const [securityProbe, setSecurityProbe] = useState<ServerSecurityProbe>({ phase: 'idle' });
   useEffect(() => {

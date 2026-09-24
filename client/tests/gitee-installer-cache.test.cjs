@@ -34,15 +34,18 @@ function fixture(t) {
   });
   const info = { version, downloadedFile: path.join(pending, fileName) };
   const exists = relative => fs.existsSync(path.join(cache, relative));
-  return { root, cache, pending, version, fileName, contents, metadata, info, create, exists, logs };
+  const markLegacyDownload = () => fs.writeFileSync(path.join(pending, 'cove-gitee-cleanup.json'), JSON.stringify({
+    schema: 1, source: 'gitee', version, fileName, sha512,
+  }));
+  return { root, cache, pending, version, fileName, contents, metadata, info, create, exists, markLegacyDownload, logs };
 }
 
-test('Gitee download is retained until the new version runs, then both installer copies are removed', async t => {
+test('a legacy Gitee download is retained until the new version runs, then both installer copies are removed', async t => {
   const f = fixture(t);
   fs.writeFileSync(path.join(f.pending, 'unrelated.txt'), 'keep');
   fs.writeFileSync(path.join(f.root, 'manual-setup.exe'), 'keep');
   const oldApp = f.create('0.8.2');
-  oldApp.remember(f.info, 'gitee');
+  f.markLegacyDownload();
   assert.equal(f.exists(`pending/${f.fileName}`), true, 'download completion must not remove the installer');
   await oldApp.cleanupInstalledUpdate();
   assert.equal(f.exists(`pending/${f.fileName}`), true, 'failed installation / old-version restart must preserve the file');
@@ -55,10 +58,9 @@ test('Gitee download is retained until the new version runs, then both installer
   await f.create().cleanupInstalledUpdate(); // idempotent
 });
 
-test('GitHub installs and unmarked caches remain untouched', async t => {
+test('unmarked caches remain untouched', async t => {
   const f = fixture(t);
   const manager = f.create();
-  manager.remember(f.info, 'github');
   await manager.cleanupInstalledUpdate();
   assert.equal(f.exists('pending/cove-gitee-cleanup.json'), false);
   assert.equal(f.exists(`pending/${f.fileName}`), true);
@@ -69,7 +71,7 @@ test('an unrelated differential baseline is not removed with the Gitee installer
   const f = fixture(t);
   fs.writeFileSync(path.join(f.cache, 'installer.exe'), 'different GitHub baseline');
   const manager = f.create();
-  manager.remember(f.info, 'gitee');
+  f.markLegacyDownload();
   await manager.cleanupInstalledUpdate();
   assert.equal(f.exists(`pending/${f.fileName}`), false);
   assert.equal(f.exists('installer.exe'), true);
@@ -79,7 +81,7 @@ test('an unrelated differential baseline is not removed with the Gitee installer
 test('newer pending metadata and changed installer content prevent cleanup', async t => {
   const f = fixture(t);
   const manager = f.create();
-  manager.remember(f.info, 'gitee');
+  f.markLegacyDownload();
   fs.writeFileSync(path.join(f.pending, 'update-info.json'), JSON.stringify({ ...f.metadata, fileName: 'Cove-Setup-0.8.4.exe' }));
   await manager.cleanupInstalledUpdate();
   assert.equal(f.exists(`pending/${f.fileName}`), true);
@@ -90,12 +92,10 @@ test('newer pending metadata and changed installer content prevent cleanup', asy
   assert.equal(f.exists('pending/cove-gitee-cleanup.json'), true);
 });
 
-test('out-of-cache downloaded paths and malicious cleanup filenames are ignored', async t => {
+test('malicious legacy cleanup filenames are ignored', async t => {
   const f = fixture(t);
   const manager = f.create();
-  manager.remember({ ...f.info, downloadedFile: path.join(f.root, f.fileName) }, 'gitee');
-  assert.equal(f.exists('pending/cove-gitee-cleanup.json'), false);
-  manager.remember(f.info, 'gitee');
+  f.markLegacyDownload();
   const markerPath = path.join(f.pending, 'cove-gitee-cleanup.json');
   const marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
   fs.writeFileSync(markerPath, JSON.stringify({ ...marker, fileName: '../../victim.exe' }));
@@ -109,7 +109,7 @@ test('out-of-cache downloaded paths and malicious cleanup filenames are ignored'
 test('redirected cache directories are never cleaned', async t => {
   const f = fixture(t);
   const manager = f.create();
-  manager.remember(f.info, 'gitee');
+  f.markLegacyDownload();
   const outside = path.join(f.root, 'outside-pending');
   fs.renameSync(f.pending, outside);
   fs.symlinkSync(outside, f.pending, process.platform === 'win32' ? 'junction' : 'dir');
@@ -121,7 +121,7 @@ test('redirected cache directories are never cleaned', async t => {
 test('linked installer files are not eligible for cleanup', async t => {
   const f = fixture(t);
   const manager = f.create();
-  manager.remember(f.info, 'gitee');
+  f.markLegacyDownload();
   const otherLink = path.join(f.root, 'manual-download.exe');
   fs.linkSync(f.info.downloadedFile, otherLink);
   await manager.cleanupInstalledUpdate();
@@ -134,7 +134,7 @@ test('a briefly locked installer is retried; permanent failure preserves the mar
   const f = fixture(t);
   let retries = 0;
   const manager = f.create(f.version, async () => { retries++; });
-  manager.remember(f.info, 'gitee');
+  f.markLegacyDownload();
   const originalUnlink = fs.unlinkSync;
   let locks = 1;
   const mock = t.mock.method(fs, 'unlinkSync', file => {
@@ -147,7 +147,7 @@ test('a briefly locked installer is retried; permanent failure preserves the mar
     assert.equal(f.exists(`pending/${f.fileName}`), false);
     fs.writeFileSync(f.info.downloadedFile, f.contents);
     fs.writeFileSync(path.join(f.pending, 'update-info.json'), JSON.stringify(f.metadata));
-    manager.remember(f.info, 'gitee');
+    f.markLegacyDownload();
     locks = 10;
     await manager.cleanupInstalledUpdate();
     assert.equal(f.exists(`pending/${f.fileName}`), true);

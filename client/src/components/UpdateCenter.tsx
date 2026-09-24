@@ -351,7 +351,7 @@ export function UpdateCenter({
         ? `${githubBase}/tag/v${state.version}`
         : githubBase;
     if (!url) {
-      setActionError('当前服务器地址无效，无法打开服务器下载地址。');
+      setActionError('服务器下载地址无效，无法打开下载页面。');
       return;
     }
     try {
@@ -424,7 +424,7 @@ export function UpdateCenter({
             <button type="button" onClick={() => { void openLog(); }}><FileText size={14} />打开更新日志</button>
             <button type="button" onClick={() => { void openRelease('github'); }}><ExternalLink size={14} />GitHub 发布页</button>
             {SERVER_DOWNLOAD_LINKS_ENABLED && (
-              <button type="button" onClick={() => { void openRelease('cloud'); }}><ExternalLink size={14} />当前服务器下载</button>
+              <button type="button" onClick={() => { void openRelease('cloud'); }}><ExternalLink size={14} />从服务器下载</button>
             )}
           </div>
           <p>分享错误详情或 updater.log 可帮助定位停在何处。手动下载请选择 Windows 客户端 .exe 安装包；这不会取消当前后台更新。</p>

@@ -6,7 +6,9 @@ export interface RemoteControlSession {
   roomId: string;
   role: 'controller' | 'sharer';
   sharerSocketId?: string;
+  sharerUserId?: string;
   controllerName?: string;
+  controllerUserId?: string;
 }
 
 type Listener = (...args: any[]) => void;

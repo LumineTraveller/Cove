@@ -2,6 +2,7 @@ export type ClientPlatform = 'desktop' | 'mobile';
 
 export interface OnlinePresenceUser {
   socketId: string;
+  userId?: string;
   username: string;
   avatarUrl: string | null;
   platform: ClientPlatform | null;
@@ -23,10 +24,12 @@ export function createLobbyPresenceSnapshot(
   roomMembers: ReadonlyMap<string, ReadonlySet<string>>,
   voiceRooms: ReadonlyMap<string, ReadonlySet<string>>,
   userPlatforms: ReadonlyMap<string, ClientPlatform> = new Map(),
+  publicUserIds: ReadonlyMap<string, string> = new Map(),
 ): LobbyPresenceSnapshot {
   return {
     onlineUsers: [...userNames.entries()].map(([socketId, username]) => ({
       socketId,
+      ...(publicUserIds.has(socketId) ? { userId: publicUserIds.get(socketId)! } : {}),
       username,
       avatarUrl: userAvatars.get(socketId) ?? null,
       platform: userPlatforms.get(socketId) ?? null,

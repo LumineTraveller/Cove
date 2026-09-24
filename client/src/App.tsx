@@ -80,10 +80,11 @@ export default function App() {
   const serverURL = getServerURL();
   const accountSession = readAccountSession(serverURL);
   const needLogin = !profile.username || !serverUrl || !accountSession || serverUnlockRequired;
+  const updateServerURL = needLogin || editingServer ? normalizeServerSecurityURL(draftUrl) : serverURL;
 
   useEffect(() => {
-    void window.coveUpdater?.setServerUrl(serverURL).catch(() => undefined);
-  }, [serverURL]);
+    void window.coveUpdater?.setServerUrl(updateServerURL).catch(() => undefined);
+  }, [updateServerURL]);
 
   useEffect(() => {
     try {
@@ -476,7 +477,7 @@ export default function App() {
     return (
       <main className="auth-page">
         <WindowTitleBar showBrand={false} />
-        <UpdateCenter allowDetails={false} serverURL={serverURL} />
+        <UpdateCenter allowDetails={false} serverURL={updateServerURL} />
         <div className="auth-shell">
           <section className="auth-showcase" aria-label="Cove 产品介绍">
             <div className="auth-brand">
@@ -671,7 +672,7 @@ export default function App() {
         <Route path="/room/:roomId" element={<ChatRoomV2 profile={profile} accountId={accountSession?.accountId ?? ''} onProfileChange={handleProfileChange} onLogout={handleLogout} sessionReady={sessionReady} serverURL={serverURL} theme={theme} onThemeChange={handleThemeChange} />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
-      <UpdateCenter serverURL={serverURL} />
+      <UpdateCenter serverURL={updateServerURL} />
       {connected !== true && (
         <div className="cove-connection-scrim" role="dialog" aria-modal="true" aria-labelledby="connection-title">
           <div className="cove-connection-modal">

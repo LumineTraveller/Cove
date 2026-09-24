@@ -48,7 +48,7 @@ function main() {
   if (fs.existsSync(apkPath) || fs.existsSync(feedPath)) throw new Error(`暂存目录已有发布文件，请先人工检查：${output}`);
   fs.writeFileSync(apkPath, apk, { flag: 'wx' });
   fs.writeFileSync(feedPath, `${JSON.stringify(feed, null, 2)}\n`, { flag: 'wx' });
-  console.log(`准备完成（尚未发布）：${output}\n先将 APK 上传两平台 ${feed.release.tag} Release，确认可下载后再更新 mobile/update.json 并推送两平台。`);
+  console.log(`准备完成（尚未发布）：${output}\n先将 APK 上传 GitHub ${feed.release.tag} Release，再镜像到 Cove 服务器并确认两处可下载，最后更新 mobile/update.json 并推送两平台仓库。`);
 }
 
 module.exports = { createFeed };

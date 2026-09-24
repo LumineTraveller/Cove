@@ -5,6 +5,7 @@ export interface Room {
   name: string;
   createdAt: number;
   ownerName: string | null;
+  ownerUserId?: string | null;
   maxMembers: number | null;
   hasPassword: boolean;
 }
@@ -22,6 +23,7 @@ export interface RoomMember {
 export interface RoomState {
   roomId: string;
   ownerName: string | null;
+  ownerUserId?: string | null;
   isOwner: boolean;
   members: RoomMember[];
   maxMembers: number | null;
@@ -41,6 +43,7 @@ export interface Soundpack {
   name: string;
   filename: string;
   uploader: string;
+  uploaderUserId?: string | null;
   createdAt: number;
   sortOrder: number;
   canDelete: boolean;
@@ -50,6 +53,9 @@ export interface Message {
   id: string;
   roomId: string;
   author: string;
+  authorUserId?: string | null;
+  contentUserId?: string;
+  contentUsername?: string;
   content: string;
   type?: 'chat' | 'soundpack' | 'image' | 'system';
   timestamp: number;

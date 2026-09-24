@@ -11,7 +11,7 @@
 
 ### 构建发布 APK 前
 
-1. 读取 `mobile/package.json` 的 `version`、`mobile/android/app/build.gradle` 的 `versionName` 和 `versionCode`，以及现有 `mobile/update.json` 的 `release.versionName` 和 `release.versionCode`；核对线上清单，记录旧版本基线。
+1. 读取 `mobile/package.json` 的 `version`、`mobile/android/app/build.gradle` 的 `versionName` 和 `versionCode`，以及现有 `mobile/update.json` 的 `release.versionName` 和 `release.versionCode`；核对 GitHub、Gitee 和 Cove 服务器线上清单，记录旧版本基线。
 2. 确认 `package.json.version` 与 Android `versionName` 完全一致，并且新的 Android `versionCode` 严格大于线上旧值。只改显示版本号、不递增 Android `versionCode` 时停止发布。
 
 ### 提交或推送发布清单、创建发布标签或发布 Release 前
@@ -22,14 +22,21 @@
 ### 发布顺序与完成条件
 
 1. 先确认 GitHub 手机版 Release 已公开且 APK 附件可下载。Gitee 不创建、不编辑、不上传 Release 附件；Gitee 仅作为仓库同步目标。
-2. 将源代码、必要的 Git 标签和更新清单推送到 GitHub 和 Gitee 的 `main` 后，分别核验两个 raw 地址返回的新版本。除非用户明确要求，不在 Gitee 创建或修改 Release。
-3. 只有 Android 版本号已递增、GitHub Release APK 元数据与清单一致、两个更新源清单一致，才算发布完成。Gitee 仓库不需要有对应的 Release 或附件。
+2. 执行 `scripts/publish-mobile-release-to-cloud.ps1`，把同一 APK 和更新清单上传到 SSH 别名 `Cove_server` 的 `/var/www/cove-download`，核验 `https://cove-cove.space/releases/mobile/update.json` 与 APK 公开地址可下载。服务器清单必须最后发布。
+3. 将源代码、必要的 Git 标签和更新清单推送到 GitHub 和 Gitee 的 `main` 后，分别核验两个 raw 地址返回的新版本。除非用户明确要求，不在 Gitee 创建或修改 Release。
+4. 只有 Android 版本号已递增、GitHub Release APK 元数据与清单一致、GitHub 和 Cove 服务器两处下载与清单一致，才算发布完成。Gitee 仓库不需要有对应的 Release 或附件。
 
 ## Gitee 同步规则
 
 - Gitee 只同步 Git 仓库内容，包括按发布流程需要的提交、`main` 分支和必要标签；不创建、不编辑、不上传、不删除 Gitee Release 或 Release 附件。
-- 手机版 APK 的发布页和下载附件以 GitHub Release 为唯一发布载体；Gitee 只接收仓库代码和 `mobile/update.json` 等更新清单。
+- 手机版 APK 先通过 GitHub Release 正式发布，再镜像到 Cove 服务器供连接该服务器的客户端下载；Gitee 只接收仓库代码和 `mobile/update.json` 等更新清单。
 - 不再执行 Gitee Release 附件配额统计或清理；如需处理历史 Gitee Release，必须获得用户明确要求。
+
+## 桌面版发布镜像
+
+- 每次公开桌面版 GitHub Release 后，执行 `scripts/publish-release-to-cloud.ps1 -Tag vX.Y.Z`，将 Windows 客户端和服务端安装包、blockmap、`latest.yml` 上传到同一服务器，最后发布 `releases/latest.json`。
+- 逐一核验 `https://cove-cove.space/releases/vX.Y.Z/latest.yml` 与 `https://cove-cove.space/downloads/Cove-Setup.exe`、`Cove-Server-Setup.exe` 可公开下载；服务器镜像未完成时不把发布任务标为完成。GitHub 仍作为客户端更新备用源。
+- 客户端“从服务器下载”使用用户当前填写的服务器地址，自动更新仅使用该地址的 HTTPS 镜像；不是固定访问 `cove-cove.space`。其他自建服务器要提供相同的 `/downloads/` 和 `/releases/` 路径才能作为更新来源，不能因为 Cove 官方服务器已有镜像就假定它们也可下载。
 
 ## 其他约定
 

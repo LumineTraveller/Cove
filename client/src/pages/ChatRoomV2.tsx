@@ -57,6 +57,7 @@ import {
   X,
 } from "@phosphor-icons/react";
 import { socket } from "../socket";
+import { applyAudioContextOutput, applyAudioElementOutput } from "../audioDevices";
 import {
   SCREEN_PRESETS,
   useWebRTC,
@@ -73,7 +74,7 @@ import { CreateRoomDialog } from "../components/CreateRoomDialog";
 import { UpdateCenter } from "../components/UpdateCenter";
 import packageInfo from "../../package.json";
 import { UPDATE_CENTER_DETAILS_EVENT } from "../update";
-import { loadProfileRemarks, saveProfileRemark } from "../profileRemarks";
+import { getProfileDisplayContent, getProfileDisplayName, loadProfileRemarks, saveProfileRemark, type ProfileRemarks } from "../profileRemarks";
 import { createRoomPayload } from "../roomSettings";
 import { sortRoomMembers } from "../memberOrdering";
 import { parseChatText } from "../chatLinks";
@@ -127,6 +128,7 @@ interface RemoteControlRequest {
   requestId: string;
   roomId: string;
   controllerName: string;
+  controllerUserId?: string;
 }
 
 const REMOTE_CONTROL_APPROVAL_DELAY_SECONDS = 10;
@@ -253,10 +255,11 @@ async function copyImageToClipboard(src: string) {
   const response = await fetch(src);
   if (!response.ok) throw new Error("读取图片失败");
   const sourceBlob = await response.blob();
+  const isGif = sourceBlob.type === "image/gif";
   let clipboardBlob = sourceBlob;
 
-  // Chromium 对剪贴板图片的兼容性以 PNG 最好，上传的 JPEG/WebP/GIF
-  // 统一转换后再写入，确保可以直接粘贴到聊天输入框或其它应用。
+  // 保留 GIF 原始帧，同时提供首帧 PNG 供不支持 GIF 的目标使用。
+  // 其它格式继续转成兼容性较好的 PNG。
   if (sourceBlob.type !== "image/png") {
     const objectUrl = URL.createObjectURL(sourceBlob);
     try {
@@ -287,7 +290,9 @@ async function copyImageToClipboard(src: string) {
     try {
       if (
         await window.coveClipboard.writeImage(
-          new Uint8Array(await clipboardBlob.arrayBuffer()),
+          new Uint8Array(await (isGif ? sourceBlob : clipboardBlob).arrayBuffer()),
+          isGif ? "image/gif" : "image/png",
+          isGif ? new Uint8Array(await clipboardBlob.arrayBuffer()) : undefined,
         )
       )
         return;
@@ -297,12 +302,27 @@ async function copyImageToClipboard(src: string) {
   }
   if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined")
     throw new Error("当前环境不支持复制图片");
+  if (isGif) {
+    const html = new Blob(
+      [`<img src="${await readFileAsDataUrl(sourceBlob)}">`],
+      { type: "text/html" },
+    );
+    const fallback = { "image/png": clipboardBlob, "text/html": html };
+    try {
+      await navigator.clipboard.write([
+        new ClipboardItem({ ...fallback, "web image/gif": sourceBlob }),
+      ]);
+    } catch {
+      await navigator.clipboard.write([new ClipboardItem(fallback)]);
+    }
+    return;
+  }
   await navigator.clipboard.write([
     new ClipboardItem({ "image/png": clipboardBlob }),
   ]);
 }
 
-function readFileAsDataUrl(file: File) {
+function readFileAsDataUrl(file: Blob) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result));
@@ -601,14 +621,59 @@ function LocalScreenVideo({ stream }: { stream: MediaStream }) {
 
 function RemoteScreenVideo({
   stream,
+  receiveVolume,
+  masterVolume,
+  outputDeviceId,
   controlling,
   onInput,
 }: {
   stream: MediaStream;
+  receiveVolume: number;
+  masterVolume: number;
+  outputDeviceId: string;
   controlling: boolean;
   onInput: (input: RemoteControlInput) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const boostedOutput = useRef<{ context: AudioContext; gain: GainNode } | null>(null);
+  const playbackSettings = useRef({ volume: receiveVolume * masterVolume, outputDeviceId });
+  playbackSettings.current = { volume: receiveVolume * masterVolume, outputDeviceId };
+  const syncPlaybackVolume = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const volume = playbackSettings.current.volume;
+    if (volume > 1 && !boostedOutput.current && video.srcObject instanceof MediaStream &&
+        video.srcObject.getAudioTracks().length > 0) {
+      let context: AudioContext | null = null;
+      try {
+        // 增益以视频元素本身为源，仍由同一个播放器掌握音画时钟。
+        context = new AudioContext();
+        const source = context.createMediaElementSource(video);
+        const gain = context.createGain();
+        source.connect(gain).connect(context.destination);
+        boostedOutput.current = { context, gain };
+        void applyAudioContextOutput(context, playbackSettings.current.outputDeviceId)
+          .catch((error) => console.warn("[screen-preview] 切换增强音量输出设备失败", error));
+        void context.resume().catch((error) => {
+          console.warn("[screen-preview] 启动增强音量失败，等待点击重试", error);
+          document.addEventListener("click", () => void context?.resume().catch(() => {}), { once: true });
+        });
+      } catch (error) {
+        void context?.close();
+        console.warn("[screen-preview] 无法启用增强音量，使用标准音量", error);
+      }
+    }
+    const boosted = boostedOutput.current;
+    if (boosted) {
+      boosted.gain.gain.value = volume;
+      video.volume = 1;
+    } else {
+      video.volume = Math.min(1, volume);
+    }
+    video.muted = volume === 0 ||
+      !(video.srcObject instanceof MediaStream) ||
+      video.srcObject.getAudioTracks().length === 0;
+  }, []);
   const inputSender = useMemo(() => new RemotePointerSender(onInput), [onInput]);
   const pressedKeys = useRef(new Set<string>());
   const pressedButtons = useRef(
@@ -616,16 +681,44 @@ function RemoteScreenVideo({
   );
   const lastPoint = useRef<{ x: number; y: number } | null>(null);
   useEffect(() => {
-    if (videoRef.current) {
-      videoRef.current.srcObject = stream;
-      void videoRef.current.play().catch((error: unknown) => {
-        // Changing a remote track while Chromium is starting playback can
-        // legitimately abort the previous play request.
-        if (!(error instanceof DOMException && error.name === "AbortError"))
-          console.warn("[screen-preview] 远程共享预览播放失败", error);
+    const video = videoRef.current;
+    if (!video) return;
+    const retry = () => void video.play().catch((error) =>
+      console.warn("[screen-preview] 点击后仍无法播放远程共享", error));
+    const play = () => {
+      syncPlaybackVolume();
+      void video.play().catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        console.warn("[screen-preview] 远程共享预览播放失败", error);
+        if (error instanceof DOMException && error.name === "NotAllowedError")
+          document.addEventListener("click", retry, { once: true });
       });
-    }
-  }, [stream]);
+    };
+    video.srcObject = stream;
+    stream.addEventListener("addtrack", play);
+    stream.addEventListener("removetrack", syncPlaybackVolume);
+    play();
+    return () => {
+      stream.removeEventListener("addtrack", play);
+      stream.removeEventListener("removetrack", syncPlaybackVolume);
+      document.removeEventListener("click", retry);
+      video.pause();
+      if (video.srcObject === stream) video.srcObject = null;
+    };
+  }, [stream, syncPlaybackVolume]);
+  useEffect(syncPlaybackVolume, [receiveVolume, masterVolume, syncPlaybackVolume]);
+  useEffect(() => {
+    const video = videoRef.current;
+    if (video) void applyAudioElementOutput(video, outputDeviceId).catch((error) =>
+      console.warn("[screen-preview] 切换输出设备失败", error));
+    const boosted = boostedOutput.current;
+    if (boosted) void applyAudioContextOutput(boosted.context, outputDeviceId).catch((error) =>
+      console.warn("[screen-preview] 切换增强音量输出设备失败", error));
+  }, [outputDeviceId]);
+  useEffect(() => () => {
+    void boostedOutput.current?.context.close();
+    boostedOutput.current = null;
+  }, []);
   const point = (event: { clientX: number; clientY: number }) => {
     const video = videoRef.current;
     if (!video) return null;
@@ -739,7 +832,7 @@ function RemoteScreenVideo({
       onBlur={release}
       onContextMenu={(event) => controlling && event.preventDefault()}
     >
-      <video ref={videoRef} autoPlay muted playsInline />
+      <video ref={videoRef} autoPlay playsInline />
       <span className="remote-control-frame" />
     </div>
   );
@@ -815,6 +908,8 @@ function ChatPanelV2({
   roomBottom,
   roomForeground,
   getMemberAvatar,
+  currentUserId,
+  profileRemarks,
   input,
   setInput,
   onSend,
@@ -835,7 +930,9 @@ function ChatPanelV2({
   serverURL: string;
   roomBottom: string;
   roomForeground: string;
-  getMemberAvatar: (username: string) => string | null | undefined;
+  getMemberAvatar: (userId?: string | null, username?: string) => string | null | undefined;
+  currentUserId?: string;
+  profileRemarks: ProfileRemarks;
   input: string;
   setInput: (value: string) => void;
   onSend: () => void;
@@ -1234,7 +1331,7 @@ function ChatPanelV2({
               <button
                 type="button"
                 className={`icon-btn chat-font-button ${fontMenuOpen ? "active" : ""}`}
-                onClick={() => setFontMenuOpen((value) => !value)}
+                onClick={openFontMenuOnHover}
                 aria-label="调整聊天字号"
                 aria-expanded={fontMenuOpen}
                 title="调整聊天字号"
@@ -1296,6 +1393,11 @@ function ChatPanelV2({
           </div>
         )}
         {messages.map((message, index) => {
+          const authorName = getProfileDisplayName(message.author, message.authorUserId, profileRemarks);
+          const messageContent = getProfileDisplayContent(message.content, message.contentUsername, message.contentUserId, profileRemarks);
+          const isOwn = message.authorUserId && currentUserId
+            ? message.authorUserId === currentUserId
+            : message.author === profile.username;
           const showDate =
             index === 0 ||
             !sameMessageDay(messages[index - 1].timestamp, message.timestamp);
@@ -1309,22 +1411,20 @@ function ChatPanelV2({
               {message.type === "system" || message.type === "soundpack" ? (
                 <div className="message-system">
                   <Radio size={14} />
-                  {message.content}
+                  {messageContent}
                 </div>
               ) : (
                 <article
-                  className={`message-row ${message.author === profile.username ? "mine" : ""} ${message.type === "image" ? "image-message" : ""}`}
+                  className={`message-row ${isOwn ? "mine" : ""} ${message.type === "image" ? "image-message" : ""}`}
                 >
                   <Avatar
                     username={
-                      message.author === profile.username
-                        ? profile.username
-                        : message.author
+                      authorName
                     }
                     avatarUrl={
-                      message.author === profile.username
+                      isOwn
                         ? profile.avatarUrl
-                        : getMemberAvatar(message.author)
+                        : getMemberAvatar(message.authorUserId, message.author)
                     }
                     size="sm"
                     className="message-avatar"
@@ -1332,9 +1432,9 @@ function ChatPanelV2({
                   <div className="message-copy">
                     <div className="message-meta">
                       <b>
-                        {message.author === profile.username
+                        {isOwn
                           ? "你"
-                          : message.author}
+                          : authorName}
                       </b>
                       <time>
                         {new Date(message.timestamp).toLocaleTimeString([], {
@@ -1362,7 +1462,7 @@ function ChatPanelV2({
                       ) : (
                         <>
                           <span className="message-text-content">
-                            {parseChatText(message.content).map(
+                            {parseChatText(messageContent).map(
                               (part, partIndex) =>
                                 part.kind === "link" && part.href ? (
                                   <a
@@ -1499,7 +1599,42 @@ function ChatPanelV2({
                 .filter((file): file is File => Boolean(file));
               if (!pastedImages.length) return;
               event.preventDefault();
-              stageImages(pastedImages);
+              if (pastedImages.length !== 1 || pastedImages[0].type === "image/gif") {
+                stageImages(pastedImages);
+                return;
+              }
+              const html = event.clipboardData.getData("text/html");
+              const gifSrc = html
+                ? new DOMParser()
+                    .parseFromString(html, "text/html")
+                    .querySelector<HTMLImageElement>('img[src^="data:image/gif;base64,"]')
+                    ?.src
+                : undefined;
+              const stageHtmlGifOrImages = () => {
+                if (gifSrc && gifSrc.length <= 14 * 1024 * 1024) {
+                  void fetch(gifSrc)
+                    .then((response) => response.blob())
+                    .then((blob) => stageImages([new File([blob], "animation.gif", { type: "image/gif" })]))
+                    .catch(() => stageImages(pastedImages));
+                } else {
+                  stageImages(pastedImages);
+                }
+              };
+              if (!window.coveClipboard?.readGif) {
+                stageHtmlGifOrImages();
+                return;
+              }
+              void window.coveClipboard.readGif()
+                .then((bytes) => {
+                  if (bytes?.length) {
+                    const gifBytes = new Uint8Array(bytes.length);
+                    gifBytes.set(bytes);
+                    stageImages([new File([gifBytes], "animation.gif", { type: "image/gif" })]);
+                  } else {
+                    stageHtmlGifOrImages();
+                  }
+                })
+                .catch(stageHtmlGifOrImages);
             }}
             onKeyDown={(event) => {
               if (event.key === "Enter" && !event.shiftKey) {
@@ -2330,19 +2465,6 @@ export function GlobalSettingsV2({
                   >
                     GitHub
                   </a>
-                  <a
-                    href="https://gitee.com/LumineTraveller/Cove"
-                    target="_blank"
-                    rel="noreferrer noopener"
-                    onClick={(event) =>
-                      openExternalLink(
-                        event,
-                        "https://gitee.com/LumineTraveller/Cove",
-                      )
-                    }
-                  >
-                    Gitee
-                  </a>
                   {SERVER_DOWNLOAD_LINKS_ENABLED && (
                     <a
                       href={serverDownloadUrl ?? '#'}
@@ -2356,7 +2478,7 @@ export function GlobalSettingsV2({
                         openExternalLink(event, serverDownloadUrl);
                       }}
                     >
-                      下载站
+                      服务器下载
                     </a>
                   )}
                 </nav>
@@ -3081,6 +3203,9 @@ function ShareViewV2({
           {remote ? (
             <RemoteScreenVideo
               stream={remote.stream}
+              receiveVolume={rtc.screenReceiveVolume}
+              masterVolume={rtc.masterOutputVolume}
+              outputDeviceId={rtc.selectedAudioOutputId}
               controlling={remoteControl.state === "active"}
               onInput={onInput}
             />
@@ -3990,6 +4115,7 @@ export default function ChatRoomV2({
               ...current,
               name: state.name ?? current.name,
               ownerName: state.ownerName,
+              ownerUserId: state.ownerUserId ?? current.ownerUserId,
               maxMembers: state.maxMembers,
               hasPassword: state.hasPassword,
               avatarUrl: state.avatarUrl ?? current.avatarUrl,
@@ -4009,10 +4135,10 @@ export default function ChatRoomV2({
       if (deleted === roomId) navigate("/", { replace: true });
     };
     // 被房主移出频道后必须真的离开房间界面，否则会停留在已经失去成员身份的房间。
-    const onKicked = ({ roomId: kicked, by }: { roomId: string; by?: string }) => {
+    const onKicked = ({ roomId: kicked, by, byUserId }: { roomId: string; by?: string; byUserId?: string }) => {
       if (kicked !== roomId) return;
       navigate("/", { replace: true });
-      window.alert(`你已被${by ?? "房主"}移出频道。`);
+      window.alert(`你已被${getProfileDisplayName(by ?? "房主", byUserId, profileRemarks)}移出频道。`);
     };
     socket.on("message:new", onMessage);
     socket.on("room:state", onState);
@@ -4024,7 +4150,7 @@ export default function ChatRoomV2({
       socket.off("room:deleted", onDeleted);
       socket.off("room:kicked", onKicked);
     };
-  }, [roomId, navigate]);
+  }, [roomId, navigate, profileRemarks]);
   useEffect(() => {
     const bridge = window.coveRemoteControl;
     const lifecycle = new RemoteControlLifecycle({
@@ -4322,7 +4448,7 @@ export default function ChatRoomV2({
     if (!isRoomOwner || isSelf) return;
     setMemberMenu({
       socketId: member.socketId,
-      username: member.username,
+      username: getProfileDisplayName(member.username, member.userId, profileRemarks),
       muted: Boolean(member.isMuted),
       x: Math.max(8, Math.min(event.clientX, window.innerWidth - 188)),
       y: Math.max(8, Math.min(event.clientY, window.innerHeight - 104)),
@@ -4474,10 +4600,15 @@ export default function ChatRoomV2({
     : null;
   const sharedScreenSharerName = rtc.remoteScreen
     ? remoteSharer
-      ? profileRemarks[remoteSharer.userId] || remoteSharer.username
-      : rtc.voiceMembers.find(
-          (member) => member.socketId === rtc.remoteScreen?.socketId,
-        )?.username ?? "成员"
+      ? getProfileDisplayName(remoteSharer.username, remoteSharer.userId, profileRemarks)
+      : (() => {
+          const voiceSharer = rtc.voiceMembers.find(
+            (member) => member.socketId === rtc.remoteScreen?.socketId,
+          );
+          return voiceSharer
+            ? getProfileDisplayName(voiceSharer.username, voiceSharer.userId, profileRemarks)
+            : "成员";
+        })()
     : "你";
   return (
     <main className={`prototype-page cove-v2-page foreground-${foreground}`}>
@@ -4488,7 +4619,11 @@ export default function ChatRoomV2({
         <NavigationRailV2
           rooms={rooms}
           activeRoom={roomId ?? ""}
-          profileName={profile.username}
+          profileName={getProfileDisplayName(
+            profile.username,
+            roomMembers.find((member) => member.socketId === socket.id)?.userId,
+            profileRemarks,
+          )}
           onRoom={(id) => navigate(`/room/${id}`)}
           expanded={sidebarOpen}
           setExpanded={setSidebarOpen}
@@ -4524,7 +4659,8 @@ export default function ChatRoomV2({
                     const voice = rtc.voiceMembers.find(
                       (item) => item.socketId === member.socketId,
                     );
-                    const isSelf = member.socketId === socket.id || member.username === profile.username;
+                    const isSelf = member.socketId === socket.id;
+                    const displayName = getProfileDisplayName(member.username, member.userId, profileRemarks);
                     const screen =
                       Boolean(member.isSharingScreen) ||
                       (isSelf && Boolean(rtc.localScreen)) ||
@@ -4580,6 +4716,9 @@ export default function ChatRoomV2({
                                     avatarUrl: profile.avatarUrl,
                                   }
                                 : {}),
+                              username: isSelf
+                                ? getProfileDisplayName(profile.username, member.userId, profileRemarks)
+                                : displayName,
                               isMuted: Boolean(
                                 member.isMuted ||
                                   voice?.isMuted ||
@@ -4592,9 +4731,8 @@ export default function ChatRoomV2({
                           <span className="member-name">
                             <b>
                               {isSelf
-                                ? `${member.username}（你）`
-                                : profileRemarks[member.userId] ||
-                                  member.username}
+                                ? `${displayName}（你）`
+                                : displayName}
                             </b>
                           </span>
                           <SharedBadges screen={screen} audio={audio} />
@@ -4616,7 +4754,7 @@ export default function ChatRoomV2({
                               label={
                                 isSelf
                                   ? "麦克风发送音量"
-                                  : `${member.username} 的音量`
+                                  : `${displayName} 的音量`
                               }
                               muted={
                                 isSelf
@@ -4653,7 +4791,7 @@ export default function ChatRoomV2({
                                 label={
                                   isSelf
                                     ? "共享发送音量"
-                                    : `${member.username} 的共享音频音量`
+                                    : `${displayName} 的共享音频音量`
                                 }
                               />
                             )}
@@ -4698,7 +4836,8 @@ export default function ChatRoomV2({
                       rtc.remoteApplicationAudios.some(
                         (item) => item.socketId === member.socketId,
                       );
-                    const isSelf = member.socketId === socket.id || member.username === profile.username;
+                    const isSelf = member.socketId === socket.id;
+                    const displayName = getProfileDisplayName(member.username, member.userId, profileRemarks);
                     const sharedVolume = getSharedAudioVolume(member, isSelf);
                     const level =
                       rtc.speakingLevels[member.socketId] ??
@@ -4733,6 +4872,9 @@ export default function ChatRoomV2({
                                     avatarUrl: profile.avatarUrl,
                                   }
                                 : {}),
+                              username: isSelf
+                                ? getProfileDisplayName(profile.username, member.userId, profileRemarks)
+                                : displayName,
                               isMuted: Boolean(
                                 member.isMuted ||
                                   (member.socketId === socket.id &&
@@ -4748,8 +4890,8 @@ export default function ChatRoomV2({
                           />
                           <b>
                             {member.socketId === socket.id
-                              ? `${member.username}（你）`
-                              : profileRemarks[member.userId] || member.username}
+                              ? `${displayName}（你）`
+                              : displayName}
                           </b>
                           <SharedBadges screen={screen} audio={audio} />
                         </button>
@@ -4828,7 +4970,9 @@ export default function ChatRoomV2({
                   remoteControl={{
                     state: remoteState,
                     sharerActive: remoteSession?.role === "sharer",
-                    controllerName: remoteSession?.controllerName,
+                    controllerName: remoteSession?.controllerName
+                      ? getProfileDisplayName(remoteSession.controllerName, remoteSession.controllerUserId, profileRemarks)
+                      : undefined,
                   }}
                   onInput={sendRemoteInput}
                   onRequestRemote={requestRemote}
@@ -4857,9 +5001,12 @@ export default function ChatRoomV2({
             serverURL={serverURL}
             roomBottom={roomBottom}
             roomForeground={foreground === "light" ? "#fff" : "#15191f"}
-            getMemberAvatar={(username) =>
-              roomMembers.find((member) => member.username === username)
-                ?.avatarUrl
+            currentUserId={roomMembers.find((member) => member.socketId === socket.id)?.userId}
+            profileRemarks={profileRemarks}
+            getMemberAvatar={(userId, username) =>
+              roomMembers.find((member) => userId
+                ? member.userId === userId
+                : member.username === username)?.avatarUrl
             }
             input={input}
             setInput={setInput}
@@ -5031,6 +5178,7 @@ export default function ChatRoomV2({
         socket={socket}
         roomId={roomId!}
         serverURL={serverURL}
+        profileRemarks={profileRemarks}
         outputDeviceId={rtc.selectedAudioOutputId}
         inVoice={rtc.inVoice}
         disabled={!sessionReady || !roomSynced}
@@ -5191,7 +5339,7 @@ export default function ChatRoomV2({
             <h2>远程控制请求</h2>
             <p aria-live="polite">
               {remoteApprovalSeconds === null
-                ? `${pendingRemote.controllerName} 请求控制你正在共享的屏幕。`
+                ? `${getProfileDisplayName(pendingRemote.controllerName, pendingRemote.controllerUserId, profileRemarks)} 请求控制你正在共享的屏幕。`
                 : remoteApprovalSeconds > 0
                   ? `已允许，将在 ${remoteApprovalSeconds} 秒后开始远程控制。`
                   : "正在启动远程控制…"}

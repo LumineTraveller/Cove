@@ -9,6 +9,7 @@ import type { OnlineUser, Room, UserProfile } from '../types';
 import type { AppTheme } from '../theme';
 import { createRoomPayload } from '../roomSettings';
 import { serverFetch } from '../serverSecurity';
+import { getProfileDisplayName, loadProfileRemarks } from '../profileRemarks';
 import {
   GlobalSettingsV2,
   NavigationRailV2,
@@ -50,6 +51,12 @@ export default function RoomList({ profile, onProfileChange, accountId, onLogout
   const [globalSettingsPage, setGlobalSettingsPage] = useState<GlobalSettingsPage>('audio');
   const [roomSettings, setRoomSettings] = useState<RoomWithAppearance | null>(null);
   const [onlineUsers, setOnlineUsers] = useState<OnlineUser[]>([]);
+  const [profileRemarks] = useState(loadProfileRemarks);
+  const profileDisplayName = getProfileDisplayName(
+    profile.username,
+    onlineUsers.find((user) => user.socketId === socket.id)?.userId,
+    profileRemarks,
+  );
   const [roomMembersMap, setRoomMembersMap] = useState<Record<string, string[]>>({});
   const [voiceCounts, setVoiceCounts] = useState<Record<string, number>>({});
 
@@ -170,7 +177,7 @@ export default function RoomList({ profile, onProfileChange, accountId, onLogout
         <NavigationRailV2
           rooms={lobbyRooms}
           activeRoom=""
-          profileName={profile.username}
+          profileName={profileDisplayName}
           onRoom={(id) => navigate(`/room/${id}`)}
           expanded
           setExpanded={() => undefined}
@@ -262,7 +269,9 @@ export default function RoomList({ profile, onProfileChange, accountId, onLogout
                         </b>
                         <small>
                           <Crown size={14} />
-                          {room.ownerName ?? "暂无房主"}
+                          {room.ownerName
+                            ? getProfileDisplayName(room.ownerName, room.ownerUserId, profileRemarks)
+                            : "暂无房主"}
                         </small>
                       </span>
                       <span className="lobby-room-card-counts">
@@ -295,18 +304,19 @@ export default function RoomList({ profile, onProfileChange, accountId, onLogout
                 <div className="lobby-member-grid">
                   {onlineUsers.map((user) => {
                     const isSelf = user.socketId === socket.id;
+                    const displayName = getProfileDisplayName(user.username, user.userId, profileRemarks);
                     return (
                       <div className="lobby-member-card" key={user.socketId}>
                         <span className="lobby-member-avatar">
                           <Avatar
-                            username={user.username}
+                            username={displayName}
                             avatarUrl={user.avatarUrl}
                             size="md"
                           />
                           <i />
                         </span>
                         <span className="lobby-member-copy">
-                          <b>{isSelf ? `${user.username}（你）` : user.username}</b>
+                          <b>{isSelf ? `${displayName}（你）` : displayName}</b>
                           <small>
                             在线 · {user.platform === "mobile" ? "手机端" : "电脑端"}
                           </small>

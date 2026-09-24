@@ -12,6 +12,8 @@ function playbackHarness() {
   const callbacks: Function[] = [];
   const activations: FakeAudio[] = [];
   const graph: { source: any; gain?: any; stream: any }[] = [];
+  const streams: { tracks: { id: string }[] }[] = [];
+  const consumed: { producerId: string; streamId: string }[] = [];
   let storageBlocked = false;
   class FakeAudio {
     muted = false;
@@ -44,6 +46,7 @@ function playbackHarness() {
   const transport = {
     id: 'transport', on() {},
     async consume(params: any) {
+      consumed.push(params);
       return { id: params.producerId, track: { id: params.producerId }, on() {}, close() {} };
     },
   };
@@ -84,7 +87,11 @@ function playbackHarness() {
       return {};
     },
     Audio: FakeAudio,
-    MediaStream: class { constructor(public tracks: any[]) {} },
+    MediaStream: class {
+      constructor(public tracks: any[]) { streams.push(this); }
+      addTrack(track: any) { this.tracks.push(track); }
+      removeTrack(track: any) { this.tracks = this.tracks.filter(item => item !== track); }
+    },
     window: { AudioContext: class { constructor() { return context; } } },
     localStorage: {
       getItem: () => null,
@@ -111,56 +118,49 @@ function playbackHarness() {
     return element;
   };
   return {
-    rtc, setup, consume, close, activations, outputFor, audibleElementFor,
+    rtc, setup, consume, close, activations, streams, consumed, outputFor, audibleElementFor,
     blockStorage: () => { storageBlocked = true; },
   };
 }
 
-test('screen viewer volume controls audible media element, preserves mute on rewatch, and stays isolated', async () => {
+test('screen audio joins the video stream and sync group without a duplicate audio player', async () => {
   const h = playbackHarness();
   assert.equal(await h.setup(), true);
   h.rtc.setScreenReceiveVolume(0.25);
+  assert.equal(await h.consume('video-1', 'alice', 'video', { type: 'screen' }), true);
   assert.equal(await h.consume('screen-1', 'alice', 'audio', { type: 'screen-audio' }), true);
   assert.equal(await h.consume('mic-1', 'alice', 'audio', { type: 'mic' }), true);
   assert.equal(await h.consume('app-1', 'alice', 'audio', { type: 'application-audio' }), true);
-  const screen = h.audibleElementFor('screen-1');
-  assert.equal(screen.volume, 0.25, 'new consumer must use the remembered viewer volume');
-  for (const volume of [0, 0.5, 1]) {
-    h.rtc.setScreenReceiveVolume(volume);
-    assert.equal(screen.volume, volume);
-    assert.equal(screen.muted, volume === 0);
-    assert.equal(h.outputFor('mic-1').gain.gain.value, 1);
-    assert.equal(h.audibleElementFor('app-1').volume, 1);
-  }
+  const screen = h.streams.find(stream => stream.tracks.some(track => track.id === 'video-1'));
+  assert.deepEqual(Array.from(screen?.tracks ?? [], track => track.id), ['video-1', 'screen-1']);
+  assert.equal(h.activations.some(element =>
+    (element.srcObject as { tracks?: { id: string }[] } | null)?.tracks?.some(track => track.id === 'screen-1')), false,
+    'screen audio must not play through a second media element');
+  assert.equal(h.consumed.find(item => item.producerId === 'video-1')?.streamId, 'screen-alice');
+  assert.equal(h.consumed.find(item => item.producerId === 'screen-1')?.streamId, 'screen-alice');
+  assert.equal(h.consumed.find(item => item.producerId === 'mic-1')?.streamId, 'mic-alice');
+  assert.equal(h.consumed.find(item => item.producerId === 'app-1')?.streamId, 'application-audio-alice');
   h.rtc.setMemberVolume('alice', 'user-alice', 0.7);
   assert.equal(h.outputFor('mic-1').gain.gain.value, 0.7);
-  assert.equal(screen.volume, 1);
   h.blockStorage();
   h.rtc.setScreenReceiveVolume(0);
-  assert.equal(screen.volume, 0, 'storage failure must not disable live controls');
-  assert.equal(screen.muted, true);
   h.close('screen-1', true);
-  assert.equal(screen.paused, true);
-  assert.equal(screen.srcObject, null);
+  assert.deepEqual(Array.from(screen?.tracks ?? [], track => track.id), ['video-1']);
   assert.equal(await h.consume('screen-2', 'alice', 'audio', { type: 'screen-audio' }), true);
-  const screen2 = h.activations.find(element =>
-    (element.srcObject as { tracks?: { id: string }[] } | null)?.tracks?.[0]?.id === 'screen-2');
-  assert.ok(screen2);
-  assert.equal(screen2.volume, 0);
-  assert.equal(screen2.muted, true);
+  assert.deepEqual(Array.from(screen?.tracks ?? [], track => track.id), ['video-1', 'screen-2']);
+  assert.equal(h.audibleElementFor('app-1').volume, 1);
   const voiceActivation = h.activations.find(element =>
     (element.srcObject as { tracks?: { id: string }[] } | null)?.tracks?.[0]?.id === 'mic-1');
   assert.ok(voiceActivation?.muted && voiceActivation.volume === 0,
     'microphone activation element must remain inaudible beside its gain path');
 });
 
-test('application sharing uses independent media-element controls per sharer without changing screen audio', async () => {
+test('application sharing uses independent media-element controls per sharer', async () => {
   const h = playbackHarness();
   await h.setup();
   h.rtc.setApplicationAudioReceiveVolume('alice', 0.3);
   await h.consume('app-alice', 'alice', 'audio', { type: 'application-audio' });
   await h.consume('app-bob', 'bob', 'audio', { type: 'application-audio' });
-  await h.consume('screen', 'alice', 'audio', { type: 'screen-audio' });
   assert.equal(h.audibleElementFor('app-alice').volume, 0.3);
   h.blockStorage();
   h.rtc.setApplicationAudioReceiveVolume('alice', 0);
@@ -170,8 +170,18 @@ test('application sharing uses independent media-element controls per sharer wit
   assert.equal(alice.volume, 0);
   assert.equal(alice.muted, true);
   assert.equal(h.audibleElementFor('app-bob').volume, 1);
-  assert.equal(h.audibleElementFor('screen').volume, 1);
   h.rtc.setApplicationAudioReceiveVolume('alice', 1);
   assert.equal(alice.volume, 1);
   assert.equal(alice.muted, false);
+});
+
+test('screen stream also joins audio that arrives before video', async () => {
+  const h = playbackHarness();
+  await h.setup();
+  await h.consume('screen-early', 'bob', 'audio', { type: 'screen-audio' });
+  await h.consume('video-late', 'bob', 'video', { type: 'screen' });
+  const stream = h.streams.find(item => item.tracks.some(track => track.id === 'video-late'));
+  assert.deepEqual(Array.from(stream?.tracks ?? [], track => track.id), ['video-late', 'screen-early']);
+  h.close('screen-early', true);
+  assert.deepEqual(Array.from(stream?.tracks ?? [], track => track.id), ['video-late']);
 });

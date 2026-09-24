@@ -1,10 +1,9 @@
-// Keep the legacy Gitee id for cleanup metadata written by older builds. New
-// releases discover the selected server's mirror first and GitHub as fallback.
-export type UpdateSourceId = 'github' | 'cloud' | 'gitee';
+// Discover the selected server's HTTPS mirror first and GitHub as fallback.
+export type UpdateSourceId = 'github' | 'cloud';
 
 export interface UpdateSourceCandidate {
   id: UpdateSourceId;
-  label: 'GitHub' | '当前服务器' | 'Gitee';
+  label: 'GitHub' | 'Cove 服务器' | '当前服务器';
   version: string;
   feedUrl: string;
   latencyMs: number;
@@ -26,12 +25,7 @@ const GITHUB_SOURCE: SourceDefinition = {
   releaseBaseUrl: 'https://github.com/LumineTraveller/Cove/releases/download/',
 };
 
-/**
- * Convert the user-selected Cove server into the only base URL accepted by
- * the server-hosted update source. The updater deliberately requires HTTPS:
- * a user-entered HTTP server must not replace the trusted release path with a
- * plaintext download path.
- */
+/** Only a valid HTTPS chat-server URL may host automatic update metadata. */
 export function getServerUpdateBaseUrl(serverUrl: string): string | null {
   try {
     const url = new URL(serverUrl.trim());
@@ -103,7 +97,7 @@ async function discoverSource(
  * 先按固定顺序探测更新源，再优先返回版本较新的正式发行版。
  *
  * 当前服务器和 GitHub 使用同一份 electron-builder 更新清单和校验值。
- * 同版本时当前服务器优先；如果服务器镜像落后，则先用 GitHub，避免可访问但
+ * 同版本时当前服务器优先；如果镜像落后，则先用 GitHub，避免可访问但
  * 尚未同步的镜像把新版本隐藏掉。
  */
 export async function discoverUpdateSources(

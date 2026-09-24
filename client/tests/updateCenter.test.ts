@@ -29,11 +29,10 @@ test('update detail card stays visible for errors and stalled stages', () => {
   );
 });
 
-test('manual download links are derived from the selected server address', () => {
-  assert.equal(
-    getServerDownloadUrl('https://server.example.test/cove/'),
-    'https://server.example.test/cove/downloads/Cove-Setup.exe',
-  );
-  assert.equal(getServerDownloadUrl('ftp://server.example.test'), null);
-  assert.equal(getServerDownloadUrl('https://user:secret@server.example.test'), null);
+test('manual download links follow the currently selected server', () => {
+  assert.equal(getServerDownloadUrl('https://server.example.test:8443/cove/'), 'https://server.example.test:8443/cove/downloads/Cove-Setup.exe');
+  assert.equal(getServerDownloadUrl('http://localhost:3001'), 'http://localhost:3001/downloads/Cove-Setup.exe');
+  assert.equal(getServerDownloadUrl('https://other.example.test', 'Cove Server.exe'), 'https://other.example.test/downloads/Cove%20Server.exe');
+  assert.equal(getServerDownloadUrl('https://user:password@server.example.test'), null);
+  assert.equal(getServerDownloadUrl(''), null);
 });

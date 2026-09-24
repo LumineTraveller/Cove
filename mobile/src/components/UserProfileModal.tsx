@@ -42,6 +42,7 @@ export function UserProfileModal({
   };
 
   const volumePercent = Math.round(volume * 100);
+  const displayName = remark || username;
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
       <View style={styles.backdrop}>
@@ -53,10 +54,10 @@ export function UserProfileModal({
             <View style={styles.avatar}>
               {avatarUrl
                 ? <Image source={{ uri: avatarUrl }} style={styles.avatarImage} />
-                : <Text style={styles.avatarText}>{username.trim().slice(0, 2).toUpperCase() || 'C'}</Text>}
+                : <Text style={styles.avatarText}>{displayName.trim().slice(0, 2).toUpperCase() || 'C'}</Text>}
             </View>
-            <Text style={styles.title}>{remark || username}</Text>
-            {remark ? <Text style={styles.username}>用户名：{username}</Text> : null}
+            <Text style={styles.title}>{displayName}</Text>
+            {remark ? <Text style={styles.username}>原用户名：{username}</Text> : null}
 
             <View style={[styles.voiceCard, !inVoice ? styles.voiceCardIdle : isMicOn ? styles.voiceCardOn : styles.voiceCardOff]}>
               {!inVoice
@@ -82,14 +83,14 @@ export function UserProfileModal({
                 <View style={styles.volumeControls}>
                   <TouchableOpacity
                     style={styles.volumeStep}
-                    accessibilityLabel={`降低${username}的音量`}
+                    accessibilityLabel={`降低${displayName}的音量`}
                     onPress={() => onVolumeChange(volume - 0.1)}
                   >
                     <Minus size={16} color={colors.textMuted} />
                   </TouchableOpacity>
                   <View
                     style={styles.volumeTrack}
-                    accessibilityLabel={`${username}的音量，当前${volumePercent}%`}
+                    accessibilityLabel={`${displayName}的音量，当前${volumePercent}%`}
                     onLayout={event => { volumeTrackWidth.current = Math.max(1, event.nativeEvent.layout.width); }}
                     onStartShouldSetResponder={() => true}
                     onMoveShouldSetResponder={() => true}
@@ -103,7 +104,7 @@ export function UserProfileModal({
                   </View>
                   <TouchableOpacity
                     style={styles.volumeStep}
-                    accessibilityLabel={`提高${username}的音量`}
+                    accessibilityLabel={`提高${displayName}的音量`}
                     onPress={() => onVolumeChange(volume + 0.1)}
                   >
                     <Plus size={16} color={colors.textMuted} />

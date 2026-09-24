@@ -6,6 +6,7 @@ import type { Socket } from 'socket.io-client';
 import { colors } from '../theme';
 import type { Soundpack } from '../types';
 import { authorizedResourceURL, serverFetch } from '../serverSecurity';
+import { getProfileDisplayName, type ProfileRemarks } from '../profileDisplayName';
 
 interface Props {
   socket: Socket;
@@ -13,6 +14,7 @@ interface Props {
   serverURL: string;
   ready: boolean;
   inVoice: boolean;
+  profileRemarks: ProfileRemarks;
   showHeading?: boolean;
 }
 
@@ -33,7 +35,7 @@ function applySoundpackOrder(packs: Soundpack[], orderedIds: string[]) {
   return [...ordered, ...byId.values()];
 }
 
-export function Soundboard({ socket, roomId, serverURL, ready, inVoice, showHeading = true }: Props) {
+export function Soundboard({ socket, roomId, serverURL, ready, inVoice, profileRemarks, showHeading = true }: Props) {
   const [packs, setPacks] = useState<Soundpack[]>([]);
   const [loading, setLoading] = useState(true);
   const [playback, setPlayback] = useState<Playback | null>(null);
@@ -141,7 +143,7 @@ export function Soundboard({ socket, roomId, serverURL, ready, inVoice, showHead
                   </View>
                   <View style={styles.copy}>
                     <Text style={styles.soundName} numberOfLines={1}>{sound.name}</Text>
-                    <Text style={styles.uploader} numberOfLines={1}>{sound.uploader}</Text>
+                    <Text style={styles.uploader} numberOfLines={1}>{getProfileDisplayName(sound.uploader, sound.uploaderUserId, profileRemarks)}</Text>
                   </View>
                 </TouchableOpacity>
                 {playing && <View style={styles.playingLine} />}

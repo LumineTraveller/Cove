@@ -1,6 +1,6 @@
-export type UpdateSource = 'github' | 'gitee';
-export const UPDATE_SOURCES: UpdateSource[] = ['github', 'gitee'];
-export const SOURCE_NAMES = { github: 'GitHub', gitee: 'Gitee' };
+export type UpdateSource = 'github' | 'cloud';
+export const UPDATE_SOURCES: UpdateSource[] = ['github', 'cloud'];
+export const SOURCE_NAMES = { github: 'GitHub', cloud: '当前服务器' };
 
 export interface InstalledVersion { versionName: string; versionCode: number; androidApi: number }
 export interface AndroidRelease {
@@ -44,29 +44,47 @@ export function parseUpdateFeed(raw: string): AndroidRelease | null {
   return { ...r, sha256: r.sha256.toLowerCase() };
 }
 
-export function releaseURL(release: AndroidRelease, source: UpdateSource, download = false): string {
+/** 自动更新只从当前选择的 HTTPS 服务器读取清单。 */
+export function getMobileUpdateServerBaseUrl(serverURL: string): string | null {
+  try {
+    const url = new URL(serverURL.trim());
+    if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) return null;
+    return `${url.origin}${url.pathname.replace(/\/+$/, '')}`;
+  } catch { return null; }
+}
+
+export function releaseURL(release: AndroidRelease, source: UpdateSource, download = false, serverURL = ''): string {
   if (!UPDATE_SOURCES.includes(source)) throw new Error('未知更新源');
-  const base = source === 'github' ? 'https://github.com' : 'https://gitee.com';
-  return `${base}/LumineTraveller/Cove/releases/${download ? 'download' : 'tag'}/${encodeURIComponent(release.tag)}${download ? `/${encodeURIComponent(release.filename)}` : ''}`;
+  if (source === 'cloud') {
+    const base = getMobileUpdateServerBaseUrl(serverURL);
+    if (!base) throw new Error('当前服务器没有可用的 HTTPS 更新地址');
+    return download
+      ? `${base}/releases/${encodeURIComponent(release.tag)}/${encodeURIComponent(release.filename)}`
+      : `${base}/downloads/Cove-Mobile.apk`;
+  }
+  return `https://github.com/LumineTraveller/Cove/releases/${download ? 'download' : 'tag'}/${encodeURIComponent(release.tag)}${download ? `/${encodeURIComponent(release.filename)}` : ''}`;
 }
 
 /** Both mirrors are checked; a fast but stale mirror must not hide a newer release. */
 export async function checkAndroidUpdate(
   installed: InstalledVersion,
   fetchFeed: (source: UpdateSource) => Promise<string>,
+  sources: readonly UpdateSource[] = UPDATE_SOURCES,
 ): Promise<UpdateCheckResult> {
   if (!Number.isSafeInteger(installed.versionCode) || installed.versionCode < 1
     || !Number.isSafeInteger(installed.androidApi) || installed.androidApi < 1) throw new Error('无法读取当前 APK 版本');
   const errors: string[] = [];
-  const results = await Promise.all(UPDATE_SOURCES.map(async source => {
-    const started = Date.now();
-    try { return { source, release: parseUpdateFeed(await withUpdateTimeout(fetchFeed(source))), elapsed: Date.now() - started }; }
+  const results = await Promise.all(sources.map(async source => {
+    try { return { source, release: parseUpdateFeed(await withUpdateTimeout(fetchFeed(source))) }; }
     catch { errors.push(`${SOURCE_NAMES[source]} 检查失败`); return null; }
   }));
   const successful = results.filter((r): r is NonNullable<typeof r> => r !== null);
-  if (!successful.length) throw new Error('GitHub 和 Gitee 均无法检查更新，请检查网络后重试');
+  if (!successful.length) throw new Error(sources.includes('cloud')
+    ? 'GitHub 和当前服务器均无法检查更新，请检查网络后重试'
+    : 'GitHub 无法检查更新，请检查网络后重试');
   const newer = successful.filter(r => r.release && r.release.versionCode > installed.versionCode)
-    .sort((a, b) => b.release!.versionCode - a.release!.versionCode || a.elapsed - b.elapsed);
+    .sort((a, b) => b.release!.versionCode - a.release!.versionCode
+      || (a.source === 'cloud' ? -1 : 1) - (b.source === 'cloud' ? -1 : 1));
   const latest = newer[0]?.release;
   const checkedSources = successful.map(r => r.source);
   if (!latest) return { candidate: null, checkedSources, errors };

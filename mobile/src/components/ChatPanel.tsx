@@ -16,8 +16,9 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { MessageCircle, Send, X } from 'lucide-react-native';
 import type { Socket } from 'socket.io-client';
 import { colors } from '../theme';
-import type { Message } from '../types';
+import type { Message, RoomMember } from '../types';
 import { authorizedResourceURL } from '../serverSecurity';
+import { getProfileDisplayContent, getProfileDisplayName, type ProfileRemarks } from '../profileDisplayName';
 
 interface Props {
   visible: boolean;
@@ -25,6 +26,8 @@ interface Props {
   roomId: string;
   serverURL: string;
   username: string;
+  members: RoomMember[];
+  profileRemarks: ProfileRemarks;
   ready: boolean;
   onClose: () => void;
 }
@@ -39,7 +42,7 @@ function mergeMessages(current: Message[], incoming: Message[]) {
   return [...merged.values()].sort((left, right) => left.timestamp - right.timestamp);
 }
 
-export function ChatPanel({ visible, socket, roomId, serverURL, username, ready, onClose }: Props) {
+export function ChatPanel({ visible, socket, roomId, serverURL, username, members, profileRemarks, ready, onClose }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -112,15 +115,20 @@ export function ChatPanel({ visible, socket, roomId, serverURL, username, ready,
               : <View style={styles.empty}><MessageCircle size={28} color={colors.textFaint} /><Text style={styles.emptyTitle}>还没有消息</Text><Text style={styles.emptyText}>发一句话开始聊天吧</Text></View>}
             renderItem={({ item }) => {
               const transient = item.type === 'system' || item.type === 'soundpack';
-              if (transient) return <Text style={styles.systemMessage}>{item.content}</Text>;
-              const own = item.author === username;
+              const content = getProfileDisplayContent(item.content, item.contentUsername, item.contentUserId, profileRemarks);
+              if (transient) return <Text style={styles.systemMessage}>{content}</Text>;
+              const currentUserId = members.find(member => member.socketId === socket.id)?.userId;
+              const own = item.authorUserId && currentUserId
+                ? item.authorUserId === currentUserId
+                : item.author === username;
+              const authorName = getProfileDisplayName(item.author, item.authorUserId, profileRemarks);
               return (
                 <View style={[styles.messageRow, own && styles.messageRowOwn]}>
                   <View style={[styles.bubble, own && styles.bubbleOwn]}>
-                    {!own && <Text style={styles.author}>{item.author}</Text>}
+                    {!own && <Text style={styles.author}>{authorName}</Text>}
                     {item.type === 'image'
                       ? <Image source={{ uri: resolveImageURL(item.content) }} style={styles.image} resizeMode="contain" />
-                      : <Text style={[styles.messageText, own && styles.messageTextOwn]}>{item.content}</Text>}
+                      : <Text style={[styles.messageText, own && styles.messageTextOwn]}>{content}</Text>}
                     <Text style={[styles.time, own && styles.timeOwn]}>{formatTime(item.timestamp)}</Text>
                   </View>
                 </View>

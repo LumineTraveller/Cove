@@ -416,7 +416,6 @@ export function useWebRTC(socket: Socket, roomId: string) {
   const memberMuteRestoreVolumes = useRef<Record<string, number>>({});
   const voiceMembersRef = useRef<VoiceMember[]>([]);
   const seenVoicePresenceEvents = useRef<string[]>([]);
-  const screenReceiveVolumeRef = useRef(screenReceiveVolume);
   const screenShareVolumeRef = useRef(screenShareVolume);
   const applicationAudioShareVolumeRef = useRef(applicationAudioShareVolume);
   const applicationAudioReceiveVolumesRef = useRef(
@@ -449,6 +448,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
     Map<string, ReturnType<typeof createRemoteAudioOutput>>
   >(new Map());
   const screenStreams = useRef<Map<string, MediaStream>>(new Map());
+  const screenAudioTracks = useRef<Map<string, MediaStreamTrack>>(new Map());
   const localAudioRef = useRef<MediaStream | null>(null);
   const rawAudioRef = useRef<MediaStream | null>(null);
   const micProcessingContext = useRef<AudioContext | null>(null);
@@ -603,28 +603,13 @@ export function useWebRTC(socket: Socket, roomId: string) {
     const normalized = Number.isFinite(volume)
       ? Math.max(0, Math.min(2, volume))
       : 1;
-    screenReceiveVolumeRef.current = normalized;
     setScreenReceiveVolumeState(normalized);
     try {
       localStorage.setItem(SCREEN_RECEIVE_VOLUME_KEY, String(normalized));
     } catch {
       /* 无法保存偏好也必须应用本次音量。 */
     }
-    for (const [consumerId, entry] of consumers.current) {
-      if (entry.sourceType !== "screen-audio") continue;
-      const element = audioEls.current.get(consumerId);
-      const output = remoteAudioOutputs.current.get(consumerId);
-      if (normalized > 1 && element && !output) {
-        promoteRemoteAudio(consumerId, entry, normalized);
-        continue;
-      }
-      if (output) {
-        output.setVolume(normalized);
-      } else if (element) {
-        element.volume = normalized;
-        element.muted = normalized === 0;
-      }
-    }
+    // 共享音频由画面元素播放；音量随状态更新在 RemoteScreenVideo 内应用。
   }, []);
 
   const setScreenShareVolume = useCallback((volume: number) => {
@@ -1547,13 +1532,23 @@ export function useWebRTC(socket: Socket, roomId: string) {
         );
 
         if (generation !== mediaGeneration.current || rt.closed) return false;
-        const consumer = await rt.consume(params as never);
+        const sourceType =
+          typeof appData?.type === "string" ? appData.type : undefined;
+        // 屏幕音画共用同步组；麦克风和独立应用音频不能混入该组。
+        const streamGroup =
+          sourceType === "screen" || sourceType === "screen-audio"
+            ? "screen"
+            : sourceType === "application-audio"
+              ? "application-audio"
+              : "mic";
+        const consumer = await rt.consume({
+          ...params,
+          streamId: `${streamGroup}-${peerId}`,
+        } as never);
         if (generation !== mediaGeneration.current || rt.closed) {
           consumer.close();
           return false;
         }
-        const sourceType =
-          typeof appData?.type === "string" ? appData.type : undefined;
         consumers.current.set(consumer.id, {
           consumer,
           socketId: peerId,
@@ -1592,12 +1587,18 @@ export function useWebRTC(socket: Socket, roomId: string) {
         const stream = new MediaStream([consumer.track]);
 
         if (kind === "audio") {
+          if (sourceType === "screen-audio") {
+            const previousTrack = screenAudioTracks.current.get(peerId);
+            if (previousTrack)
+              screenStreams.current.get(peerId)?.removeTrack(previousTrack);
+            screenAudioTracks.current.set(peerId, consumer.track);
+            screenStreams.current.get(peerId)?.addTrack(consumer.track);
+            return true;
+          }
           const isVoice = isMemberVoiceAudio(kind, sourceType);
           const memberVolume = memberVolumesRef.current[peerId] ?? 1;
           const volume =
-            sourceType === "screen-audio"
-              ? screenReceiveVolumeRef.current
-              : sourceType === "application-audio"
+            sourceType === "application-audio"
                 ? (applicationAudioReceiveVolumesRef.current[peerId] ?? 1)
                 : memberVolume;
           let usesGainOutput = false;
@@ -1635,9 +1636,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
             }
           }
           if (!usesGainOutput) {
-            // Electron 29 对按需暂停/恢复的屏幕音频通过 MediaStreamAudioSourceNode
-            // 播放并不稳定。共享音频使用实际媒体元素作为唯一可听路径；麦克风仅在
-            // Web Audio 初始化失败时进入相同的兼容回退。
+            // 麦克风和独立应用音频的兼容回退；屏幕音频由视频元素播放。
             const el = new Audio();
             el.autoplay = true;
             el.volume = Math.min(1, volume);
@@ -1654,13 +1653,6 @@ export function useWebRTC(socket: Socket, roomId: string) {
               .finally(() =>
                 el
                   .play()
-                  .then(() => {
-                    if (sourceType === "screen-audio")
-                      console.info("[screen-audio] 播放元素已启动", {
-                        paused: el.paused,
-                        readyState: el.readyState,
-                      });
-                  })
                   .catch((error) => {
                     console.warn("[audio] 自动播放被阻止，等待下一次点击重试", {
                       sourceType,
@@ -1689,6 +1681,8 @@ export function useWebRTC(socket: Socket, roomId: string) {
           }
         } else if (kind === "video") {
           // appData.type === 'screen'
+          const audioTrack = screenAudioTracks.current.get(peerId);
+          if (audioTrack) stream.addTrack(audioTrack);
           screenStreams.current.set(peerId, stream);
           setRemoteScreen({ socketId: peerId, stream });
         }
@@ -1762,6 +1756,13 @@ export function useWebRTC(socket: Socket, roomId: string) {
         remoteAudioOutputs.current.delete(consumerId);
       }
       detachAnalyser(consumerId);
+      if (entry.sourceType === "screen-audio") {
+        const track = screenAudioTracks.current.get(entry.socketId);
+        if (track === entry.consumer.track) {
+          screenStreams.current.get(entry.socketId)?.removeTrack(track);
+          screenAudioTracks.current.delete(entry.socketId);
+        }
+      }
       if (entry.kind === "video") {
         screenStreams.current.delete(entry.socketId);
         setRemoteScreen((current) =>
@@ -1935,11 +1936,8 @@ export function useWebRTC(socket: Socket, roomId: string) {
       if (!entry) return;
       closeLocalConsumer(consumerId, false);
       if (entry.sourceType === "screen") {
-        watchingScreenPeerRef.current = null;
-        setWatchingScreenPeer(null);
-        videoCounterPrev.current = null;
-        receiveLossPrev.current = null;
-        if (!screenProducer.current) setStats(EMPTY_STATS);
+        // 视频已结束时一并关闭关联音频，避免残留无画面的订阅。
+        stopWatchingScreen();
       }
       if (entry.sourceType === "application-audio")
         removeRemoteApplicationAudio(entry.socketId, entry.producerId);
@@ -2041,6 +2039,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
         consumers.current.delete(cid);
       }
       screenStreams.current.delete(socketId);
+      screenAudioTracks.current.delete(socketId);
       setRemoteScreen((p) => (p?.socketId === socketId ? null : p));
       pendingScreenAudioByPeer.current.delete(socketId);
       removeAvailableScreen(socketId);
@@ -2499,6 +2498,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
       // 发布音频（标记 type:mic 以区分系统音频）
       const producer = await sendTransport.current!.produce({
         track: microphoneTrack,
+        streamId: `mic-${socket.id}`,
         codecOptions: { opusStereo: false, opusDtx: true, opusFec: true },
         appData: { type: "mic" },
       });
@@ -2729,6 +2729,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
       remoteAudioOutputs.current.forEach((output) => output.close());
       remoteAudioOutputs.current.clear();
       screenStreams.current.clear();
+      screenAudioTracks.current.clear();
 
       // 停止音量计和统计
       stopMeters();
@@ -3037,6 +3038,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
       const producer = await produceWithSsrcRetry(() =>
         sendTransport.current!.produce({
           track,
+          streamId: `screen-${socket.id}`,
           codecOptions: { opusStereo: true, opusDtx: true, opusFec: true },
           appData: { type: "screen-audio" },
           stopTracks: false,
@@ -3165,6 +3167,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
             producer = await produceWithSsrcRetry(() =>
               sendTransport.current!.produce({
                 track: videoTrack,
+                streamId: `screen-${socket.id}`,
                 appData: {
                   type: "screen",
                   adaptation: gameMode ? "game" : "content",
@@ -3506,6 +3509,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
         const producer = await produceWithSsrcRetry(() =>
           sendTransport.current!.produce({
             track,
+            streamId: `application-audio-${socket.id}`,
             codecOptions: { opusStereo: true, opusDtx: true, opusFec: true },
             appData: {
               type: "application-audio",
@@ -3561,6 +3565,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
       const producer = await produceWithSsrcRetry(() =>
         sendTransport.current!.produce({
           track,
+          streamId: `application-audio-${socket.id}`,
           codecOptions: { opusStereo: true, opusDtx: true, opusFec: true },
           appData: {
             type: "application-audio",

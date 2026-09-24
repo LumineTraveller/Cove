@@ -20,14 +20,20 @@ test('loads realtime messages and sends text to the current room', async () => {
   await act(async () => {
     renderer = TestRenderer.create(<ChatPanel
       visible socket={socket as never} roomId="room" serverURL="http://server.test:3001"
-      username="Alice" ready onClose={() => {}}
+      username="Alice" members={[]} profileRemarks={{ 'public-bob': 'Bobby' }} ready onClose={() => {}}
     />);
   });
 
   await act(async () => listeners.get('message:new')?.({
-    id: 'message', roomId: 'room', author: 'Bob', content: '你好', type: 'chat', timestamp: 1,
+    id: 'message', roomId: 'room', author: 'Bob', authorUserId: 'public-bob', content: '你好', type: 'chat', timestamp: 1,
   }));
   expect(renderer.root.findAllByType(Text).some(node => node.props.children === '你好')).toBe(true);
+  expect(renderer.root.findAllByType(Text).some(node => node.props.children === 'Bobby')).toBe(true);
+  await act(async () => listeners.get('message:new')?.({
+    id: 'system-message', roomId: 'room', author: 'Cove', content: '[Bob] 加入了语音',
+    contentUsername: 'Bob', contentUserId: 'public-bob', type: 'system', timestamp: 2,
+  }));
+  expect(renderer.root.findAllByType(Text).some(node => node.props.children === '[Bobby] 加入了语音')).toBe(true);
 
   const input = renderer.root.findByProps({ placeholder: '发送消息' }) as TestRenderer.ReactTestInstance;
   await act(async () => input.props.onChangeText('  手机消息  '));

@@ -26,7 +26,8 @@ interface CoveWindowApi {
 
 interface CoveClipboardApi {
   writeText(value: string): Promise<boolean>;
-  writeImage(value: Uint8Array): Promise<boolean>;
+  writeImage(value: Uint8Array, mimeType: 'image/png' | 'image/gif', pngFallback?: Uint8Array): Promise<boolean>;
+  readGif(): Promise<Uint8Array | null>;
 }
 
 interface CoveSecurityApi {

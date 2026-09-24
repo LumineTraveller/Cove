@@ -41,7 +41,7 @@ import type { Socket } from 'socket.io-client';
 import { Soundboard } from '../components/Soundboard';
 import { ChatPanel } from '../components/ChatPanel';
 import { UserProfileModal } from '../components/UserProfileModal';
-import { loadProfileRemarks, saveProfileRemark, type ProfileRemarks } from '../profileRemarks';
+import { getProfileDisplayName, loadProfileRemarks, saveProfileRemark, type ProfileRemarks } from '../profileRemarks';
 import { colors } from '../theme';
 import type { Room, RoomMember, RoomState, SessionConfig } from '../types';
 import { useMobileMedia } from '../useMobileMedia';
@@ -117,6 +117,8 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
   const [soundboardOpen, setSoundboardOpen] = useState(false);
   const [viewingProfile, setViewingProfile] = useState<RoomMember | null>(null);
   const [profileRemarks, setProfileRemarks] = useState<ProfileRemarks>({});
+  const [roomOwnerName, setRoomOwnerName] = useState(room.ownerName);
+  const [roomOwnerUserId, setRoomOwnerUserId] = useState(room.ownerUserId ?? null);
   const screenVolumeBeforeMute = useRef(1);
   const media = useMobileMedia(socket, room.id);
 
@@ -140,6 +142,11 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
     loadProfileRemarks().then(remarks => { if (active) setProfileRemarks(remarks); });
     return () => { active = false; };
   }, []);
+
+  useEffect(() => {
+    setRoomOwnerName(room.ownerName);
+    setRoomOwnerUserId(room.ownerUserId ?? null);
+  }, [room.id, room.ownerName, room.ownerUserId]);
 
   const saveRoomSettings = (clearPassword = false) => {
     if (!sessionReady || !roomReady || settingsPendingRef.current) return;
@@ -211,6 +218,8 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
     const onState = (state: RoomState) => {
       if (state.roomId === room.id) {
         setMembers(state.members);
+        setRoomOwnerName(state.ownerName);
+        setRoomOwnerUserId(state.ownerUserId ?? null);
         setRoomMeta({ maxMembers: state.maxMembers, hasPassword: state.hasPassword });
       }
     };
@@ -237,8 +246,27 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
   const sharerName = useMemo(() => {
     const socketId = media.remoteScreen?.socketId;
     if (!socketId) return undefined;
-    return members.find(member => member.socketId === socketId)?.username;
-  }, [media.remoteScreen, members]);
+    const member = members.find(candidate => candidate.socketId === socketId)
+      ?? media.voiceMembers.find(candidate => candidate.socketId === socketId);
+    return member
+      ? getProfileDisplayName(member.username, member.userId, profileRemarks)
+      : undefined;
+  }, [media.remoteScreen, media.voiceMembers, members, profileRemarks]);
+
+  const ownerMember = members.find(member => member.isOwner);
+  const displayOwnerName = getProfileDisplayName(
+    ownerMember?.username ?? roomOwnerName ?? '',
+    ownerMember?.userId ?? roomOwnerUserId,
+    profileRemarks,
+  );
+
+  const displayScreenSharer = (socketId: string) => {
+    const member = members.find(candidate => candidate.socketId === socketId)
+      ?? media.voiceMembers.find(candidate => candidate.socketId === socketId);
+    return member
+      ? getProfileDisplayName(member.username, member.userId, profileRemarks)
+      : '成员';
+  };
 
   const screenContent = screenURL ? (
     <ZoomableScreenVideo key={screenURL} streamURL={screenURL} />
@@ -249,7 +277,7 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
       <Text style={styles.shareAvailableText}>选择一位成员观看，其他共享不会消耗视频流量</Text>
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.shareChoices}>
         {media.availableScreens.map(screen => {
-          const name = members.find(member => member.socketId === screen.socketId)?.username ?? '成员';
+          const name = displayScreenSharer(screen.socketId);
           return (
             <TouchableOpacity key={screen.videoProducerId} style={styles.watchButton} onPress={() => media.watchScreen(screen.socketId)} activeOpacity={0.8}>
               <Eye size={16} color="#082f49" />
@@ -274,7 +302,7 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
         <TouchableOpacity style={styles.iconButton} onPress={onBack}><ArrowLeft size={21} color={colors.textMuted} /></TouchableOpacity>
         <View style={styles.headerCopy}>
           <Text style={styles.roomName} numberOfLines={1}>{room.name}</Text>
-          <Text style={styles.ownerName} numberOfLines={1}>{room.ownerName ? `房主 ${room.ownerName}` : '房间'}</Text>
+          <Text style={styles.ownerName} numberOfLines={1}>{displayOwnerName ? `房主 ${displayOwnerName}` : '房间'}</Text>
         </View>
         <View style={styles.headerActions}>
           {members.some(member => member.socketId === socket.id && member.isOwner) && <TouchableOpacity style={styles.headerAction} onPress={() => { setSettingsLimit(roomMeta.maxMembers ? String(roomMeta.maxMembers) : ''); setSettingsPassword(''); setSettingsError(null); setSettingsOpen(true); }} accessibilityLabel="房间设置"><Settings size={17} color={colors.cyan} /></TouchableOpacity>}
@@ -323,7 +351,7 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.shareSwitcher}>
             {media.availableScreens.map(screen => {
               const selected = media.watchingScreenPeerId === screen.socketId;
-              const name = members.find(member => member.socketId === screen.socketId)?.username ?? '成员';
+              const name = displayScreenSharer(screen.socketId);
               return (
                 <TouchableOpacity
                   key={screen.videoProducerId}
@@ -391,6 +419,7 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
             {members.map(member => {
               const voiceMember = media.voiceMembers.find(voice => voice.socketId === member.socketId);
               const showVoiceState = !!voiceMember;
+              const displayName = getProfileDisplayName(member.username, member.userId, profileRemarks);
               return (
                 <TouchableOpacity
                   style={styles.memberChip}
@@ -399,10 +428,10 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
                   onPress={() => setViewingProfile(member)}
                   activeOpacity={0.75}
                 >
-                  <View style={styles.miniAvatar}><Text style={styles.miniAvatarText}>{initials(member.username)}</Text></View>
+                  <View style={styles.miniAvatar}><Text style={styles.miniAvatarText}>{initials(displayName)}</Text></View>
                   <View>
-                    <Text style={styles.memberName}>{profileRemarks[member.userId] || member.username}</Text>
-                    {profileRemarks[member.userId] ? <Text style={styles.memberUsername}>{member.username}</Text> : null}
+                    <Text style={styles.memberName}>{displayName}</Text>
+                    {profileRemarks[member.userId] ? <Text style={styles.memberUsername}>原用户名：{member.username}</Text> : null}
                   </View>
                   {member.isOwner && <Crown size={13} color="#fcd34d" />}
                   {member.platform === 'mobile'
@@ -499,6 +528,8 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
         roomId={room.id}
         serverURL={config.serverURL}
         username={config.username}
+        members={members}
+        profileRemarks={profileRemarks}
         ready={roomReady}
         onClose={() => setChatOpen(false)}
       />
@@ -514,7 +545,7 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
             <TouchableOpacity style={styles.iconButton} onPress={() => setSoundboardOpen(false)} accessibilityLabel="关闭语音包"><X size={20} color={colors.textMuted} /></TouchableOpacity>
           </View>
           <ScrollView contentContainerStyle={styles.toolContent} showsVerticalScrollIndicator={false}>
-            <Soundboard socket={socket} roomId={room.id} serverURL={config.serverURL} ready={roomReady} inVoice={media.inVoice} showHeading={false} />
+            <Soundboard socket={socket} roomId={room.id} serverURL={config.serverURL} ready={roomReady} inVoice={media.inVoice} profileRemarks={profileRemarks} showHeading={false} />
           </ScrollView>
         </SafeAreaView>
       </Modal>

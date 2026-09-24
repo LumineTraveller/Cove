@@ -9,7 +9,6 @@ import {
 import { createPortal } from "react-dom";
 import type { Socket } from "socket.io-client";
 import {
-  AlertTriangle,
   Download,
   GripVertical,
   LayoutGrid,
@@ -33,12 +32,14 @@ import { soundpackDownloadFileName } from "../soundpackDownload";
 import { useSortableList } from "../hooks/useSortableList";
 import { AudioTrimEditor } from "./AudioTrimEditor";
 import { authorizedResourceURL, serverFetch } from "../serverSecurity";
+import { getProfileDisplayName, type ProfileRemarks } from "../profileRemarks";
 
 interface Soundpack {
   id: string;
   name: string;
   filename: string;
   uploader: string;
+  uploaderUserId?: string | null;
   createdAt: number;
   sortOrder: number;
   canDelete: boolean;
@@ -49,6 +50,7 @@ interface Props {
   serverURL: string;
   outputDeviceId?: string;
   inVoice: boolean;
+  profileRemarks: ProfileRemarks;
   disabled?: boolean;
   hideTrigger?: boolean;
   defaultOpen?: boolean;
@@ -113,6 +115,7 @@ export function SoundPackPanel({
   serverURL,
   outputDeviceId = DEFAULT_AUDIO_DEVICE_ID,
   inVoice,
+  profileRemarks,
   disabled = false,
   hideTrigger = false,
   defaultOpen = false,
@@ -132,7 +135,6 @@ export function SoundPackPanel({
     total: number;
   } | null>(null);
   const [playingId, setPlayingId] = useState<string | null>(null);
-  const [pendingDelete, setPendingDelete] = useState<Soundpack | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [pendingRename, setPendingRename] = useState<Soundpack | null>(null);
   const [renameValue, setRenameValue] = useState("");
@@ -408,7 +410,6 @@ export function SoundPackPanel({
         }
         return null;
       });
-      setPendingDelete((current) => (current?.id === soundId ? null : current));
       setPendingRename((current) => (current?.id === soundId ? null : current));
     };
     const onRenamed = ({
@@ -674,7 +675,6 @@ export function SoundPackPanel({
       setFavoriteIds((previous) =>
         previous.filter((soundId) => soundId !== target.id),
       );
-      setPendingDelete(null);
       setPendingRename((current) =>
         current?.id === target.id ? null : current,
       );
@@ -685,11 +685,6 @@ export function SoundPackPanel({
     } finally {
       setDeletingId(null);
     }
-  };
-
-  const deleteSound = async () => {
-    if (!pendingDelete) return;
-    await deleteSoundTarget(pendingDelete);
   };
 
   const beginRename = (sound: Soundpack) => {
@@ -864,7 +859,7 @@ export function SoundPackPanel({
               <>
                 <div className="soundpack-item-copy">
                   <b>{overlayPack.name}</b>
-                  <small>{overlayPack.uploader}</small>
+                  <small>{getProfileDisplayName(overlayPack.uploader, overlayPack.uploaderUserId, profileRemarks)}</small>
                 </div>
                 {/* Visual stand-in for the resting card's favorite button: it
                     occupies the same slot so the centered name does not shift
@@ -894,7 +889,7 @@ export function SoundPackPanel({
                     {overlayPack.name}
                   </span>
                   <span className="mt-1 block truncate text-xs text-white/40">
-                    {overlayPack.uploader}
+                    {getProfileDisplayName(overlayPack.uploader, overlayPack.uploaderUserId, profileRemarks)}
                   </span>
                 </span>
               </>
@@ -1097,7 +1092,7 @@ export function SoundPackPanel({
                         >
                           <div className="soundpack-item-copy">
                             <b>{sound.name}</b>
-                            <small>{sound.uploader}</small>
+                            <small>{getProfileDisplayName(sound.uploader, sound.uploaderUserId, profileRemarks)}</small>
                           </div>
                           <button
                             type="button"
@@ -1186,11 +1181,7 @@ export function SoundPackPanel({
                         className="danger"
                         onClick={() => {
                           const target = pendingRename;
-                          if (
-                            deletingId === target.id ||
-                            !window.confirm(`确定删除“${target.name}”吗？`)
-                          )
-                            return;
+                          if (deletingId === target.id) return;
                           void deleteSoundTarget(target);
                         }}
                         disabled={deletingId === pendingRename.id}
@@ -1272,9 +1263,6 @@ export function SoundPackPanel({
                     onClick={() => {
                       const target = cardMenu.sound;
                       setCardMenu(null);
-                      // compact 分支不渲染 pendingDelete 确认框，沿用编辑弹窗里的
-                      // 同一套确认 + 删除流程，避免出现点了没反应的菜单项。
-                      if (!window.confirm(`确定删除“${target.name}”吗？`)) return;
                       void deleteSoundTarget(target);
                     }}
                   >
@@ -1465,7 +1453,7 @@ export function SoundPackPanel({
                                   {sound.name}
                                 </span>
                                 <span className="mt-1 block truncate text-xs text-white/30">
-                                  {sound.uploader}
+                                  {getProfileDisplayName(sound.uploader, sound.uploaderUserId, profileRemarks)}
                                 </span>
                               </span>
                             </span>
@@ -1485,7 +1473,7 @@ export function SoundPackPanel({
                                 <Pencil size={15} />
                               </button>
                               <button
-                                onClick={() => setPendingDelete(sound)}
+                                onClick={() => void deleteSoundTarget(sound)}
                                 disabled={disabled || deletingId === sound.id}
                                 className="rounded-lg bg-zinc-900/80 p-2 text-white/45 backdrop-blur transition hover:bg-red-500/20 hover:text-red-300 focus:outline-none focus:ring-2 focus:ring-red-300/40 disabled:opacity-30"
                                 aria-label={`删除语音包 ${sound.name}`}
@@ -1579,50 +1567,6 @@ export function SoundPackPanel({
                       </button>
                     </div>
                   </form>
-                </div>
-              )}
-              {pendingDelete && (
-                <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/70 p-6 backdrop-blur-sm">
-                  <div
-                    className="w-full max-w-sm rounded-3xl border border-red-400/20 bg-zinc-900 p-6 shadow-2xl"
-                    role="alertdialog"
-                    aria-modal="true"
-                    aria-labelledby="delete-sound-title"
-                  >
-                    <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-red-500/15 text-red-300">
-                      <AlertTriangle size={21} />
-                    </div>
-                    <h3
-                      id="delete-sound-title"
-                      className="mt-4 text-lg font-bold text-white"
-                    >
-                      删除“{pendingDelete.name}”？
-                    </h3>
-                    <p className="mt-2 text-sm leading-relaxed text-white/45">
-                      音频文件会从服务器永久删除，所有在线成员的语音包列表也会同步更新。
-                    </p>
-                    <div className="mt-5 flex gap-2.5">
-                      <button
-                        onClick={() => setPendingDelete(null)}
-                        disabled={deletingId === pendingDelete.id}
-                        className="flex-1 rounded-xl bg-white/10 py-2.5 font-medium text-white/70 transition hover:bg-white/15 disabled:opacity-35"
-                      >
-                        取消
-                      </button>
-                      <button
-                        onClick={deleteSound}
-                        disabled={deletingId === pendingDelete.id}
-                        className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl bg-red-500 py-2.5 font-semibold text-white transition hover:bg-red-400 disabled:opacity-50"
-                      >
-                        {deletingId === pendingDelete.id ? (
-                          <LoaderCircle size={17} className="animate-spin" />
-                        ) : (
-                          <Trash2 size={17} />
-                        )}
-                        确认删除
-                      </button>
-                    </div>
-                  </div>
                 </div>
               )}
             </section>

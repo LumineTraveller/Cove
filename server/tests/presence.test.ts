@@ -16,11 +16,12 @@ test('lobby snapshot contains the current online, channel and voice state', () =
     new Map([['room-1', new Set(['socket-a', 'socket-b'])]]),
     new Map([['room-1', new Set(['socket-b'])]]),
     new Map([['socket-a', 'desktop' as const], ['socket-b', 'mobile' as const]]),
+    new Map([['socket-a', 'public-a'], ['socket-b', 'public-b']]),
   );
 
   assert.deepEqual(snapshot.onlineUsers, [
-    { socketId: 'socket-a', username: 'Alice', avatarUrl: 'data:image/png;base64,avatar', platform: 'desktop' },
-    { socketId: 'socket-b', username: 'Bob', avatarUrl: null, platform: 'mobile' },
+    { socketId: 'socket-a', userId: 'public-a', username: 'Alice', avatarUrl: 'data:image/png;base64,avatar', platform: 'desktop' },
+    { socketId: 'socket-b', userId: 'public-b', username: 'Bob', avatarUrl: null, platform: 'mobile' },
   ]);
   assert.deepEqual(snapshot.roomMembers, { 'room-1': ['Alice', 'Bob'] });
   assert.deepEqual(snapshot.voiceCounts, { 'room-1': 1 });

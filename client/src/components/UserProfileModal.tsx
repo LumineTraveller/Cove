@@ -30,9 +30,9 @@ export function UserProfileModal({ userId, username, avatarUrl, remark = '', onS
           <button onClick={onClose} className="absolute right-4 top-4 rounded-xl bg-black/25 p-2 text-white/60 transition hover:bg-black/40 hover:text-white" aria-label="关闭用户主页"><X size={18} /></button>
         </div>
         <div className="px-7 pb-7">
-          <Avatar username={username} avatarUrl={avatarUrl} size="xl" className="-mt-12 border-4 border-zinc-900 shadow-xl" />
+          <Avatar username={remark || username} avatarUrl={avatarUrl} size="xl" className="-mt-12 border-4 border-zinc-900 shadow-xl" />
           <h2 id="other-profile-title" className="mt-4 text-2xl font-bold text-white">{remark || username}</h2>
-          {remark && <p className="mt-1 text-sm text-white/45">用户名：{username}</p>}
+          {remark && <p className="mt-1 text-sm text-white/45">原用户名：{username}</p>}
 
           <div className="profile-id-card mt-5 rounded-2xl border border-white/[0.08] bg-black/20 p-4">
             <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-white/30"><Hash size={14} /> 用户 ID</div>

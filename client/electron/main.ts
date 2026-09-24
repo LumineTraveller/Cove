@@ -124,6 +124,20 @@ function createWindow() {
 
   Menu.setApplicationMenu(null);
 
+  win.webContents.on("context-menu", (_event, params) => {
+    if (!params.isEditable) return;
+    Menu.buildFromTemplate([
+      { label: "撤销", role: "undo", enabled: params.editFlags.canUndo },
+      { label: "重做", role: "redo", enabled: params.editFlags.canRedo },
+      { type: "separator" },
+      { label: "剪切", role: "cut", enabled: params.editFlags.canCut },
+      { label: "复制", role: "copy", enabled: params.editFlags.canCopy },
+      { label: "粘贴", role: "paste" },
+      { type: "separator" },
+      { label: "全选", role: "selectAll", enabled: params.editFlags.canSelectAll },
+    ]).popup({ window: win });
+  });
+
   // F12 / Ctrl+Shift+I 切换开发者工具（正式版也能用，方便排查音视频问题）
   win.webContents.on("before-input-event", (_e, input) => {
     if (input.type !== "keyDown") return;
@@ -189,7 +203,11 @@ function createWindow() {
   // Electron 不允许渲染进程直接调用 getDisplayMedia，必须在主进程注册处理函数
   session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
     desktopCapturer
-      .getSources({ types: ["screen", "window"] })
+      .getSources({
+        types: ["screen", "window"],
+        // No thumbnails are shown; avoid capturing one for every window.
+        thumbnailSize: { width: 0, height: 0 },
+      })
       .then((sources) => {
         if (!sources.length) {
           callback({});
@@ -246,18 +264,40 @@ app.whenReady().then(() => {
       return false;
     }
   });
-  ipcMain.handle("cove:clipboard:write-image", async (event, value: unknown) => {
+  ipcMain.handle("cove:clipboard:write-image", async (event, value: unknown, mimeType: unknown, pngFallback: unknown) => {
     if (event.sender !== mainWindow?.webContents) return false;
     if (!(value instanceof Uint8Array) || value.byteLength === 0) return false;
+    if (mimeType !== "image/png" && mimeType !== "image/gif") return false;
+    if (mimeType === "image/gif" && (!(pngFallback instanceof Uint8Array) || pngFallback.byteLength === 0)) return false;
     try {
-      const imageBlob = new Blob([Buffer.from(value)], { type: "image/png" });
+      const imageBytes = Buffer.from(value);
+      const imageData: Record<string, Blob | string> = mimeType === "image/gif"
+        ? {
+            "image/gif": new Blob([imageBytes], { type: "image/gif" }),
+            "image/png": new Blob([Buffer.from(pngFallback as Uint8Array)], { type: "image/png" }),
+            "text/html": `<img src="data:image/gif;base64,${imageBytes.toString("base64")}">`,
+          }
+        : { "image/png": new Blob([imageBytes], { type: "image/png" }) };
       await clipboard.write([
-        new ClipboardItem({ "image/png": imageBlob }),
+        new ClipboardItem(imageData),
       ]);
       return true;
     } catch (error) {
       console.error("[clipboard] 图片写入失败", error);
       return false;
+    }
+  });
+  ipcMain.handle("cove:clipboard:read-gif", async (event) => {
+    if (event.sender !== mainWindow?.webContents) return null;
+    try {
+      const item = (await clipboard.read()).find((entry) => entry.types.includes("image/gif"));
+      if (!item) return null;
+      const blob = await item.getType("image/gif");
+      if (!(blob instanceof Blob) || blob.size === 0 || blob.size > 10 * 1024 * 1024) return null;
+      return new Uint8Array(await blob.arrayBuffer());
+    } catch (error) {
+      console.error("[clipboard] 动图读取失败", error);
+      return null;
     }
   });
   ipcMain.handle(

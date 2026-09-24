@@ -1,7 +1,10 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import type { ProfileRemarks } from './profileDisplayName';
+
+export { getProfileDisplayContent, getProfileDisplayName } from './profileDisplayName';
+export type { ProfileRemarks } from './profileDisplayName';
 
 const PROFILE_REMARKS_KEY = 'cove_profile_remarks_v1';
-export type ProfileRemarks = Record<string, string>;
 
 export async function loadProfileRemarks(): Promise<ProfileRemarks> {
   try {

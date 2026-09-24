@@ -40,8 +40,10 @@ contextBridge.exposeInMainWorld("coveWindow", {
 contextBridge.exposeInMainWorld("coveClipboard", {
   writeText: (value: string): Promise<boolean> =>
     ipcRenderer.invoke("cove:clipboard:write-text", value),
-  writeImage: (value: Uint8Array): Promise<boolean> =>
-    ipcRenderer.invoke("cove:clipboard:write-image", value),
+  writeImage: (value: Uint8Array, mimeType: "image/png" | "image/gif", pngFallback?: Uint8Array): Promise<boolean> =>
+    ipcRenderer.invoke("cove:clipboard:write-image", value, mimeType, pngFallback),
+  readGif: (): Promise<Uint8Array | null> =>
+    ipcRenderer.invoke("cove:clipboard:read-gif"),
 });
 
 contextBridge.exposeInMainWorld("coveSecurity", {
