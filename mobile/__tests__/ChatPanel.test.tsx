@@ -5,6 +5,33 @@ import { ChatPanel } from '../src/components/ChatPanel';
 
 jest.mock('lucide-react-native', () => ({ MessageCircle: 'MessageCircle', Send: 'Send', X: 'X' }));
 
+test('cancels the initial scroll when chat closes or unmounts', async () => {
+  const requestFrame = jest.spyOn(globalThis, 'requestAnimationFrame').mockReturnValue(42);
+  const cancelFrame = jest.spyOn(globalThis, 'cancelAnimationFrame').mockImplementation(() => {});
+  const socket = { on: jest.fn(), off: jest.fn() };
+  const props = {
+    socket: socket as never, roomId: 'room', serverURL: 'http://server.test:3001',
+    username: 'Alice', members: [], profileRemarks: {}, ready: false, onClose: () => {},
+  };
+  let renderer: TestRenderer.ReactTestRenderer | undefined;
+  try {
+    await act(async () => { renderer = TestRenderer.create(<ChatPanel {...props} visible />); });
+    expect(requestFrame).toHaveBeenCalledTimes(1);
+    await act(async () => { renderer!.update(<ChatPanel {...props} visible={false} />); });
+    expect(cancelFrame).toHaveBeenCalledWith(42);
+    cancelFrame.mockClear();
+    requestFrame.mockReturnValue(43);
+    await act(async () => { renderer!.update(<ChatPanel {...props} visible />); });
+    await act(async () => { renderer!.unmount(); });
+    renderer = undefined;
+    expect(cancelFrame).toHaveBeenCalledWith(43);
+  } finally {
+    if (renderer) await act(async () => { renderer!.unmount(); });
+    requestFrame.mockRestore();
+    cancelFrame.mockRestore();
+  }
+});
+
 test('loads realtime messages and sends text to the current room', async () => {
   const listeners = new Map<string, (...args: any[]) => void>();
   const socket = {

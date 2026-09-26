@@ -30,6 +30,7 @@ if ($PublicBaseUrl.Scheme -ne 'https' -or -not $PublicBaseUrl.Host -or $PublicBa
 }
 $publicBase = $PublicBaseUrl.AbsoluteUri.TrimEnd('/')
 $version = $Tag.Substring(1)
+$httpHelper = Join-Path $PSScriptRoot 'release-http.cjs'
 $expectedNames = @(
     'latest.yml',
     "Cove-Setup-$version.exe",
@@ -43,23 +44,24 @@ function Invoke-Checked([string]$command, [string[]]$arguments) {
     if ($LASTEXITCODE -ne 0) { throw "$command 执行失败（退出码 $LASTEXITCODE）。" }
 }
 
+function Invoke-ReleaseHttp([string]$mode, [string]$url, [string]$userAgent, [string]$outputPath = '', [string]$expectedSize = '') {
+    $arguments = @($httpHelper, $mode, $url, $userAgent)
+    if ($mode -eq 'download') { $arguments += $outputPath }
+    if ($expectedSize) { $arguments += $expectedSize }
+    $output = & node @arguments
+    if ($LASTEXITCODE -ne 0) { throw "HTTP 请求失败：$url" }
+    if ($mode -eq 'json') { return (($output -join [Environment]::NewLine) | ConvertFrom-Json) }
+    if ($output) { Write-Output $output }
+}
+
 function Assert-PublicHead([string]$url) {
-    $nodeCode = @'
-const url = process.argv[1];
-fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(15000) })
-  .then(response => {
-    if (response.status !== 200) throw new Error(`HTTP ${response.status}: ${url}`);
-    console.log(`HTTP 200: ${url}`);
-  })
-  .catch(error => { console.error(error); process.exitCode = 1; });
-'@
-    Invoke-Checked 'node' @('-e', $nodeCode, $url)
+    Invoke-ReleaseHttp 'head' $url 'cove-cloud-publisher' | Out-Null
 }
 
 function Get-GithubRelease([string]$repo, [string]$tag) {
     $uri = "https://api.github.com/repos/$repo/releases/tags/$tag"
     try {
-        return Invoke-RestMethod -Uri $uri -Headers @{ 'User-Agent' = 'cove-cloud-publisher' } -UseBasicParsing -NoProxy
+        return Invoke-ReleaseHttp 'json' $uri 'cove-cloud-publisher'
     } catch {
         throw "GitHub 上找不到 $repo 的 $tag Release（$($_.Exception.Message)）"
     }
@@ -96,7 +98,7 @@ try {
             continue
         }
         Write-Output "下载 $($asset.name) ..."
-        Invoke-WebRequest -Uri $asset.browser_download_url -Headers @{ 'User-Agent' = 'cove-cloud-publisher' } -OutFile $destination -UseBasicParsing -NoProxy
+        Invoke-ReleaseHttp 'download' $asset.browser_download_url 'cove-cloud-publisher' $destination | Out-Null
         $actualSize = (Get-Item -LiteralPath $destination).Length
         if ($actualSize -ne $asset.size) { throw "$($asset.name) 下载不完整（$actualSize / $($asset.size) 字节）。" }
     }
@@ -127,7 +129,7 @@ try {
     )
     Invoke-Checked 'ssh' @($SshTarget, ($remoteCommands -join '; '))
 
-    $publicMetadata = Invoke-RestMethod -Uri "$publicBase/releases/latest.json?check=$Tag" -UseBasicParsing -NoProxy
+    $publicMetadata = Invoke-ReleaseHttp 'json' "$publicBase/releases/latest.json?check=$Tag" 'cove-cloud-publisher'
     if ($publicMetadata.tag_name -ne $Tag -or $publicMetadata.draft -or $publicMetadata.prerelease) {
         throw "公开 latest.json 未确认 $Tag。"
     }

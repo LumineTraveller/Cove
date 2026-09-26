@@ -19,6 +19,7 @@ import { colors } from '../theme';
 import type { Message, RoomMember } from '../types';
 import { authorizedResourceURL } from '../serverSecurity';
 import { getProfileDisplayContent, getProfileDisplayName, type ProfileRemarks } from '../profileDisplayName';
+import { Avatar } from './Avatar';
 
 interface Props {
   visible: boolean;
@@ -48,6 +49,7 @@ export function ChatPanel({ visible, socket, roomId, serverURL, username, member
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const listRef = useRef<FlatList<Message>>(null);
+  const needsInitialScrollRef = useRef(false);
 
   useEffect(() => {
     if (!ready) return;
@@ -74,7 +76,11 @@ export function ChatPanel({ visible, socket, roomId, serverURL, username, member
 
   useEffect(() => {
     if (!visible) return;
-    requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: false }));
+    // 打开聊天后的首次定位必须无动画：否则内容尺寸变化触发 scrollToEnd({animated:true})，
+    // 列表会从最顶端一路滚到底部，看起来像多余的动画。
+    needsInitialScrollRef.current = true;
+    const frame = requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: false }));
+    return () => cancelAnimationFrame(frame);
   }, [visible]);
 
   const send = useCallback(() => {
@@ -109,7 +115,13 @@ export function ChatPanel({ visible, socket, roomId, serverURL, username, member
             data={messages}
             keyExtractor={message => message.id}
             contentContainerStyle={messages.length ? styles.list : styles.emptyList}
-            onContentSizeChange={() => visible && listRef.current?.scrollToEnd({ animated: true })}
+            onContentSizeChange={() => {
+              if (!visible) return;
+              // 首次定位（打开/重新打开）直接落底；之后新消息到达才用滚动动画。
+              const initial = needsInitialScrollRef.current;
+              if (initial) needsInitialScrollRef.current = false;
+              listRef.current?.scrollToEnd({ animated: !initial });
+            }}
             ListEmptyComponent={loading
               ? <View style={styles.empty}><ActivityIndicator color={colors.cyan} /><Text style={styles.emptyText}>正在加载聊天记录</Text></View>
               : <View style={styles.empty}><MessageCircle size={28} color={colors.textFaint} /><Text style={styles.emptyTitle}>还没有消息</Text><Text style={styles.emptyText}>发一句话开始聊天吧</Text></View>}
@@ -122,8 +134,20 @@ export function ChatPanel({ visible, socket, roomId, serverURL, username, member
                 ? item.authorUserId === currentUserId
                 : item.author === username;
               const authorName = getProfileDisplayName(item.author, item.authorUserId, profileRemarks);
+              const authorMember = members.find(member => item.authorUserId
+                ? member.userId === item.authorUserId
+                : member.username === item.author);
               return (
                 <View style={[styles.messageRow, own && styles.messageRowOwn]}>
+                  {!own && (
+                    <Avatar
+                      username={authorName}
+                      avatarUrl={authorMember?.avatarUrl}
+                      size={28}
+                      borderRadius={10}
+                      style={styles.messageAvatar}
+                    />
+                  )}
                   <View style={[styles.bubble, own && styles.bubbleOwn]}>
                     {!own && <Text style={styles.author}>{authorName}</Text>}
                     {item.type === 'image'
@@ -131,6 +155,15 @@ export function ChatPanel({ visible, socket, roomId, serverURL, username, member
                       : <Text style={[styles.messageText, own && styles.messageTextOwn]}>{content}</Text>}
                     <Text style={[styles.time, own && styles.timeOwn]}>{formatTime(item.timestamp)}</Text>
                   </View>
+                  {own && (
+                    <Avatar
+                      username={authorName}
+                      avatarUrl={authorMember?.avatarUrl ?? members.find(member => member.socketId === socket.id)?.avatarUrl}
+                      size={28}
+                      borderRadius={10}
+                      style={styles.messageAvatar}
+                    />
+                  )}
                 </View>
               );
             }}
@@ -178,7 +211,8 @@ const styles = StyleSheet.create({
   emptyTitle: { color: colors.textMuted, fontSize: 14, fontWeight: '700' },
   emptyText: { color: colors.textFaint, fontSize: 11 },
   systemMessage: { alignSelf: 'center', color: colors.textFaint, fontSize: 10, lineHeight: 15, paddingVertical: 4, textAlign: 'center' },
-  messageRow: { alignItems: 'flex-start' },
+  messageRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 },
+  messageAvatar: { marginTop: 2 },
   messageRowOwn: { alignItems: 'flex-end' },
   bubble: { maxWidth: '82%', paddingHorizontal: 12, paddingVertical: 9, borderRadius: 16, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surfaceRaised },
   bubbleOwn: { borderColor: 'rgba(103,232,249,0.2)', backgroundColor: '#cffafe' },

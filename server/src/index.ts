@@ -1089,6 +1089,10 @@ function announceVoicePresence(
 }
 
 function handleVoiceLeave(socketId: string, roomId: string) {
+  // 远程控制依附于语音会话：控制者或被控者任一方退出语音，会话立即终止。
+  // 否则控制者挂断后，被控方会一直显示"正在被控制"。clearSocket 幂等，
+  // 与 disconnect/room:leave 等路径的重复调用不会产生重复通知。
+  stopRemoteControlForSocket(socketId, '成员已退出语音');
   const members = voiceRooms.get(roomId);
   const wasInVoice = members?.delete(socketId);
   selfMutedVoiceMembers.delete(socketId);

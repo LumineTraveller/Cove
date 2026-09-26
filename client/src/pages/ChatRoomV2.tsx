@@ -131,7 +131,7 @@ interface RemoteControlRequest {
   controllerUserId?: string;
 }
 
-const REMOTE_CONTROL_APPROVAL_DELAY_SECONDS = 10;
+const REMOTE_CONTROL_REQUEST_COOLDOWN_SECONDS = 10;
 interface MessageHistoryCursor {
   timestamp: number;
   id: string;
@@ -2668,6 +2668,7 @@ function ShareStatusBarV2({
   onMute,
   onRemote,
   remoteState,
+  remoteCooldownSeconds,
   onStopRemote,
   onFull,
   onEnd,
@@ -2682,6 +2683,7 @@ function ShareStatusBarV2({
   onMute: () => void;
   onRemote: () => void;
   remoteState: "available" | "pending" | "active" | "unsupported";
+  remoteCooldownSeconds: number;
   onStopRemote: () => void;
   onFull: () => void;
   onEnd: () => void;
@@ -2714,9 +2716,19 @@ function ShareStatusBarV2({
               取消请求
             </button>
           ) : remoteState === "available" ? (
-            <button onClick={onRemote}>
+            <button
+              onClick={onRemote}
+              disabled={remoteCooldownSeconds > 0}
+              title={
+                remoteCooldownSeconds > 0
+                  ? `请等待 ${remoteCooldownSeconds} 秒后再发送申请`
+                  : undefined
+              }
+            >
               <MousePointer2 size={17} />
-              远程控制
+              {remoteCooldownSeconds > 0
+                ? `${remoteCooldownSeconds} 秒后可再申请`
+                : "远程控制"}
             </button>
           ) : null)}
         <div className="fullscreen-stack">
@@ -3175,6 +3187,7 @@ function ShareViewV2({
     state: "available" | "pending" | "active" | "unsupported";
     sharerActive?: boolean;
     controllerName?: string;
+    cooldownSeconds?: number;
   };
   sharerName: string;
   onInput: (input: RemoteControlInput) => void;
@@ -3308,6 +3321,7 @@ function ShareViewV2({
         onMute={toggleVolumeMute}
         onRemote={onRequestRemote}
         remoteState={remoteControl.state}
+        remoteCooldownSeconds={remoteControl.cooldownSeconds ?? 0}
         onStopRemote={onStopRemote}
         onFull={toggleNativeFullscreen}
         onEnd={end}
@@ -3654,9 +3668,8 @@ export default function ChatRoomV2({
   const [pendingRemoteRequestId, setPendingRemoteRequestId] = useState<
     string | null
   >(null);
-  const [remoteApprovalSeconds, setRemoteApprovalSeconds] = useState<
-    number | null
-  >(null);
+  const [remoteRequestCooldownSeconds, setRemoteRequestCooldownSeconds] =
+    useState(0);
   const [remoteSession, setRemoteSession] =
     useState<RemoteControlSession | null>(null);
   const [remoteNotice, setRemoteNotice] = useState("");
@@ -3772,7 +3785,6 @@ export default function ChatRoomV2({
     setPendingRemote(null);
     setPendingRemoteRequest(false);
     setPendingRemoteRequestId(null);
-    setRemoteApprovalSeconds(null);
     setRemoteSession(null);
   }, [shareLayout]);
   useEffect(() => {
@@ -4183,7 +4195,6 @@ export default function ChatRoomV2({
         setRemoteSession(session);
         setPendingRemoteRequest(false);
         setPendingRemoteRequestId(null);
-        setRemoteApprovalSeconds(null);
         setPendingRemote(null);
       },
       onNotice: setRemoteNotice,
@@ -4191,8 +4202,9 @@ export default function ChatRoomV2({
     remoteLifecycleRef.current = lifecycle;
     const onRequested = (request: RemoteControlRequest) => {
       if (request.roomId !== roomId) return;
-      setRemoteApprovalSeconds(null);
       setPendingRemote(request);
+      // 审批界面必须立刻可见：窗口在后台/被遮挡时也要拉到最前。
+      void window.coveWindow?.focus();
     };
     const onResult = ({
       requestId,
@@ -4220,7 +4232,6 @@ export default function ChatRoomV2({
       reason?: string;
     }) => {
       lifecycle.cancelExpectedStart();
-      setRemoteApprovalSeconds(null);
       setPendingRemote((current) =>
         current?.requestId === requestId ? null : current,
       );
@@ -4240,34 +4251,14 @@ export default function ChatRoomV2({
       if (remoteLifecycleRef.current === lifecycle) remoteLifecycleRef.current = null;
     };
   }, [roomId]);
+  // 发出远程控制申请后的冷却：10 秒内不允许再次发送申请。
   useEffect(() => {
-    if (remoteApprovalSeconds === null) return;
-    if (remoteApprovalSeconds === 0) {
-      if (!pendingRemote) {
-        setRemoteApprovalSeconds(null);
-        return;
-      }
-      if (!remoteLifecycleRef.current?.expectStart("sharer")) {
-        setRemoteApprovalSeconds(null);
-        setPendingRemote(null);
-        setRemoteNotice("连接已断开，远程控制未启动");
-        return;
-      }
-      socket.emit("remote-control:respond", {
-        requestId: pendingRemote.requestId,
-        accepted: true,
-      });
-      setRemoteApprovalSeconds(null);
-      setPendingRemote(null);
-      return;
-    }
+    if (remoteRequestCooldownSeconds <= 0) return;
     const timer = window.setTimeout(() => {
-      setRemoteApprovalSeconds((current) =>
-        current === null ? null : Math.max(0, current - 1),
-      );
+      setRemoteRequestCooldownSeconds((current) => Math.max(0, current - 1));
     }, 1000);
     return () => window.clearTimeout(timer);
-  }, [pendingRemote, remoteApprovalSeconds]);
+  }, [remoteRequestCooldownSeconds]);
   const sortedMembers = useMemo(
     () =>
       sortRoomMembers(
@@ -4407,9 +4398,16 @@ export default function ChatRoomV2({
   const requestRemote = () => {
     const target = rtc.remoteScreen?.socketId;
     if (!target || !roomId || pendingRemoteRequest) return;
+    if (remoteRequestCooldownSeconds > 0) {
+      setRemoteNotice(
+        `请等待 ${remoteRequestCooldownSeconds} 秒后再发送远程控制申请。`,
+      );
+      return;
+    }
     if (!remoteLifecycleRef.current?.expectStart("controller")) return;
     setRemoteNotice("");
     setPendingRemoteRequest(true);
+    setRemoteRequestCooldownSeconds(REMOTE_CONTROL_REQUEST_COOLDOWN_SECONDS);
     socket
       .timeout(5000)
       .emit(
@@ -4431,15 +4429,22 @@ export default function ChatRoomV2({
   const respondRemote = (accepted: boolean) => {
     if (!pendingRemote) return;
     if (accepted) {
-      if (remoteApprovalSeconds !== null) return;
-      setRemoteApprovalSeconds(REMOTE_CONTROL_APPROVAL_DELAY_SECONDS);
+      if (!remoteLifecycleRef.current?.expectStart("sharer")) {
+        setPendingRemote(null);
+        setRemoteNotice("连接已断开，远程控制未启动");
+        return;
+      }
+      socket.emit("remote-control:respond", {
+        requestId: pendingRemote.requestId,
+        accepted: true,
+      });
+      setPendingRemote(null);
       return;
     }
     socket.emit("remote-control:respond", {
       requestId: pendingRemote.requestId,
       accepted,
     });
-    setRemoteApprovalSeconds(null);
     setPendingRemote(null);
   };
   const stopRemote = () => {
@@ -4451,7 +4456,6 @@ export default function ChatRoomV2({
     const cancelledRequest = !remoteSession && Boolean(pendingRemoteRequestId);
     setPendingRemoteRequest(false);
     setPendingRemoteRequestId(null);
-    setRemoteApprovalSeconds(null);
     setPendingRemote(null);
     setRemoteSession(null);
     if (cancelledRequest) setRemoteNotice("远程控制请求已取消");
@@ -4995,6 +4999,7 @@ export default function ChatRoomV2({
                     controllerName: remoteSession?.controllerName
                       ? getProfileDisplayName(remoteSession.controllerName, remoteSession.controllerUserId, profileRemarks)
                       : undefined,
+                    cooldownSeconds: remoteRequestCooldownSeconds,
                   }}
                   onInput={sendRemoteInput}
                   onRequestRemote={requestRemote}
@@ -5360,26 +5365,15 @@ export default function ChatRoomV2({
             <MousePointer2 size={25} />
             <h2>远程控制请求</h2>
             <p aria-live="polite">
-              {remoteApprovalSeconds === null
-                ? `${getProfileDisplayName(pendingRemote.controllerName, pendingRemote.controllerUserId, profileRemarks)} 请求控制你正在共享的屏幕。`
-                : remoteApprovalSeconds > 0
-                  ? `已允许，将在 ${remoteApprovalSeconds} 秒后开始远程控制。`
-                  : "正在启动远程控制…"}
+              {`${getProfileDisplayName(pendingRemote.controllerName, pendingRemote.controllerUserId, profileRemarks)} 请求控制你正在共享的屏幕。`}
             </p>
             <div>
-              <button onClick={() => respondRemote(false)}>
-                {remoteApprovalSeconds === null ? "拒绝" : "取消启动"}
-              </button>
+              <button onClick={() => respondRemote(false)}>拒绝</button>
               <button
                 className="primary-wide"
-                disabled={remoteApprovalSeconds !== null}
                 onClick={() => respondRemote(true)}
               >
-                {remoteApprovalSeconds === null
-                  ? "允许本次控制"
-                  : remoteApprovalSeconds > 0
-                    ? `${remoteApprovalSeconds} 秒后开始`
-                    : "正在启动…"}
+                允许本次控制
               </button>
             </div>
           </section>

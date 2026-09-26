@@ -34,8 +34,10 @@ import {
   VolumeX,
   X,
   Settings,
+  SlidersHorizontal,
 } from 'lucide-react-native';
 import { ZoomableScreenVideo } from '../components/ZoomableScreenVideo';
+import { Avatar } from '../components/Avatar';
 import { ROOM_LIMIT_PRESETS, roomSettingsPayload } from '../roomSettings';
 import type { Socket } from 'socket.io-client';
 import { Soundboard } from '../components/Soundboard';
@@ -45,6 +47,8 @@ import { getProfileDisplayName, loadProfileRemarks, saveProfileRemark, type Prof
 import { colors } from '../theme';
 import type { Room, RoomMember, RoomState, SessionConfig } from '../types';
 import { useMobileMedia } from '../useMobileMedia';
+import { NOISE_MODES } from '../microphoneNoise';
+import { inputDeviceLabel, outputDeviceLabel } from '../audioDevices';
 
 interface Props {
   socket: Socket;
@@ -54,20 +58,19 @@ interface Props {
   onBack: () => void;
 }
 
-function initials(name: string) {
-  return name.trim().slice(0, 2) || 'C';
-}
-
 interface InlineVolumeSliderProps {
   value: number;
   label: string;
   onChange: (value: number) => void;
 }
 
-function InlineVolumeSlider({ value, label, onChange }: InlineVolumeSliderProps) {
+export function InlineVolumeSlider({ value, label, onChange }: InlineVolumeSliderProps) {
   const trackWidth = useRef(1);
   const normalized = Math.max(0, Math.min(1, value));
   const percentage = Math.round(normalized * 100);
+  // locationX must stay relative to the track. Keep rail/fill/thumb out of the
+  // hit target so a drag that starts on the thumb cannot jump coordinate frames
+  // and make the value flicker back and forth.
   const updateFromTouch = (event: GestureResponderEvent) => {
     onChange(Math.max(0, Math.min(1, event.nativeEvent.locationX / trackWidth.current)));
   };
@@ -83,13 +86,16 @@ function InlineVolumeSlider({ value, label, onChange }: InlineVolumeSliderProps)
       onAccessibilityAction={event => onChange(normalized + (event.nativeEvent.actionName === 'increment' ? 0.05 : -0.05))}
       onLayout={event => { trackWidth.current = Math.max(1, event.nativeEvent.layout.width); }}
       onStartShouldSetResponder={() => true}
+      onStartShouldSetResponderCapture={() => true}
       onMoveShouldSetResponder={() => true}
+      onMoveShouldSetResponderCapture={() => true}
       onResponderGrant={updateFromTouch}
       onResponderMove={updateFromTouch}
+      onResponderTerminationRequest={() => false}
     >
-      <View style={styles.volumeSliderRail} />
-      <View style={[styles.volumeSliderFill, { width: `${percentage}%` }]} />
-      <View style={[styles.volumeSliderThumb, { left: `${percentage}%` }]} />
+      <View pointerEvents="none" style={styles.volumeSliderRail} />
+      <View pointerEvents="none" style={[styles.volumeSliderFill, { width: `${percentage}%` }]} />
+      <View pointerEvents="none" style={[styles.volumeSliderThumb, { left: `${percentage}%` }]} />
     </View>
   );
 }
@@ -105,6 +111,7 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
   const [joinPending, setJoinPending] = useState(false);
   const joinGeneration = useRef(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [audioSettingsOpen, setAudioSettingsOpen] = useState(false);
   const [settingsLimit, setSettingsLimit] = useState(room.maxMembers ? String(room.maxMembers) : '');
   const [settingsPassword, setSettingsPassword] = useState('');
   const [settingsError, setSettingsError] = useState<string | null>(null);
@@ -121,6 +128,7 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
   const [roomOwnerUserId, setRoomOwnerUserId] = useState(room.ownerUserId ?? null);
   const screenVolumeBeforeMute = useRef(1);
   const media = useMobileMedia(socket, room.id);
+  const audioSettingsBusy = media.joining || media.noiseSwitching || media.audioDeviceSwitching;
 
   const setScreenVolume = (volume: number) => {
     const normalized = Math.max(0, Math.min(1, volume));
@@ -312,15 +320,19 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
           <TouchableOpacity style={styles.headerAction} onPress={() => setSoundboardOpen(true)} accessibilityLabel="打开语音包">
             <AudioLines size={17} color={colors.cyan} />
           </TouchableOpacity>
-          <View style={[styles.mediaState, media.connectionState === 'connected' && styles.mediaConnected]}>
-            {media.connectionState === 'connected'
-              ? <CheckCircle2 size={17} color={colors.green} />
-              : <Headphones size={17} color={colors.textFaint} />}
-          </View>
+          <TouchableOpacity
+            style={[styles.mediaState, media.connectionState === 'connected' && styles.mediaConnected]}
+            onPress={() => { setAudioSettingsOpen(true); void media.refreshAudioDevices(); }}
+            accessibilityRole="button"
+            accessibilityLabel="音频设置"
+            accessibilityHint="设置麦克风降噪和输入输出设备"
+          >
+            <SlidersHorizontal size={17} color={media.connectionState === 'connected' ? colors.green : colors.cyan} />
+          </TouchableOpacity>
         </View>
       </View>
 
-      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+      <ScrollView style={styles.roomScroll} contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
         {(joinError || media.error) && (
           <TouchableOpacity style={styles.errorBanner} onPress={() => { setJoinError(null); media.clearError(); }}>
             <ShieldAlert size={18} color={colors.red} />
@@ -428,7 +440,7 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
                   onPress={() => setViewingProfile(member)}
                   activeOpacity={0.75}
                 >
-                  <View style={styles.miniAvatar}><Text style={styles.miniAvatarText}>{initials(displayName)}</Text></View>
+                  <Avatar username={displayName} avatarUrl={member.avatarUrl} size={26} borderRadius={9} />
                   <View>
                     <Text style={styles.memberName}>{displayName}</Text>
                     {profileRemarks[member.userId] ? <Text style={styles.memberUsername}>原用户名：{member.username}</Text> : null}
@@ -448,10 +460,9 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
           </ScrollView>
         </View>
 
-        <View style={styles.bottomSpacer} />
       </ScrollView>
 
-      <View style={styles.voiceControls}>
+      <View style={styles.voiceControls} testID="voice-controls">
         {!media.inVoice ? (
           <TouchableOpacity
             style={[styles.joinVoice, (!roomReady || media.joining) && styles.controlDisabled]}
@@ -468,6 +479,7 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
               style={[styles.micControl, media.isMuted && styles.micMuted, media.isForceMuted && styles.forceMuted]}
               disabled={media.isForceMuted}
               onPress={media.toggleMute}
+              accessibilityLabel={media.isForceMuted ? '已被房主禁言' : media.isMuted ? '开启麦克风' : '关闭麦克风'}
               activeOpacity={0.78}
             >
               {media.isMuted ? <MicOff size={20} color={media.isForceMuted ? colors.red : colors.amber} /> : <Mic size={20} color={colors.green} />}
@@ -475,10 +487,109 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
                 {media.isForceMuted ? '已被房主禁言' : media.isMuted ? '麦克风已关' : '麦克风已开'}
               </Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.leaveControl} onPress={media.leaveVoice}><PhoneOff size={20} color={colors.red} /></TouchableOpacity>
+            <TouchableOpacity style={styles.leaveControl} onPress={media.leaveVoice} accessibilityLabel="退出语音"><PhoneOff size={20} color={colors.red} /></TouchableOpacity>
           </>
         )}
       </View>
+
+      <Modal visible={audioSettingsOpen} animationType="slide" onRequestClose={() => setAudioSettingsOpen(false)}>
+        <SafeAreaView style={styles.toolModal} edges={['top', 'right', 'bottom', 'left']}>
+          <View style={styles.toolHeader}>
+            <View style={styles.toolHeaderIcon}><Headphones size={19} color={colors.cyan} /></View>
+            <View style={styles.headerCopy}>
+              <Text style={styles.toolTitle}>音频设置</Text>
+              <Text style={styles.toolSubtitle}>降噪 · 麦克风 · 声音输出</Text>
+            </View>
+            <TouchableOpacity style={styles.iconButton} onPress={() => setAudioSettingsOpen(false)} accessibilityLabel="关闭音频设置"><X size={20} color={colors.textMuted} /></TouchableOpacity>
+          </View>
+          <ScrollView contentContainerStyle={styles.audioSettingsContent} showsVerticalScrollIndicator={false}>
+            <View style={styles.audioSettingsSection}>
+              <Text style={styles.sectionTitle}>麦克风降噪</Text>
+              <Text style={styles.noiseHint}>默认使用 RNNoise 改进降噪。切换后对当前通话立即生效。</Text>
+              {media.noiseSwitching && <Text style={styles.noiseHint}>正在切换降噪…</Text>}
+              {NOISE_MODES.map((option) => {
+                const selected = media.noiseMode === option.value;
+                return (
+                  <TouchableOpacity
+                    key={option.value}
+                    style={[styles.noiseOption, selected && styles.noiseOptionActive]}
+                    disabled={audioSettingsBusy}
+                    accessibilityRole="radio"
+                    accessibilityLabel={option.label}
+                    accessibilityState={{ checked: selected, disabled: audioSettingsBusy }}
+                    onPress={() => { void media.selectNoiseMode(option.value); }}
+                    activeOpacity={0.78}
+                  >
+                    <Text style={[styles.noiseOptionText, selected && styles.noiseOptionTextActive]}>{option.label}</Text>
+                    {selected ? <CheckCircle2 size={18} color={colors.cyan} /> : null}
+                  </TouchableOpacity>
+                );
+              })}
+              {media.noiseError ? <Text style={styles.formError}>{media.noiseError}</Text> : null}
+            </View>
+
+            <View style={styles.audioSettingsSection}>
+              <Text style={styles.sectionTitle}>输入输出设备</Text>
+              <Text style={styles.noiseHint}>选择麦克风和声音输出。通话中切换会立即生效。</Text>
+              {media.audioDeviceSwitching && <Text style={styles.noiseHint}>正在切换音频设备…</Text>}
+
+              <Text style={styles.deviceSectionTitle}>输出设备</Text>
+              {media.audioOutputs.length === 0 ? (
+                <Text style={styles.noiseHint}>暂无可切换输出设备</Text>
+              ) : media.audioOutputs.map((device) => {
+                const selected = media.selectedAudioOutputId === device.id;
+                return (
+                  <TouchableOpacity
+                    key={device.id}
+                    style={[styles.noiseOption, selected && styles.noiseOptionActive]}
+                    disabled={audioSettingsBusy}
+                    accessibilityRole="radio"
+                    accessibilityLabel={`输出设备：${device.label || outputDeviceLabel(device.id, media.audioOutputs)}`}
+                    accessibilityState={{ checked: selected, disabled: audioSettingsBusy }}
+                    onPress={async () => {
+                      await media.selectAudioOutput(device.id);
+                    }}
+                    activeOpacity={0.78}
+                  >
+                    <Text style={[styles.noiseOptionText, selected && styles.noiseOptionTextActive]}>
+                      {device.label || outputDeviceLabel(device.id, media.audioOutputs)}
+                    </Text>
+                    {selected ? <CheckCircle2 size={18} color={colors.cyan} /> : null}
+                  </TouchableOpacity>
+                );
+              })}
+
+              <Text style={styles.deviceSectionTitle}>输入设备</Text>
+              {media.audioInputs.length === 0 ? (
+                <Text style={styles.noiseHint}>暂无可切换输入设备</Text>
+              ) : media.audioInputs.map((device) => {
+                const selected = media.selectedAudioInputId === device.id;
+                return (
+                  <TouchableOpacity
+                    key={device.id}
+                    style={[styles.noiseOption, selected && styles.noiseOptionActive]}
+                    disabled={audioSettingsBusy}
+                    accessibilityRole="radio"
+                    accessibilityLabel={`输入设备：${device.label || inputDeviceLabel(device.id, media.audioInputs)}`}
+                    accessibilityState={{ checked: selected, disabled: audioSettingsBusy }}
+                    onPress={async () => {
+                      await media.selectAudioInput(device.id);
+                    }}
+                    activeOpacity={0.78}
+                  >
+                    <Text style={[styles.noiseOptionText, selected && styles.noiseOptionTextActive]}>
+                      {device.label || inputDeviceLabel(device.id, media.audioInputs)}
+                    </Text>
+                    {selected ? <CheckCircle2 size={18} color={colors.cyan} /> : null}
+                  </TouchableOpacity>
+                );
+              })}
+
+              {media.audioDeviceError ? <Text style={styles.formError}>{media.audioDeviceError}</Text> : null}
+            </View>
+          </ScrollView>
+        </SafeAreaView>
+      </Modal>
 
       <Modal visible={fullscreen} animationType="fade" supportedOrientations={['portrait', 'landscape']} onRequestClose={() => setFullscreen(false)}>
         <View style={styles.fullscreen}>
@@ -594,6 +705,7 @@ const styles = StyleSheet.create({
   mediaState: { width: 36, height: 36, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.05)' },
   mediaConnected: { backgroundColor: colors.greenSoft },
   scrollContent: { paddingTop: 14 },
+  roomScroll: { flex: 1 },
   errorBanner: { flexDirection: 'row', alignItems: 'center', gap: 9, marginHorizontal: 14, marginBottom: 10, padding: 11, borderWidth: 1, borderColor: 'rgba(248,113,113,0.2)', borderRadius: 13, backgroundColor: colors.redSoft },
   errorText: { flex: 1, color: colors.red, fontSize: 11, lineHeight: 16 },
   screenStage: { position: 'relative', aspectRatio: 16 / 9, marginHorizontal: 14, marginBottom: 14, overflow: 'hidden', borderWidth: 1, borderColor: colors.border, borderRadius: 20, backgroundColor: '#020203' },
@@ -632,22 +744,27 @@ const styles = StyleSheet.create({
   sectionSubtitle: { color: colors.textFaint, fontSize: 10, marginTop: 4 },
   memberList: { gap: 8 },
   memberChip: { flexDirection: 'row', alignItems: 'center', gap: 7, paddingVertical: 7, paddingLeft: 7, paddingRight: 9, borderRadius: 13, borderWidth: 1, borderColor: colors.border, backgroundColor: 'rgba(255,255,255,0.035)' },
-  miniAvatar: { width: 26, height: 26, borderRadius: 9, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.cyanSoft },
-  miniAvatarText: { color: colors.cyan, fontSize: 9, fontWeight: '800' },
   memberName: { color: 'rgba(244,244,245,0.7)', fontSize: 11 },
   memberUsername: { marginTop: 2, color: colors.textFaint, fontSize: 8 },
-  bottomSpacer: { height: 85 },
-  voiceControls: { position: 'absolute', right: 0, bottom: 0, left: 0, minHeight: 74, flexDirection: 'row', alignItems: 'center', gap: 9, paddingHorizontal: 14, paddingVertical: 10, borderTopWidth: 1, borderTopColor: colors.borderStrong, backgroundColor: 'rgba(12,12,15,0.98)' },
+  voiceControls: { minHeight: 74, flexDirection: 'row', alignItems: 'center', gap: 9, paddingHorizontal: 14, paddingVertical: 10, borderTopWidth: 1, borderTopColor: colors.borderStrong, backgroundColor: 'rgba(12,12,15,0.98)' },
   joinVoice: { flex: 1, height: 50, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 9, borderRadius: 15, backgroundColor: '#ecfeff' },
   joinVoiceText: { color: '#164e63', fontSize: 15, fontWeight: '800' },
   controlDisabled: { opacity: 0.35 },
-  micControl: { flex: 1, height: 50, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 9, borderRadius: 15, backgroundColor: colors.greenSoft },
+  micControl: { flex: 1, minWidth: 0, minHeight: 50, paddingHorizontal: 12, paddingVertical: 10, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 9, borderRadius: 15, backgroundColor: colors.greenSoft },
   micMuted: { backgroundColor: colors.amberSoft },
   forceMuted: { backgroundColor: colors.redSoft },
-  micText: { color: colors.green, fontSize: 14, fontWeight: '700' },
+  micText: { flexShrink: 1, color: colors.green, fontSize: 14, fontWeight: '700' },
   micMutedText: { color: colors.amber },
   forceMutedText: { color: colors.red },
   leaveControl: { width: 52, height: 50, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.redSoft },
+  audioSettingsContent: { padding: 16, gap: 16 },
+  audioSettingsSection: { padding: 14, gap: 10, borderRadius: 18, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
+  noiseHint: { color: colors.textMuted, fontSize: 12, lineHeight: 18 },
+  deviceSectionTitle: { color: colors.textMuted, fontSize: 12, fontWeight: '700', marginTop: 6 },
+  noiseOption: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 14, paddingVertical: 13, borderRadius: 12, backgroundColor: colors.surfaceRaised, borderWidth: 1, borderColor: colors.border },
+  noiseOptionActive: { borderColor: colors.cyan, backgroundColor: colors.cyanSoft },
+  noiseOptionText: { flex: 1, marginRight: 10, color: colors.text, fontSize: 15, fontWeight: '600' },
+  noiseOptionTextActive: { color: colors.cyan },
   fullscreen: { flex: 1, backgroundColor: '#000' },
   closeFullscreen: { position: 'absolute', top: 18, right: 18, width: 42, height: 42, alignItems: 'center', justifyContent: 'center', borderRadius: 14, backgroundColor: 'rgba(0,0,0,0.7)' },
   toolModal: { flex: 1, backgroundColor: colors.background },

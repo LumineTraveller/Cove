@@ -5,7 +5,7 @@ import { useMobileMedia } from '../src/useMobileMedia';
 const mockConsumers = new Map<string, any>();
 const mockTransport = {
   on: jest.fn(), close: jest.fn(),
-  produce: jest.fn(async () => ({ close: jest.fn(), pause: jest.fn(), resume: jest.fn() })),
+  produce: jest.fn(async () => ({ close: jest.fn(), pause: jest.fn(), resume: jest.fn(), replaceTrack: jest.fn(), paused: false, closed: false })),
   consume: jest.fn(async (params: any) => {
     const consumer = { id: params.id, track: { enabled: true, _setVolume: jest.fn() }, close: jest.fn(), on: jest.fn() };
     mockConsumers.set(params.producerId, consumer);
@@ -19,7 +19,25 @@ jest.mock('mediasoup-client', () => ({ Device: { factory: async () => ({
 jest.mock('react-native-incall-manager', () => ({ start: jest.fn(), stop: jest.fn(), setForceSpeakerphoneOn: jest.fn(), setSpeakerphoneOn: jest.fn(), stopProximitySensor: jest.fn(), turnScreenOn: jest.fn(), setKeepScreenOn: jest.fn() }));
 jest.mock('react-native-webrtc', () => ({
   MediaStream: class { release = jest.fn(); },
-  mediaDevices: { getUserMedia: async () => ({ getAudioTracks: () => [{}], release: jest.fn() }) },
+  mediaDevices: { getUserMedia: async () => ({ getAudioTracks: () => [{ enabled: true }], release: jest.fn() }) },
+}));
+jest.mock('../src/audioDevices', () => ({
+  DEFAULT_OUTPUT_ID: 'out-speaker',
+  listAudioDevices: jest.fn(async () => ({
+    inputs: [{ id: 'default', label: '系统默认麦克风', isDefault: true }],
+    outputs: [{ id: 'out-speaker', label: '扬声器' }, { id: 'out-earpiece', label: '听筒' }],
+    inputId: 'default',
+    outputId: 'out-speaker',
+  })),
+  setAudioInputDevice: jest.fn(async (id: string) => id),
+  setAudioOutputDevice: jest.fn(async (id: string) => id),
+}));
+jest.mock('../src/microphoneNoise', () => ({
+  DEFAULT_NOISE_MODE: 'rnnoise',
+  isMicrophoneNoiseMode: (value: unknown) => value === 'system' || value === 'rnnoise',
+  createMicrophoneConstraints: (mode: string) => ({ echoCancellation: true, noiseSuppression: mode === 'system', autoGainControl: false, channelCount: 1, sampleRate: 48000 }),
+  applyNoiseMode: jest.fn(async (mode: string) => ({ mode, effectiveMode: mode, rnnoiseReady: true, interceptorActive: true, processing: mode === 'rnnoise' })),
+  getNoiseStatus: jest.fn(async () => ({ mode: 'rnnoise', effectiveMode: 'rnnoise', rnnoiseReady: true, interceptorActive: true, processing: true })),
 }));
 
 import { PermissionsAndroid } from 'react-native';
@@ -237,4 +255,31 @@ test('leaving during microphone acquisition cannot resurrect the old join', asyn
   expect(lateStream.release).toHaveBeenCalledWith(true);
   await act(async () => media.joinVoice());
   expect(media.inVoice).toBe(true);
+});
+
+
+test('defaults to improved RNNoise and can switch before joining', async () => {
+  expect(media.noiseMode).toBe('rnnoise');
+  await act(async () => { await media.selectNoiseMode('system'); });
+  expect(media.noiseMode).toBe('system');
+  expect(media.noiseError).toBeNull();
+});
+
+test('switches noise mode while in voice via replaceTrack', async () => {
+  await act(async () => media.joinVoice());
+  await act(async () => { await media.selectNoiseMode('system'); });
+  expect(media.noiseMode).toBe('system');
+  const { applyNoiseMode } = jest.requireMock('../src/microphoneNoise');
+  expect(applyNoiseMode).toHaveBeenCalledWith('system');
+});
+
+
+test('lists audio devices and switches output/input', async () => {
+  await act(async () => { await media.refreshAudioDevices(); });
+  expect(media.audioOutputs.map((device) => device.id)).toEqual(['out-speaker', 'out-earpiece']);
+  await act(async () => { await media.selectAudioOutput('out-earpiece'); });
+  expect(media.selectedAudioOutputId).toBe('out-earpiece');
+  await act(async () => { await media.selectAudioInput('default'); });
+  expect(media.selectedAudioInputId).toBe('default');
+  expect(media.audioDeviceError).toBeNull();
 });

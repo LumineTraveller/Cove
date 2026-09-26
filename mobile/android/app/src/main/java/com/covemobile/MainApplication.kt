@@ -2,6 +2,9 @@ package com.covemobile
 
 import android.app.Application
 import android.media.AudioAttributes
+import com.covemobile.audio.AudioRouteRuntime
+import com.covemobile.audio.MicrophoneNoiseRuntime
+import com.covemobile.audio.RnnoiseAudioInterceptor
 import com.facebook.react.PackageList
 import com.facebook.react.ReactApplication
 import com.facebook.react.ReactHost
@@ -32,13 +35,18 @@ class MainApplication : Application(), ReactApplication {
       .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
       .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
       .build()
-    WebRTCModuleOptions.getInstance().audioDeviceModule =
-      JavaAudioDeviceModule.builder(this)
-        .setAudioAttributes(audioAttributes)
-        // 优先使用 Android 的硬件 AEC/NS；不支持时 WebRTC 会回退到软件处理。
-        .setUseHardwareAcousticEchoCanceler(true)
-        .setUseHardwareNoiseSuppressor(true)
-        .createAudioDeviceModule()
+    // 保留硬件 NS 实例，便于在 RNNoise / 系统降噪之间运行时切换；
+    // RNNoise 模式会关掉系统 NS，避免双重降噪损伤语音。
+    val audioDeviceModule = JavaAudioDeviceModule.builder(this)
+      .setAudioAttributes(audioAttributes)
+      .setUseHardwareAcousticEchoCanceler(true)
+      .setUseHardwareNoiseSuppressor(true)
+      .createAudioDeviceModule()
+    WebRTCModuleOptions.getInstance().audioDeviceModule = audioDeviceModule
+
+    val interceptorAttached = RnnoiseAudioInterceptor.attach(audioDeviceModule)
+    MicrophoneNoiseRuntime.bind(audioDeviceModule, interceptorAttached)
+    AudioRouteRuntime.bind(this, audioDeviceModule)
 
     loadReactNative(this)
   }

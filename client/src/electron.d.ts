@@ -21,6 +21,7 @@ interface CoveWindowApi {
   toggleMaximize(): Promise<boolean>;
   isMaximized(): Promise<boolean>;
   close(): Promise<boolean>;
+  focus(): Promise<boolean>;
   onState(listener: (maximized: boolean) => void): () => void;
 }
 

@@ -11,6 +11,9 @@ import android.os.Handler
 import android.os.Looper
 import java.net.InetAddress
 import java.util.concurrent.Executors
+import com.covemobile.audio.AudioRouteRuntime
+import com.covemobile.audio.MicrophoneNoiseRuntime
+import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
@@ -88,6 +91,7 @@ class CoveNativeModule(private val reactContext: ReactApplicationContext) :
       mainHandler.removeCallbacks(reapplySpeakerphone)
       if (enabled) {
         registerAudioDeviceCallback()
+        AudioRouteRuntime.setOutput("out-speaker")
         applySpeakerphoneRoute()
         // InCallManager 和 WebRTC 可能在音轨建立后再次选择通话设备。
         // 做两次短延迟恢复，避免路由被异步切回听筒。
@@ -95,7 +99,90 @@ class CoveNativeModule(private val reactContext: ReactApplicationContext) :
         mainHandler.postDelayed(reapplySpeakerphone, 1_000)
       } else {
         unregisterAudioDeviceCallback()
+        AudioRouteRuntime.setOutput(null)
         releaseSpeakerphoneRoute()
+      }
+    }
+  }
+
+  @ReactMethod
+  fun setMicrophoneNoiseMode(mode: String, promise: Promise) {
+    try {
+      val applied = MicrophoneNoiseRuntime.setMode(mode)
+      promise.resolve(applied.wire)
+    } catch (error: Exception) {
+      promise.reject("NOISE_MODE", error.message, error)
+    }
+  }
+
+  @ReactMethod
+  fun getMicrophoneNoiseStatus(promise: Promise) {
+    try {
+      val status = MicrophoneNoiseRuntime.status()
+      val map = Arguments.createMap()
+      map.putString("mode", status["mode"] as? String ?: "rnnoise")
+      map.putString("effectiveMode", status["effectiveMode"] as? String ?: "system")
+      map.putBoolean("rnnoiseReady", status["rnnoiseReady"] as? Boolean ?: false)
+      map.putBoolean("interceptorActive", status["interceptorActive"] as? Boolean ?: false)
+      map.putBoolean("processing", status["processing"] as? Boolean ?: false)
+      promise.resolve(map)
+    } catch (error: Exception) {
+      promise.reject("NOISE_STATUS", error.message, error)
+    }
+  }
+
+  @ReactMethod
+  fun listAudioDevices(promise: Promise) {
+    try {
+      val result = Arguments.createMap()
+      val inputs = Arguments.createArray()
+      for (device in AudioRouteRuntime.listInputs()) {
+        val map = Arguments.createMap()
+        map.putString("id", device.id)
+        map.putString("label", device.label)
+        map.putBoolean("isDefault", device.isDefault)
+        inputs.pushMap(map)
+      }
+      val outputs = Arguments.createArray()
+      for (device in AudioRouteRuntime.listOutputs()) {
+        val map = Arguments.createMap()
+        map.putString("id", device.id)
+        map.putString("label", device.label)
+        map.putBoolean("isDefault", device.isDefault)
+        outputs.pushMap(map)
+      }
+      result.putArray("inputs", inputs)
+      result.putArray("outputs", outputs)
+      result.putString("inputId", AudioRouteRuntime.selectedInputId())
+      result.putString("outputId", AudioRouteRuntime.selectedOutputId() ?: "")
+      promise.resolve(result)
+    } catch (error: Exception) {
+      promise.reject("AUDIO_DEVICES", error.message, error)
+    }
+  }
+
+  @ReactMethod
+  fun setAudioInputDevice(deviceId: String, promise: Promise) {
+    mainHandler.post {
+      try {
+        val ok = AudioRouteRuntime.setInput(deviceId)
+        if (ok) promise.resolve(AudioRouteRuntime.selectedInputId())
+        else promise.reject("AUDIO_INPUT", "无法切换到所选麦克风")
+      } catch (error: Exception) {
+        promise.reject("AUDIO_INPUT", error.message, error)
+      }
+    }
+  }
+
+  @ReactMethod
+  fun setAudioOutputDevice(deviceId: String, promise: Promise) {
+    mainHandler.post {
+      try {
+        val ok = AudioRouteRuntime.setOutput(deviceId)
+        if (ok) promise.resolve(AudioRouteRuntime.selectedOutputId() ?: "")
+        else promise.reject("AUDIO_OUTPUT", "无法切换到所选输出设备")
+      } catch (error: Exception) {
+        promise.reject("AUDIO_OUTPUT", error.message, error)
       }
     }
   }

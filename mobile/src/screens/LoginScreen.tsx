@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Image,
   KeyboardAvoidingView,
   Platform,
   ScrollView,
@@ -21,6 +22,7 @@ import { httpsOrigin } from '../serverCertificate';
 import { MobileUpdateButton, useSetMobileUpdateServerURL } from '../components/MobileUpdater';
 import type { RememberedServer } from '../storage';
 import { normalizeServerSecurityURL, readServerSecurityStatus, type ServerSecurityStatus } from '../serverSecurity';
+import { useKeyboardInset } from '../useKeyboardInset';
 
 type ServerSecurityProbe =
   | { phase: 'idle' | 'checking' | 'invalid' | 'unavailable'; status?: undefined }
@@ -37,6 +39,15 @@ interface Props {
 
 export function LoginScreen({ saving, error, onSubmit, rememberedServers = [], onForget, onProbeServerSecurity }: Props) {
   const setUpdateServerURL = useSetMobileUpdateServerURL();
+  const keyboard = useKeyboardInset(18);
+  const inputRefs = useRef<Record<string, TextInput | null>>({});
+  const keyboardBindInput = keyboard.bindInput;
+  const keyboardUnbindInput = keyboard.unbindInput;
+  const bindInput = useCallback((name: string) => ({
+    ref: (node: TextInput | null) => { inputRefs.current[name] = node; },
+    onFocus: () => keyboardBindInput(inputRefs.current[name]),
+    onBlur: () => keyboardUnbindInput(inputRefs.current[name]),
+  }), [keyboardBindInput, keyboardUnbindInput]);
   const [mode, setMode] = useState<AccountAuthMode>('login');
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState(rememberedServers[0]?.email ?? '');
@@ -117,8 +128,23 @@ export function LoginScreen({ saving, error, onSubmit, rememberedServers = [], o
         style={styles.keyboard}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
-        <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-          <View style={styles.brandMark}><Text style={styles.brandLetter}>C</Text></View>
+        <ScrollView
+          ref={keyboard.scrollView}
+          onScroll={keyboard.onScroll}
+          onLayout={keyboard.onLayout}
+          onContentSizeChange={keyboard.onContentSizeChange}
+          scrollEventThrottle={16}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="on-drag"
+          contentContainerStyle={[
+            styles.content,
+            keyboard.keyboardHeight > 0 ? { paddingBottom: 28 + keyboard.bottomInset } : null,
+            keyboard.keyboardHeight > 0 ? styles.contentKeyboardOpen : null,
+          ]}
+        >
+          <View style={styles.brandMark}>
+            <Image source={require('../../assets/cove-icon.png')} style={styles.brandIcon} accessibilityLabel="Cove" />
+          </View>
           <Text style={styles.title}>Cove</Text>
           <Text style={styles.subtitle}>朋友语音与屏幕共享</Text>
 
@@ -156,6 +182,7 @@ export function LoginScreen({ saving, error, onSubmit, rememberedServers = [], o
                 <View style={styles.inputShell}>
                   <UserRound size={19} color={colors.textFaint} />
                   <TextInput
+                    {...bindInput('username')}
                     style={styles.input}
                     value={username}
                     onChangeText={setUsername}
@@ -172,6 +199,7 @@ export function LoginScreen({ saving, error, onSubmit, rememberedServers = [], o
             <View style={styles.inputShell}>
               <Mail size={19} color={colors.textFaint} />
               <TextInput
+                {...bindInput('email')}
                 style={styles.input}
                 value={email}
                 onChangeText={setEmail}
@@ -189,6 +217,7 @@ export function LoginScreen({ saving, error, onSubmit, rememberedServers = [], o
             <View style={styles.inputShell}>
               <LockKeyhole size={19} color={colors.textFaint} />
               <TextInput
+                {...bindInput('password')}
                 style={styles.input}
                 value={password}
                 onChangeText={setPassword}
@@ -205,6 +234,7 @@ export function LoginScreen({ saving, error, onSubmit, rememberedServers = [], o
               <View style={styles.inputShell}>
                 <Server size={19} color={colors.textFaint} />
                 <TextInput
+                  {...bindInput('serverPassword')}
                   style={styles.input}
                   value={serverPassword}
                   onChangeText={setServerPassword}
@@ -222,6 +252,7 @@ export function LoginScreen({ saving, error, onSubmit, rememberedServers = [], o
                 <View style={styles.inputShell}>
                   <LockKeyhole size={19} color={colors.textFaint} />
                   <TextInput
+                    {...bindInput('bootstrapToken')}
                     style={styles.input}
                     value={bootstrapToken}
                     onChangeText={setBootstrapToken}
@@ -242,6 +273,7 @@ export function LoginScreen({ saving, error, onSubmit, rememberedServers = [], o
             <View style={styles.inputShell}>
               <Server size={19} color={colors.textFaint} />
               <TextInput
+                {...bindInput('serverURL')}
                 style={styles.input}
                 value={serverURL}
                 onChangeText={value => {
@@ -301,12 +333,13 @@ const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: colors.background },
   keyboard: { flex: 1 },
   content: { flexGrow: 1, justifyContent: 'center', paddingHorizontal: 22, paddingVertical: 28 },
+  contentKeyboardOpen: { justifyContent: 'flex-start' },
   brandMark: {
-    width: 68, height: 68, borderRadius: 23, alignSelf: 'center', alignItems: 'center',
-    justifyContent: 'center', backgroundColor: colors.cyanSoft, borderWidth: 1,
+    width: 68, height: 68, borderRadius: 23, alignSelf: 'center', overflow: 'hidden',
+    backgroundColor: colors.cyanSoft, borderWidth: 1,
     borderColor: 'rgba(103,232,249,0.24)',
   },
-  brandLetter: { color: colors.cyan, fontSize: 31, fontWeight: '800' },
+  brandIcon: { width: '100%', height: '100%' },
   title: { color: colors.text, fontSize: 32, fontWeight: '800', textAlign: 'center', marginTop: 17 },
   subtitle: { color: colors.textMuted, fontSize: 15, textAlign: 'center', marginTop: 7, marginBottom: 26 },
   card: { padding: 21, borderRadius: 25, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },

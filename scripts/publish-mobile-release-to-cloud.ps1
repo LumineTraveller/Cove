@@ -39,30 +39,28 @@ if ($feed.schemaVersion -ne 1 -or $feed.platform -ne 'android' -or
 $tag = [string]$item.tag
 $fileName = [string]$item.filename
 $publicBase = $PublicBaseUrl.AbsoluteUri.TrimEnd('/')
+$httpHelper = Join-Path $PSScriptRoot 'release-http.cjs'
 
 function Invoke-Checked([string]$command, [string[]]$arguments) {
     & $command @arguments
     if ($LASTEXITCODE -ne 0) { throw "$command 执行失败（退出码 $LASTEXITCODE）。" }
 }
 
-function Assert-PublicApk([string]$url, [long]$expectedSize) {
-    $nodeCode = @'
-const [url, expectedSize] = process.argv.slice(1);
-fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(15000) })
-  .then(response => {
-    const actualSize = response.headers.get('content-length');
-    if (response.status !== 200 || actualSize !== expectedSize) {
-      throw new Error(`APK 回查失败：HTTP ${response.status}，大小 ${actualSize}，预期 ${expectedSize}`);
-    }
-    console.log(`HTTP 200，${actualSize} 字节：${url}`);
-  })
-  .catch(error => { console.error(error); process.exitCode = 1; });
-'@
-    Invoke-Checked 'node' @('-e', $nodeCode, $url, [string]$expectedSize)
+function Invoke-ReleaseHttp([string]$mode, [string]$url, [string]$userAgent, [string]$outputPath = '', [string]$expectedSize = '') {
+    $arguments = @($httpHelper, $mode, $url, $userAgent)
+    if ($mode -eq 'download') { $arguments += $outputPath }
+    if ($expectedSize) { $arguments += $expectedSize }
+    $output = & node @arguments
+    if ($LASTEXITCODE -ne 0) { throw "HTTP 请求失败：$url" }
+    if ($mode -eq 'json') { return (($output -join [Environment]::NewLine) | ConvertFrom-Json) }
+    if ($output) { Write-Output $output }
 }
 
-$release = Invoke-RestMethod -Uri "https://api.github.com/repos/$GitHubRepo/releases/tags/$tag" `
-    -Headers @{ 'User-Agent' = 'cove-mobile-cloud-publisher' } -UseBasicParsing -NoProxy
+function Assert-PublicApk([string]$url, [long]$expectedSize) {
+    Invoke-ReleaseHttp 'head' $url 'cove-mobile-cloud-publisher' '' ([string]$expectedSize) | Out-Null
+}
+
+$release = Invoke-ReleaseHttp 'json' "https://api.github.com/repos/$GitHubRepo/releases/tags/$tag" 'cove-mobile-cloud-publisher'
 if ($release.draft -or $release.prerelease -or $release.tag_name -ne $tag) {
     throw "GitHub $tag 不是已公开的正式 Release。"
 }
@@ -78,11 +76,7 @@ $staging = "/tmp/cove-mobile-cloud-$tag-$([guid]::NewGuid().ToString('N'))"
 $completed = $false
 try {
     New-Item -ItemType Directory -Path $tempDir | Out-Null
-    Invoke-Checked 'curl.exe' @(
-        '--noproxy', '*', '--fail', '--location', '--retry', '3',
-        '--connect-timeout', '10', '--max-time', '300',
-        '--output', $apkPath, [string]$asset[0].browser_download_url
-    )
+    Invoke-ReleaseHttp 'download' ([string]$asset[0].browser_download_url) 'cove-mobile-cloud-publisher' $apkPath | Out-Null
     if ((Get-Item -LiteralPath $apkPath).Length -ne $item.size -or
         (Get-FileHash -LiteralPath $apkPath -Algorithm SHA256).Hash -ne $item.sha256) {
         throw '下载的 GitHub APK 与更新清单的大小或 SHA-256 不一致。'
@@ -108,7 +102,7 @@ try {
         "rmdir -- '$staging'"
     )
     Invoke-Checked 'ssh' @($SshTarget, ($publishFeedCommands -join '; '))
-    $published = Invoke-RestMethod -Uri "$publicBase/releases/mobile/update.json?check=$tag" -UseBasicParsing -NoProxy
+    $published = Invoke-ReleaseHttp 'json' "$publicBase/releases/mobile/update.json?check=$tag" 'cove-mobile-cloud-publisher'
     if ($published.release.tag -ne $tag -or $published.release.sha256 -ne $item.sha256) {
         throw '公开的手机更新清单与待发布版本不一致。'
     }

@@ -1,6 +1,6 @@
 {
   "name": "cove-server",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "description": "Cove - 即时通讯服务器",
   "author": "Cove",
   "private": true,

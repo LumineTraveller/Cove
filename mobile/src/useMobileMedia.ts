@@ -11,6 +11,22 @@ import {
 import type { VoiceMember } from './types';
 import { startVoiceAudioSession } from './voiceAudioSession';
 import { DisconnectGrace } from './disconnectGrace';
+import {
+  applyNoiseMode,
+  createMicrophoneConstraints,
+  DEFAULT_NOISE_MODE,
+  getNoiseStatus,
+  isMicrophoneNoiseMode,
+  type MicrophoneNoiseMode,
+} from './microphoneNoise';
+import {
+  DEFAULT_OUTPUT_ID,
+  listAudioDevices,
+  setAudioInputDevice,
+  setAudioOutputDevice,
+  type AudioDeviceList,
+  type AudioDeviceOption,
+} from './audioDevices';
 
 type Transport = MsTypes.Transport;
 type Producer = MsTypes.Producer;
@@ -93,6 +109,15 @@ export function useMobileMedia(socket: Socket, roomId: string) {
   const [screenReceiveVolume, setScreenReceiveVolumeState] = useState(1);
   const [connectionState, setConnectionState] = useState<ConnectionState>('idle');
   const [error, setError] = useState<string | null>(null);
+  const [noiseMode, setNoiseMode] = useState<MicrophoneNoiseMode>(DEFAULT_NOISE_MODE);
+  const [noiseSwitching, setNoiseSwitching] = useState(false);
+  const [noiseError, setNoiseError] = useState<string | null>(null);
+  const [audioInputs, setAudioInputs] = useState<AudioDeviceOption[]>([]);
+  const [audioOutputs, setAudioOutputs] = useState<AudioDeviceOption[]>([]);
+  const [selectedAudioInputId, setSelectedAudioInputId] = useState('default');
+  const [selectedAudioOutputId, setSelectedAudioOutputId] = useState(DEFAULT_OUTPUT_ID);
+  const [audioDeviceSwitching, setAudioDeviceSwitching] = useState(false);
+  const [audioDeviceError, setAudioDeviceError] = useState<string | null>(null);
 
   const deviceRef = useRef<Device | null>(null);
   const sendTransport = useRef<Transport | null>(null);
@@ -119,6 +144,11 @@ export function useMobileMedia(socket: Socket, roomId: string) {
   const inVoiceRef = useRef(false);
   const selfMutedRef = useRef(false);
   const forceMutedRef = useRef(false);
+  const noiseModeRef = useRef<MicrophoneNoiseMode>(DEFAULT_NOISE_MODE);
+  const noiseBusyRef = useRef(false);
+  const audioInputIdRef = useRef('default');
+  const audioOutputIdRef = useRef(DEFAULT_OUTPUT_ID);
+  const audioDeviceBusyRef = useRef(false);
   const availableScreensRef = useRef(new Map<string, AvailableScreen>());
   const pendingScreenAudioByPeer = useRef(new Map<string, string>());
   const watchingScreenPeerRef = useRef<string | null>(null);
@@ -555,6 +585,63 @@ export function useMobileMedia(socket: Socket, roomId: string) {
 
   useEffect(() => () => teardown(false), [teardown]);
 
+  const refreshAudioDevices = useCallback(async () => {
+    try {
+      const list: AudioDeviceList = await listAudioDevices();
+      setAudioInputs(list.inputs);
+      setAudioOutputs(list.outputs);
+      audioInputIdRef.current = list.inputId || 'default';
+      audioOutputIdRef.current = list.outputId || DEFAULT_OUTPUT_ID;
+      setSelectedAudioInputId(audioInputIdRef.current);
+      setSelectedAudioOutputId(audioOutputIdRef.current);
+      setAudioDeviceError(null);
+      return list;
+    } catch (error) {
+      setAudioDeviceError(`读取音频设备失败：${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
+  }, []);
+
+  const selectAudioInput = useCallback(async (deviceId: string) => {
+    if (audioDeviceBusyRef.current || !deviceId || deviceId === audioInputIdRef.current) return;
+    audioDeviceBusyRef.current = true;
+    setAudioDeviceSwitching(true);
+    setAudioDeviceError(null);
+    const previous = audioInputIdRef.current;
+    try {
+      const applied = await setAudioInputDevice(deviceId);
+      audioInputIdRef.current = applied || deviceId;
+      setSelectedAudioInputId(audioInputIdRef.current);
+    } catch (error) {
+      audioInputIdRef.current = previous;
+      setSelectedAudioInputId(previous);
+      setAudioDeviceError(`切换麦克风失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      audioDeviceBusyRef.current = false;
+      setAudioDeviceSwitching(false);
+    }
+  }, []);
+
+  const selectAudioOutput = useCallback(async (deviceId: string) => {
+    if (audioDeviceBusyRef.current || !deviceId || deviceId === audioOutputIdRef.current) return;
+    audioDeviceBusyRef.current = true;
+    setAudioDeviceSwitching(true);
+    setAudioDeviceError(null);
+    const previous = audioOutputIdRef.current;
+    try {
+      const applied = await setAudioOutputDevice(deviceId);
+      audioOutputIdRef.current = applied || deviceId;
+      setSelectedAudioOutputId(audioOutputIdRef.current);
+    } catch (error) {
+      audioOutputIdRef.current = previous;
+      setSelectedAudioOutputId(previous);
+      setAudioDeviceError(`切换输出设备失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      audioDeviceBusyRef.current = false;
+      setAudioDeviceSwitching(false);
+    }
+  }, []);
+
   const joinVoice = useCallback(async () => {
     if (inVoiceRef.current || joiningRef.current || !socket.connected) return;
     const generation = ++mediaGeneration.current;
@@ -572,14 +659,23 @@ export function useMobileMedia(socket: Socket, roomId: string) {
       ensureCurrent();
       // Android 14+ 要求麦克风前台服务必须在可见 Activity 内启动。
       CoveNative?.startVoiceService();
+      const requestedNoise = noiseModeRef.current;
+      let appliedNoise;
+      try {
+        appliedNoise = await applyNoiseMode(requestedNoise);
+      } catch {
+        // 原生切换失败时退回系统降噪，不能把未降噪的音轨当成功发出。
+        appliedNoise = await applyNoiseMode('system').catch(() => ({
+          mode: 'system' as MicrophoneNoiseMode,
+          effectiveMode: 'system' as MicrophoneNoiseMode,
+          rnnoiseReady: false,
+          interceptorActive: false,
+          processing: false,
+        }));
+      }
+      ensureCurrent();
       const stream = await mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: false,
-          channelCount: 1,
-          sampleRate: 48_000,
-        },
+        audio: createMicrophoneConstraints(appliedNoise.mode),
         video: false,
       } as never);
       if (generation !== mediaGeneration.current) { stream.release(true); ensureCurrent(); }
@@ -599,8 +695,25 @@ export function useMobileMedia(socket: Socket, roomId: string) {
       audioProducer.current = producer;
       if (forceMutedRef.current) producer.pause();
 
+      appliedNoise = await getNoiseStatus();
+      noiseModeRef.current = requestedNoise;
+      setNoiseMode(requestedNoise);
+      if (requestedNoise === 'rnnoise' && appliedNoise.effectiveMode !== 'rnnoise') {
+        setNoiseError('RNNoise 未启用，已回退到系统降噪');
+      } else {
+        setNoiseError(null);
+      }
+
       startVoiceAudioSession();
-      CoveNative?.setSpeakerphoneEnabled(true);
+      try {
+        if (audioInputIdRef.current && audioInputIdRef.current !== 'default') {
+          await setAudioInputDevice(audioInputIdRef.current);
+        }
+        await setAudioOutputDevice(audioOutputIdRef.current || DEFAULT_OUTPUT_ID);
+      } catch {
+        // 路由失败不阻断入会；系统会按默认设备出声。
+      }
+      void refreshAudioDevices();
       inVoiceRef.current = true;
       setInVoice(true);
       setIsMuted(forceMutedRef.current);
@@ -645,7 +758,80 @@ export function useMobileMedia(socket: Socket, roomId: string) {
         setJoining(false);
       }
     }
-  }, [consumeProducer, roomId, setupDevice, socket, storeAvailableScreen, teardown]);
+  }, [consumeProducer, refreshAudioDevices, roomId, setupDevice, socket, storeAvailableScreen, teardown]);
+
+  const replaceMicrophone = useCallback(async (mode: MicrophoneNoiseMode) => {
+    const producer = audioProducer.current;
+    if (!producer || producer.closed) return;
+    const generation = mediaGeneration.current;
+    const ensureCurrent = () => {
+      if (generation !== mediaGeneration.current || audioProducer.current !== producer || producer.closed) {
+        throw new Error('麦克风切换已取消');
+      }
+    };
+
+    const applied = await applyNoiseMode(mode);
+    ensureCurrent();
+    const stream = await mediaDevices.getUserMedia({
+      audio: createMicrophoneConstraints(applied.mode),
+      video: false,
+    } as never);
+    ensureCurrent();
+    const track = stream.getAudioTracks()[0];
+    if (!track) {
+      stream.release(true);
+      throw new Error('没有可用的麦克风音轨');
+    }
+    track.enabled = !producer.paused && !selfMutedRef.current && !forceMutedRef.current;
+    try {
+      await producer.replaceTrack({ track: track as never });
+    } catch (error) {
+      stream.release(true);
+      throw error;
+    }
+    ensureCurrent();
+    const previous = microphoneStream.current;
+    microphoneStream.current = stream;
+    previous?.release(true);
+
+    const status = await getNoiseStatus();
+    noiseModeRef.current = mode;
+    setNoiseMode(mode);
+    if (mode === 'rnnoise' && status.effectiveMode !== 'rnnoise') {
+      setNoiseError('RNNoise 未启用，已回退到系统降噪');
+    } else {
+      setNoiseError(null);
+    }
+  }, []);
+
+  const selectNoiseMode = useCallback(async (mode: MicrophoneNoiseMode) => {
+    if (!isMicrophoneNoiseMode(mode) || noiseBusyRef.current || joiningRef.current) return;
+    if (mode === noiseModeRef.current) return;
+    setNoiseError(null);
+    if (!audioProducer.current) {
+      noiseModeRef.current = mode;
+      setNoiseMode(mode);
+      try {
+        const status = await applyNoiseMode(mode);
+        if (mode === 'rnnoise' && status.effectiveMode !== 'rnnoise') {
+          setNoiseError('RNNoise 未启用，将回退到系统降噪');
+        }
+      } catch (error) {
+        setNoiseError(`降噪切换失败：${error instanceof Error ? error.message : String(error)}`);
+      }
+      return;
+    }
+    noiseBusyRef.current = true;
+    setNoiseSwitching(true);
+    try {
+      await replaceMicrophone(mode);
+    } catch (error) {
+      setNoiseError(`降噪切换失败，已保留原模式：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      noiseBusyRef.current = false;
+      setNoiseSwitching(false);
+    }
+  }, [replaceMicrophone]);
 
   const leaveVoice = useCallback(() => {
     teardown(true);
@@ -679,6 +865,19 @@ export function useMobileMedia(socket: Socket, roomId: string) {
     screenReceiveVolume,
     connectionState,
     error,
+    noiseMode,
+    noiseSwitching,
+    noiseError,
+    selectNoiseMode,
+    audioInputs,
+    audioOutputs,
+    selectedAudioInputId,
+    selectedAudioOutputId,
+    audioDeviceSwitching,
+    audioDeviceError,
+    refreshAudioDevices,
+    selectAudioInput,
+    selectAudioOutput,
     joinVoice,
     leaveVoice,
     toggleMute,

@@ -30,6 +30,7 @@ contextBridge.exposeInMainWorld("coveWindow", {
   toggleMaximize: (): Promise<boolean> => ipcRenderer.invoke("cove:window:toggle-maximize"),
   isMaximized: (): Promise<boolean> => ipcRenderer.invoke("cove:window:is-maximized"),
   close: (): Promise<boolean> => ipcRenderer.invoke("cove:window:close"),
+  focus: (): Promise<boolean> => ipcRenderer.invoke("cove:window:focus"),
   onState: (listener: (maximized: boolean) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, maximized: boolean) => listener(maximized);
     ipcRenderer.on("cove:window-state", handler);

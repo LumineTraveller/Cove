@@ -3918,8 +3918,6 @@ body .cove-window-controls button {
 }
 .remote-request-scrim {
   z-index: 1400;
-  align-items: start;
-  padding-top: clamp(24px, 8vh, 88px);
 }
 .remote-request h2 {
   margin: 14px 0 6px;

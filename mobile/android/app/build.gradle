@@ -82,8 +82,8 @@ android {
         applicationId "com.cove.mobile"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 10
-        versionName "0.6.0"
+        versionCode 11
+        versionName "0.6.1"
     }
     signingConfigs {
         debug {
@@ -91,6 +91,12 @@ android {
             storePassword 'android'
             keyAlias 'androiddebugkey'
             keyPassword 'android'
+        }
+    }
+    externalNativeBuild {
+        cmake {
+            path "src/main/jni/CMakeLists.txt"
+            version "3.22.1"
         }
     }
     buildTypes {

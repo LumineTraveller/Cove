@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { Image, Modal, StyleSheet, Text, TextInput, TouchableOpacity, View, type GestureResponderEvent } from 'react-native';
+import { Modal, StyleSheet, Text, TextInput, TouchableOpacity, View, type GestureResponderEvent } from 'react-native';
 import { Check, Hash, Mic, MicOff, Minus, Plus, UserRound, Volume2, VolumeX, X } from 'lucide-react-native';
 import { colors } from '../theme';
+import { Avatar } from './Avatar';
 
 interface Props {
   visible: boolean;
@@ -35,10 +36,17 @@ export function UserProfileModal({
 
   useEffect(() => setDraft(remark), [remark, userId, visible]);
 
+  // locationX is only stable when the track itself is the hit target; the fill
+  // and thumb must not receive touches or the value jumps while dragging.
   const updateVolumeFromTouch = (event: GestureResponderEvent) => {
     if (!onVolumeChange) return;
     const next = Math.max(0, Math.min(2, event.nativeEvent.locationX / volumeTrackWidth.current * 2));
     onVolumeChange(next);
+  };
+
+  const stepVolume = (delta: number) => {
+    if (!onVolumeChange) return;
+    onVolumeChange(Math.max(0, Math.min(2, volume + delta)));
   };
 
   const volumePercent = Math.round(volume * 100);
@@ -51,11 +59,13 @@ export function UserProfileModal({
             <TouchableOpacity style={styles.close} onPress={onClose}><X size={19} color={colors.textMuted} /></TouchableOpacity>
           </View>
           <View style={styles.body}>
-            <View style={styles.avatar}>
-              {avatarUrl
-                ? <Image source={{ uri: avatarUrl }} style={styles.avatarImage} />
-                : <Text style={styles.avatarText}>{displayName.trim().slice(0, 2).toUpperCase() || 'C'}</Text>}
-            </View>
+            <Avatar
+              username={displayName}
+              avatarUrl={avatarUrl}
+              size={84}
+              borderRadius={28}
+              style={styles.avatar}
+            />
             <Text style={styles.title}>{displayName}</Text>
             {remark ? <Text style={styles.username}>原用户名：{username}</Text> : null}
 
@@ -84,7 +94,7 @@ export function UserProfileModal({
                   <TouchableOpacity
                     style={styles.volumeStep}
                     accessibilityLabel={`降低${displayName}的音量`}
-                    onPress={() => onVolumeChange(volume - 0.1)}
+                    onPress={() => stepVolume(-0.1)}
                   >
                     <Minus size={16} color={colors.textMuted} />
                   </TouchableOpacity>
@@ -93,19 +103,22 @@ export function UserProfileModal({
                     accessibilityLabel={`${displayName}的音量，当前${volumePercent}%`}
                     onLayout={event => { volumeTrackWidth.current = Math.max(1, event.nativeEvent.layout.width); }}
                     onStartShouldSetResponder={() => true}
+                    onStartShouldSetResponderCapture={() => true}
                     onMoveShouldSetResponder={() => true}
+                    onMoveShouldSetResponderCapture={() => true}
                     onResponderGrant={updateVolumeFromTouch}
                     onResponderMove={updateVolumeFromTouch}
+                    onResponderTerminationRequest={() => false}
                   >
-                    <View style={styles.volumeRail} />
-                    <View style={[styles.volumeFill, { width: `${Math.min(100, volumePercent / 2)}%` }]} />
-                    <View style={[styles.volumeThumb, { left: `${Math.min(100, volumePercent / 2)}%` }]} />
-                    <View style={styles.volumeUnityMark} />
+                    <View pointerEvents="none" style={styles.volumeRail} />
+                    <View pointerEvents="none" style={[styles.volumeFill, { width: `${Math.min(100, volumePercent / 2)}%` }]} />
+                    <View pointerEvents="none" style={[styles.volumeThumb, { left: `${Math.min(100, volumePercent / 2)}%` }]} />
+                    <View pointerEvents="none" style={styles.volumeUnityMark} />
                   </View>
                   <TouchableOpacity
                     style={styles.volumeStep}
                     accessibilityLabel={`提高${displayName}的音量`}
-                    onPress={() => onVolumeChange(volume + 0.1)}
+                    onPress={() => stepVolume(0.1)}
                   >
                     <Plus size={16} color={colors.textMuted} />
                   </TouchableOpacity>
@@ -141,9 +154,7 @@ const styles = StyleSheet.create({
   cover: { height: 92, backgroundColor: 'rgba(34,211,238,0.10)' },
   close: { position: 'absolute', top: 14, right: 14, width: 38, height: 38, alignItems: 'center', justifyContent: 'center', borderRadius: 12, backgroundColor: 'rgba(0,0,0,0.25)' },
   body: { paddingHorizontal: 22, paddingBottom: 22 },
-  avatar: { width: 84, height: 84, marginTop: -42, overflow: 'hidden', alignItems: 'center', justifyContent: 'center', borderWidth: 4, borderColor: '#17171b', borderRadius: 28, backgroundColor: colors.cyanSoft },
-  avatarImage: { width: '100%', height: '100%' },
-  avatarText: { color: colors.cyan, fontSize: 25, fontWeight: '800' },
+  avatar: { marginTop: -42, borderWidth: 4, borderColor: '#17171b' },
   title: { marginTop: 13, color: colors.text, fontSize: 22, fontWeight: '800' },
   username: { marginTop: 4, color: colors.textFaint, fontSize: 11 },
   voiceCard: { minHeight: 58, marginTop: 17, paddingHorizontal: 13, flexDirection: 'row', alignItems: 'center', gap: 10, borderWidth: 1, borderRadius: 15 },

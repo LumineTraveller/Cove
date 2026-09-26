@@ -264,6 +264,21 @@ app.whenReady().then(() => {
     win.close();
     return true;
   });
+  ipcMain.handle("cove:window:focus", (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!win || win.isDestroyed()) return false;
+    if (win.isMinimized()) win.restore();
+    win.show();
+    // Windows 有前台锁定：非用户手势触发的 focus 往往提不到最前。
+    // 短暂置顶再取消，确保审批弹窗在后台时也能立刻露出。
+    win.setAlwaysOnTop(true);
+    win.moveTop();
+    win.focus();
+    setTimeout(() => {
+      if (!win.isDestroyed()) win.setAlwaysOnTop(false);
+    }, 400);
+    return true;
+  });
   ipcMain.handle("cove:shell:open-external", async (_event, value: unknown) => {
     const url = normalizeExternalHttpUrl(value);
     if (!url) return false;

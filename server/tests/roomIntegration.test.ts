@@ -258,3 +258,50 @@ test('server password rotation disconnects active sockets and rejects the old ac
   assert.equal(staleRooms.status, 401);
   assert.ok(serverAccessToken);
 });
+
+test('controller leaving voice terminates the remote control session and notifies the sharer', { timeout: 10_000 }, async () => {
+  const sharerAccount = await register('rc-sharer@example.com', 'RC Sharer');
+  const controllerAccount = await register('rc-controller@example.com', 'RC Controller');
+  // 远程控制要求双方都是支持远控的桌面客户端注册。
+  const desktopSocket = (account: Account) => {
+    const socket = connectSocket(base, { autoConnect: false, reconnection: false, auth: { serverAccessToken, clientProtocol } });
+    const register = new Promise<any>(resolve => socket.on('connect', () => socket.emit('user:register', {
+      username: account.account.username,
+      clientId: `client-${account.account.id}-rc`,
+      authToken: account.token,
+      platform: 'desktop',
+      remoteControlSupported: true,
+    }, resolve)));
+    socket.connect();
+    sockets.push(socket);
+    return { socket, register };
+  };
+  const sharer = desktopSocket(sharerAccount);
+  const controller = desktopSocket(controllerAccount);
+  assert.equal((await sharer.register).ok, true);
+  assert.equal((await controller.register).ok, true);
+
+  const created = await emit<any>(sharer.socket, 'room:create', { name: 'RC Room' });
+  const roomId = created.room.id;
+  assert.equal((await emit<any>(sharer.socket, 'room:join', { roomId })).ok, true);
+  assert.equal((await emit<any>(controller.socket, 'room:join', { roomId })).ok, true);
+
+  // 注入假的屏幕共享 producer，让共享者满足 isSharingScreen。
+  const sharerPeer = fake.peers.get(sharer.socket.id);
+  assert.ok(sharerPeer);
+  sharerPeer.roomId = roomId;
+  sharerPeer.producers.set('screen-1', { closed: false, appData: { type: 'screen' }, close() {} });
+
+  const request = await emit<any>(controller.socket, 'remote-control:request', { roomId, sharerSocketId: sharer.socket.id });
+  assert.equal(request.ok, true);
+
+  const stopped = new Promise<any>(resolve => sharer.socket.once('remote-control:stopped', resolve));
+  const respond = await emit<any>(sharer.socket, 'remote-control:respond', { requestId: request.requestId, accepted: true });
+  assert.equal(respond.ok, true);
+
+  // 控制者直接退出语音（不离开频道）：会话必须终止并通知被控方。
+  controller.socket.emit('voice:leave', roomId);
+  const stoppedPayload = await stopped;
+  assert.equal(typeof stoppedPayload.sessionId, 'string');
+  assert.match(stoppedPayload.reason, /退出语音/);
+});

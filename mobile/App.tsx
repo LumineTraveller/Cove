@@ -33,6 +33,7 @@ function CoveSession() {
   const [savingConfig, setSavingConfig] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [config, setConfig] = useState<SessionConfig | null>(null);
+  const updateServerURL = config?.serverURL;
   const [rememberedServers, setRememberedServers] = useState<RememberedServer[]>([]);
   const [socket, setSocket] = useState<Socket | null>(null);
   const [sessionReady, setSessionReady] = useState(false);
@@ -40,8 +41,8 @@ function CoveSession() {
   const [selectedRoom, setSelectedRoom] = useState<Room | null>(null);
 
   useEffect(() => {
-    if (config) setUpdateServerURL?.(config.serverURL);
-  }, [config?.serverURL, setUpdateServerURL]);
+    if (updateServerURL) setUpdateServerURL?.(updateServerURL);
+  }, [updateServerURL, setUpdateServerURL]);
 
   useEffect(() => {
     readSessionConfig()
