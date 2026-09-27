@@ -189,7 +189,7 @@ select:focus-visible {
   height: 100%;
   min-height: 0;
   display: grid;
-  grid-template-columns: var(--rail-width) minmax(0, 1fr) var(--chat-width);
+  grid-template-columns: auto minmax(0, 1fr) var(--chat-width);
   border: 0;
   border-radius: 0;
   overflow: hidden;
@@ -245,6 +245,8 @@ select:focus-visible {
 /* Navigation rail */
 .navigation-rail {
   min-width: 0;
+  width: var(--rail-width);
+  flex: 0 0 auto;
   height: 100%;
   border-right: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.96);
@@ -254,7 +256,9 @@ select:focus-visible {
   position: relative;
   z-index: 100;
   overflow: visible;
-  transition: padding 320ms var(--ease-layout);
+  transition:
+    padding 320ms var(--ease-layout),
+    width 320ms var(--ease-layout);
   /* 房间栏有自己固定的底色（浅色主题白、深色主题 #111923），不随房间背景渐变变化，
      所以栏内文字必须按主题取值，而不是继承 .cove-shell 的 --room-fg / --room-muted
      —— 那两个变量是跟随房间背景深浅翻转的，一旦继承下来，浅色主题配深色房间背景时
@@ -2392,7 +2396,7 @@ select:focus-visible {
 .cove-shell.mode-idle,
 .cove-shell.mode-available {
   --control-center: calc(var(--rail-width) + var(--member-width) / 2);
-  grid-template-columns: var(--rail-width) var(--member-width) minmax(0, 1fr);
+  grid-template-columns: auto var(--member-width) minmax(0, 1fr);
   transition: grid-template-columns 340ms var(--ease-layout);
 }
 .cove-shell .control-ball-anchor {
@@ -2802,7 +2806,7 @@ select:focus-visible {
   .cove-shell.mode-idle,
   .cove-shell.mode-available {
     grid-template-columns:
-      var(--rail-width) min(var(--member-width), 350px)
+      auto min(var(--member-width), 350px)
       minmax(0, 1fr);
   }
   .mode-idle .member-row,
@@ -7030,7 +7034,7 @@ body .cove-window-controls button {
   .cove-shell.mode-watching,
   .cove-shell.mode-self {
     --chat-overlay-width: min(360px, 52vw);
-    grid-template-columns: var(--rail-width) minmax(0, 1fr);
+    grid-template-columns: auto minmax(0, 1fr);
     /* 抽屉不占列宽，控制球按整块工作区居中。 */
     --control-center: calc(50% + var(--rail-width) / 2);
   }
@@ -9071,4 +9075,26 @@ body:has(
 }
 .cove-shell.chat-closed .chat-edge-toggle-anchor {
   transform: translateX(0);
+}
+
+/* 功能球右侧栏以最右端为锚定点：展开时从最右端的“离开语音”先伸出，
+   收起时它最后收回，与左侧（锚定左端、麦克风最后收回）形成对称。 */
+.control-ball .ball-right {
+  justify-content: flex-end;
+}
+
+/* 深色模式下的共享屏幕激活态此前没有专属样式，悬停落到通用暗色规则上
+   表现为“变暗”。补齐与蓝/紫/调试一致的亮起式悬停。 */
+:root[data-theme="dark"] .control-ball .ball-side button.enabled-yellow {
+  background: color-mix(in srgb, var(--screen-yellow) 18%, #1a2430);
+  color: #f4e3b0;
+}
+:root[data-theme="dark"] .control-ball .ball-side button.enabled-yellow:hover {
+  background: color-mix(in srgb, var(--screen-yellow) 30%, #202e3e);
+  color: #f9efc9;
+}
+
+/* 侧栏宽度切换时功能球中心跟随滑动（此前只有 idle/available 有）。 */
+.cove-shell .control-ball-anchor {
+  transition: left 340ms var(--ease-layout);
 }

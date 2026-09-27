@@ -78,6 +78,17 @@ declare global {
       drag: (fromId: string, toId: string) => Promise<string[]>;
       dragBetween: (fromId: string, leftId: string, rightId: string) => Promise<string[]>;
       keyboard: (id: string, keys: string[]) => Promise<string[]>;
+      rapidRedrag: (
+        fromId1: string,
+        toId1: string,
+        fromId2: string,
+        toId2: string,
+      ) => Promise<{
+        order: string[];
+        overlayDuring: boolean;
+        placeholderHeight: number;
+        overlayNearPointer: boolean;
+      }>;
     };
   }
 }
@@ -131,6 +142,52 @@ window.sortableQa = {
     }
     await delay(80);
     return window.sortableQa.order();
+  },
+  // 回归：第一次拖放的 settle 定时器（约 400ms）还在飞时就立刻抓起下一个，
+  // 在定时器应触发之后仍按住不放，检查 overlay 不被抽走、占位不塌、卡片跟手。
+  async rapidRedrag(fromId1, toId1, fromId2, toId2) {
+    const dragTo = async (fromId: string, toId: string) => {
+      const toRect = elementAt(toId).getBoundingClientRect();
+      const endX = toRect.left + toRect.width / 2;
+      const endY = toRect.top + toRect.height / 2;
+      const fromRect = elementAt(fromId).getBoundingClientRect();
+      const startX = fromRect.left + fromRect.width / 2;
+      const startY = fromRect.top + fromRect.height / 2;
+      fire(elementAt(fromId), 'pointerdown', startX, startY);
+      for (let step = 1; step <= 8; step += 1) {
+        fire(window, 'pointermove', startX + ((endX - startX) * step) / 8, startY + ((endY - startY) * step) / 8);
+        await frame();
+      }
+      return { endX, endY };
+    };
+
+    const first = await dragTo(fromId1, toId1);
+    fire(window, 'pointerup', first.endX, first.endY);
+    await delay(60);
+
+    const second = await dragTo(fromId2, toId2);
+    // 越过上一次 settle 定时器的触发点（首次 drop 后约 400ms），仍按住观察。
+    await delay(520);
+
+    const overlay = document.getElementById('overlay');
+    const overlayRect = overlay?.getBoundingClientRect() ?? null;
+    const placeholder = document.querySelector<HTMLElement>('#list li[data-placeholder="true"]');
+    const placeholderHeight = placeholder?.getBoundingClientRect().height ?? 0;
+    const overlayNearPointer = overlayRect
+      ? second.endX >= overlayRect.left - 2 &&
+        second.endX <= overlayRect.right + 2 &&
+        second.endY >= overlayRect.top - 2 &&
+        second.endY <= overlayRect.bottom + 2
+      : false;
+
+    fire(window, 'pointerup', second.endX, second.endY);
+    await delay(520);
+    return {
+      order: window.sortableQa.order(),
+      overlayDuring: Boolean(overlay),
+      placeholderHeight,
+      overlayNearPointer,
+    };
   },
 };
 

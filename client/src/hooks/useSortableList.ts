@@ -259,10 +259,12 @@ export function useSortableList({
           return;
         drag.order = orderedRef.current;
         drag.sourceIndex = drag.order.indexOf(drag.id);
+        // 与 measureRows 同理：上一次换序的 FLIP 可能还在播，必须先取消再读布局位置，
+        // 否则拖拽几何会拿到动画插值中的脏值，落位跟着漂。
+        const measured = measureRows(true);
         drag.rows = drag.order.flatMap((id) => {
-          const element = rowRefs.current.get(id);
-          if (!element) return [];
-          const rect = element.getBoundingClientRect();
+          const rect = measured.get(id);
+          if (!rect) return [];
           return [{ id, top: rect.top, left: rect.left, width: rect.width, height: rect.height }];
         });
         const row = drag.rows.find((item) => item.id === drag.id);
@@ -299,7 +301,7 @@ export function useSortableList({
         });
       }
     },
-    [applyOrder, computeTarget, syncOverlayTransform],
+    [applyOrder, computeTarget, measureRows, syncOverlayTransform],
   );
 
   const finishPointerDrag = useCallback(
@@ -401,6 +403,15 @@ export function useSortableList({
     if (target?.closest('button, a, input, textarea, select, [data-sortable-ignore]')) return;
     const element = rowRefs.current.get(id);
     if (!element) return;
+    // 上一次拖放的 settle 动画/定时器可能还在飞行中，而 overlay 是同一个
+    // portal 节点（无 key，React 会复用 DOM）：fill:'forwards' 的残留动画会
+    // 盖住新拖拽的 transform（卡片冻在旧落点），定时器又会中途把 overlay 卸掉
+    // （卡片“消失”，直到松手才复原）。新拖拽开始时必须把两者收干净。
+    if (settleTimerRef.current !== null) {
+      window.clearTimeout(settleTimerRef.current);
+      settleTimerRef.current = null;
+    }
+    overlayRef.current?.getAnimations().forEach((animation) => animation.cancel());
     const rect = element.getBoundingClientRect();
     suppressClickRef.current = false;
     latestPointRef.current = { x: event.clientX, y: event.clientY };

@@ -1,6 +1,6 @@
 {
   "name": "cove-server",
-  "version": "1.5.2",
+  "version": "1.5.3",
   "description": "Cove - 即时通讯服务器",
   "author": "Cove",
   "private": true,
@@ -36,7 +36,10 @@
     "productName": "Cove Server",
     "artifactName": "Cove-Server-Setup-${version}.${ext}",
     "compression": "maximum",
-    "electronLanguages": ["zh-CN", "en-US"],
+    "electronLanguages": [
+      "zh-CN",
+      "en-US"
+    ],
     "directories": {
       "output": "dist-app"
     },
@@ -53,7 +56,10 @@
       "!node_modules/mediasoup/worker/pip_invoke{,/**/*}"
     ],
     "extraResources": [
-      { "from": "build/vc_redist.x64.exe", "to": "vc_redist.x64.exe" }
+      {
+        "from": "build/vc_redist.x64.exe",
+        "to": "vc_redist.x64.exe"
+      }
     ],
     "npmRebuild": false,
     "win": {

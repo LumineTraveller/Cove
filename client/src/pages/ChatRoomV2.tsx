@@ -670,9 +670,9 @@ function RemoteScreenVideo({
     } else {
       video.volume = Math.min(1, volume);
     }
-    video.muted = volume === 0 ||
-      !(video.srcObject instanceof MediaStream) ||
-      video.srcObject.getAudioTracks().length === 0;
+    // 只在显式静音时 muted。不能因「尚无音轨」而 muted：addtrack 事件在
+    // Chromium 的 MediaStream 上不可靠，初始 muted 后音轨到达也不会自动解除。
+    video.muted = volume === 0;
   }, []);
   const inputSender = useMemo(() => new RemotePointerSender(onInput), [onInput]);
   const pressedKeys = useRef(new Set<string>());
@@ -2674,6 +2674,7 @@ function ShareStatusBarV2({
   onEnd,
   fullscreenMode,
   onAppFull,
+  hasAudio,
 }: {
   self: boolean;
   sharer: string;
@@ -2689,19 +2690,22 @@ function ShareStatusBarV2({
   onEnd: () => void;
   fullscreenMode: string | null;
   onAppFull: () => void;
+  hasAudio: boolean;
 }) {
   const appFullscreen = fullscreenMode === "app";
   return (
     <div className="share-status-bar">
       <div className="share-status-left">
         <b>{self ? "你的共享" : `${sharer}的共享`}</b>
-        <VolumeControl
-          value={volume}
-          onChange={onVolume}
-          label={self ? "共享发送音量" : "共享观看音量"}
-          muted={muted}
-          onMute={onMute}
-        />
+        {hasAudio && (
+          <VolumeControl
+            value={volume}
+            onChange={onVolume}
+            label={self ? "共享发送音量" : "共享观看音量"}
+            muted={muted}
+            onMute={onMute}
+          />
+        )}
       </div>
       <div className="share-status-actions">
         {!self &&
@@ -3329,6 +3333,10 @@ function ShareViewV2({
           nativeFullscreen ? "full" : screenMaximized ? "app" : null
         }
         onAppFull={toggleFullscreen}
+        hasAudio={local
+          ? Boolean(rtc.localScreen?.getAudioTracks().length)
+          : rtc.screenReceiveHasAudio
+        }
       />
     </div>
   );

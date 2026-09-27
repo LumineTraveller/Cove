@@ -45,9 +45,9 @@ export function groupRowsIntoLines(rows: readonly SortableRowGeometry[]): Sortab
 }
 
 /**
- * 网格布局：先按指针的 Y 找到目标行（最近的一行），再在该行内按 X 决定插到
- * 哪张卡片的左/右侧，从而支持“停在同一行的两张卡片之间”。横向分割线取
- * 相邻卡片实际间隙的中点，而不是左侧卡片的中心，避免卡片还没有拖到间隙就提前换位。
+ * 网格布局：与纵向列表同一套手感——先按指针的 Y 找到目标行（最近的一行），
+ * 再在该行内统计中心位于拖动项中心左侧的卡片数得到插入索引。
+ * 拖动项中心越过目标卡片中线即换位，横向与纵向的触发点保持一致。
  */
 export function gridTargetIndex(
   rows: readonly SortableRowGeometry[],
@@ -75,17 +75,9 @@ export function gridTargetIndex(
     for (const row of lines[i]) if (row.id !== draggingId) index += 1;
   }
   const line = lines[lineIndex].filter((row) => row.id !== draggingId);
-  for (let rowIndex = 0; rowIndex < line.length; rowIndex += 1) {
-    const row = line[rowIndex];
-    const next = line[rowIndex + 1];
-    if (next) {
-      const rowRight = row.left + row.width;
-      const gapCenter = rowRight + Math.max(0, next.left - rowRight) / 2;
-      if (pointX >= gapCenter) index += 1;
-    } else if (pointX >= row.left + row.width) {
-      // 最后一张卡片没有右侧相邻卡片，用卡片右边缘作为“放到末尾”的分割线。
-      index += 1;
-    }
+  for (const row of line) {
+    // 与 verticalTargetIndex 的严格比较保持一致：中心恰好重合时尚未越过。
+    if (row.left + row.width / 2 < pointX) index += 1;
   }
   return index;
 }

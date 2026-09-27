@@ -331,6 +331,8 @@ export function useWebRTC(socket: Socket, roomId: string) {
   const [screenReceiveVolume, setScreenReceiveVolumeState] = useState(() =>
     loadNumber(SCREEN_RECEIVE_VOLUME_KEY, 1, 2),
   );
+  // 观看中的屏幕共享是否附带音频：决定观看端是否显示共享音频音量条。
+  const [screenReceiveHasAudio, setScreenReceiveHasAudio] = useState(false);
   const [screenShareVolume, setScreenShareVolumeState] = useState(() =>
     loadNumber(SCREEN_SHARE_VOLUME_KEY, 1, 2),
   );
@@ -1601,6 +1603,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
           ) {
             screenStreams.current.get(peerId)?.removeTrack(consumer.track);
             screenAudioTracks.current.delete(peerId);
+            setScreenReceiveHasAudio(false);
           }
         });
 
@@ -1613,6 +1616,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
               screenStreams.current.get(peerId)?.removeTrack(previousTrack);
             screenAudioTracks.current.set(peerId, consumer.track);
             screenStreams.current.get(peerId)?.addTrack(consumer.track);
+            setScreenReceiveHasAudio(true);
             return true;
           }
           const isVoice = isMemberVoiceAudio(kind, sourceType);
@@ -1775,10 +1779,12 @@ export function useWebRTC(socket: Socket, roomId: string) {
         if (track === entry.consumer.track) {
           screenStreams.current.get(entry.socketId)?.removeTrack(track);
           screenAudioTracks.current.delete(entry.socketId);
+          setScreenReceiveHasAudio(false);
         }
       }
       if (entry.kind === "video") {
         screenStreams.current.delete(entry.socketId);
+        setScreenReceiveHasAudio(false);
         setRemoteScreen((current) =>
           current?.socketId === entry.socketId ? null : current,
         );
@@ -3614,6 +3620,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
     setMemberVolume,
     toggleMemberMute,
     screenReceiveVolume,
+    screenReceiveHasAudio,
     setScreenReceiveVolume,
     screenShareVolume,
     setScreenShareVolume,

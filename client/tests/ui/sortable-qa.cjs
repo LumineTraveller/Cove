@@ -43,11 +43,26 @@ app.whenReady().then(async () => {
     const afterKeyboard = await run("window.sortableQa.keyboard('b', [' ', 'ArrowRight', ' '])");
     if (afterKeyboard.join('') !== 'cbad') throw new Error(`keyboard drag produced ${afterKeyboard.join('')}`);
 
+    // 回归：settle 定时器仍在飞时立刻连拖下一张。旧实现会被定时器抽掉 overlay
+    // （卡片“消失”），或被 fill:'forwards' 的残留动画钉在上一次落点。
+    const rapid = await run("window.sortableQa.rapidRedrag('c', 'd', 'a', 'b')");
+    if (!rapid.overlayDuring) throw new Error('overlay vanished during rapid re-drag (stale settle timer cleared it)');
+    if (!(rapid.placeholderHeight > 0)) throw new Error(`placeholder collapsed to ${rapid.placeholderHeight}px during rapid re-drag`);
+    if (!rapid.overlayNearPointer) throw new Error('overlay stayed at the previous drop slot instead of following the pointer');
+    if (rapid.order.length !== 4) throw new Error(`rapid re-drag lost items: ${rapid.order.join('')}`);
+    const overlayAfterRapid = await run("Boolean(document.getElementById('overlay'))");
+    if (overlayAfterRapid) throw new Error('drag overlay survived the final pointerup');
+    const draggingAfterRapid = await run('window.sortableQa.dragging()');
+    if (draggingAfterRapid !== null) throw new Error('dragging state was not cleared after rapid re-drag');
+
     const status = await run("document.getElementById('status').textContent");
     if (!status.includes('已放下')) throw new Error(`missing live announcement: ${status}`);
     if (errors.length) throw new Error(`renderer errors: ${errors.join(' | ')}`);
 
-    console.log('sortable-qa passed', JSON.stringify({ afterSameRow, afterDrag, afterKeyboard, zIndex: lastDrag.zIndex }));
+    console.log(
+      'sortable-qa passed',
+      JSON.stringify({ afterSameRow, afterDrag, afterKeyboard, zIndex: lastDrag.zIndex, rapid }),
+    );
     app.exit(0);
   } catch (error) {
     console.error('sortable-qa failed:', error instanceof Error ? error.message : error);
