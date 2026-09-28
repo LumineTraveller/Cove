@@ -1,9 +1,11 @@
-// Discover the selected server's HTTPS mirror first and GitHub as fallback.
+import { UPDATE_DOWNLOAD_BASE_URL } from './update-config';
+
+// Discover the configured HTTPS download server first and GitHub as fallback.
 export type UpdateSourceId = 'github' | 'cloud';
 
 export interface UpdateSourceCandidate {
   id: UpdateSourceId;
-  label: 'GitHub' | 'Cove 服务器' | '当前服务器';
+  label: 'GitHub' | 'Cove 服务器' | '当前服务器' | '更新服务器';
   version: string;
   feedUrl: string;
   latencyMs: number;
@@ -25,7 +27,7 @@ const GITHUB_SOURCE: SourceDefinition = {
   releaseBaseUrl: 'https://github.com/LumineTraveller/Cove/releases/download/',
 };
 
-/** Only a valid HTTPS chat-server URL may host automatic update metadata. */
+/** Automatic update metadata requires a valid HTTPS download-server URL. */
 export function getServerUpdateBaseUrl(serverUrl: string): string | null {
   try {
     const url = new URL(serverUrl.trim());
@@ -41,7 +43,7 @@ function createServerSource(serverUrl: string): SourceDefinition | null {
   if (!baseUrl) return null;
   return {
     id: 'cloud',
-    label: '当前服务器',
+    label: '更新服务器',
     apiUrl: `${baseUrl}/releases/latest.json`,
     releaseBaseUrl: `${baseUrl}/releases/`,
   };
@@ -96,12 +98,12 @@ async function discoverSource(
 /**
  * 先按固定顺序探测更新源，再优先返回版本较新的正式发行版。
  *
- * 当前服务器和 GitHub 使用同一份 electron-builder 更新清单和校验值。
- * 同版本时当前服务器优先；如果镜像落后，则先用 GitHub，避免可访问但
+ * 更新服务器和 GitHub 使用同一份 electron-builder 更新清单和校验值。
+ * 同版本时更新服务器优先；如果镜像落后，则先用 GitHub，避免可访问但
  * 尚未同步的镜像把新版本隐藏掉。
  */
 export async function discoverUpdateSources(
-  serverUrl = '',
+  serverUrl = UPDATE_DOWNLOAD_BASE_URL,
   fetchImpl: FetchLike = fetch,
   timeoutMs = 6_000,
   now: () => number = Date.now,

@@ -258,7 +258,7 @@ export function UpdateCenter({
       return;
     }
     try {
-      setState(await updater.checkNow(serverURL));
+      setState(await updater.checkNow());
     } catch (cause) {
       setState({
         status: 'error',
@@ -266,11 +266,10 @@ export function UpdateCenter({
         message: cause instanceof Error ? cause.message : '检查更新失败，请稍后重试。',
       });
     }
-  }, [embedded, serverURL]);
+  }, [embedded]);
 
   useEffect(() => {
     const updater = window.coveUpdater;
-    void updater?.setServerUrl(serverURL).catch(() => undefined);
     let active = true;
     if (updater) {
       void updater.getState().then((next) => {
@@ -297,7 +296,7 @@ export function UpdateCenter({
       unsubscribe?.();
       window.removeEventListener(UPDATE_CENTER_OPEN_EVENT, handleOpen);
     };
-  }, [checkNow, embedded, serverURL]);
+  }, [checkNow, embedded]);
 
   useEffect(() => {
     if ((!embedded && !open) || !isUpdateBusy(state.status)) return;

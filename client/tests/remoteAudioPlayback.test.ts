@@ -15,6 +15,10 @@ function playbackHarness() {
   const streams: { tracks: { id: string }[] }[] = [];
   const consumed: { producerId: string; streamId: string }[] = [];
   const consumerEvents = new Map<string, Record<string, Function>>();
+  const signals = new Map<string, number>();
+  const meters: any[] = [];
+  const timers: Function[] = [];
+  const states: { initial: any; value: any }[] = [];
   let storageBlocked = false;
   class FakeAudio {
     muted = false;
@@ -22,10 +26,11 @@ function playbackHarness() {
     srcObject: unknown = null;
     paused = false;
     constructor() { activations.push(this); }
-    async play() {}
+    async play() { this.paused = false; }
     pause() { this.paused = true; }
   }
   const context = {
+    state: 'running',
     destination: {},
     async resume() {},
     async setSinkId(_id: string) {},
@@ -36,13 +41,25 @@ function playbackHarness() {
       const entry: any = { stream };
       entry.source = {
         disconnected: false,
-        connect(target: any) { entry.gain = target; return target; },
+        connect(target: any) {
+          entry.gain = target;
+          if (target.getByteTimeDomainData) target.trackId = stream.tracks[0].id;
+          return target;
+        },
         disconnect() { this.disconnected = true; },
       };
       graph.push(entry);
       return entry.source;
     },
-    createAnalyser() { return { fftSize: 512, frequencyBinCount: 256 }; },
+    createAnalyser() {
+      const meter = {
+        trackId: '', fftSize: 512, frequencyBinCount: 256, disconnected: false,
+        getByteTimeDomainData(data: Uint8Array) { data.fill(signals.get(this.trackId) ?? 128); },
+        disconnect() { this.disconnected = true; },
+      };
+      meters.push(meter);
+      return meter;
+    },
   };
   const transport = {
     id: 'transport', on() {},
@@ -52,7 +69,7 @@ function playbackHarness() {
       consumerEvents.set(params.producerId, events);
       return {
         id: params.producerId,
-        track: { id: params.producerId },
+        track: { id: params.producerId, kind: 'audio', enabled: true, muted: false, readyState: 'live' },
         on(event: string, handler: Function) { events[event] = handler; },
         close() {},
       };
@@ -75,7 +92,12 @@ function playbackHarness() {
     exports,
     require: (id: string) => {
       if (id === 'react') return {
-        useState: (initial: any) => [typeof initial === 'function' ? initial() : initial, () => {}],
+        useState: (initial: any) => {
+          const value = typeof initial === 'function' ? initial() : initial;
+          const state = { initial: value, value };
+          states.push(state);
+          return [value, (next: any) => { state.value = typeof next === 'function' ? next(state.value) : next; }];
+        },
         useRef: (initial: any) => ({ current: initial }),
         useEffect() {},
         useCallback: (callback: Function) => { callbacks.push(callback); return callback; },
@@ -97,6 +119,7 @@ function playbackHarness() {
     Audio: FakeAudio,
     MediaStream: class {
       constructor(public tracks: any[]) { streams.push(this); }
+      getAudioTracks() { return this.tracks.filter(track => track.kind === 'audio'); }
       addTrack(track: any) { this.tracks.push(track); }
       removeTrack(track: any) { this.tracks = this.tracks.filter(item => item !== track); }
     },
@@ -107,7 +130,8 @@ function playbackHarness() {
     },
     document: { addEventListener() {} },
     console: { log() {}, warn() {}, error() {} },
-    setTimeout: () => 1, clearTimeout() {}, setInterval: () => 1, clearInterval() {},
+    setTimeout: () => 1, clearTimeout() {},
+    setInterval: (callback: Function) => { timers.push(callback); return timers.length; }, clearInterval() {},
   });
   const rtc = exports.useWebRTC(socket, 'test-room');
   const setup = callbacks.find(fn => fn.toString().includes("'ms:capabilities'"));
@@ -127,6 +151,10 @@ function playbackHarness() {
   };
   return {
     rtc, setup, consume, close, activations, streams, consumed, outputFor, audibleElementFor,
+    context, meters, signals,
+    tickMeters: () => timers.forEach(callback => callback()),
+    levels: () => states.find(state => state.initial === rtc.sharedAudioLevels)?.value,
+    voiceLevels: () => states.find(state => state.initial === rtc.speakingLevels)?.value,
     blockStorage: () => { storageBlocked = true; },
     endTrack: (id: string) => consumerEvents.get(id)?.trackended?.(),
   };
@@ -196,4 +224,54 @@ test('screen stream also joins audio that arrives before video', async () => {
   assert.deepEqual(Array.from(stream?.tracks ?? [], track => track.id), ['video-late', 'screen-early']);
   h.close('screen-early', true);
   assert.deepEqual(Array.from(stream?.tracks ?? [], track => track.id), ['video-late']);
+});
+
+test('shared meters report pre-volume signal, use gain only as an audible gate and stay separate from voice', async () => {
+  const h = playbackHarness();
+  await h.setup();
+  h.signals.set('mic-alice', 160);
+  h.signals.set('app-alice', 144);
+  h.signals.set('app-bob', 144);
+  await h.consume('mic-alice', 'alice', 'audio', { type: 'mic' });
+  await h.consume('app-alice', 'alice', 'audio', { type: 'application-audio' });
+  await h.consume('app-bob', 'bob', 'audio', { type: 'application-audio' });
+  h.rtc.setApplicationAudioReceiveVolume('alice', 0.5);
+  h.tickMeters();
+  assert.equal(h.voiceLevels().alice, 0.75);
+  assert.equal(h.levels().alice, 0.375, 'nonzero gain must not compress the input level before the UI caps it');
+  assert.equal(h.levels().bob, 0.375);
+  h.rtc.setApplicationAudioReceiveVolume('alice', 0);
+  h.tickMeters();
+  assert.equal(h.levels().alice, 0);
+  assert.equal(h.levels().bob, 0.375);
+  h.rtc.setApplicationAudioReceiveVolume('alice', 2);
+  h.tickMeters();
+  assert.equal(h.levels().alice, 0.375, 'playback boost must not amplify the input level before the UI caps it');
+  h.context.state = 'suspended';
+  h.tickMeters();
+  assert.equal(h.levels().alice, 0, 'a suspended gain output cannot be audible');
+  assert.equal(h.levels().bob, 0, 'a suspended analyser must not display stale media-element samples');
+});
+
+test('shared meters stop when playback pauses, the track ends or the consumer is removed', async () => {
+  const h = playbackHarness();
+  await h.setup();
+  h.signals.set('app-alice', 144);
+  await h.consume('app-alice', 'alice', 'audio', { type: 'application-audio' });
+  const element = h.audibleElementFor('app-alice');
+  element.pause();
+  h.tickMeters();
+  assert.equal(h.levels().alice, 0, 'blocked autoplay must not show audible output');
+  await element.play();
+  h.tickMeters();
+  assert.equal(h.levels().alice, 0.375);
+  const meter = h.meters.find(meter => meter.trackId === 'app-alice');
+  const stream = h.streams.find(stream => stream.tracks[0]?.id === 'app-alice');
+  (stream!.tracks[0] as any).readyState = 'ended';
+  h.tickMeters();
+  assert.equal(h.levels().alice, 0);
+  h.close('app-alice', true);
+  h.tickMeters();
+  assert.equal(h.levels().alice, undefined);
+  assert.equal(meter.disconnected, true, 'removing a consumer releases its analyser');
 });

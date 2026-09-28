@@ -1034,7 +1034,8 @@ select:focus-visible {
     visibility 180ms;
 }
 .strip-member:hover .vertical-volume-popover,
-.vertical-volume-popover:hover {
+.vertical-volume-popover:hover,
+.vertical-volume-popover.is-dragging {
   opacity: 1;
   visibility: visible;
   pointer-events: auto;

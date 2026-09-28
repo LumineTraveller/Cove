@@ -1,6 +1,6 @@
 {
   "name": "cove-client",
-  "version": "1.5.3",
+  "version": "1.5.4",
   "description": "Cove - 即时通讯客户端",
   "author": "Cove",
   "private": true,
@@ -8,11 +8,13 @@
   "scripts": {
     "dev": "vite",
     "remote-input:build": "node electron/build-remote-input.cjs",
+    "application-audio:build": "node electron/build-application-audio.cjs",
+    "test:application-audio-sources": "tsx --test tests/applicationAudioSources.test.ts && node tests/applicationAudioSources.native.cjs",
     "prepare:rnnoise-assets": "node tools/prepare-rnnoise-assets.cjs",
-    "electron:compile": "npm run remote-input:build && tsc -p electron/tsconfig.json",
+    "electron:compile": "npm run remote-input:build && npm run application-audio:build && tsc -p electron/tsconfig.json",
     "test:updater": "npm run electron:compile && node --test tests/updater.test.cjs tests/gitee-installer-cache.test.cjs tests/server-certificate-policy.test.cjs",
     "test:connection": "tsx --test tests/connectionDeadline.test.ts tests/sessionRegistration.test.ts tests/voiceConnectionRecovery.test.ts",
-    "test:audio-devices": "tsx --test tests/audioDevices.test.ts tests/remoteAudioPlayback.test.ts tests/applicationAudio.test.ts tests/microphoneProcessing.test.ts tests/microphoneEcho.test.ts",
+    "test:audio-devices": "tsx --test tests/audioDevices.test.ts tests/remoteAudioPlayback.test.ts tests/applicationAudio.test.ts tests/applicationAudioSources.test.ts tests/microphoneProcessing.test.ts tests/microphoneEcho.test.ts",
     "test:microphone-echo": "electron tests/microphoneEcho.electron.cjs",
     "test:microphone": "electron tests/microphoneProcessing.electron.cjs",
     "test:rnnoise": "tsx --test tests/rnnoise.test.ts && electron tests/rnnoise.electron.cjs",
@@ -92,6 +94,10 @@
         {
           "from": "build/remote-input-helper.exe",
           "to": "remote-input-helper.exe"
+        },
+        {
+          "from": "build/application-audio-helper.exe",
+          "to": "application-audio-helper.exe"
         }
       ]
     },

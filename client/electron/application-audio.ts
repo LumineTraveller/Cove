@@ -1,6 +1,7 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { desktopCapturer, type WebContents } from 'electron';
+import path from 'node:path';
+import { app, type WebContents } from 'electron';
 
 const execFileAsync = promisify(execFile);
 
@@ -22,90 +23,59 @@ export interface ApplicationAudioSource {
   iconDataUrl?: string;
 }
 
-interface ProcessWindow {
-  processId: number;
-  processName: string;
-  windowHandle: number;
+// The creation timestamp prevents a stale selection from targeting a different
+// application after Windows recycles its PID. IDs never depend on window state.
+const sourceIdPattern = /^process:([1-9]\d{0,9}):([1-9]\d{0,18})$/;
+
+function readSource(value: unknown): ApplicationAudioSource | null {
+  if (!value || typeof value !== 'object') return null;
+  const record = value as Record<string, unknown>;
+  const match = typeof record.id === 'string' ? sourceIdPattern.exec(record.id) : null;
+  if (!match || !Number.isSafeInteger(record.processId) || record.processId !== Number(match[1])
+    || typeof record.processName !== 'string' || !record.processName
+    || typeof record.name !== 'string' || !record.name) return null;
+  return {
+    id: record.id as string, name: record.name,
+    processId: record.processId as number, processName: record.processName,
+    ...(typeof record.iconDataUrl === 'string' && /^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(record.iconDataUrl)
+      ? { iconDataUrl: record.iconDataUrl } : {}),
+  };
 }
 
-function windowHandleFromSourceId(sourceId: string): number | null {
-  const match = /^window:(\d+):/.exec(sourceId);
-  if (!match) return null;
-  const handle = Number(match[1]);
-  return Number.isSafeInteger(handle) && handle > 0 ? handle : null;
-}
-
-async function visibleProcessWindows(handles: number[]): Promise<ProcessWindow[]> {
-  if (!handles.length) return [];
-  // Handles are parsed from Electron's own DesktopCapturer IDs and kept numeric,
-  // so embedding them into this no-profile PowerShell query cannot inject code.
-  const script = [
-    `$handles = @(${handles.join(',')})`,
-    'Get-Process | ForEach-Object {',
-    '  if ($handles -contains $_.MainWindowHandle.ToInt64()) {',
-    '    [PSCustomObject]@{ processId = $_.Id; processName = $_.ProcessName; windowHandle = $_.MainWindowHandle.ToInt64() }',
-    '  }',
-    '} | ConvertTo-Json -Compress',
-  ].join('; ');
-  try {
-    const { stdout } = await execFileAsync('powershell.exe', [
-      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script,
-    ], { windowsHide: true, timeout: 5_000, maxBuffer: 256 * 1024 });
-    if (!stdout.trim()) return [];
-    const parsed: unknown = JSON.parse(stdout);
-    const records = Array.isArray(parsed) ? parsed : [parsed];
-    return records.flatMap((value): ProcessWindow[] => {
-      if (!value || typeof value !== 'object') return [];
-      const record = value as Record<string, unknown>;
-      const processId = Number(record.processId);
-      const windowHandle = Number(record.windowHandle);
-      const processName = typeof record.processName === 'string' ? record.processName : '';
-      return Number.isInteger(processId) && processId > 0 && Number.isSafeInteger(windowHandle) && processName
-        ? [{ processId, processName, windowHandle }]
-        : [];
-    });
-  } catch (error) {
-    console.warn('[application-audio] 无法读取窗口所属进程', error);
-    return [];
-  }
+async function querySources(command: 'list' | 'resolve', sourceId?: string): Promise<unknown> {
+  const executable = app.isPackaged
+    ? path.join(process.resourcesPath, 'application-audio-helper.exe')
+    : path.resolve(__dirname, '..', 'build', 'application-audio-helper.exe');
+  const { stdout, stderr } = await execFileAsync(executable,
+    [command, String(process.pid), ...(sourceId ? [sourceId] : [])],
+    { windowsHide: true, timeout: 5_000, maxBuffer: 4 * 1024 * 1024, encoding: 'utf8' });
+  if (stderr.trim()) console.warn('[application-audio] 枚举诊断:', stderr.trim());
+  return JSON.parse(stdout.replace(/^\uFEFF/, '').trim());
 }
 
 export async function listApplicationAudioSources(): Promise<ApplicationAudioSource[]> {
   if (process.platform !== 'win32') return [];
-  const sources = await desktopCapturer.getSources({
-    types: ['window'],
-    thumbnailSize: { width: 0, height: 0 },
-    fetchWindowIcons: true,
-  });
-  const handles = sources.map(source => windowHandleFromSourceId(source.id)).filter((value): value is number => value !== null);
-  const processes = await visibleProcessWindows(handles);
-  const processByHandle = new Map(processes.map(process => [process.windowHandle, process]));
+  // Core Audio sessions include tray/background players. EnumWindows adds
+  // ordinary apps (including minimized windows) even before playback starts.
+  const records = await querySources('list');
+  if (!Array.isArray(records)) throw new Error('应用音频列表响应无效。');
+  const sources: ApplicationAudioSource[] = [];
   const seen = new Set<number>();
-  return sources.flatMap(source => {
-    const handle = windowHandleFromSourceId(source.id);
-    const process = handle === null ? undefined : processByHandle.get(handle);
-    // A process tree is the capture unit. Showing one entry per process avoids
-    // duplicate browser/game windows producing the same audio twice.
-    if (!process || seen.has(process.processId)) return [];
-    seen.add(process.processId);
-    let iconDataUrl: string | undefined;
-    try {
-      if (source.appIcon && !source.appIcon.isEmpty()) {
-        iconDataUrl = source.appIcon.toDataURL();
-      }
-    } catch (error) {
-      // An app can disappear while the desktop-capturer result is being read;
-      // the source remains usable with the generic window icon in that case.
-      console.debug('[application-audio] 无法读取窗口图标', error);
-    }
-    return [{
-      id: source.id,
-      name: source.name,
-      processId: process.processId,
-      processName: process.processName,
-      ...(iconDataUrl ? { iconDataUrl } : {}),
-    }];
-  });
+  for (const record of records) {
+    const source = readSource(record);
+    if (!source || seen.has(source.processId) || source.processId === process.pid) continue;
+    seen.add(source.processId);
+    sources.push(source);
+  }
+  return sources;
+}
+
+export async function resolveApplicationAudioSource(sourceId: string): Promise<ApplicationAudioSource | null> {
+  if (process.platform !== 'win32' || !sourceIdPattern.test(sourceId)) return null;
+  // Do not re-enumerate windows or sessions: hiding a window, pausing playback,
+  // or moving it to the tray after selection must not prevent capture startup.
+  const source = readSource(await querySources('resolve', sourceId));
+  return source?.id === sourceId && source.processId !== process.pid ? source : null;
 }
 
 export class ApplicationAudioCaptureController {

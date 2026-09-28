@@ -332,15 +332,19 @@ export function useSortableList({
             settleTimerRef.current = window.setTimeout(() => {
               settleTimerRef.current = null;
               setOverlay(null);
+              // 延迟恢复内容：等 overlay 飞回占位符后再显示，避免出现两份卡片。
+              setDraggingId(null);
             }, SETTLE_DURATION_MS + 20);
           } else {
             setOverlay(null);
+            setDraggingId(null);
           }
           onCommitRef.current(orderedRef.current);
           setAnnouncement('已放下');
         } else {
           applyOrder(drag.order);
           setOverlay(null);
+          setDraggingId(null);
           setAnnouncement('已取消排序');
         }
       }
@@ -353,7 +357,7 @@ export function useSortableList({
         releaseDragCursor();
       }
       pointerRef.current = null;
-      setDraggingId(null);
+      if (!drag.moved || !drag.id) setDraggingId(null);
       setPointerSession(null);
     },
     [applyOrder],

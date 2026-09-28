@@ -436,6 +436,24 @@ window.fetch = async (input, init) => {
 const originalGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
 const originalGetDisplayMedia = navigator.mediaDevices.getDisplayMedia?.bind(navigator.mediaDevices);
 const testAudioContexts: AudioContext[] = [];
+const audioMeterQa = new URLSearchParams(location.search).has("audio-meter");
+let sharedToneContext: AudioContext | undefined;
+let sharedToneGain: GainNode | undefined;
+if (audioMeterQa) {
+  sharedToneContext = new AudioContext();
+  const oscillator = sharedToneContext.createOscillator();
+  sharedToneGain = sharedToneContext.createGain();
+  sharedToneGain.gain.value = 0.04;
+  const destination = sharedToneContext.createMediaStreamDestination();
+  oscillator.frequency.value = 200;
+  oscillator.connect(sharedToneGain).connect(destination);
+  oscillator.start();
+  producers.set("qa-peer-audio", {
+    id: "qa-peer-audio", peerId: peerMember.socketId, kind: "audio",
+    appData: { type: "application-audio", label: "合成共享音频" },
+    track: destination.stream.getAudioTracks()[0],
+  });
+}
 navigator.mediaDevices.getUserMedia = async () => {
   const context = new AudioContext();
   testAudioContexts.push(context);
@@ -453,7 +471,7 @@ navigator.mediaDevices.getDisplayMedia = async () => {
 
 window.coveApplicationAudio = { stop: async () => undefined } as any;
 window.coveScreenAudio = undefined;
-window.coveRemoteControl = { supported: false } as any;
+window.coveRemoteControl = undefined;
 
 const root = createRoot(document.getElementById("root")!);
 const render = (theme: AppTheme) => {
@@ -538,6 +556,32 @@ function setTone(tone: "red" | "blue" | "green") {
 
 (window as any).shareChatQaResult = (async () => {
   render("dark");
+  if (audioMeterQa) {
+    // Opt-in manual QA: a synthetic tone exercises the real receive hook and
+    // both real volume controls without accessing a microphone or live server.
+    const controls = document.createElement("div");
+    controls.style.cssText = "position:fixed;top:4px;left:340px;z-index:10000;background:#17233b;padding:8px;display:flex;gap:12px;color:white";
+    for (const [label, gain] of [["低电平", 0.04], ["高电平", 0.18], ["无声", 0]] as const) {
+      const button = document.createElement("button");
+      button.textContent = label;
+      button.onclick = async () => {
+        sharedToneGain!.gain.value = gain;
+        await sharedToneContext!.resume();
+        await Promise.all(testAudioContexts.map(context => context.resume()));
+      };
+      controls.append(button);
+    }
+    const reading = document.createElement("output");
+    controls.append(reading);
+    document.body.append(controls);
+    setInterval(() => {
+      flushSync(() => {});
+      const meter = document.querySelector<HTMLElement>(".volume-share label, .vertical-volume.purple");
+      // Keep live data visible to the browser QA runner (no private DOM API).
+      reading.textContent = `共享电平 ${meter?.style.getPropertyValue("--volume-level") || "0%"}`;
+    }, 150);
+    return state;
+  }
   await wait(300);
   check(findChatPanel(), "real ChatRoomV2 ordinary chat mounted");
   check(document.body.textContent?.includes("普通聊天室消息"), "history message is visible");

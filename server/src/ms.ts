@@ -80,6 +80,7 @@ export async function initMediasoup() {
 export interface PeerInfo {
   roomId:        string | null;
   sendTransport: T.WebRtcTransport | null;
+  screenSendTransport: T.WebRtcTransport | null;
   recvTransport: T.WebRtcTransport | null;
   producers:     Map<string, T.Producer>;  // producerId → Producer
   consumers:     Map<string, T.Consumer>;  // consumerId → Consumer
@@ -89,7 +90,7 @@ export const peers = new Map<string, PeerInfo>();
 
 export function createPeer(socketId: string): PeerInfo {
   const p: PeerInfo = {
-    roomId: null, sendTransport: null, recvTransport: null,
+    roomId: null, sendTransport: null, screenSendTransport: null, recvTransport: null,
     producers: new Map(), consumers: new Map(),
   };
   peers.set(socketId, p);
@@ -100,6 +101,7 @@ export function removePeer(socketId: string) {
   const p = peers.get(socketId);
   if (!p) return;
   p.sendTransport?.close();
+  p.screenSendTransport?.close();
   p.recvTransport?.close();
   peers.delete(socketId);
 }

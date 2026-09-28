@@ -3,6 +3,7 @@ const { EventEmitter } = require('node:events');
 const fs = require('node:fs');
 const test = require('node:test');
 const { configureAutoUpdater } = require('../dist-electron/updater-core.js');
+const { UPDATE_DOWNLOAD_BASE_URL } = require('../dist-electron/update-config.js');
 const { compareReleaseVersions, discoverUpdateSources } = require('../dist-electron/update-sources.js');
 const { formatTransferPercent, transferPercent, updateWaitWarning, updateStepIndex } = require('../dist-electron/update-state.js');
 
@@ -10,7 +11,7 @@ const githubSource = {
   id: 'github', label: 'GitHub', version: '0.7.0',
   feedUrl: 'https://github.com/LumineTraveller/Cove/releases/download/v0.7.0/', latencyMs: 30,
 };
-const cloudServerUrl = 'https://cove-cove.space';
+const cloudServerUrl = 'https://cove.luxe';
 const cloudSource = {
   id: 'cloud', label: '当前服务器', version: '0.7.0',
   feedUrl: `${cloudServerUrl}/releases/v0.7.0/`, latencyMs: 10,
@@ -26,6 +27,7 @@ test('compiled updater exposes only the in-app IPC bridge and no OS notification
   assert.match(preload, /cove:update:check/);
   assert.match(preload, /cove:update:install/);
   assert.match(preload, /cove:update:open-log/);
+  assert.doesNotMatch(preload, /cove:update:set-server-url/);
 });
 
 test('compiled Electron main keeps WGC capture without diagnostic file logging', () => {
@@ -150,7 +152,7 @@ test('packaged builds configure automatic checks and downloads', async () => {
   assert.equal(h.updater.feedCalls[0].url, githubSource.feedUrl);
 });
 
-test('the updater preserves the renderer server argument for source-resolver compatibility', async () => {
+test('startup and manual checks use the download configuration without a login server', async () => {
   const received = [];
   const h = createHarness({
     resolveSources: async serverUrl => {
@@ -158,8 +160,80 @@ test('the updater preserves the renderer server argument for source-resolver com
       return [githubSource];
     },
   });
-  await h.controller.checkNow(cloudServerUrl);
-  assert.deepEqual(received, [cloudServerUrl]);
+  h.updater.checkForUpdates = async () => {
+    h.updater.checkCount++;
+    h.updater.emit('update-not-available', { version: '1.5.3' });
+  };
+  h.once[0].callback();
+  await new Promise(resolve => setImmediate(resolve));
+  // Even stale callers cannot replace the update server with a chat address.
+  await h.controller.checkNow('https://chat.example.test');
+  assert.deepEqual(received, [UPDATE_DOWNLOAD_BASE_URL, UPDATE_DOWNLOAD_BASE_URL]);
+  assert.equal(h.controller.setServerUrl, undefined);
+  h.controller.dispose();
+});
+
+test('a custom download base is used by scheduled and manual checks', async () => {
+  const received = [];
+  const h = createHarness({
+    downloadBaseUrl: 'https://download.example.test/cove',
+    resolveSources: async serverUrl => {
+      received.push(serverUrl);
+      return [cloudSource];
+    },
+  });
+  h.updater.checkForUpdates = async () => {
+    h.updater.checkCount++;
+    h.updater.emit('update-not-available', { version: '1.5.3' });
+  };
+  h.once[0].callback();
+  await new Promise(resolve => setImmediate(resolve));
+  h.repeating[0].callback();
+  await new Promise(resolve => setImmediate(resolve));
+  await h.controller.checkNow();
+  assert.deepEqual(received, Array(3).fill('https://download.example.test/cove'));
+  h.controller.dispose();
+});
+
+test('configured download server works before login when GitHub is unreachable', async () => {
+  const calls = [];
+  const fetchImpl = async input => {
+    const url = String(input);
+    calls.push(url);
+    if (url === `${cloudServerUrl}/releases/latest.json`) {
+      return new Response(JSON.stringify({ tag_name: 'v1.5.4' }), { status: 200 });
+    }
+    throw new Error('GitHub offline');
+  };
+  const h = createHarness({ downloadBaseUrl: cloudServerUrl, resolveSources: url => discoverUpdateSources(url, fetchImpl, 1000) });
+  h.once[0].callback();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls[0], `${cloudServerUrl}/releases/latest.json`);
+  assert.equal(h.updater.feedCalls[0].url, `${cloudServerUrl}/releases/v1.5.4/`);
+  assert.equal(h.controller.getState().sourceLabel, '更新服务器');
+  h.controller.dispose();
+});
+
+test('blank default download address never probes a server on startup or manual checks', async () => {
+  assert.equal(UPDATE_DOWNLOAD_BASE_URL, '');
+  const calls = [];
+  const githubApi = 'https://api.github.com/repos/LumineTraveller/Cove/releases/latest';
+  const fetchImpl = async input => {
+    const url = String(input);
+    calls.push(url);
+    assert.equal(url, githubApi);
+    return new Response(JSON.stringify({ tag_name: 'v1.5.3' }), { status: 200 });
+  };
+  const h = createHarness({ resolveSources: url => discoverUpdateSources(url, fetchImpl, 1000) });
+  h.updater.checkForUpdates = async () => {
+    h.updater.checkCount++;
+    h.updater.emit('update-not-available', { version: '1.5.3' });
+  };
+  h.once[0].callback();
+  await new Promise(resolve => setImmediate(resolve));
+  await h.controller.checkNow('https://chat.example.test');
+  assert.deepEqual(calls, [githubApi, githubApi]);
+  assert.equal(h.controller.getState().source, 'github');
   h.controller.dispose();
 });
 
@@ -233,7 +307,7 @@ test('the cloud mirror and GitHub both retain differential downloads', async () 
     await h.controller.checkNow();
     assert.equal(h.updater.disableDifferentialDownload, false);
     h.updater.emit('update-available', { version: '0.8.3' });
-     if (source.id === 'cloud') assert.match(h.controller.getState().message, /当前服务器/);
+     if (source.id === 'cloud') assert.match(h.controller.getState().message, /更新服务器/);
     h.controller.dispose();
   }
   const h = createHarness({ resolveSources: async () => [githubSource, cloudSource] });

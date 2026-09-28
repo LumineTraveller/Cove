@@ -24,7 +24,7 @@ import {
 import {
   ApplicationAudioCaptureController,
   listApplicationAudioSources,
-  type ApplicationAudioSource,
+  resolveApplicationAudioSource,
 } from "./application-audio";
 
 // 开发/测试运行的 stdout 可能指向已经关闭的终端管道。此时任何 console 输出都会
@@ -400,18 +400,9 @@ app.whenReady().then(() => {
     () => updaterController?.getState() ?? unavailableUpdateState,
   );
   ipcMain.handle(
-    "cove:update:set-server-url",
-    (event, serverUrl: unknown) => {
-      if (event.sender !== mainWindow?.webContents || typeof serverUrl !== "string") return false;
-      updaterController?.setServerUrl(serverUrl);
-      return true;
-    },
-  );
-  ipcMain.handle(
     "cove:update:check",
-    (event, serverUrl: unknown) => {
+    (event) => {
       if (event.sender !== mainWindow?.webContents) return unavailableUpdateState;
-      if (typeof serverUrl === "string") updaterController?.setServerUrl(serverUrl);
       return updaterController?.checkNow() ?? unavailableUpdateState;
     },
   );
@@ -436,9 +427,7 @@ app.whenReady().then(() => {
       )
         return { ok: false, error: "无效的应用音频请求。" };
       try {
-        const source = (await listApplicationAudioSources()).find(
-          (item) => item.id === sourceId,
-        ) as ApplicationAudioSource | undefined;
+        const source = await resolveApplicationAudioSource(sourceId);
         if (!source)
           return {
             ok: false,

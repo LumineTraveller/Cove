@@ -5,6 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import Module from 'node:module';
+import { EventEmitter } from 'node:events';
 import { io as connectSocket, type Socket } from 'socket.io-client';
 
 // The production server uses better-sqlite3 and mediasoup. Keep this test
@@ -28,11 +29,34 @@ class TestDatabase {
 
 const originalLoad = (Module as any)._load;
 const fake = { peers: new Map<string, any>() };
+let transportSequence = 0;
+const fakeRouter = {
+  rtpCapabilities: {},
+  async createWebRtcTransport() {
+    const producers: any[] = [];
+    const transport = Object.assign(new EventEmitter(), {
+      id: `transport-${++transportSequence}`, closed: false,
+      iceParameters: {}, iceCandidates: [], dtlsParameters: {}, sctpParameters: {},
+      async connect() {},
+      close() { this.closed = true; producers.forEach(producer => producer.close()); },
+      async produce(options: any) {
+        const producer = Object.assign(new EventEmitter(), {
+          id: `producer-${transportSequence}-${producers.length}`, closed: false,
+          kind: options.kind, appData: options.appData, observer: new EventEmitter(),
+          async pause() {}, async resume() {},
+          close() { if (this.closed) return; this.closed = true; this.observer.emit('close'); },
+        });
+        producers.push(producer); return producer;
+      },
+    });
+    return transport;
+  },
+};
 (Module as any)._load = function(request: string, parent: unknown, isMain: boolean) {
   if (request === 'better-sqlite3') return TestDatabase;
   if (request === './ms' || request.endsWith('/src/ms')) {
     return {
-      MS_IP: '127.0.0.1', MS_PORT: 40000, router: null, webRtcServer: null,
+      MS_IP: '127.0.0.1', MS_PORT: 40000, router: fakeRouter, webRtcServer: null,
       peers: fake.peers, createPeer: (id: string) => { const peer = { roomId: null, sendTransport: null, recvTransport: null, producers: new Map(), consumers: new Map() }; fake.peers.set(id, peer); return peer; },
       removePeer: (id: string) => fake.peers.delete(id), getRoomProducers: () => [], initMediasoup: async () => {},
     };
@@ -257,6 +281,52 @@ test('server password rotation disconnects active sockets and rejects the old ac
   const staleRooms = await fetch(`${base}/api/rooms`, { headers: serverHeaders(oldAccessToken) });
   assert.equal(staleRooms.status, 401);
   assert.ok(serverAccessToken);
+});
+
+test('mobile screen transport is isolated from voice and closes independently', { timeout: 10_000 }, async () => {
+  const account = await register('mobile-sharer@example.com', 'Mobile Sharer');
+  const client = socketFor(account); sockets.push(client.socket);
+  assert.equal((await client.register).ok, true);
+  const { room } = await emit<any>(client.socket, 'room:create', { name: 'Mobile Share' });
+  assert.equal((await emit<any>(client.socket, 'room:join', room.id)).ok, true);
+  const peer = fake.peers.get(client.socket.id);
+  assert.deepEqual(await emit<any>(client.socket, 'ms:screen-sharing-capabilities', {}), { dedicatedTransport: true });
+  // Legacy mobile joins voice AFTER setting up its mic. Keep that path working.
+  const voice = await emit<any>(client.socket, 'ms:create-transport', { direction: 'send' });
+  const mic = await emit<any>(client.socket, 'ms:produce', { transportId: voice.id, kind: 'audio', rtpParameters: {}, appData: { type: 'mic' } });
+  assert.ok(mic.producerId);
+  const micProducer = peer.producers.get(mic.producerId);
+  const voiceTransport = peer.sendTransport;
+  const rejected = await emit<any>(client.socket, 'ms:create-transport', { direction: 'send', purpose: 'screen' });
+  assert.match(rejected.error, /加入语音/);
+  assert.equal((await emit<any>(client.socket, 'voice:join', room.id)).ok, true);
+  const share = await emit<any>(client.socket, 'ms:create-transport', { direction: 'send', purpose: 'screen' });
+  assert.equal(share.purpose, 'screen');
+  assert.equal(peer.sendTransport, voiceTransport);
+  assert.equal(voiceTransport.closed, false);
+  assert.equal(micProducer.closed, false);
+  const invalid = await emit<any>(client.socket, 'ms:produce', { transportId: share.id, kind: 'audio', rtpParameters: {}, appData: { type: 'mic' } });
+  assert.match(invalid.error, /仅用于屏幕/);
+  const video = await emit<any>(client.socket, 'ms:produce', { transportId: share.id, kind: 'video', rtpParameters: {}, appData: { type: 'screen' } });
+  const playback = await emit<any>(client.socket, 'ms:produce', { transportId: share.id, kind: 'audio', rtpParameters: {}, appData: { type: 'screen-audio' } });
+  assert.ok(video.producerId); assert.ok(playback.producerId);
+  client.socket.emit('ms:close-screen-transport', { transportId: voice.id });
+  // Ack barrier confirms the preceding no-op request was processed.
+  await emit<any>(client.socket, 'ms:screen-sharing-capabilities', {});
+  assert.equal(peer.screenSendTransport.closed, false);
+  client.socket.emit('ms:close-screen-transport', { transportId: share.id });
+  await emit<any>(client.socket, 'ms:screen-sharing-capabilities', {});
+  assert.equal(peer.screenSendTransport, null);
+  assert.equal(peer.producers.has(video.producerId), false);
+  assert.equal(peer.producers.has(playback.producerId), false);
+  assert.equal(micProducer.closed, false);
+  const next = await emit<any>(client.socket, 'ms:create-transport', { direction: 'send', purpose: 'screen' });
+  const nextTransport = peer.screenSendTransport;
+  client.socket.emit('voice:leave', room.id);
+  await emit<any>(client.socket, 'ms:screen-sharing-capabilities', {});
+  assert.equal(nextTransport.closed, true);
+  assert.equal(peer.screenSendTransport, null);
+  assert.ok(next.id);
 });
 
 test('controller leaving voice terminates the remote control session and notifies the sharer', { timeout: 10_000 }, async () => {

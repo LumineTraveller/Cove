@@ -15,7 +15,7 @@ export interface UpdateState {
   lastActivityAt?: number;
   message?: string;
   source?: 'github' | 'cloud';
-  sourceLabel?: 'GitHub' | 'Cove 服务器' | '当前服务器';
+  sourceLabel?: 'GitHub' | 'Cove 服务器' | '当前服务器' | '更新服务器';
   failedStage?: UpdateStatus;
   errorDetail?: string;
   errorCode?: string;

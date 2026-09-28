@@ -108,10 +108,6 @@ export default function App() {
   const updateServerURL = needLogin || editingServer ? normalizeServerSecurityURL(draftUrl) : serverURL;
 
   useEffect(() => {
-    void window.coveUpdater?.setServerUrl(updateServerURL).catch(() => undefined);
-  }, [updateServerURL]);
-
-  useEffect(() => {
     try {
       window.localStorage.setItem(THEME_STORAGE_KEY, theme);
     } catch {

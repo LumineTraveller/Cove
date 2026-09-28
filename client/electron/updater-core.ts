@@ -1,4 +1,5 @@
 import { isUpdateBusy, transferPercent, type UpdateState } from './update-state';
+import { UPDATE_DOWNLOAD_BASE_URL } from './update-config';
 export type { UpdateState, UpdateStatus } from './update-state';
 
 export interface UpdateInfoLike {
@@ -19,7 +20,7 @@ export interface UpdateCheckResultLike {
 
 export interface UpdateSourceCandidate {
   id: 'github' | 'cloud';
-  label: 'GitHub' | 'Cove 服务器' | '当前服务器';
+  label: 'GitHub' | 'Cove 服务器' | '当前服务器' | '更新服务器';
   version: string;
   feedUrl: string;
   latencyMs: number;
@@ -65,13 +66,13 @@ export interface AutoUpdaterOptions {
   startupDelayMs?: number;
   checkIntervalMs?: number;
   resolveSources?: (serverUrl: string) => Promise<UpdateSourceCandidate[]>;
+  downloadBaseUrl?: string;
   now?: () => number;
 }
 
 export interface AutoUpdaterController {
   enabled: boolean;
-  checkNow: (serverUrl?: string) => Promise<UpdateState>;
-  setServerUrl: (serverUrl: string) => void;
+  checkNow: () => Promise<UpdateState>;
   getState: () => UpdateState;
   installNow: () => boolean;
   dispose: () => void;
@@ -99,6 +100,7 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
     startupDelayMs = DEFAULT_STARTUP_DELAY_MS,
     checkIntervalMs = DEFAULT_CHECK_INTERVAL_MS,
     resolveSources = async () => [],
+    downloadBaseUrl = UPDATE_DOWNLOAD_BASE_URL,
     now = Date.now,
   } = options;
 
@@ -121,7 +123,6 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
     return {
       enabled: false,
       checkNow: async () => state,
-      setServerUrl: () => undefined,
       getState: () => state,
       installNow: () => false,
       dispose: () => undefined,
@@ -137,7 +138,6 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
   let probingSources = false;
   let retryingDownload = false;
   let sources: UpdateSourceCandidate[] = [];
-  let configuredServerUrl = '';
   let sourceIndex = -1;
   let activeSource: UpdateSourceCandidate | undefined;
   let sourceGeneration = 0;
@@ -184,7 +184,7 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
     checking = false;
     logger.info(`[updater] 发现新版本 ${info.version}，开始后台下载`);
     setState(stateForSource({ status: 'available', version: info.version, percent: 0,
-      message: activeSource?.id === 'cloud' ? '发现新版本，准备从当前服务器下载。' : '发现新版本，准备下载。',
+      message: activeSource?.id === 'cloud' ? '发现新版本，准备从更新服务器下载。' : '发现新版本，准备下载。',
     }));
   };
   const onNotAvailable = (info: UpdateInfoLike) => {
@@ -296,14 +296,7 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
   updater.on('update-cancelled', onCancelled);
   updater.on('error', onError);
 
-  const setServerUrl = (serverUrl: string): void => {
-    if (configuredServerUrl === serverUrl) return;
-    configuredServerUrl = serverUrl;
-    logger.info('[updater] 已更新当前服务器更新源绑定');
-  };
-
-  const checkNow = async (serverUrl?: string): Promise<UpdateState> => {
-    if (typeof serverUrl === 'string') setServerUrl(serverUrl);
+  const checkNow = async (): Promise<UpdateState> => {
     if (disposed || checking || isUpdateBusy(state.status) || state.status === 'downloaded') return state;
     checking = true;
     activeSource = undefined;
@@ -312,9 +305,9 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
     setState({ status: 'checking', message: '正在连接更新服务器…' });
     try {
       // Ignore obsolete source identifiers even if a stale resolver supplies one.
-      sources = (await resolveSources(configuredServerUrl)).filter(source => source.id === 'github' || source.id === 'cloud');
+      sources = (await resolveSources(downloadBaseUrl)).filter(source => source.id === 'github' || source.id === 'cloud');
       if (disposed) return state;
-      if (!sources.length) throw new Error('当前服务器与 GitHub 更新源均无法访问，请检查网络后重试。');
+      if (!sources.length) throw new Error('更新服务器与 GitHub 更新源均无法访问，请检查网络后重试。');
       probingSources = true;
       let lastError: Error | null = null;
       for (let index = 0; index < sources.length; index += 1) {
@@ -358,7 +351,6 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
   return {
     enabled: true,
     checkNow,
-    setServerUrl,
     getState: () => state,
     installNow: () => {
       if (disposed || state.status !== 'downloaded') return false;

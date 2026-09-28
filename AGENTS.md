@@ -36,7 +36,7 @@
 
 - 每次公开桌面版 GitHub Release 后，执行 `scripts/publish-release-to-cloud.ps1 -Tag vX.Y.Z`，将 Windows 客户端和服务端安装包、blockmap、`latest.yml` 上传到同一服务器，最后发布 `releases/latest.json`。
 - 逐一核验 `https://cove-cove.space/releases/vX.Y.Z/latest.yml` 与 `https://cove-cove.space/downloads/Cove-Setup.exe`、`Cove-Server-Setup.exe` 可公开下载；服务器镜像未完成时不把发布任务标为完成。GitHub 仍作为客户端更新备用源。
-- 客户端“从服务器下载”使用用户当前填写的服务器地址，自动更新仅使用该地址的 HTTPS 镜像；不是固定访问 `cove-cove.space`。其他自建服务器要提供相同的 `/downloads/` 和 `/releases/` 路径才能作为更新来源，不能因为 Cove 官方服务器已有镜像就假定它们也可下载。
+- 桌面客户端手动“从服务器下载”使用用户当前填写的聊天服务器地址。桌面与手机自动更新使用各自独立配置的 `UPDATE_DOWNLOAD_BASE_URL`，默认必须留空；未配置时只检查 GitHub，不从聊天地址推导或用官方域名补填。配置后只允许 HTTPS，不依赖登录，保留 GitHub 备用源。官方域名为 `cove.luxe`，不要把历史 `cove-cove.space` 当作默认域名。自建下载服务器要提供相同的 `/downloads/` 和 `/releases/` 路径才能作为更新来源，不能因为 Cove 官方服务器已有镜像就假定它们也可下载。
 
 ## 其他约定
 

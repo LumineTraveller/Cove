@@ -5,6 +5,7 @@ import {
   isScreenEncodingWithinPlan,
   screenEncodingPlanLabel,
   SCREEN_PRESETS,
+  SCREEN_RAMP_GRACE_MS,
   toScreenRtpEncoding,
   withScreenEncodingPlan,
   type ScreenActivity,
@@ -157,4 +158,31 @@ test('turning native sharing off restores the selected preset without changing t
   assert.deepEqual([scaled.outputWidth, scaled.outputHeight], [1152, 720]);
   assert.deepEqual([scaled.sourceWidth, scaled.sourceHeight], [2560, 1600]);
   assert.equal(scaled.nativeResolution, false);
+});
+
+test('the startup ramp guard keeps resolution while motion still picks its frame rate', () => {
+  const options = { preset: '1080p' as const, maxFps: 60 as const, activity: 'motion' as const, sourceWidth: 2560, sourceHeight: 1600 };
+  const guarded = createScreenEncodingPlan({ ...options, rampGuard: true });
+  const unguarded = createScreenEncodingPlan(options);
+
+  assert.equal(unguarded.degradationPreference, 'maintain-framerate');
+  assert.equal(guarded.degradationPreference, 'maintain-resolution');
+  // 宽限期只改降级策略，帧率、内容提示和缩放几何都保持 motion 的选择。
+  assert.equal(guarded.fps, unguarded.fps);
+  assert.equal(guarded.contentHint, 'motion');
+  assert.deepEqual(toScreenRtpEncoding(guarded), toScreenRtpEncoding(unguarded));
+});
+
+test('the startup ramp guard is a no-op for activities that already keep resolution', () => {
+  for (const activity of ['static', 'active'] as ScreenActivity[]) {
+    const guarded = createScreenEncodingPlan({ preset: '1440p', maxFps: 60, activity, rampGuard: true });
+    const unguarded = createScreenEncodingPlan({ preset: '1440p', maxFps: 60, activity });
+    assert.equal(guarded.degradationPreference, 'maintain-resolution');
+    assert.deepEqual(guarded, unguarded);
+  }
+});
+
+test('the startup ramp guard covers a real bitrate climb rather than a single frame', () => {
+  assert.ok(SCREEN_RAMP_GRACE_MS >= 3_000);
+  assert.ok(SCREEN_RAMP_GRACE_MS <= 10_000);
 });

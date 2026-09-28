@@ -458,9 +458,9 @@ function VolumeControl({
 }) {
   const shown = muted ? 0 : Math.round(clamp(value));
   const liveLevel = Math.max(0, Math.min(1, Number(level) || 0));
-  const meterLevel = muted
-    ? 0
-    : Math.min(1, liveLevel * (shown / 100));
+  // 电平条以"当前音量位置"为上限封顶（滑块满量程 200，位置 = shown/200）。
+  // 用 min 封顶而不是乘比值：乘法会让低音量时整条电平被等比压扁、看不出波动。
+  const meterLevel = muted ? 0 : Math.min(liveLevel * 2, shown / 200);
   const Icon =
     icon === "mic"
       ? muted
@@ -519,6 +519,7 @@ function VerticalVolume({
   muted = false,
   icon = "speaker",
   onMute,
+  onDraggingChange,
 }: {
   value: number;
   onChange: (value: number) => void;
@@ -528,12 +529,12 @@ function VerticalVolume({
   muted?: boolean;
   icon?: "speaker" | "mic" | "share";
   onMute?: () => void;
+  onDraggingChange?: (dragging: boolean) => void;
 }) {
   const shown = muted ? 0 : Math.round(clamp(value));
   const liveLevel = Math.max(0, Math.min(1, Number(level) || 0));
-  const meterLevel = muted
-    ? 0
-    : Math.min(1, liveLevel * (shown / 100));
+  // 与横向控件一致：以当前音量位置封顶，用 min 而非乘比值。
+  const meterLevel = muted ? 0 : Math.min(liveLevel * 2, shown / 200);
   const Icon =
     icon === "mic"
       ? muted
@@ -565,6 +566,20 @@ function VerticalVolume({
           step="1"
           value={shown}
           onChange={(event) => onChange(Number(event.target.value))}
+          onPointerDown={(event) => {
+            if (event.button !== 0) return;
+            // Keep receiving range updates even when the pointer leaves this
+            // narrow track during a drag.
+            try {
+              event.currentTarget.setPointerCapture(event.pointerId);
+            } catch {
+              // Native range dragging remains available if capture is unsupported.
+            }
+            onDraggingChange?.(true);
+          }}
+          onPointerUp={() => onDraggingChange?.(false)}
+          onPointerCancel={() => onDraggingChange?.(false)}
+          onLostPointerCapture={() => onDraggingChange?.(false)}
           onWheel={(event) => {
             event.preventDefault();
             onChange(clamp(shown + (event.deltaY < 0 ? 1 : -1)));
@@ -2884,6 +2899,7 @@ function ScreenShareSettingsV2({
 function AudioShareMenuV2({
   sources,
   loading,
+  error,
   onClose,
   onRefresh,
   onSystemAudio,
@@ -2891,6 +2907,7 @@ function AudioShareMenuV2({
 }: {
   sources: ApplicationAudioSource[];
   loading: boolean;
+  error: string;
   onClose: () => void;
   onRefresh: () => void;
   onSystemAudio: () => void;
@@ -2994,7 +3011,12 @@ function AudioShareMenuV2({
           </button>
           {/* 刷新时 sources 仍持有上一次的列表，这时不切回转圈，避免列表先塌陷再长回来；
               只有首次载入（还没有任何内容可显示）才展示加载态。 */}
-          {loading && sources.length === 0 ? (
+          {error ? (
+            <div className="audio-share-empty" role="alert">
+              <span>无法读取应用音频列表。</span>
+              <small>{error}</small>
+            </div>
+          ) : loading && sources.length === 0 ? (
             <div className="audio-share-loading">
               <LoaderCircle className="spin" size={19} />
               正在读取可共享的应用…
@@ -3033,8 +3055,8 @@ function AudioShareMenuV2({
           ) : (
             <div className="audio-share-empty">
               <AppWindow size={22} />
-              <span>没有可捕获的应用窗口。</span>
-              <small>请先打开要播放声音的应用，再点击刷新。</small>
+              <span>没有可共享音频的应用。</span>
+              <small>请先打开应用或播放音频，再点击刷新；后台播放器也支持。</small>
             </div>
           )}
         </div>
@@ -3670,6 +3692,7 @@ export default function ChatRoomV2({
     [],
   );
   const [audioLoading, setAudioLoading] = useState(false);
+  const [audioSourceError, setAudioSourceError] = useState("");
   const [pendingRemote, setPendingRemote] =
     useState<RemoteControlRequest | null>(null);
   const [pendingRemoteRequest, setPendingRemoteRequest] = useState(false);
@@ -3689,6 +3712,9 @@ export default function ChatRoomV2({
     x: number;
     y: number;
   } | null>(null);
+  const [draggingVolumeMember, setDraggingVolumeMember] = useState<
+    string | null
+  >(null);
   const [debug, setDebug] = useState(false);
   const [diagnosticsCompact, setDiagnosticsCompact] = useState(false);
   useEffect(() => {
@@ -4328,8 +4354,11 @@ export default function ChatRoomV2({
   const refreshAudioSources = useCallback(async () => {
     if (!window.coveApplicationAudio) return;
     setAudioLoading(true);
+    setAudioSourceError("");
     try {
       setAudioSources(await window.coveApplicationAudio.listSources());
+    } catch (error) {
+      setAudioSourceError(error instanceof Error ? error.message : "请刷新后重试。");
     } finally {
       setAudioLoading(false);
     }
@@ -4818,6 +4847,7 @@ export default function ChatRoomV2({
                                   )
                                 }
                                 icon="share"
+                                level={rtc.sharedAudioLevels[member.socketId] ?? 0}
                                 muted={sharedVolume === 0}
                                 onMute={() =>
                                   toggleSharedAudioMute(member, isSelf)
@@ -4871,6 +4901,14 @@ export default function ChatRoomV2({
                         (item) => item.socketId === member.socketId,
                       );
                     const isSelf = member.socketId === socket.id;
+                    const onVolumeDraggingChange = (dragging: boolean) =>
+                      setDraggingVolumeMember((current) =>
+                        dragging
+                          ? member.socketId
+                          : current === member.socketId
+                            ? null
+                            : current,
+                      );
                     const displayName = getProfileDisplayName(member.username, member.userId, profileRemarks);
                     const sharedVolume = getSharedAudioVolume(member, isSelf);
                     const level =
@@ -4930,7 +4968,15 @@ export default function ChatRoomV2({
                           <SharedBadges screen={screen} audio={audio} />
                         </button>
                         {voice && (
-                          <div className="vertical-volume-popover popover-card">
+                          <div
+                            className={
+                              `vertical-volume-popover popover-card${
+                                draggingVolumeMember === member.socketId
+                                  ? " is-dragging"
+                                  : ""
+                              }`
+                            }
+                          >
                             <VerticalVolume
                               value={
                                 member.socketId === socket.id
@@ -4948,6 +4994,7 @@ export default function ChatRoomV2({
                                     )
                               }
                               label="语音"
+                              onDraggingChange={onVolumeDraggingChange}
                               icon={isSelf ? "mic" : "speaker"}
                               muted={
                                 isSelf
@@ -4977,8 +5024,10 @@ export default function ChatRoomV2({
                                   )
                                 }
                                 label="共享"
+                                onDraggingChange={onVolumeDraggingChange}
                                 colorClass="purple"
                                 icon="share"
+                                level={rtc.sharedAudioLevels[member.socketId] ?? 0}
                                 muted={sharedVolume === 0}
                                 onMute={() =>
                                   toggleSharedAudioMute(member, isSelf)
@@ -5153,6 +5202,7 @@ export default function ChatRoomV2({
           <AudioShareMenuV2
             sources={audioSources}
             loading={audioLoading}
+            error={audioSourceError}
             onClose={closeAudioModal}
             onRefresh={() => void refreshAudioSources()}
             onSystemAudio={() => {

@@ -44,6 +44,7 @@ import {
 } from "../mediaDiagnostics";
 import {
   createScreenEncodingPlan,
+  SCREEN_RAMP_GRACE_MS,
   toScreenRtpEncoding,
   withScreenEncodingPlan,
   type ScreenActivity,
@@ -377,6 +378,9 @@ export function useWebRTC(socket: Socket, roomId: string) {
   const [speakingLevels, setSpeakingLevels] = useState<Record<string, number>>(
     {},
   );
+  const [sharedAudioLevels, setSharedAudioLevels] = useState<
+    Record<string, number>
+  >({});
   // 本机针对每位远端成员的麦克风播放增益，1 = 100% 原始音量，2 = 200%。
   const [memberVolumes, setMemberVolumes] = useState<Record<string, number>>(
     {},
@@ -490,6 +494,8 @@ export function useWebRTC(socket: Socket, roomId: string) {
     count: 0,
   });
   const screenActivityRef = useRef<ScreenActivity>("active");
+  const screenRampGuardUntil = useRef(0);
+  const screenRampTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 音量分析（Web Audio）
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -498,9 +504,13 @@ export function useWebRTC(socket: Socket, roomId: string) {
     Map<
       string,
       {
+        source: MediaStreamAudioSourceNode;
         analyser: AnalyserNode;
         data: Uint8Array<ArrayBuffer>;
         socketId: string;
+        stream: MediaStream;
+        type: "voice" | "application";
+        playbackGain: () => number;
       }
     >
   >(new Map());
@@ -905,17 +915,27 @@ export function useWebRTC(socket: Socket, roomId: string) {
     key: string,
     stream: MediaStream,
     socketId: string,
+    type: "voice" | "application" = "voice",
+    playbackGain: () => number = () => 1,
   ) => {
+    detachAnalyser(key);
     try {
       const ctx = ensureAudioCtx();
+      if (type === "application" && ctx.state !== "running") {
+        void ctx.resume().catch(() => {});
+      }
       const src = ctx.createMediaStreamSource(stream);
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 512;
       src.connect(analyser); // 不连到 destination，避免重复播放
       analysers.current.set(key, {
+        source: src,
         analyser,
         data: new Uint8Array(new ArrayBuffer(analyser.frequencyBinCount)),
         socketId,
+        stream,
+        type,
+        playbackGain,
       });
     } catch {
       /* ignore */
@@ -923,7 +943,14 @@ export function useWebRTC(socket: Socket, roomId: string) {
   };
 
   const detachAnalyser = (key: string) => {
+    const entry = analysers.current.get(key);
+    entry?.source.disconnect();
+    entry?.analyser.disconnect();
     analysers.current.delete(key);
+  };
+
+  const clearAnalysers = () => {
+    for (const key of analysers.current.keys()) detachAnalyser(key);
   };
 
   // 音量计：每 100ms 计算每路音频的 RMS，聚合到 socketId → 0~1
@@ -932,10 +959,12 @@ export function useWebRTC(socket: Socket, roomId: string) {
     volumeTimer.current = setInterval(() => {
       if (analysers.current.size === 0) {
         setSpeakingLevels({});
+        setSharedAudioLevels({});
         return;
       }
       const levels: Record<string, number> = {};
-      analysers.current.forEach(({ analyser, data, socketId }) => {
+      const sharedLevels: Record<string, number> = {};
+      analysers.current.forEach(({ analyser, data, socketId, stream, type, playbackGain }) => {
         analyser.getByteTimeDomainData(data);
         let sum = 0;
         for (let i = 0; i < data.length; i++) {
@@ -943,10 +972,20 @@ export function useWebRTC(socket: Socket, roomId: string) {
           sum += v * v;
         }
         const rms = Math.sqrt(sum / data.length);
-        const level = Math.min(1, rms * 3); // 放大便于观察
-        levels[socketId] = Math.max(levels[socketId] ?? 0, level);
+        const active = type === "voice" || (
+          audioCtxRef.current?.state === "running" && stream.getAudioTracks().some(
+            (track) => track.enabled && !track.muted && track.readyState === "live",
+          )
+        );
+        const gain = active ? playbackGain() : 0;
+        // 电平只表示输入信号强度：增益只作"是否在出声"的开关，不参与幅度。
+        // 否则音量会在电平里乘一次、又在 UI 的封顶比值里乘一次，低音量时电表几乎不动。
+        const level = gain > 0 ? Math.min(1, rms * 3) : 0; // 放大便于观察
+        const target = type === "application" ? sharedLevels : levels;
+        target[socketId] = Math.max(target[socketId] ?? 0, level);
       });
       setSpeakingLevels(levels);
+      setSharedAudioLevels(sharedLevels);
     }, 100);
   }, []);
 
@@ -956,6 +995,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
       volumeTimer.current = null;
     }
     setSpeakingLevels({});
+    setSharedAudioLevels({});
   }, []);
 
   // 分阶段媒体统计：采集 → 编码 → RTP 发送 → SFU → RTP 接收 → 解码。
@@ -1346,9 +1386,13 @@ export function useWebRTC(socket: Socket, roomId: string) {
         playPresenceTone("leave");
       }
       if (volumeTimer.current) clearInterval(volumeTimer.current);
+      clearAnalysers();
       if (statsTimer.current) clearInterval(statsTimer.current);
       if (screenAnalysisTimer.current)
         clearInterval(screenAnalysisTimer.current);
+      if (screenRampTimer.current) clearTimeout(screenRampTimer.current);
+      screenRampTimer.current = null;
+      screenRampGuardUntil.current = 0;
       if (screenAnalysisVideo.current)
         screenAnalysisVideo.current.srcObject = null;
       remoteAudioOutputs.current.forEach((output) => output.close());
@@ -1695,11 +1739,19 @@ export function useWebRTC(socket: Socket, roomId: string) {
                   }),
               );
           }
-          // 只对麦克风音频做音量分析（系统音频不计入"说话"）
-          if (
-            appData?.type !== "screen-audio" &&
-            appData?.type !== "application-audio"
-          ) {
+          if (sourceType === "application-audio") {
+            // 旁路分析不会连接扬声器；电平按当前实际播放路径的增益计算。
+            attachAnalyser(consumer.id, stream, peerId, "application", () => {
+              const element = audioEls.current.get(consumer.id);
+              if (!element || element.paused) return 0;
+              const output = remoteAudioOutputs.current.get(consumer.id);
+              if (output) return audioCtxRef.current?.state === "running"
+                ? output.gain.gain.value * masterOutputVolumeRef.current
+                : 0;
+              return element.muted ? 0 : element.volume;
+            });
+            startMeters();
+          } else if (isVoice) {
             attachAnalyser(consumer.id, stream, peerId);
             startMeters();
           }
@@ -2708,6 +2760,9 @@ export function useWebRTC(socket: Socket, roomId: string) {
       if (screenAnalysisTimer.current)
         clearInterval(screenAnalysisTimer.current);
       screenAnalysisTimer.current = null;
+      if (screenRampTimer.current) clearTimeout(screenRampTimer.current);
+      screenRampTimer.current = null;
+      screenRampGuardUntil.current = 0;
       if (screenAnalysisVideo.current)
         screenAnalysisVideo.current.srcObject = null;
       screenAnalysisVideo.current = null;
@@ -2731,7 +2786,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
 
       // 停止音量计和统计
       stopMeters();
-      analysers.current.clear();
+      clearAnalysers();
       receiveLossPrev.current = null;
       remoteLossPrev.current = null;
       videoCounterPrev.current = null;
@@ -2862,6 +2917,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
         sourceWidth: settings?.width,
         sourceHeight: settings?.height,
         nativeResolution,
+        rampGuard: Date.now() < screenRampGuardUntil.current,
       });
       screenActivityRef.current = activity;
       setScreenActivity(activity);
@@ -2900,6 +2956,35 @@ export function useWebRTC(socket: Socket, roomId: string) {
   );
 
   /**
+   * 起播宽限期：这段时间内即使画面被判为 motion 也保持 maintain-resolution，
+   * 避免码率还在爬升时编码器降分辨率换帧率。到期后按当前活跃度重新下发一次，
+   * motion 才恢复 maintain-framerate。
+   */
+  const armScreenRampGuard = useCallback(
+    (preset: ScreenPreset, maxFps: Fps, nativeResolution: boolean) => {
+      if (screenRampTimer.current) clearTimeout(screenRampTimer.current);
+      screenRampGuardUntil.current = Date.now() + SCREEN_RAMP_GRACE_MS;
+      screenRampTimer.current = setTimeout(() => {
+        screenRampTimer.current = null;
+        screenRampGuardUntil.current = 0;
+        applyScreenActivity(
+          preset,
+          maxFps,
+          screenActivityRef.current,
+          nativeResolution,
+        );
+      }, SCREEN_RAMP_GRACE_MS);
+    },
+    [applyScreenActivity],
+  );
+
+  const clearScreenRampGuard = useCallback(() => {
+    if (screenRampTimer.current) clearTimeout(screenRampTimer.current);
+    screenRampTimer.current = null;
+    screenRampGuardUntil.current = 0;
+  }, []);
+
+  /**
    * mediasoup 不读取视频像素，因此在发送端把画面缩到 160×90，每秒比较一次
    * 亮度变化。连续静止后降到 15fps；滚动/普通操作用 30fps；大面积变化时才
    * 使用用户选择的最高 60fps。采样只有约 1.4 万像素，开销远低于视频编码。
@@ -2925,7 +3010,9 @@ export function useWebRTC(socket: Socket, roomId: string) {
       screenAnalysisVideo.current = video;
       screenAnalysisCanvas.current = canvas;
       video.play().catch(() => {});
-      applyScreenActivity(preset, maxFps, "active", nativeResolution);
+      // 调用方在启动分析前已经按 initialActivity 下发过编码参数，这里不再重复
+      // 下发一次：多一次 setParameters 就是多一次编码器重配置，正好落在起播
+      // 码率爬坡的窗口里。
 
       screenAnalysisTimer.current = setInterval(() => {
         if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
@@ -3181,6 +3268,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
           throw lastProduceError ?? new Error("没有可用的屏幕共享视频编码器");
         screenProducer.current = producer;
         if (!screenDemandActiveRef.current) producer.pause();
+        armScreenRampGuard(preset, currentFps, nativeResolution);
         applyScreenActivity(
           preset,
           currentFps,
@@ -3213,6 +3301,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
       } catch (e) {
         console.error(`[screen share] ${startupStage}失败`, e);
         stopScreenAnalysis();
+        clearScreenRampGuard();
         if (screenProducer.current) {
           socket.emit("ms:close-producer", {
             producerId: screenProducer.current.id,
@@ -3255,10 +3344,12 @@ export function useWebRTC(socket: Socket, roomId: string) {
       shareAudio,
       screenGameMode,
       screenNativeResolution,
+      armScreenRampGuard,
       applyScreenActivity,
       startScreenAnalysis,
       startScreenAudio,
       stopScreenAnalysis,
+      clearScreenRampGuard,
     ],
   );
 
@@ -3403,6 +3494,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
 
   const stopScreenShare = useCallback(() => {
     stopScreenAnalysis();
+    clearScreenRampGuard();
     if (screenProducer.current) {
       socket.emit("ms:close-producer", {
         producerId: screenProducer.current.id,
@@ -3439,9 +3531,11 @@ export function useWebRTC(socket: Socket, roomId: string) {
     clearRemoteApplicationAudios,
     socket,
     stopScreenAnalysis,
+    clearScreenRampGuard,
   ]);
 
   const stopApplicationAudioShare = useCallback(() => {
+    detachAnalyser("local-application");
     const producer = applicationAudioProducer.current;
     if (producer) {
       socket.emit("ms:close-producer", { producerId: producer.id });
@@ -3502,6 +3596,11 @@ export function useWebRTC(socket: Socket, roomId: string) {
         applicationAudioStop.current = bridge.stop;
         applicationAudioProducer.current = producer;
         if (forceMutedRef.current) producer.pause();
+        attachAnalyser("local-application", pipeline.destination.stream,
+          socket.id ?? "local", "application", () =>
+            applicationAudioProducer.current?.paused === false &&
+            applicationAudioPipeline.current?.context.state === "running" ? 1 : 0);
+        startMeters();
         setApplicationAudioLabel(source.name);
         setIsApplicationAudioSharing(true);
       } catch (error) {
@@ -3558,6 +3657,11 @@ export function useWebRTC(socket: Socket, roomId: string) {
       applicationAudioStop.current = bridge.stop;
       applicationAudioProducer.current = producer;
       if (forceMutedRef.current) producer.pause();
+      attachAnalyser("local-application", pipeline.destination.stream,
+        socket.id ?? "local", "application", () =>
+          applicationAudioProducer.current?.paused === false &&
+          applicationAudioPipeline.current?.context.state === "running" ? 1 : 0);
+      startMeters();
       setApplicationAudioLabel("全部系统音频");
       setIsApplicationAudioSharing(true);
     } catch (error) {
@@ -3615,7 +3719,8 @@ export function useWebRTC(socket: Socket, roomId: string) {
     statsEnabled,
     toggleStats,
     exportMediaDiagnostics,
-    speakingLevels, // socketId → 0~1
+    speakingLevels, // socketId → 0~1，音量前的输入电平
+    sharedAudioLevels, // socketId → 0~1，同为音量前的输入电平；音量封顶由 UI 侧负责
     memberVolumes,
     setMemberVolume,
     toggleMemberMute,

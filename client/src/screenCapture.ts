@@ -9,6 +9,13 @@ export type ScreenPreset = keyof typeof SCREEN_PRESETS;
 export type ScreenFps = 30 | 60;
 export type ScreenActivity = 'static' | 'active' | 'motion';
 
+/**
+ * 拥塞控制从起播的低码率爬到可用码率需要数秒。此期间若允许
+ * maintain-framerate，编码器会降分辨率换帧率，观看端看到的是开头几秒画面
+ * 发糊、随后才变清晰。宽限期内一律保分辨率，宁可掉帧率。
+ */
+export const SCREEN_RAMP_GRACE_MS = 5_000;
+
 export interface ScreenEncodingPlan {
   preset: ScreenPreset;
   nativeResolution: boolean;
@@ -59,6 +66,7 @@ export function createScreenEncodingPlan({
   sourceWidth,
   sourceHeight,
   nativeResolution = false,
+  rampGuard = false,
 }: {
   preset: ScreenPreset;
   maxFps: ScreenFps;
@@ -66,6 +74,7 @@ export function createScreenEncodingPlan({
   sourceWidth?: number;
   sourceHeight?: number;
   nativeResolution?: boolean;
+  rampGuard?: boolean;
 }): ScreenEncodingPlan {
   const definition = SCREEN_PRESETS[preset];
   const width = positiveDimension(sourceWidth, definition.width);
@@ -83,7 +92,10 @@ export function createScreenEncodingPlan({
     scaleResolutionDownBy,
     fps: profile.fps,
     contentHint: activity === 'motion' ? 'motion' : 'detail',
-    degradationPreference: !nativeResolution && activity === 'motion' ? 'maintain-framerate' : 'maintain-resolution',
+    degradationPreference:
+      !nativeResolution && activity === 'motion' && !rampGuard
+        ? 'maintain-framerate'
+        : 'maintain-resolution',
   };
 }
 

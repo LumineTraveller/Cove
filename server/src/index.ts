@@ -1108,6 +1108,8 @@ function handleVoiceLeave(socketId: string, roomId: string) {
       producer.close();
       peer.producers.delete(producerId);
     }
+    peer.screenSendTransport?.close();
+    peer.screenSendTransport = null;
   }
   if (!wasInVoice || !members) return;
   [...members].forEach(mid => io.to(mid).emit('voice:user-left', { socketId }));
@@ -1986,11 +1988,21 @@ io.on('connection', socket => {
   });
 
   /** 2. 创建 WebRTC transport（发送 or 接收） */
+  socket.on('ms:screen-sharing-capabilities', (_data: unknown, cb: (data: unknown) => void) => {
+    cb({ dedicatedTransport: true });
+  });
+
   socket.on('ms:create-transport', async (
     data: unknown,
     cb: (params: unknown) => void,
   ) => {
     try {
+      const peer = peers.get(socket.id);
+      if (!peer?.roomId) return cb({ error: '请先加入房间' });
+      const request = data as { direction?: 'send' | 'recv'; purpose?: string };
+      const direction = request?.direction ?? (!peer.sendTransport ? 'send' : 'recv');
+      const isScreen = direction === 'send' && request?.purpose === 'screen';
+      if (isScreen && !voiceRooms.get(peer.roomId)?.has(socket.id)) return cb({ error: '请先加入语音' });
       const transport = await router.createWebRtcTransport({
         webRtcServer,
         enableUdp: true,
@@ -2000,15 +2012,18 @@ io.on('connection', socket => {
         // 初始估计而不是硬限速，后续仍会按接收端反馈自动升降。
         initialAvailableOutgoingBitrate: 10_000_000,
       });
+      if (peers.get(socket.id) !== peer || !peer.roomId || (isScreen && !voiceRooms.get(peer.roomId)?.has(socket.id))) {
+        transport.close();
+        return cb({ error: '语音会话已结束' });
+      }
 
       // 存到 peer（前两次调用对应 send/recv，按顺序）
-      const peer = peers.get(socket.id)!;
       // 客户端明确指定方向。兼容旧客户端：未指定时按调用顺序（首次=send）。
-      const direction: 'send' | 'recv' =
-        (data as { direction?: 'send' | 'recv' })?.direction ??
-        (!peer.sendTransport ? 'send' : 'recv');
-      const role = direction === 'send' ? 'send发送' : 'recv接收';
-      if (direction === 'send') {
+      const role = isScreen ? 'screen共享' : direction === 'send' ? 'send发送' : 'recv接收';
+      if (isScreen) {
+        peer.screenSendTransport?.close();
+        peer.screenSendTransport = transport;
+      } else if (direction === 'send') {
         peer.sendTransport?.close(); // 关掉重连前残留的旧通道，避免引用错位
         peer.sendTransport = transport;
       } else {
@@ -2032,6 +2047,7 @@ io.on('connection', socket => {
           transport.close();
           // 通道关闭时清空引用，确保重新加入语音时能正确重建收发通道
           if (peer.sendTransport === transport) peer.sendTransport = null;
+          if (peer.screenSendTransport === transport) peer.screenSendTransport = null;
           if (peer.recvTransport === transport) peer.recvTransport = null;
         }
       });
@@ -2049,6 +2065,7 @@ io.on('connection', socket => {
         iceCandidates:   transport.iceCandidates,
         dtlsParameters:  transport.dtlsParameters,
         sctpParameters:  transport.sctpParameters,
+        purpose: isScreen ? 'screen' : undefined,
       });
     } catch (e: unknown) {
       cb({ error: String(e) });
@@ -2060,9 +2077,11 @@ io.on('connection', socket => {
     { transportId, dtlsParameters }: { transportId: string; dtlsParameters: unknown },
     cb: () => void,
   ) => {
-    const peer = peers.get(socket.id)!;
+    const peer = peers.get(socket.id);
+    if (!peer) return cb();
     const transport =
       peer.sendTransport?.id === transportId ? peer.sendTransport :
+      peer.screenSendTransport?.id === transportId ? peer.screenSendTransport :
       peer.recvTransport?.id === transportId ? peer.recvTransport : null;
     if (!transport) return cb();
     try {
@@ -2071,15 +2090,29 @@ io.on('connection', socket => {
     cb();
   });
 
+  // Closing screen capture must never close the microphone/receive transports.
+  socket.on('ms:close-screen-transport', ({ transportId }: { transportId: string }) => {
+    const peer = peers.get(socket.id);
+    if (peer?.screenSendTransport?.id !== transportId) return;
+    peer.screenSendTransport.close();
+    peer.screenSendTransport = null;
+  });
+
   /** 4. 开始发送媒体（produce） */
   socket.on('ms:produce', async (
     { transportId, kind, rtpParameters, appData }:
       { transportId: string; kind: string; rtpParameters: unknown; appData: unknown },
     cb: (res: unknown) => void,
   ) => {
-    const peer = peers.get(socket.id)!;
-    const transport = peer.sendTransport?.id === transportId ? peer.sendTransport : null;
+    const peer = peers.get(socket.id);
+    if (!peer?.roomId) return cb({ error: '语音会话已结束' });
+    const transport = peer.sendTransport?.id === transportId ? peer.sendTransport :
+      peer.screenSendTransport?.id === transportId ? peer.screenSendTransport : null;
     if (!transport) return cb({ error: 'transport not found' });
+    if (transport === peer.screenSendTransport &&
+        !['screen', 'screen-audio'].includes((appData as { type?: string })?.type ?? '')) {
+      return cb({ error: '共享通道仅用于屏幕及共享音频' });
+    }
 
     try {
       const producer = await transport.produce({
@@ -2087,6 +2120,10 @@ io.on('connection', socket => {
         rtpParameters: rtpParameters as never,
         appData: appData as never,
       });
+      if (peers.get(socket.id) !== peer || !peer.roomId || transport.closed) {
+        producer.close();
+        return cb({ error: '语音会话已结束' });
+      }
 
       // 每个连接的同类来源只能保留一条。高延迟网络下重复点击“加入语音”
       // 可能并发发布两条 mic；关闭旧流可从服务端兜底避免双重播放。

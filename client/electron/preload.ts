@@ -6,10 +6,8 @@ import type { RemoteControlInput } from "./remote-control";
 contextBridge.exposeInMainWorld("coveUpdater", {
   getState: (): Promise<UpdateState> =>
     ipcRenderer.invoke("cove:update:get-state"),
-  setServerUrl: (serverUrl: string): Promise<boolean> =>
-    ipcRenderer.invoke("cove:update:set-server-url", serverUrl),
-  checkNow: (serverUrl?: string): Promise<UpdateState> =>
-    ipcRenderer.invoke("cove:update:check", serverUrl),
+  checkNow: (): Promise<UpdateState> =>
+    ipcRenderer.invoke("cove:update:check"),
   installNow: (): Promise<boolean> => ipcRenderer.invoke("cove:update:install"),
   openLog: (): Promise<boolean> => ipcRenderer.invoke("cove:update:open-log"),
   onState: (listener: (state: UpdateState) => void) => {
