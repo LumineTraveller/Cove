@@ -5,17 +5,14 @@ import {
 } from 'react-native';
 import { checkAndroidUpdate, getMobileUpdateServerBaseUrl, releaseURL, SOURCE_NAMES, withUpdateTimeout, type InstalledVersion, type UpdateCandidate, type UpdateSource } from '../mobileUpdate';
 import { colors } from '../theme';
+import { UPDATE_DOWNLOAD_BASE_URL } from '../updateConfig';
 
 interface UpdateBridge {
   getInstalledVersion(): Promise<InstalledVersion>;
   fetchUpdateFeed(source: UpdateSource, serverURL: string): Promise<string>;
 }
-const UpdateContext = createContext<{ version: string; check: () => void; setServerURL: (serverURL: string) => void } | null>(null);
+const UpdateContext = createContext<{ version: string; check: () => void } | null>(null);
 const RECHECK_INTERVAL = 6 * 60 * 60 * 1000;
-
-export function useSetMobileUpdateServerURL() {
-  return useContext(UpdateContext)?.setServerURL;
-}
 
 export function MobileUpdateButton() {
   const updater = useContext(UpdateContext);
@@ -37,17 +34,8 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
   const [opening, setOpening] = useState(false);
   const mounted = useRef(false);
   const running = useRef(false);
-  const serverURLRef = useRef('');
   const nextAutomaticCheck = useRef(0);
   const prompted = useRef<number | null>(null);
-
-  const setServerURL = useCallback((value: string) => {
-    if (serverURLRef.current === value) return;
-    serverURLRef.current = value;
-    nextAutomaticCheck.current = 0;
-    setCandidate(null);
-    setVisible(false);
-  }, []);
 
   const check = useCallback(async (manual = false) => {
     if (Platform.OS !== 'android') return;
@@ -63,13 +51,11 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
       const installed = await withUpdateTimeout(bridge.getInstalledVersion(), 5000);
       if (!mounted.current) return;
       setVersion(installed.versionName);
-      const selectedServerURL = serverURLRef.current;
-      const updateServerURL = getMobileUpdateServerBaseUrl(selectedServerURL);
+      const updateServerURL = getMobileUpdateServerBaseUrl(UPDATE_DOWNLOAD_BASE_URL);
       const sources: UpdateSource[] = updateServerURL ? ['github', 'cloud'] : ['github'];
       const result = await checkAndroidUpdate(installed,
         s => bridge.fetchUpdateFeed(s, s === 'cloud' ? updateServerURL ?? '' : ''), sources);
       if (!mounted.current) return;
-      if (serverURLRef.current !== selectedServerURL) return;
       // Retry soon when one mirror is unavailable; that mirror may carry a newer release.
       nextAutomaticCheck.current = Date.now() + (result.errors.length ? 60_000 : RECHECK_INTERVAL);
       setCandidate(result.candidate);
@@ -104,7 +90,7 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
     if (!candidate || opening) return;
     setOpening(true);
     try {
-      await Linking.openURL(releaseURL(candidate.release, source, download, serverURLRef.current));
+      await Linking.openURL(releaseURL(candidate.release, source, download));
       if (mounted.current) setVisible(false);
     } catch {
       if (mounted.current) setMessage('无法打开浏览器，请尝试另一更新源或打开发布页面。');
@@ -112,7 +98,7 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <UpdateContext.Provider value={{ version, check: () => { void check(true); }, setServerURL }}>
+    <UpdateContext.Provider value={{ version, check: () => { void check(true); } }}>
       {children}
       <Modal visible={visible} transparent animationType="fade" onRequestClose={() => setVisible(false)}>
         <View style={styles.overlay}>

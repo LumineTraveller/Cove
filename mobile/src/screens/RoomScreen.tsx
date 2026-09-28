@@ -5,6 +5,7 @@ import {
   ScrollView,
   StatusBar,
   StyleSheet,
+  Switch,
   Text,
   TouchableOpacity,
   View,
@@ -35,6 +36,8 @@ import {
   X,
   Settings,
   SlidersHorizontal,
+  ScreenShare,
+  Square,
 } from 'lucide-react-native';
 import { ZoomableScreenVideo } from '../components/ZoomableScreenVideo';
 import { Avatar } from '../components/Avatar';
@@ -112,6 +115,8 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
   const joinGeneration = useRef(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [audioSettingsOpen, setAudioSettingsOpen] = useState(false);
+  const [screenShareSettingsOpen, setScreenShareSettingsOpen] = useState(false);
+  const [includeScreenAudio, setIncludeScreenAudio] = useState(false);
   const [settingsLimit, setSettingsLimit] = useState(room.maxMembers ? String(room.maxMembers) : '');
   const [settingsPassword, setSettingsPassword] = useState('');
   const [settingsError, setSettingsError] = useState<string | null>(null);
@@ -359,6 +364,34 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
           )}
         </View>
 
+        {media.canShareScreen !== false && (
+          <View style={styles.ownScreenCard} testID="own-screen-sharing">
+            <View style={styles.ownScreenCopy}>
+              <ScreenShare size={20} color={media.sharingScreen ? colors.green : colors.cyan} />
+              <View style={styles.ownScreenText}>
+                <Text style={styles.sectionTitle}>{media.sharingScreen ? '正在共享我的屏幕' : '共享我的屏幕'}</Text>
+                <Text style={styles.sectionSubtitle}>{media.sharingScreen
+                  ? `${media.sharingScreenAudio ? '画面与播放音频' : '仅画面'} · ${media.screenViewerCount} 人观看`
+                  : media.screenSharingBusy ? '等待系统授权或连接…' : media.inVoice ? '将手机画面分享给房间成员' : '加入语音后即可共享'}</Text>
+              </View>
+            </View>
+            {media.sharingScreen || media.screenSharingBusy ? (
+              <TouchableOpacity style={styles.stopShareButton} onPress={media.stopScreenShare} accessibilityRole="button" accessibilityLabel={media.sharingScreen ? '停止共享我的屏幕' : '取消发起屏幕共享'}>
+                <Square size={15} color={colors.red} /><Text style={styles.stopShareText}>{media.sharingScreen ? '停止' : '取消'}</Text>
+              </TouchableOpacity>
+            ) : (
+              <TouchableOpacity style={[styles.startShareButton, !media.inVoice && styles.controlDisabled]} disabled={!media.inVoice} onPress={() => { media.clearScreenSharingError(); setScreenShareSettingsOpen(true); }} accessibilityRole="button" accessibilityLabel="打开屏幕共享设置">
+                <Text style={styles.startShareText}>共享</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        )}
+        {media.screenSharingError && (
+          <TouchableOpacity style={styles.errorBanner} onPress={media.clearScreenSharingError} accessibilityLabel="关闭屏幕共享错误提示">
+            <ShieldAlert size={18} color={colors.red} /><Text style={styles.errorText}>{media.screenSharingError}</Text>
+          </TouchableOpacity>
+        )}
+
         {screenURL && media.availableScreens.length > 1 && (
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.shareSwitcher}>
             {media.availableScreens.map(screen => {
@@ -492,6 +525,29 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
         )}
       </View>
 
+      <Modal visible={screenShareSettingsOpen} animationType="slide" onRequestClose={() => { if (media.screenSharingBusy) media.stopScreenShare(); setScreenShareSettingsOpen(false); }}>
+        <SafeAreaView style={styles.toolModal} edges={['top', 'right', 'bottom', 'left']}>
+          <View style={styles.toolHeader}>
+            <View style={styles.toolHeaderIcon}><ScreenShare size={19} color={colors.cyan} /></View>
+            <View style={styles.headerCopy}><Text style={styles.toolTitle}>共享手机屏幕</Text><Text style={styles.toolSubtitle}>画面共享 · 可选播放音频</Text></View>
+            <TouchableOpacity style={styles.iconButton} onPress={() => { if (media.screenSharingBusy) media.stopScreenShare(); setScreenShareSettingsOpen(false); }} accessibilityLabel="关闭屏幕共享设置"><X size={20} color={colors.textMuted} /></TouchableOpacity>
+          </View>
+          <ScrollView contentContainerStyle={styles.audioSettingsContent}>
+            <View style={styles.screenShareOption}>
+              <View style={styles.ownScreenText}><Text style={styles.sectionTitle}>同时共享音频</Text><Text style={styles.sectionSubtitle}>共享视频、游戏等应用播放的声音，不改变麦克风设置。</Text></View>
+              <Switch value={includeScreenAudio && !!media.canShareScreenAudio} disabled={media.screenSharingBusy || !media.canShareScreenAudio} onValueChange={setIncludeScreenAudio} accessibilityLabel="同时共享音频" trackColor={{ false: colors.borderStrong, true: colors.cyan }} thumbColor={colors.text} />
+            </View>
+            <Text style={styles.sectionSubtitle}>{media.canShareScreenAudio ? '部分应用禁止音频录制，其声音不会被共享。Cove 通话声音不会重复共享。' : '共享音频需要 Android 10 或更新版本，此设备仍可共享画面。'}</Text>
+            <View style={styles.screenPrivacyNote}><ShieldAlert size={20} color={colors.amber} /><Text style={styles.screenPrivacyText}>开始后请在系统窗口确认共享范围。注意保护屏幕上的聊天、通知和个人信息；可随时在此处或系统录屏指示中停止。</Text></View>
+            {media.screenSharingError && <Text style={styles.errorText}>{media.screenSharingError}</Text>}
+            <TouchableOpacity style={[styles.submit, (media.screenSharingBusy || !media.inVoice) && styles.controlDisabled]} disabled={media.screenSharingBusy || !media.inVoice} accessibilityRole="button" accessibilityLabel="开始共享手机屏幕" onPress={async () => { if (await media.startScreenShare(includeScreenAudio && !!media.canShareScreenAudio)) setScreenShareSettingsOpen(false); }}>
+              {media.screenSharingBusy ? <ActivityIndicator color="#164e63" /> : <ScreenShare size={20} color="#164e63" />}
+              <Text style={styles.submitText}>{media.screenSharingBusy ? '正在启动共享…' : '开始共享'}</Text>
+            </TouchableOpacity>
+          </ScrollView>
+        </SafeAreaView>
+      </Modal>
+
       <Modal visible={audioSettingsOpen} animationType="slide" onRequestClose={() => setAudioSettingsOpen(false)}>
         <SafeAreaView style={styles.toolModal} edges={['top', 'right', 'bottom', 'left']}>
           <View style={styles.toolHeader}>
@@ -505,7 +561,7 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
           <ScrollView contentContainerStyle={styles.audioSettingsContent} showsVerticalScrollIndicator={false}>
             <View style={styles.audioSettingsSection}>
               <Text style={styles.sectionTitle}>麦克风降噪</Text>
-              <Text style={styles.noiseHint}>默认使用 RNNoise 改进降噪。切换后对当前通话立即生效。</Text>
+              <Text style={styles.noiseHint}>默认使用系统降噪，也可切换 RNNoise。两种降噪不会叠加。</Text>
               {media.noiseSwitching && <Text style={styles.noiseHint}>正在切换降噪…</Text>}
               {NOISE_MODES.map((option) => {
                 const selected = media.noiseMode === option.value;
@@ -513,14 +569,14 @@ export function RoomScreen({ socket, config, room, sessionReady, onBack }: Props
                   <TouchableOpacity
                     key={option.value}
                     style={[styles.noiseOption, selected && styles.noiseOptionActive]}
-                    disabled={audioSettingsBusy}
+                    disabled={audioSettingsBusy || option.disabled === true}
                     accessibilityRole="radio"
                     accessibilityLabel={option.label}
-                    accessibilityState={{ checked: selected, disabled: audioSettingsBusy }}
+                    accessibilityState={{ checked: selected, disabled: audioSettingsBusy || option.disabled === true }}
                     onPress={() => { void media.selectNoiseMode(option.value); }}
-                    activeOpacity={0.78}
+                    activeOpacity={option.disabled ? 1 : 0.78}
                   >
-                    <Text style={[styles.noiseOptionText, selected && styles.noiseOptionTextActive]}>{option.label}</Text>
+                    <Text style={[styles.noiseOptionText, selected && styles.noiseOptionTextActive, option.disabled && styles.noiseOptionTextDisabled]}>{option.label}</Text>
                     {selected ? <CheckCircle2 size={18} color={colors.cyan} /> : null}
                   </TouchableOpacity>
                 );
@@ -709,6 +765,16 @@ const styles = StyleSheet.create({
   errorBanner: { flexDirection: 'row', alignItems: 'center', gap: 9, marginHorizontal: 14, marginBottom: 10, padding: 11, borderWidth: 1, borderColor: 'rgba(248,113,113,0.2)', borderRadius: 13, backgroundColor: colors.redSoft },
   errorText: { flex: 1, color: colors.red, fontSize: 11, lineHeight: 16 },
   screenStage: { position: 'relative', aspectRatio: 16 / 9, marginHorizontal: 14, marginBottom: 14, overflow: 'hidden', borderWidth: 1, borderColor: colors.border, borderRadius: 20, backgroundColor: '#020203' },
+  ownScreenCard: { marginHorizontal: 14, marginBottom: 14, padding: 14, borderRadius: 16, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, flexDirection: 'row', alignItems: 'center', gap: 10 },
+  ownScreenCopy: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: 10 },
+  ownScreenText: { flex: 1, minWidth: 0, gap: 5 },
+  startShareButton: { minWidth: 62, minHeight: 44, borderRadius: 12, backgroundColor: 'rgba(103,232,249,0.12)', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 12 },
+  startShareText: { color: colors.cyan, fontSize: 14, fontWeight: '700' },
+  stopShareButton: { minHeight: 44, borderRadius: 12, backgroundColor: 'rgba(248,113,113,0.10)', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 12, gap: 6 },
+  stopShareText: { color: colors.red, fontSize: 14, fontWeight: '700' },
+  screenShareOption: { flexDirection: 'row', alignItems: 'center', gap: 14, padding: 16, borderRadius: 16, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
+  screenPrivacyNote: { flexDirection: 'row', gap: 12, paddingVertical: 12 },
+  screenPrivacyText: { flex: 1, color: colors.textMuted, fontSize: 13, lineHeight: 21 },
   screenEmpty: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 20 },
   screenEmptyIcon: { width: 58, height: 58, marginBottom: 12, borderRadius: 19, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.045)' },
   screenEmptyTitle: { color: colors.text, fontSize: 14, fontWeight: '700' },
@@ -765,6 +831,7 @@ const styles = StyleSheet.create({
   noiseOptionActive: { borderColor: colors.cyan, backgroundColor: colors.cyanSoft },
   noiseOptionText: { flex: 1, marginRight: 10, color: colors.text, fontSize: 15, fontWeight: '600' },
   noiseOptionTextActive: { color: colors.cyan },
+  noiseOptionTextDisabled: { color: colors.textMuted },
   fullscreen: { flex: 1, backgroundColor: '#000' },
   closeFullscreen: { position: 'absolute', top: 18, right: 18, width: 42, height: 42, alignItems: 'center', justifyContent: 'center', borderRadius: 14, backgroundColor: 'rgba(0,0,0,0.7)' },
   toolModal: { flex: 1, backgroundColor: colors.background },

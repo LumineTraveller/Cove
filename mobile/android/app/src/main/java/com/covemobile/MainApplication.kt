@@ -2,9 +2,9 @@ package com.covemobile
 
 import android.app.Application
 import android.media.AudioAttributes
+import android.media.AudioFormat
 import com.covemobile.audio.AudioRouteRuntime
 import com.covemobile.audio.MicrophoneNoiseRuntime
-import com.covemobile.audio.RnnoiseAudioInterceptor
 import com.facebook.react.PackageList
 import com.facebook.react.ReactApplication
 import com.facebook.react.ReactHost
@@ -35,17 +35,28 @@ class MainApplication : Application(), ReactApplication {
       .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
       .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
       .build()
-    // 保留硬件 NS 实例，便于在 RNNoise / 系统降噪之间运行时切换；
-    // RNNoise 模式会关掉系统 NS，避免双重降噪损伤语音。
+    // System mode uses WebRTC software NS. Keep hardware NS off to avoid
+    // stacking it with RNNoise; retain hardware echo cancellation.
     val audioDeviceModule = JavaAudioDeviceModule.builder(this)
       .setAudioAttributes(audioAttributes)
       .setUseHardwareAcousticEchoCanceler(true)
-      .setUseHardwareNoiseSuppressor(true)
+      .setUseHardwareNoiseSuppressor(false)
+      .setInputSampleRate(48_000)
+      .setUseStereoInput(false)
+      .setAudioFormat(AudioFormat.ENCODING_PCM_16BIT)
+      .setAudioRecordStateCallback(object : JavaAudioDeviceModule.AudioRecordStateCallback {
+        override fun onWebRtcAudioRecordStart() {
+          MicrophoneNoiseRuntime.onAudioRecordStarted()
+        }
+
+        override fun onWebRtcAudioRecordStop() {
+          MicrophoneNoiseRuntime.onAudioRecordStopped()
+        }
+      })
       .createAudioDeviceModule()
     WebRTCModuleOptions.getInstance().audioDeviceModule = audioDeviceModule
+    WebRTCModuleOptions.getInstance().enableMediaProjectionService = true
 
-    val interceptorAttached = RnnoiseAudioInterceptor.attach(audioDeviceModule)
-    MicrophoneNoiseRuntime.bind(audioDeviceModule, interceptorAttached)
     AudioRouteRuntime.bind(this, audioDeviceModule)
 
     loadReactNative(this)

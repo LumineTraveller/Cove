@@ -1,3 +1,6 @@
 <resources>
     <string name="app_name">Cove</string>
+    <string name="media_projection_notification_title">Cove 正在共享屏幕</string>
+    <string name="media_projection_notification_text">返回 Cove 可停止共享。请注意保护屏幕上的个人信息。</string>
+    <string name="ongoing_notification_channel_name">屏幕共享</string>
 </resources>

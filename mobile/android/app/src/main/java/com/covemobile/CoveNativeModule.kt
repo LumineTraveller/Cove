@@ -120,11 +120,13 @@ class CoveNativeModule(private val reactContext: ReactApplicationContext) :
     try {
       val status = MicrophoneNoiseRuntime.status()
       val map = Arguments.createMap()
-      map.putString("mode", status["mode"] as? String ?: "rnnoise")
+      map.putString("mode", status["mode"] as? String ?: "system")
       map.putString("effectiveMode", status["effectiveMode"] as? String ?: "system")
       map.putBoolean("rnnoiseReady", status["rnnoiseReady"] as? Boolean ?: false)
       map.putBoolean("interceptorActive", status["interceptorActive"] as? Boolean ?: false)
       map.putBoolean("processing", status["processing"] as? Boolean ?: false)
+      map.putBoolean("systemNoiseSuppressorEnabled", status["systemNoiseSuppressorEnabled"] as? Boolean ?: false)
+      map.putString("error", status["error"] as? String)
       promise.resolve(map)
     } catch (error: Exception) {
       promise.reject("NOISE_STATUS", error.message, error)

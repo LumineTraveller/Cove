@@ -1,6 +1,8 @@
+import { UPDATE_DOWNLOAD_BASE_URL } from './updateConfig';
+
 export type UpdateSource = 'github' | 'cloud';
 export const UPDATE_SOURCES: UpdateSource[] = ['github', 'cloud'];
-export const SOURCE_NAMES = { github: 'GitHub', cloud: '当前服务器' };
+export const SOURCE_NAMES = { github: 'GitHub', cloud: '更新服务器' };
 
 export interface InstalledVersion { versionName: string; versionCode: number; androidApi: number }
 export interface AndroidRelease {
@@ -44,7 +46,7 @@ export function parseUpdateFeed(raw: string): AndroidRelease | null {
   return { ...r, sha256: r.sha256.toLowerCase() };
 }
 
-/** 自动更新只从当前选择的 HTTPS 服务器读取清单。 */
+/** 自动更新只使用配置的 HTTPS 下载地址，不依赖聊天服务器或登录状态。 */
 export function getMobileUpdateServerBaseUrl(serverURL: string): string | null {
   try {
     const url = new URL(serverURL.trim());
@@ -53,11 +55,11 @@ export function getMobileUpdateServerBaseUrl(serverURL: string): string | null {
   } catch { return null; }
 }
 
-export function releaseURL(release: AndroidRelease, source: UpdateSource, download = false, serverURL = ''): string {
+export function releaseURL(release: AndroidRelease, source: UpdateSource, download = false, serverURL = UPDATE_DOWNLOAD_BASE_URL): string {
   if (!UPDATE_SOURCES.includes(source)) throw new Error('未知更新源');
   if (source === 'cloud') {
     const base = getMobileUpdateServerBaseUrl(serverURL);
-    if (!base) throw new Error('当前服务器没有可用的 HTTPS 更新地址');
+    if (!base) throw new Error('下载服务器没有可用的 HTTPS 更新地址');
     return download
       ? `${base}/releases/${encodeURIComponent(release.tag)}/${encodeURIComponent(release.filename)}`
       : `${base}/downloads/Cove-Mobile.apk`;
@@ -80,7 +82,7 @@ export async function checkAndroidUpdate(
   }));
   const successful = results.filter((r): r is NonNullable<typeof r> => r !== null);
   if (!successful.length) throw new Error(sources.includes('cloud')
-    ? 'GitHub 和当前服务器均无法检查更新，请检查网络后重试'
+    ? 'GitHub 和更新服务器均无法检查更新，请检查网络后重试'
     : 'GitHub 无法检查更新，请检查网络后重试');
   const newer = successful.filter(r => r.release && r.release.versionCode > installed.versionCode)
     .sort((a, b) => b.release!.versionCode - a.release!.versionCode

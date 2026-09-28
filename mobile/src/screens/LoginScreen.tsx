@@ -19,7 +19,7 @@ import type { AccountAuthRequest, AccountAuthMode } from '../accountAuth';
 import { validAccountEmail } from '../accountAuth';
 import { colors } from '../theme';
 import { httpsOrigin } from '../serverCertificate';
-import { MobileUpdateButton, useSetMobileUpdateServerURL } from '../components/MobileUpdater';
+import { MobileUpdateButton } from '../components/MobileUpdater';
 import type { RememberedServer } from '../storage';
 import { normalizeServerSecurityURL, readServerSecurityStatus, type ServerSecurityStatus } from '../serverSecurity';
 import { useKeyboardInset } from '../useKeyboardInset';
@@ -38,7 +38,6 @@ interface Props {
 }
 
 export function LoginScreen({ saving, error, onSubmit, rememberedServers = [], onForget, onProbeServerSecurity }: Props) {
-  const setUpdateServerURL = useSetMobileUpdateServerURL();
   const keyboard = useKeyboardInset(18);
   const inputRefs = useRef<Record<string, TextInput | null>>({});
   const keyboardBindInput = keyboard.bindInput;
@@ -55,7 +54,6 @@ export function LoginScreen({ saving, error, onSubmit, rememberedServers = [], o
   const [serverPassword, setServerPassword] = useState('');
   const [bootstrapToken, setBootstrapToken] = useState('');
   const [serverURL, setServerURL] = useState(rememberedServers[0]?.serverURL ?? '');
-  useEffect(() => { setUpdateServerURL?.(serverURL); }, [serverURL, setUpdateServerURL]);
   const [certificateException, setCertificateException] = useState(rememberedServers[0]?.allowInvalidServerCertificate === true);
   const [securityProbe, setSecurityProbe] = useState<ServerSecurityProbe>({ phase: 'idle' });
   useEffect(() => {

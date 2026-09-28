@@ -94,25 +94,59 @@ jobs:
         working-directory: mobile
         run: node scripts/verify-release.cjs --feed "$RELEASE_TAG"
 
+      - name: Inspect APK manifest and packaged ABIs
+        working-directory: mobile
+        shell: bash
+        run: |
+          version="${RELEASE_TAG#mobile-v}"
+          apk="build/updates/$RELEASE_TAG/Cove-Mobile-$version.apk"
+          analyzer="$(command -v apkanalyzer || true)"
+          metadata="android/app/build/outputs/apk/release/output-metadata.json"
+          if [[ -z "$analyzer" || ! -x "$analyzer" ]]; then
+            echo "Missing apkanalyzer on PATH" >&2
+            exit 1
+          fi
+          app_id=$("$analyzer" manifest application-id "$apk")
+          apk_version=$("$analyzer" manifest version-name "$apk")
+          apk_code=$("$analyzer" manifest version-code "$apk")
+          apk_min_api=$("$analyzer" manifest min-sdk "$apk")
+          metadata_code=$(node -p "require('./$metadata').elements[0].versionCode")
+          metadata_min_api=$(node -p "require('./$metadata').minSdkVersionForDexing")
+          [[ "$app_id" == "com.cove.mobile" ]]
+          [[ "$apk_version" == "$version" ]]
+          [[ "$apk_code" == "$metadata_code" ]]
+          [[ "$apk_min_api" == "$metadata_min_api" ]]
+          unzip -Z1 "$apk" | grep -q '^lib/arm64-v8a/'
+          unzip -Z1 "$apk" | grep -q '^lib/armeabi-v7a/'
+          if unzip -Z1 "$apk" | grep -Eq '^lib/(x86|x86_64)/'; then
+            echo "Unexpected x86 ABI in the mobile release APK" >&2
+            exit 1
+          fi
+
       - name: Create GitHub release
         working-directory: mobile
         shell: bash
         run: |
           version="${RELEASE_TAG#mobile-v}"
           apk="build/updates/$RELEASE_TAG/Cove-Mobile-$version.apk"
+          feed="build/updates/$RELEASE_TAG/update.json"
           if [[ ! -f "$apk" ]]; then
             echo "Missing release asset: $apk" >&2
             exit 1
           fi
+          if [[ ! -f "$feed" ]]; then
+            echo "Missing release feed: $feed" >&2
+            exit 1
+          fi
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" "$apk" --clobber --repo "$GITHUB_REPOSITORY"
+            gh release upload "$RELEASE_TAG" "$apk" "$feed" --clobber --repo "$GITHUB_REPOSITORY"
             gh release edit "$RELEASE_TAG" \
               --title "cove mobile $version" \
               --notes-file RELEASE_NOTES.md \
               --latest=false \
               --repo "$GITHUB_REPOSITORY"
           else
-            gh release create "$RELEASE_TAG" "$apk" \
+            gh release create "$RELEASE_TAG" "$apk" "$feed" \
               --verify-tag \
               --title "cove mobile $version" \
               --notes-file RELEASE_NOTES.md \
@@ -126,5 +160,5 @@ jobs:
           version="${RELEASE_TAG#mobile-v}"
           asset="Cove-Mobile-$version.apk"
           gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease,assets \
-            --jq "if .isDraft or .isPrerelease then error(\"Release is not public\") else ([.assets[].name] | index(\"$asset\")) end" \
-            | grep -qx '0'
+            --jq "if .isDraft or .isPrerelease then error(\"Release is not public\") else ([.assets[].name] | (index(\"$asset\") != null and index(\"update.json\") != null)) end" \
+            | grep -qx 'true'

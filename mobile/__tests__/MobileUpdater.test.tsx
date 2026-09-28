@@ -1,7 +1,8 @@
 import React from 'react';
 import TestRenderer, { act } from 'react-test-renderer';
 import { AppState, Linking, Modal, NativeModules, Platform, Text, TouchableOpacity, type AppStateStatus } from 'react-native';
-import { MobileUpdateButton, MobileUpdateProvider, useSetMobileUpdateServerURL } from '../src/components/MobileUpdater';
+import { MobileUpdateButton, MobileUpdateProvider } from '../src/components/MobileUpdater';
+import * as updateConfig from '../src/updateConfig';
 
 jest.setTimeout(20000);
 
@@ -22,6 +23,7 @@ const press = async (label: string) => {
 
 beforeEach(() => {
   jest.useFakeTimers();
+  jest.replaceProperty(updateConfig, 'UPDATE_DOWNLOAD_BASE_URL', 'https://download.example.test');
   Platform.OS = 'android';
   NativeModules.CoveMobileUpdate = { getInstalledVersion: getVersion, fetchUpdateFeed: fetchFeed };
   getVersion.mockReset().mockResolvedValue({ versionName: '0.3.1', versionCode: 5, androidApi: 36 });
@@ -34,38 +36,67 @@ afterEach(async () => {
   jest.restoreAllMocks();
   jest.useRealTimers();
 });
-function SelectedServer({ url }: { url: string }) {
-  const setServerURL = useSetMobileUpdateServerURL();
-  React.useEffect(() => { setServerURL?.(url); }, [setServerURL, url]);
-  return null;
+async function mount() {
+  await act(async () => { renderer = TestRenderer.create(<MobileUpdateProvider><MobileUpdateButton /></MobileUpdateProvider>); });
 }
 
-async function mount(serverURL = 'https://selected.example.test/cove') {
-  await act(async () => { renderer = TestRenderer.create(<MobileUpdateProvider><SelectedServer url={serverURL} /><MobileUpdateButton /></MobileUpdateProvider>); });
-}
-
-test('automatically detects on launch, shows notes, allows mirror switch and browser APK download', async () => {
+test('launch without any login or chat server uses configured update server and browser APK download', async () => {
   await mount();
   expect(visible()).toBe(false);
   await act(async () => jest.advanceTimersByTimeAsync(1001));
   expect(getVersion).toHaveBeenCalledTimes(1);
   expect(fetchFeed).toHaveBeenCalledTimes(2);
-  expect(fetchFeed).toHaveBeenCalledWith('cloud', 'https://selected.example.test/cove');
+  expect(fetchFeed).toHaveBeenCalledWith('cloud', updateConfig.UPDATE_DOWNLOAD_BASE_URL);
   expect(visible()).toBe(true);
   expect(JSON.stringify(renderer.toJSON())).toContain('更新说明');
   expect(Linking.openURL).not.toHaveBeenCalled();
-  await press('当前服务器');
+  await press('更新服务器');
   await press('在浏览器中下载更新');
-  expect(Linking.openURL).toHaveBeenCalledWith('https://selected.example.test/cove/releases/mobile-v0.4.0/Cove-Mobile-0.4.0.apk');
+  expect(Linking.openURL).toHaveBeenCalledWith(`${updateConfig.UPDATE_DOWNLOAD_BASE_URL}/releases/mobile-v0.4.0/Cove-Mobile-0.4.0.apk`);
   expect(visible()).toBe(false);
 });
 
-test('an HTTP current server is not used as a mobile update source', async () => {
-  await mount('http://selected.example.test');
+test('an insecure download configuration falls back to GitHub', async () => {
+  jest.replaceProperty(updateConfig, 'UPDATE_DOWNLOAD_BASE_URL', 'http://download.example.test');
+  await mount();
   await act(async () => jest.advanceTimersByTimeAsync(1001));
   expect(fetchFeed).toHaveBeenCalledTimes(1);
   expect(fetchFeed).toHaveBeenCalledWith('github', '');
-  expect(JSON.stringify(renderer.toJSON())).not.toContain('当前服务器');
+  expect(JSON.stringify(renderer.toJSON())).not.toContain('更新服务器');
+});
+
+test('blank download address checks GitHub only on startup and manual retry', async () => {
+  jest.replaceProperty(updateConfig, 'UPDATE_DOWNLOAD_BASE_URL', '');
+  await mount();
+  await act(async () => jest.advanceTimersByTimeAsync(1001));
+  expect(fetchFeed.mock.calls).toEqual([['github', '']]);
+  expect(JSON.stringify(renderer.toJSON())).not.toContain('更新服务器');
+  await press('稍后再说');
+  await press('检查手机端更新');
+  expect(fetchFeed.mock.calls).toEqual([['github', ''], ['github', '']]);
+  await press('在浏览器中下载更新');
+  expect(Linking.openURL).toHaveBeenCalledWith('https://github.com/LumineTraveller/Cove/releases/download/mobile-v0.4.0/Cove-Mobile-0.4.0.apk');
+});
+
+test('custom download address is used consistently by startup, manual check and APK download', async () => {
+  jest.replaceProperty(updateConfig, 'UPDATE_DOWNLOAD_BASE_URL', 'https://download.example.test/cove/');
+  await mount();
+  await act(async () => jest.advanceTimersByTimeAsync(1001));
+  expect(fetchFeed).toHaveBeenCalledWith('cloud', 'https://download.example.test/cove');
+  await press('稍后再说');
+  await press('检查手机端更新');
+  expect(fetchFeed).toHaveBeenCalledTimes(4);
+  await press('在浏览器中下载更新');
+  expect(Linking.openURL).toHaveBeenCalledWith('https://download.example.test/cove/releases/mobile-v0.4.0/Cove-Mobile-0.4.0.apk');
+});
+
+test('GitHub failure does not prevent startup update detection from configured server', async () => {
+  fetchFeed.mockImplementation(source => source === 'github' ? Promise.reject(new Error('offline')) : Promise.resolve(feed));
+  await mount();
+  await act(async () => jest.advanceTimersByTimeAsync(1001));
+  expect(visible()).toBe(true);
+  await press('在浏览器中下载更新');
+  expect(Linking.openURL).toHaveBeenCalledWith(`${updateConfig.UPDATE_DOWNLOAD_BASE_URL}/releases/mobile-v0.4.0/Cove-Mobile-0.4.0.apk`);
 });
 
 test('automatic network failure stays silent; manual check explains failure', async () => {

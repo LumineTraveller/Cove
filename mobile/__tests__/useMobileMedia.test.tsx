@@ -3,6 +3,15 @@ import TestRenderer, { act } from 'react-test-renderer';
 import { useMobileMedia } from '../src/useMobileMedia';
 
 const mockConsumers = new Map<string, any>();
+let mockNoiseMode = 'system';
+const mockNoiseStatus = () => ({ mode: mockNoiseMode, effectiveMode: mockNoiseMode, rnnoiseReady: mockNoiseMode === 'rnnoise', interceptorActive: true, processing: mockNoiseMode === 'rnnoise', systemNoiseSuppressorEnabled: mockNoiseMode === 'system' });
+const mockStreams: any[] = [];
+const mockGetUserMedia = jest.fn(async () => {
+  const track = { enabled: true };
+  const stream = { getAudioTracks: () => [track], release: jest.fn() };
+  mockStreams.push(stream);
+  return stream;
+});
 const mockTransport = {
   on: jest.fn(), close: jest.fn(),
   produce: jest.fn(async () => ({ close: jest.fn(), pause: jest.fn(), resume: jest.fn(), replaceTrack: jest.fn(), paused: false, closed: false })),
@@ -19,7 +28,7 @@ jest.mock('mediasoup-client', () => ({ Device: { factory: async () => ({
 jest.mock('react-native-incall-manager', () => ({ start: jest.fn(), stop: jest.fn(), setForceSpeakerphoneOn: jest.fn(), setSpeakerphoneOn: jest.fn(), stopProximitySensor: jest.fn(), turnScreenOn: jest.fn(), setKeepScreenOn: jest.fn() }));
 jest.mock('react-native-webrtc', () => ({
   MediaStream: class { release = jest.fn(); },
-  mediaDevices: { getUserMedia: async () => ({ getAudioTracks: () => [{ enabled: true }], release: jest.fn() }) },
+  mediaDevices: { getUserMedia: (...args: any[]) => (mockGetUserMedia as any)(...args) },
 }));
 jest.mock('../src/audioDevices', () => ({
   DEFAULT_OUTPUT_ID: 'out-speaker',
@@ -33,11 +42,11 @@ jest.mock('../src/audioDevices', () => ({
   setAudioOutputDevice: jest.fn(async (id: string) => id),
 }));
 jest.mock('../src/microphoneNoise', () => ({
-  DEFAULT_NOISE_MODE: 'rnnoise',
+  DEFAULT_NOISE_MODE: 'system',
   isMicrophoneNoiseMode: (value: unknown) => value === 'system' || value === 'rnnoise',
   createMicrophoneConstraints: (mode: string) => ({ echoCancellation: true, noiseSuppression: mode === 'system', autoGainControl: false, channelCount: 1, sampleRate: 48000 }),
-  applyNoiseMode: jest.fn(async (mode: string) => ({ mode, effectiveMode: mode, rnnoiseReady: true, interceptorActive: true, processing: mode === 'rnnoise' })),
-  getNoiseStatus: jest.fn(async () => ({ mode: 'rnnoise', effectiveMode: 'rnnoise', rnnoiseReady: true, interceptorActive: true, processing: true })),
+  applyNoiseMode: jest.fn(async (mode: string) => { mockNoiseMode = mode; return mockNoiseStatus(); }),
+  getNoiseStatus: jest.fn(async () => mockNoiseStatus()),
 }));
 
 import { PermissionsAndroid } from 'react-native';
@@ -53,7 +62,7 @@ let delayedConsume: (() => void) | undefined;
 let holdConsume: boolean;
 
 beforeEach(async () => {
-  jest.clearAllMocks(); mockConsumers.clear(); existing = []; delayedConsume = undefined; holdConsume = false;
+  jest.clearAllMocks(); mockConsumers.clear(); mockStreams.length = 0; mockNoiseMode = 'system'; existing = []; delayedConsume = undefined; holdConsume = false;
   jest.spyOn(PermissionsAndroid, 'request').mockResolvedValue(PermissionsAndroid.RESULTS.GRANTED);
   handlers = new Map();
   socket = {
@@ -258,8 +267,11 @@ test('leaving during microphone acquisition cannot resurrect the old join', asyn
 });
 
 
-test('defaults to improved RNNoise and can switch before joining', async () => {
+test('defaults to system noise suppression and allows RNNoise before joining', async () => {
+  expect(media.noiseMode).toBe('system');
+  await act(async () => { await media.selectNoiseMode('rnnoise'); });
   expect(media.noiseMode).toBe('rnnoise');
+  expect(media.noiseError).toBeNull();
   await act(async () => { await media.selectNoiseMode('system'); });
   expect(media.noiseMode).toBe('system');
   expect(media.noiseError).toBeNull();
@@ -267,10 +279,113 @@ test('defaults to improved RNNoise and can switch before joining', async () => {
 
 test('switches noise mode while in voice via replaceTrack', async () => {
   await act(async () => media.joinVoice());
-  await act(async () => { await media.selectNoiseMode('system'); });
-  expect(media.noiseMode).toBe('system');
+  await act(async () => { await media.selectNoiseMode('rnnoise'); });
+  expect(media.noiseMode).toBe('rnnoise');
+  const producer = (await (mockTransport.produce as jest.Mock).mock.results[0].value);
+  expect(producer.replaceTrack).toHaveBeenCalledWith({ track: mockStreams[1].getAudioTracks()[0] });
+  expect(mockStreams[0].release).toHaveBeenCalledWith(true);
+  expect(mockStreams[1].release).not.toHaveBeenCalled();
+  expect(mockTransport.produce).toHaveBeenCalledTimes(1);
+  expect(media.inVoice).toBe(true);
   const { applyNoiseMode } = jest.requireMock('../src/microphoneNoise');
-  expect(applyNoiseMode).toHaveBeenCalledWith('system');
+  expect(applyNoiseMode).toHaveBeenCalledWith('rnnoise');
+});
+
+test('noise switch preserves self mute and producer pause', async () => {
+  await act(async () => media.joinVoice());
+  await act(async () => media.toggleMute());
+  await act(async () => media.selectNoiseMode('rnnoise'));
+  expect(mockStreams[1].getAudioTracks()[0].enabled).toBe(false);
+  expect(media.isMuted).toBe(true);
+  expect(media.inVoice).toBe(true);
+});
+
+test('failed source creation retains the original microphone and mode', async () => {
+  await act(async () => media.joinVoice());
+  mockGetUserMedia.mockRejectedValueOnce(new Error('source failed'));
+  await act(async () => media.selectNoiseMode('rnnoise'));
+  expect(media.noiseMode).toBe('system');
+  expect(media.noiseError).toContain('source failed');
+  expect(mockStreams[0].release).not.toHaveBeenCalled();
+  expect(media.inVoice).toBe(true);
+});
+
+test('failed native switch restores the previous live track and mode', async () => {
+  await act(async () => media.joinVoice());
+  const { applyNoiseMode } = jest.requireMock('../src/microphoneNoise');
+  applyNoiseMode.mockRejectedValueOnce(new Error('model failed'));
+  await act(async () => media.selectNoiseMode('rnnoise'));
+  const producer = await (mockTransport.produce as jest.Mock).mock.results[0].value;
+  expect(producer.replaceTrack).toHaveBeenLastCalledWith({ track: mockStreams[0].getAudioTracks()[0] });
+  expect(mockStreams[0].release).not.toHaveBeenCalled();
+  expect(mockStreams[1].release).toHaveBeenCalledWith(true);
+  expect(media.noiseMode).toBe('system');
+  expect(media.inVoice).toBe(true);
+});
+
+test('replaceTrack rejection releases only the unused replacement stream', async () => {
+  await act(async () => media.joinVoice());
+  const producer = await (mockTransport.produce as jest.Mock).mock.results[0].value;
+  producer.replaceTrack.mockRejectedValueOnce(new Error('sender failed'));
+  await act(async () => media.selectNoiseMode('rnnoise'));
+  expect(mockStreams[0].release).not.toHaveBeenCalled();
+  expect(mockStreams[1].release).toHaveBeenCalledWith(true);
+  expect(media.noiseMode).toBe('system');
+  expect(media.inVoice).toBe(true);
+});
+
+test('rollback failure never releases the track still attached to the sender', async () => {
+  await act(async () => media.joinVoice());
+  const producer = await (mockTransport.produce as jest.Mock).mock.results[0].value;
+  producer.replaceTrack.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('rollback failed'));
+  const { applyNoiseMode } = jest.requireMock('../src/microphoneNoise');
+  applyNoiseMode.mockRejectedValueOnce(new Error('model failed'));
+  await act(async () => media.selectNoiseMode('rnnoise'));
+  expect(mockStreams[1].release).not.toHaveBeenCalled();
+  expect(media.noiseError).toContain('原麦克风恢复失败');
+  expect(media.inVoice).toBe(true);
+  await act(async () => media.leaveVoice());
+  expect(mockStreams[1].release).toHaveBeenCalledWith(true);
+});
+
+test('leaving during source replacement releases the late stream without changing mode', async () => {
+  await act(async () => media.joinVoice());
+  let resolve!: (stream: any) => void;
+  mockGetUserMedia.mockImplementationOnce(() => new Promise(result => { resolve = result; }));
+  let switching!: Promise<void>;
+  await act(async () => { switching = media.selectNoiseMode('rnnoise'); });
+  await act(async () => media.leaveVoice());
+  const late = { getAudioTracks: () => [{ enabled: true }], release: jest.fn() };
+  await act(async () => { resolve(late); await switching; });
+  expect(late.release).toHaveBeenCalledWith(true);
+  expect(media.inVoice).toBe(false);
+  expect(media.noiseMode).toBe('system');
+});
+
+test('RNNoise processing faults fall back without leaving voice', async () => {
+  jest.useFakeTimers();
+  await act(async () => media.joinVoice());
+  await act(async () => media.selectNoiseMode('rnnoise'));
+  const { getNoiseStatus } = jest.requireMock('../src/microphoneNoise');
+  getNoiseStatus.mockResolvedValueOnce({ ...mockNoiseStatus(), error: 'unexpected format' });
+  await act(async () => jest.advanceTimersByTime(1000));
+  expect(media.noiseMode).toBe('system');
+  expect(media.inVoice).toBe(true);
+  expect(media.noiseError).toContain('unexpected format');
+  expect(socket.emit).not.toHaveBeenCalledWith('voice:leave', 'room');
+});
+
+test('repeated noise changes and leaving/rejoining do not create duplicate senders', async () => {
+  await act(async () => media.joinVoice());
+  await act(async () => media.selectNoiseMode('rnnoise'));
+  await act(async () => media.selectNoiseMode('system'));
+  await act(async () => media.selectNoiseMode('rnnoise'));
+  expect(mockTransport.produce).toHaveBeenCalledTimes(1);
+  await act(async () => media.leaveVoice());
+  await act(async () => media.joinVoice());
+  expect(mockTransport.produce).toHaveBeenCalledTimes(2);
+  expect(media.noiseMode).toBe('rnnoise');
+  expect(media.inVoice).toBe(true);
 });
 
 

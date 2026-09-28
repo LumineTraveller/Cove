@@ -1,3 +1,7 @@
+plugins {
+    id "com.cove.android-instrumentation"
+}
+
 apply plugin: "com.android.application"
 apply plugin: "org.jetbrains.kotlin.android"
 apply plugin: "com.facebook.react"
@@ -82,8 +86,8 @@ android {
         applicationId "com.cove.mobile"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 11
-        versionName "0.6.1"
+        versionCode 12
+        versionName "0.7.0"
     }
     signingConfigs {
         debug {
@@ -114,6 +118,10 @@ android {
 }
 
 dependencies {
+    // The pre-send hook is checked against this exact Java ABI. Review it on upgrades.
+    constraints {
+        implementation('org.jitsi:webrtc') { version { strictly '124.0.0' } }
+    }
     testImplementation("junit:junit:4.13.2")
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")

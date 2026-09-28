@@ -11,6 +11,7 @@ import {
 import type { VoiceMember } from './types';
 import { startVoiceAudioSession } from './voiceAudioSession';
 import { DisconnectGrace } from './disconnectGrace';
+import { useMobileScreenShare } from './useMobileScreenShare';
 import {
   applyNoiseMode,
   createMicrophoneConstraints,
@@ -153,6 +154,8 @@ export function useMobileMedia(socket: Socket, roomId: string) {
   const pendingScreenAudioByPeer = useRef(new Map<string, string>());
   const watchingScreenPeerRef = useRef<string | null>(null);
   const screenReceiveVolumeRef = useRef(1);
+  const screenShare = useMobileScreenShare(socket, deviceRef, inVoiceRef);
+  const stopScreenShare = screenShare.stopScreenShare;
 
   const publishAvailableScreens = useCallback(() => {
     setAvailableScreens([...availableScreensRef.current.values()]);
@@ -176,6 +179,7 @@ export function useMobileMedia(socket: Socket, roomId: string) {
   }, [publishAvailableScreens]);
 
   const teardown = useCallback((notifyServer: boolean) => {
+    stopScreenShare();
     mediaGeneration.current += 1;
     joiningRef.current = false;
     connectionGrace.current.clear();
@@ -220,7 +224,7 @@ export function useMobileMedia(socket: Socket, roomId: string) {
     setIsWatchingScreen(false);
     setConnectionState('idle');
     CoveNative?.stopVoiceService();
-  }, [roomId, socket, clearAvailableScreens]);
+  }, [roomId, socket, clearAvailableScreens, stopScreenShare]);
 
   const checkTransport = useCallback((key: string, state: string) => {
     if (state === 'connected') connectionGrace.current.recover(key);
@@ -671,6 +675,7 @@ export function useMobileMedia(socket: Socket, roomId: string) {
           rnnoiseReady: false,
           interceptorActive: false,
           processing: false,
+          systemNoiseSuppressorEnabled: false,
         }));
       }
       ensureCurrent();
@@ -696,13 +701,11 @@ export function useMobileMedia(socket: Socket, roomId: string) {
       if (forceMutedRef.current) producer.pause();
 
       appliedNoise = await getNoiseStatus();
-      noiseModeRef.current = requestedNoise;
-      setNoiseMode(requestedNoise);
-      if (requestedNoise === 'rnnoise' && appliedNoise.effectiveMode !== 'rnnoise') {
-        setNoiseError('RNNoise 未启用，已回退到系统降噪');
-      } else {
-        setNoiseError(null);
-      }
+      noiseModeRef.current = appliedNoise.effectiveMode;
+      setNoiseMode(appliedNoise.effectiveMode);
+      setNoiseError(appliedNoise.error ?? (requestedNoise !== appliedNoise.effectiveMode
+        ? 'RNNoise 未能启用，已使用系统降噪'
+        : null));
 
       startVoiceAudioSession();
       try {
@@ -770,37 +773,52 @@ export function useMobileMedia(socket: Socket, roomId: string) {
       }
     };
 
-    const applied = await applyNoiseMode(mode);
-    ensureCurrent();
+    const previousMode = noiseModeRef.current;
+    const previous = microphoneStream.current;
+    const previousTrack = previous?.getAudioTracks()[0];
     const stream = await mediaDevices.getUserMedia({
-      audio: createMicrophoneConstraints(applied.mode),
+      audio: createMicrophoneConstraints(mode),
       video: false,
     } as never);
-    ensureCurrent();
-    const track = stream.getAudioTracks()[0];
-    if (!track) {
-      stream.release(true);
-      throw new Error('没有可用的麦克风音轨');
-    }
-    track.enabled = !producer.paused && !selfMutedRef.current && !forceMutedRef.current;
+    let replaced = false;
     try {
+      ensureCurrent();
+      const track = stream.getAudioTracks()[0];
+      if (!track) throw new Error('没有可用的麦克风音轨');
+      track.enabled = !producer.paused && !selfMutedRef.current && !forceMutedRef.current;
       await producer.replaceTrack({ track: track as never });
-    } catch (error) {
-      stream.release(true);
-      throw error;
-    }
-    ensureCurrent();
-    const previous = microphoneStream.current;
-    microphoneStream.current = stream;
-    previous?.release(true);
-
-    const status = await getNoiseStatus();
-    noiseModeRef.current = mode;
-    setNoiseMode(mode);
-    if (mode === 'rnnoise' && status.effectiveMode !== 'rnnoise') {
-      setNoiseError('RNNoise 未启用，已回退到系统降噪');
-    } else {
+      replaced = true;
+      ensureCurrent();
+      // Commit native processing only after the new source's WebRTC NS options
+      // are installed. Keep the old track alive until this transaction succeeds.
+      const status = await applyNoiseMode(mode);
+      ensureCurrent();
+      if (status.effectiveMode !== mode || status.error) throw new Error(status.error ?? '原生降噪模式未生效');
+      microphoneStream.current = stream;
+      previous?.release(true);
+      noiseModeRef.current = status.effectiveMode;
+      setNoiseMode(status.effectiveMode);
       setNoiseError(null);
+    } catch (error) {
+      try {
+        if (generation === mediaGeneration.current && audioProducer.current === producer && !producer.closed) {
+          if (replaced && previousTrack) {
+            try {
+              await producer.replaceTrack({ track: previousTrack as never });
+            } catch (rollbackError) {
+              // Never release a track still attached to a live sender. Report
+              // the failed rollback, keep voice alive, and own the new stream.
+              microphoneStream.current = stream;
+              previous?.release(true);
+              throw new Error(`原麦克风恢复失败，已保留当前音轨：${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+            }
+          }
+          await applyNoiseMode(previousMode);
+        }
+      } finally {
+        if (microphoneStream.current !== stream) stream.release(true);
+      }
+      throw error;
     }
   }, []);
 
@@ -809,15 +827,18 @@ export function useMobileMedia(socket: Socket, roomId: string) {
     if (mode === noiseModeRef.current) return;
     setNoiseError(null);
     if (!audioProducer.current) {
-      noiseModeRef.current = mode;
-      setNoiseMode(mode);
+      noiseBusyRef.current = true;
+      setNoiseSwitching(true);
       try {
         const status = await applyNoiseMode(mode);
-        if (mode === 'rnnoise' && status.effectiveMode !== 'rnnoise') {
-          setNoiseError('RNNoise 未启用，将回退到系统降噪');
-        }
+        if (status.error) throw new Error(status.error);
+        noiseModeRef.current = status.effectiveMode;
+        setNoiseMode(status.effectiveMode);
       } catch (error) {
         setNoiseError(`降噪切换失败：${error instanceof Error ? error.message : String(error)}`);
+      } finally {
+        noiseBusyRef.current = false;
+        setNoiseSwitching(false);
       }
       return;
     }
@@ -826,12 +847,30 @@ export function useMobileMedia(socket: Socket, roomId: string) {
     try {
       await replaceMicrophone(mode);
     } catch (error) {
-      setNoiseError(`降噪切换失败，已保留原模式：${error instanceof Error ? error.message : String(error)}`);
+      setNoiseError(`降噪切换失败：${error instanceof Error ? error.message : String(error)}`);
     } finally {
       noiseBusyRef.current = false;
       setNoiseSwitching(false);
     }
   }, [replaceMicrophone]);
+
+  useEffect(() => {
+    if (!inVoice || noiseMode !== 'rnnoise') return;
+    let cancelled = false;
+    const generation = mediaGeneration.current;
+    const timer = setInterval(() => {
+      void getNoiseStatus().then(async (status) => {
+        if (cancelled || generation !== mediaGeneration.current || !status.error || noiseBusyRef.current) return;
+        await selectNoiseMode('system');
+        if (generation === mediaGeneration.current) {
+          setNoiseError(noiseModeRef.current === 'system'
+            ? `RNNoise 异常，已回退系统降噪：${status.error}`
+            : `RNNoise 异常，回退失败，请切换系统降噪：${status.error}`);
+        }
+      }).catch(() => { /* Status query failures must not disconnect voice. */ });
+    }, 1000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [inVoice, noiseMode, selectNoiseMode]);
 
   const leaveVoice = useCallback(() => {
     teardown(true);
@@ -849,6 +888,7 @@ export function useMobileMedia(socket: Socket, roomId: string) {
   }, [roomId, socket]);
 
   return {
+    ...screenShare,
     inVoice,
     joining,
     isMuted,

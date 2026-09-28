@@ -34,7 +34,7 @@ describe('room audio settings', () => {
     media = {
       inVoice: true, joining: false, isMuted: false, isForceMuted: false,
       connectionState: 'connected', voiceMembers: [], availableScreens: [], applicationAudioShares: [], memberVolumes: {},
-      noiseMode: 'rnnoise', noiseSwitching: false, noiseError: null,
+      noiseMode: 'system', noiseSwitching: false, noiseError: null,
       audioDeviceSwitching: false, audioDeviceError: null,
       audioInputs: [{ id: 'default', label: '系统默认麦克风' }, { id: 'usb-mic', label: 'USB 麦克风' }],
       audioOutputs: [{ id: 'out-speaker', label: '扬声器' }, { id: 'out-bluetooth', label: '蓝牙耳机' }],
@@ -42,6 +42,9 @@ describe('room audio settings', () => {
       refreshAudioDevices: jest.fn(async () => null), selectNoiseMode: jest.fn(async () => {}),
       selectAudioInput: jest.fn(async () => {}), selectAudioOutput: jest.fn(async () => {}),
       joinVoice: jest.fn(), leaveVoice: jest.fn(), toggleMute: jest.fn(),
+      canShareScreen: true, canShareScreenAudio: true, sharingScreen: false, sharingScreenAudio: false,
+      screenSharingBusy: false, screenViewerCount: 0, screenSharingError: null,
+      startScreenShare: jest.fn(async () => true), stopScreenShare: jest.fn(), clearScreenSharingError: jest.fn(),
     };
     (useMobileMedia as jest.Mock).mockImplementation(() => media);
     const timeoutEmit = jest.fn((_event, _payload, callback) => callback(null, { ok: true }));
@@ -63,7 +66,8 @@ describe('room audio settings', () => {
     expect(StyleSheet.flatten(footer.props.style).position).toBeUndefined();
     await openAudio();
     expect(media.refreshAudioDevices).toHaveBeenCalledTimes(1);
-    expect(button('RNNoise（改进）').props.accessibilityState.checked).toBe(true);
+    expect(button('系统降噪').props.accessibilityState.checked).toBe(true);
+    expect(button('RNNoise').props.disabled).not.toBe(true);
     expect(button('输出设备：扬声器').props.accessibilityState.checked).toBe(true);
     expect(button('输入设备：系统默认麦克风').props.accessibilityState.checked).toBe(true);
   });
@@ -71,9 +75,11 @@ describe('room audio settings', () => {
   test('noise and both device choices use existing media callbacks without closing', async () => {
     await openAudio();
     await act(async () => button('系统降噪').props.onPress());
+    await act(async () => button('RNNoise').props.onPress());
     await act(async () => button('输出设备：蓝牙耳机').props.onPress());
     await act(async () => button('输入设备：USB 麦克风').props.onPress());
     expect(media.selectNoiseMode).toHaveBeenCalledWith('system');
+    expect(media.selectNoiseMode).toHaveBeenCalledWith('rnnoise');
     expect(media.selectAudioOutput).toHaveBeenCalledWith('out-bluetooth');
     expect(media.selectAudioInput).toHaveBeenCalledWith('usb-mic');
     media.noiseMode = 'system';
@@ -137,5 +143,35 @@ describe('room audio settings', () => {
     expect(controls).toHaveLength(1);
     await act(async () => controls[0].props.onPress());
     expect(media.joinVoice).toHaveBeenCalledTimes(1);
+  });
+
+  test('screen sharing is separate from the header/footer and only offers optional audio', async () => {
+    const card = renderer.root.findByProps({ testID: 'own-screen-sharing' });
+    expect(StyleSheet.flatten(card.props.style).position).toBeUndefined();
+    expect(StyleSheet.flatten(card.props.style).flexDirection).toBe('row');
+    await act(async () => button('打开屏幕共享设置').props.onPress());
+    const content = JSON.stringify(renderer.toJSON());
+    expect(content).toContain('同时共享音频');
+    expect(content).not.toContain('分辨率');
+    expect(content).not.toContain('帧率');
+    await act(async () => button('开始共享手机屏幕').props.onPress());
+    expect(media.startScreenShare).toHaveBeenCalledWith(false);
+    expect(renderer.root.findAllByType(Modal).some(node => node.props.visible)).toBe(false);
+    media.sharingScreen = true; media.sharingScreenAudio = true; media.screenViewerCount = 2;
+    await rerender();
+    await act(async () => button('停止共享我的屏幕').props.onPress());
+    expect(media.stopScreenShare).toHaveBeenCalledTimes(1);
+    expect(media.leaveVoice).not.toHaveBeenCalled();
+    expect(renderer.root.findByProps({ testID: 'voice-controls' }).findAllByType(TouchableOpacity)).toHaveLength(2);
+  });
+
+  test('sharing authorization can be canceled without locking other call controls', async () => {
+    await act(async () => button('打开屏幕共享设置').props.onPress());
+    media.screenSharingBusy = true;
+    await rerender();
+    expect(button('开始共享手机屏幕').props.disabled).toBe(true);
+    await act(async () => button('关闭屏幕共享设置').props.onPress());
+    expect(media.stopScreenShare).toHaveBeenCalledTimes(1);
+    expect(media.leaveVoice).not.toHaveBeenCalled();
   });
 });

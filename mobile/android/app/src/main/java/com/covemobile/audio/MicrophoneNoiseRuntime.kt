@@ -1,80 +1,82 @@
 package com.covemobile.audio
 
+import android.media.AudioFormat
+import android.media.AudioRecord
+import com.oney.WebRTCModule.CoveScreenRuntime
 import com.covemobile.RnnoiseEngine
-import org.webrtc.audio.JavaAudioDeviceModule
+import org.webrtc.Logging
+import java.nio.ByteBuffer
 
-/**
- * Runtime switch between RNNoise (default) and the system noise suppressor.
- * Mirrors the desktop MicrophoneNoiseMode contract.
- */
+/** Runs on WebRTC's OWN capture thread before PCM is sent to native WebRTC. */
 object MicrophoneNoiseRuntime {
-  enum class Mode(val wire: String) {
-    RNNOISE("rnnoise"),
-    SYSTEM("system"),
-    ;
+  enum class Mode(val wire: String) { SYSTEM("system"), RNNOISE("rnnoise") }
+  private var mode = Mode.SYSTEM
+  private var captureActive = false
+  private var hookActive = false
+  private var processing = false
+  private var muted = false
+  private var error: String? = null
 
-    companion object {
-      fun fromWire(value: String?): Mode =
-        entries.firstOrNull { it.wire == value } ?: RNNOISE
-    }
+  @Synchronized fun onAudioRecordStarted() {
+    captureActive = true
+    hookActive = false
+    processing = false
+    muted = false
+    if (mode == Mode.RNNOISE && !RnnoiseEngine.reset()) error = "RNNoise 模型初始化失败"
   }
-
-  @Volatile
-  private var mode: Mode = Mode.RNNOISE
-
-  @Volatile
-  private var adm: JavaAudioDeviceModule? = null
-
-  @Volatile
-  private var interceptorAttached = false
-
-  fun currentMode(): Mode = mode
-
-  fun bind(adm: JavaAudioDeviceModule, interceptorOk: Boolean) {
-    this.adm = adm
-    this.interceptorAttached = interceptorOk
-    applyMode()
+  @Synchronized fun onAudioRecordStopped() {
+    captureActive = false
+    hookActive = false
+    processing = false
+    RnnoiseEngine.release()
   }
-
-  private fun interceptorUsable(): Boolean =
-    interceptorAttached && RnnoiseAudioInterceptor.isAttached()
-
-  fun setMode(value: String?): Mode {
-    mode = Mode.fromWire(value)
-    applyMode()
+  @Synchronized fun setMode(value: String?): Mode {
+    val next = Mode.entries.find { it.wire == value } ?: throw IllegalArgumentException("未知降噪模式")
+    // Validate before committing: failed switches retain the previous mode.
+    if (next == Mode.RNNOISE && !RnnoiseEngine.reset()) throw IllegalStateException("RNNoise 模型不可用")
+    if (next == Mode.SYSTEM) RnnoiseEngine.release()
+    mode = next
+    processing = false
+    muted = false
+    error = null
     return mode
   }
-
-  fun status(): Map<String, Any?> {
-    val processing = interceptorUsable() && RnnoiseEngine.enabled && mode == Mode.RNNOISE
-    return mapOf(
-      "mode" to mode.wire,
-      // 请求了 RNNoise 但拦截器未就绪时，实际在跑的是系统降噪。
-      "effectiveMode" to if (processing) Mode.RNNOISE.wire else Mode.SYSTEM.wire,
-      "rnnoiseReady" to RnnoiseEngine.isReady(),
-      "interceptorActive" to interceptorUsable(),
-      "processing" to processing,
-    )
-  }
-
-  private fun applyMode() {
-    val deviceModule = adm
-    val useRnnoise = mode == Mode.RNNOISE && interceptorUsable() && RnnoiseEngine.isReady()
-    if (useRnnoise) {
-      // Model NS must not stack on RNNoise — double suppression damages speech.
-      RnnoiseEngine.enabled = true
-      RnnoiseAudioInterceptor.setProcessingEnabled(true)
-      try {
-        deviceModule?.setNoiseSuppressorEnabled(false)
-      } catch (_: Throwable) {
+  @Synchronized fun status(): Map<String, Any?> = mapOf(
+    "mode" to mode.wire,
+    "effectiveMode" to mode.wire,
+    "rnnoiseReady" to RnnoiseEngine.isReady(),
+    // Legacy key: pre-send hook observed, NOT a replacement capture thread.
+    "interceptorActive" to hookActive,
+    "processing" to processing,
+    "systemNoiseSuppressorEnabled" to (captureActive && mode == Mode.SYSTEM),
+    "error" to error,
+  )
+  @JvmStatic @Synchronized
+  fun processRecordedBuffer(record: AudioRecord, buffer: ByteBuffer, sampleRate: Int, channels: Int, format: Int, microphoneMuted: Boolean) {
+    // Playback audio is music/game sound, not a second microphone. Never run RNNoise on it.
+    if (CoveScreenRuntime.isPlaybackRecord(record)) return
+    hookActive = true
+    if (mode != Mode.RNNOISE || error != null) return
+    try {
+      check(sampleRate == 48_000 && channels == 1 && format == AudioFormat.ENCODING_PCM_16BIT) {
+        "RNNoise 需要 48 kHz 单声道 PCM16，实际为 $sampleRate Hz / $channels 声道 / 格式 $format"
       }
-    } else {
-      RnnoiseEngine.enabled = false
-      RnnoiseAudioInterceptor.setProcessingEnabled(false)
-      try {
-        deviceModule?.setNoiseSuppressorEnabled(true)
-      } catch (_: Throwable) {
+      if (microphoneMuted) {
+        // WebRTC already zeroed this buffer. Don't leak queued voice into it.
+        if (!muted) check(RnnoiseEngine.reset()) { "RNNoise 重置失败" }
+        muted = true
+        processing = false
+        return
       }
+      muted = false
+      check(RnnoiseEngine.processPcm16(buffer)) { "RNNoise 音频缓冲区处理失败" }
+      processing = true
+    } catch (failure: Exception) {
+      error = failure.message ?: "RNNoise 处理失败"
+      processing = false
+      Logging.e("CoveAudio", error!!)
+      // JS observes this fault and replaces ONLY the microphone source with
+      // system NS. Never stop capture or remove the user from voice here.
     }
   }
 }

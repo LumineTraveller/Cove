@@ -5,6 +5,7 @@ set(RNNOISE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/rnnoise-master)
 
 add_library(cove_rnnoise SHARED
   cove_rnnoise.cpp
+  rnnoise_pcm_processor.cpp
   ${RNNOISE_DIR}/src/denoise.c
   ${RNNOISE_DIR}/src/kiss_fft.c
   ${RNNOISE_DIR}/src/pitch.c
@@ -15,6 +16,7 @@ add_library(cove_rnnoise SHARED
 )
 
 target_compile_options(cove_rnnoise PRIVATE -O3 -fvisibility=hidden)
+target_compile_features(cove_rnnoise PRIVATE cxx_std_17)
 
 target_include_directories(cove_rnnoise PRIVATE
   ${RNNOISE_DIR}/include

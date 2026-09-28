@@ -1,0 +1,4 @@
+// Keep AGP API dependencies out of buildSrc: KSP can skip Room processors when
+// AGP API 8.10+ is present here. Cove's Android instrumentation lives in the
+// isolated build-logic included build instead.
+plugins { id 'java' }

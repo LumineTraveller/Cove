@@ -1,4 +1,5 @@
 import { checkAndroidUpdate, getMobileUpdateServerBaseUrl, parseUpdateFeed, releaseURL, type AndroidRelease } from '../src/mobileUpdate';
+import { UPDATE_DOWNLOAD_BASE_URL } from '../src/updateConfig';
 
 export const release: AndroidRelease = {
   versionName: '0.4.0', versionCode: 6, minAndroidApi: 24, packageName: 'com.cove.mobile',
@@ -72,6 +73,14 @@ test('APK URL follows the selected server, never a feed-supplied URL', () => {
   expect(() => releaseURL(parsed, 'cloud', true, 'https://user:secret@selected.example.test')).toThrow('HTTPS');
   expect(() => releaseURL(parsed, 'gitee' as never, true)).toThrow('未知更新源');
   expect(() => parseUpdateFeed(feed({ ...release, filename: '../malware.apk' }))).toThrow();
+});
+
+test('default download address is blank and cannot produce a server APK link', () => {
+  expect(UPDATE_DOWNLOAD_BASE_URL).toBe('');
+  expect(getMobileUpdateServerBaseUrl(UPDATE_DOWNLOAD_BASE_URL)).toBeNull();
+  expect(() => releaseURL(release, 'cloud', true)).toThrow('HTTPS');
+  expect(() => releaseURL(release, 'cloud')).toThrow('HTTPS');
+  expect(releaseURL(release, 'github', true)).toBe('https://github.com/LumineTraveller/Cove/releases/download/mobile-v0.4.0/Cove-Mobile-0.4.0.apk');
 });
 
 test('without an HTTPS current server only the GitHub feed is checked', async () => {

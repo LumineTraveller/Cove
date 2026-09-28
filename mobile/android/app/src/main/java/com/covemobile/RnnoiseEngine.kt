@@ -1,47 +1,32 @@
 package com.covemobile
 
-/**
- * JNI bridge to the bundled RNNoise implementation (48 kHz mono PCM16).
- * Native side carries leftover samples across calls so arbitrary buffer
- * sizes do not reset the model state.
- */
+import java.nio.ByteBuffer
+
+/** Serialize reset/release/processing so a mode switch cannot free a live model. */
 object RnnoiseEngine {
-  @Volatile
-  private var ready = false
-
-  @Volatile
-  var enabled = true
-
-  fun init(): Boolean {
-    synchronized(this) {
-      if (ready) return true
-      ready = try {
+  @Volatile private var ready = false
+  private var loaded = false
+  @Synchronized fun init(): Boolean = if (ready) true else reset()
+  @Synchronized fun reset(): Boolean {
+    ready = try {
+      if (!loaded) {
         System.loadLibrary("cove_rnnoise")
-        nativeInit()
-      } catch (error: Throwable) {
-        false
+        loaded = true
       }
-      return ready
-    }
+      nativeReset()
+    } catch (_: LinkageError) { false }
+    return ready
   }
-
-  fun release() {
-    synchronized(this) {
-      if (!ready) return
-      nativeRelease()
-      ready = false
-    }
+  @Synchronized fun release() {
+    if (loaded) nativeRelease()
+    ready = false
   }
-
   fun isReady(): Boolean = ready
-
-  fun processPcm16(bytes: ByteArray, length: Int) {
-    if (!ready || !enabled || length <= 0) return
-    nativeProcessPcm16(bytes, length)
+  @Synchronized fun processPcm16(buffer: ByteBuffer): Boolean {
+    if (!ready || !buffer.isDirect || buffer.capacity() <= 0 || buffer.capacity() % 2 != 0) return false
+    return nativeProcessPcm16(buffer, buffer.capacity())
   }
-
-  private external fun nativeInit(): Boolean
+  private external fun nativeReset(): Boolean
   private external fun nativeRelease()
-  private external fun nativeFrameSize(): Int
-  private external fun nativeProcessPcm16(pcm: ByteArray, length: Int)
+  private external fun nativeProcessPcm16(pcm: ByteBuffer, length: Int): Boolean
 }
