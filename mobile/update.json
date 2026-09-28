@@ -3,13 +3,13 @@
   "platform": "android",
   "release": {
     "packageName": "com.cove.mobile",
-    "versionName": "0.6.1",
-    "versionCode": 11,
+    "versionName": "0.7.0",
+    "versionCode": 12,
     "minAndroidApi": 24,
-    "tag": "mobile-v0.6.1",
-    "filename": "Cove-Mobile-0.6.1.apk",
-    "size": 55891405,
-    "sha256": "840b09cc0550a33da191cbb9c683e474dde3f7df562d45ee9dfae1442d6e6729",
-    "notes": "# Cove Mobile v0.6.1\n\n发布日期：2026-09-27。Android versionCode：11。配套桌面端及服务端：1.5.2。\n\n## 新增与修复\n\n- 新增统一音频设置入口，将 RNNoise/系统降噪切换与输入、输出设备选择收纳到右上角菜单；底部语音控制区重新排版。\n- Android 默认使用原生 RNNoise 降噪，可切换系统降噪并在原生处理不可用时平滑回退；支持麦克风及扬声器、听筒、蓝牙等音频路由。\n- 修复登录页键盘弹出时输入框没有移到输入法上方的问题。\n- 修复手机屏幕共享画面的缩放、拖动坐标，并在窗口尺寸变化时保留缩放状态。\n- 聊天和成员列表统一支持头像显示与头像裁剪；修正进入聊天时的初始滚动和音量滑块交互。\n- 修复 RNNoise 原生构建配置对 React Native 原生模块启动路径的影响，避免安装包启动即闪退。\n\n## 安装说明\n\n下载 `Cove-Mobile-0.6.1.apk` 后覆盖安装。沿用原应用 ID 与签名，不需卸载旧版。\n正式分发包支持 ARM64 与 ARMv7 手机，最低 Android 7.0；不包含 x86 模拟器架构。"
+    "tag": "mobile-v0.7.0",
+    "filename": "Cove-Mobile-0.7.0.apk",
+    "size": 55943498,
+    "sha256": "d318c1aeaef36558a30dd7826075bb7a1d939ec8a2a82a236440f358a1753e61",
+    "notes": "# Cove Mobile v0.7.0\n\n发布日期：2026-09-28。Android versionCode：12。\n\n## 新增与修复\n\n- 新增手机屏幕共享，可选择是否同时共享应用播放音频；屏幕视频使用 AV1，不支持 AV1 的设备或服务器会明确提示，不回退到 H.264。共享音频采集需要 Android 10 及以上，并受应用录制策略限制。\n- 修复手机麦克风降噪链路的失真问题，重新提供 RNNoise 选项；默认降噪模式改为系统降噪，每次冷启动恢复默认值。\n- 调整 Android 原生音频处理与 React Native 模块构建/初始化路径，避免原生处理配置导致应用启动即闪退。\n- 新增独立的 HTTPS 更新下载地址配置。默认留空时不访问预设服务器地址；启动更新检查仍可使用 GitHub，配置地址后才会同时检查对应下载服务器。\n- 改进登录表单在软键盘弹出时的可视区域处理。\n\n## 安装说明\n\n下载 `Cove-Mobile-0.7.0.apk` 后覆盖安装。应用 ID 与签名保持不变。\n正式分发包支持 ARM64 与 ARMv7，最低 Android 7.0；不包含 x86 模拟器架构。"
   }
 }
