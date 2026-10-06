@@ -229,6 +229,27 @@ async function main() {
     await renderer('window.coveRemoteControl.setActive(null)');
     const final = await status(); assert.equal(final.shortcuts, 0);
     assert.deepEqual(final.journal.filter(row => row.helper === 1).map(row => [row.type, row.flags]), [[1, 0], [1, 2]]);
+    let accountPasswordBridgeVerified = false, accountPasswordsOSCryptoVerified = false;
+    if (process.env.COVE_PACKAGE_SMOKE_UNIFIED === '1') {
+      const available = await renderer('window.coveAccountPasswords.status()');
+      assert.equal(available.available, true);
+      assert.equal(await renderer('Boolean(document.querySelector(\'[aria-label="记住账号密码"]\'))'), true);
+      const denied = await evaluate(`__covePackageSmoke.foreign(${JSON.stringify('(async()=>({status:await window.coveAccountPasswords.status(),set:await window.coveAccountPasswords.set("http://127.0.0.1:3317","fixture@example.test","fictional-packaged-password")}))()')})`);
+      assert.equal(denied.status.ok, false); assert.equal(denied.set.ok, false);
+      const saved = await renderer('window.coveAccountPasswords.set("http://127.0.0.1:3317","fixture@example.test","fictional-packaged-password")');
+      assert.equal(saved.ok, true);
+      const credentialFile = path.join(testDir, 'profile', 'account-passwords.v1.json');
+      const stored = fs.readFileSync(credentialFile, 'utf8');
+      assert.equal(stored.includes('fictional-packaged-password'), false);
+      assert.equal(stored.includes('fixture@example.test'), false);
+      assert.equal(await renderer('(async()=>{const result=await window.coveAccountPasswords.get("http://127.0.0.1:3317","fixture@example.test");return result.ok&&result.password==="fictional-packaged-password"})()'), true);
+      assert.equal(await renderer('(async()=>{const result=await window.coveAccountPasswords.get("http://127.0.0.1:3318","fixture@example.test");return result.password===null})()'), true);
+      assert.equal((await renderer('window.coveAccountPasswords.remove("http://127.0.0.1:3317","fixture@example.test")')).ok, true);
+      assert.equal(await renderer('(async()=>{const result=await window.coveAccountPasswords.get("http://127.0.0.1:3317","fixture@example.test");return result.password===null})()'), true);
+      assert.equal((await renderer('window.coveAccountPasswords.clear()')).ok, true);
+      assert.equal(fs.existsSync(credentialFile), false);
+      accountPasswordBridgeVerified = true; accountPasswordsOSCryptoVerified = true;
+    }
     const report = { capturedAt: new Date().toISOString(), executable, archiveSha256: hash(fs.readFileSync(archive)),
       identity: { version: initial.version, runtimeName: initial.name, manifestName: manifest.name, appId: 'com.cove.app' },
       actualPackagedExecutableStarted: true, loginAndBrandingRendered: true, hiddenAndProfileIsolated: true,
@@ -236,10 +257,11 @@ async function main() {
       authorizedIpcAccepted: true, queuedBurstAccepted: accepted.length, burstJournalBeforeRevoke: beforeStop.journal.length,
       revokeDiscardsPendingMoves: true, nativeHeldInputReleased: true, staleSessionInputDenied: true,
       lateAckCannotResume: true, emergencyStopsAndReleases: true, helpersExited: final.helpers.every(helper => helper.closed),
+      accountPasswordBridgeVerified, accountPasswordsOSCryptoVerified,
       nativeBoundary: 'recording-only SendInput replacement; no real system input',
       globalShortcutBoundary: 'owned callback map; no real system shortcut registration',
       excluded: ['installation/rollback execution', 'real OS cursor', 'WAN', 'video feedback'], testDir };
-    const reportName = process.env.COVE_PACKAGE_SMOKE_RAW === '1' ? 'remote-input-raw-packaged-smoke.json' : 'remote-input-packaged-smoke.json';
+    const reportName = process.env.COVE_PACKAGE_SMOKE_UNIFIED === '1' ? 'remote-input-unified-packaged-smoke.json' : process.env.COVE_PACKAGE_SMOKE_RAW === '1' ? 'remote-input-raw-packaged-smoke.json' : 'remote-input-packaged-smoke.json';
     fs.writeFileSync(path.join(root, 'runtime', reportName), JSON.stringify(report, null, 2) + '\n');
     console.log(JSON.stringify(report, null, 2));
     await command('Runtime.evaluate', { expression: '__covePackageSmoke.quit()' }); socket.close();

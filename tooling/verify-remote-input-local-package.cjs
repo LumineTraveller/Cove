@@ -11,8 +11,9 @@ const asar = require('@electron/asar');
 const root = path.resolve(__dirname, '..');
 const output = path.join(root, 'apps/desktop/dist-app-remote-input-2.0.1');
 const installerName = process.argv[2] ?? 'Cove-Setup-2.0.1.exe';
-assert.ok(['Cove-Setup-2.0.1.exe', 'Cove-Setup-2.0.1-raw-input.exe'].includes(installerName));
+assert.ok(['Cove-Setup-2.0.1.exe', 'Cove-Setup-2.0.1-raw-input.exe', 'Cove-Setup-2.0.1-remote-input-account-memory.exe'].includes(installerName));
 const rawInputCandidate = installerName.includes('raw-input');
+const unifiedCandidate = installerName.includes('remote-input-account-memory');
 const installer = path.join(output, installerName);
 const rollback = path.join(root, 'runtime/rollback-2.0.0/Cove-Setup-2.0.0.exe');
 async function fingerprint(file, algorithm = 'sha256', encoding = 'hex') {
@@ -63,12 +64,26 @@ async function main() {
   const policy = JSON.parse(fs.readFileSync(liveFile, 'utf8'));
   assert.equal(policy.minimumClientVersion, '2.0.0'); assert.equal(policy.requiredClientProtocol, 3);
   assert.equal(policy.upgradeRequired, false);
-  const smoke = JSON.parse(fs.readFileSync(path.join(root, rawInputCandidate ? 'runtime/remote-input-raw-packaged-smoke.json' : 'runtime/remote-input-packaged-smoke.json'), 'utf8'));
+  const smoke = JSON.parse(fs.readFileSync(path.join(root, unifiedCandidate ? 'runtime/remote-input-unified-packaged-smoke.json' : rawInputCandidate ? 'runtime/remote-input-raw-packaged-smoke.json' : 'runtime/remote-input-packaged-smoke.json'), 'utf8'));
   assert.equal(smoke.archiveSha256, payload.find(row => row.entry === 'resources\\app.asar').sha256);
   assert.equal(smoke.actualPackagedExecutableStarted, true); assert.equal(smoke.helpersExited, true);
+  if(unifiedCandidate) {
+    assert.equal(smoke.accountPasswordBridgeVerified, true);
+    assert.equal(smoke.accountPasswordsOSCryptoVerified, true);
+    const files=asar.listPackage(archive);
+    const frontend=files.filter(name=>/index-.*\.js$/.test(name)).map(name=>asar.extractFile(archive,name.slice(1)).toString()).join('\n');
+    const styles=files.filter(name=>/index-.*\.css$/.test(name)).map(name=>asar.extractFile(archive,name.slice(1)).toString()).join('\n');
+    assert.ok(frontend.includes('pointerrawupdate'));
+    assert.equal(frontend.includes('remote-control-frame'),false);
+    assert.ok(styles.includes('body:has(.share-view.screen-maximized) .cove-window-titlebar{display:none}'));
+    for(const file of ['account-password-ipc.js','account-password-store.js'])
+      assert.equal(createHash('sha256').update(asar.extractFile(archive,'dist-electron/'+file)).digest('hex'),await fingerprint(path.join(root,'apps/desktop/dist-electron',file)));
+  }
   const report = { verifiedAt: new Date().toISOString(), appId: manifest.build.appId, productName: manifest.build.productName,
-    packageName: packed.name, version: packed.version, sourceFixCommits: ['d4c18a4', '152bfce'],
-    rawInputCandidate, sourceHead: process.env.COVE_CANDIDATE_SOURCE_HEAD ?? null,
+    packageName: packed.name, version: packed.version,
+    sourceFixCommits: unifiedCandidate ? ['d4c18a4', '76992b2', '74331dc'] : rawInputCandidate ? ['d4c18a4', '76992b2'] : ['d4c18a4', '152bfce'],
+    importedDesktopPasswordSource: unifiedCandidate ? '01a06308da0006b59c1427f3e01cc984190d33a9' : null,
+    rawInputCandidate, unifiedCandidate, sourceHead: process.env.COVE_CANDIDATE_SOURCE_HEAD ?? null,
     installer: { path: installer, size: fs.statSync(installer).size, sha256: await fingerprint(installer), sha512: metadata.files[0].sha512 },
     rollback: { path: rollback, size: fs.statSync(rollback).size, version: '2.0.0', sha256: rollbackSha256,
       source: 'https://github.com/LumineTraveller/Cove/releases/download/v2.0.0/Cove-Setup-2.0.0.exe', publishedDigestMatched: true },
@@ -76,7 +91,7 @@ async function main() {
     liveVersionPolicy: { url: 'http://39.106.95.59:3001/api/version', requestedVersion: '2.0.1', requestedPlatform: 'desktop',
       requestedProtocol: 3, observedAt: fs.statSync(liveFile).mtime.toISOString(), policy },
     packagedSmoke: smoke, installed: false, published: false, serverChanged: false, mobileChanged: false };
-  fs.writeFileSync(path.join(root, rawInputCandidate ? 'runtime/remote-input-raw-artifact.json' : 'runtime/remote-input-2.0.1-artifact.json'), JSON.stringify(report, null, 2) + '\n');
+  fs.writeFileSync(path.join(root, unifiedCandidate ? 'runtime/remote-input-unified-artifact.json' : rawInputCandidate ? 'runtime/remote-input-raw-artifact.json' : 'runtime/remote-input-2.0.1-artifact.json'), JSON.stringify(report, null, 2) + '\n');
   console.log(JSON.stringify({ verifiedAt: report.verifiedAt, installer: report.installer, rollback: report.rollback,
     payloadEntriesMatched: payload.length, liveVersionAccepted: true, packagedStartupAndRevokePassed: true }, null, 2));
 }
