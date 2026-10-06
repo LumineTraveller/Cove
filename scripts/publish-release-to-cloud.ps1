@@ -79,6 +79,13 @@ foreach ($name in $expectedNames) {
     if (-not $assetsByName.ContainsKey($name)) { throw "GitHub Release 缺少附件：$name" }
     $selectedAssets += $assetsByName[$name]
 }
+$assetHashes = @{}
+foreach ($asset in $selectedAssets) {
+    if ([string]$asset.digest -notmatch '^sha256:([a-fA-F0-9]{64})$') {
+        throw "GitHub Release 缺少附件 SHA-256：$($asset.name)"
+    }
+    $assetHashes[$asset.name] = $Matches[1].ToLowerInvariant()
+}
 
 Write-Output "GitHub Release：$($release.name)（$Tag）"
 $selectedAssets | ForEach-Object { "  {0}  {1:N1} MB" -f $_.name, ($_.size / 1MB) }
@@ -93,7 +100,9 @@ try {
 
     foreach ($asset in $selectedAssets) {
         $destination = Join-Path $tempDir $asset.name
-        if ((Test-Path -LiteralPath $destination) -and ((Get-Item -LiteralPath $destination).Length -eq $asset.size)) {
+        if ((Test-Path -LiteralPath $destination) -and
+            ((Get-Item -LiteralPath $destination).Length -eq $asset.size) -and
+            ((Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash -eq $assetHashes[$asset.name])) {
             Write-Output "已存在，跳过下载：$($asset.name)"
             continue
         }
@@ -101,7 +110,14 @@ try {
         Invoke-ReleaseHttp 'download' $asset.browser_download_url 'cove-cloud-publisher' $destination | Out-Null
         $actualSize = (Get-Item -LiteralPath $destination).Length
         if ($actualSize -ne $asset.size) { throw "$($asset.name) 下载不完整（$actualSize / $($asset.size) 字节）。" }
+        if ((Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash -ne $assetHashes[$asset.name]) {
+            throw "$($asset.name) 下载的 SHA-256 与 GitHub Release 不一致。"
+        }
     }
+
+    $checksums = Join-Path $tempDir 'SHA256SUMS'
+    $checksumLines = @($selectedAssets | ForEach-Object { "$($assetHashes[$_.name])  $($_.name)" })
+    [System.IO.File]::WriteAllText($checksums, ($checksumLines -join "`n") + "`n", [System.Text.UTF8Encoding]::new($false))
 
     $latestJson = Join-Path $tempDir 'latest.json'
     $metadata = @{ tag_name = $Tag; draft = $false; prerelease = $false } | ConvertTo-Json -Compress
@@ -109,12 +125,13 @@ try {
 
     Write-Output "准备云服务器临时目录：$staging"
     Invoke-Checked 'ssh' @($SshTarget, "mkdir -p '$staging'")
-    $localFiles = @($selectedAssets | ForEach-Object { Join-Path $tempDir $_.name }) + $latestJson
+    $localFiles = @($selectedAssets | ForEach-Object { Join-Path $tempDir $_.name }) + $latestJson + $checksums
     Invoke-Checked 'scp' ($localFiles + "${SshTarget}:$staging/")
 
     $releaseDir = "$RemoteRoot/releases/$Tag"
     $remoteCommands = @(
         'set -eu',
+        "cd '$staging' && sha256sum -c SHA256SUMS",
         "sudo install -d -m 0755 '$releaseDir' '$RemoteRoot/downloads'",
         "sudo install -m 0644 '$staging/latest.yml' '$releaseDir/latest.yml'",
         "sudo install -m 0644 '$staging/Cove-Setup-$version.exe' '$releaseDir/Cove-Setup-$version.exe'",
@@ -123,7 +140,9 @@ try {
         "sudo install -m 0644 '$staging/Cove-Server-Setup-$version.exe.blockmap' '$releaseDir/Cove-Server-Setup-$version.exe.blockmap'",
         "sudo install -m 0644 '$releaseDir/Cove-Setup-$version.exe' '$RemoteRoot/downloads/Cove-Setup.exe'",
         "sudo install -m 0644 '$releaseDir/Cove-Server-Setup-$version.exe' '$RemoteRoot/downloads/Cove-Server-Setup.exe'",
+        "cd '$releaseDir' && sha256sum -c '$staging/SHA256SUMS'",
         "sudo install -m 0644 '$staging/latest.json' '$RemoteRoot/releases/latest.json'",
+        "rm -f -- '$staging/SHA256SUMS'",
         "rm -f -- '$staging/latest.yml' '$staging/latest.json' '$staging/Cove-Setup-$version.exe' '$staging/Cove-Setup-$version.exe.blockmap' '$staging/Cove-Server-Setup-$version.exe' '$staging/Cove-Server-Setup-$version.exe.blockmap'",
         "rmdir -- '$staging'"
     )
