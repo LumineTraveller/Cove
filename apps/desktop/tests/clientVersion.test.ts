@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { COVE_RELEASE_VERSION } from '@cove/contracts';
+import { COVE_RELEASE_VERSION, isSupportedClientVersion } from '@cove/contracts';
+import packageInfo from '../package.json';
 import {
   CLIENT_VERSION,
   createClientVersionGate,
@@ -12,9 +13,9 @@ import {
 
 const policy = { minimumClientVersion: '2.0.0', serverVersion: '2.0.0', upgradeRequired: true };
 
-test('the actual desktop identity matches the release and a current stable client never loops on upgrade flags', () => {
-  assert.equal(CLIENT_VERSION, '2.0.0');
-  assert.equal(CLIENT_VERSION, COVE_RELEASE_VERSION);
+test('the actual desktop identity matches its package and a supported patch never loops on upgrade flags', () => {
+  assert.equal(CLIENT_VERSION, packageInfo.version);
+  assert.equal(isSupportedClientVersion(CLIENT_VERSION, COVE_RELEASE_VERSION), true);
   assert.equal(requiresClientUpgrade(policy), false);
   assert.equal(requiresClientUpgrade(policy, '2.0.0+local.1'), false);
   assert.equal(requiresClientUpgrade(policy, '2.0.0-rc.1'), true);
@@ -98,7 +99,7 @@ test('the public version probe identifies the platform, carries no saved credent
   globalThis.fetch = async (input, init) => {
     assert.equal(input, 'https://server.test/cove/api/version');
     const headers = new Headers(init?.headers);
-    assert.equal(headers.get('X-Cove-Client-Version'), '2.0.0');
+    assert.equal(headers.get('X-Cove-Client-Version'), CLIENT_VERSION);
     assert.equal(headers.get('X-Cove-Client-Platform'), 'desktop');
     assert.equal(headers.get('X-Cove-Client-Protocol'), '3');
     assert.equal(headers.has('authorization'), false);

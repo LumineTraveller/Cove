@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { CLIENT_VERSION } from '../src/features/updates/clientVersion';
 import {
   CLIENT_PROTOCOL_VERSION,
   ensureServerAccess,
@@ -64,7 +65,7 @@ test('client requests advertise protocol 3 and the actual desktop identity for a
   const headers = new Headers(init.headers);
   assert.equal(headers.get('x-cove-client-protocol'), String(CLIENT_PROTOCOL_VERSION));
   assert.equal(CLIENT_PROTOCOL_VERSION, 3);
-  assert.equal(headers.get('x-cove-client-version'), '2.0.0');
+  assert.equal(headers.get('x-cove-client-version'), CLIENT_VERSION);
   assert.equal(headers.get('x-cove-client-platform'), 'desktop');
   assert.equal(headers.get('x-test'), 'kept');
 });
@@ -72,10 +73,10 @@ test('client requests advertise protocol 3 and the actual desktop identity for a
 test('socket identity and direct media requests identify the desktop version with and without a grant', () => {
   const server = 'https://identity.test';
   assert.deepEqual(serverSocketAuth(server), {
-    serverAccessToken: null, clientProtocol: 3, clientVersion: '2.0.0', clientPlatform: 'desktop',
+    serverAccessToken: null, clientProtocol: 3, clientVersion: CLIENT_VERSION, clientPlatform: 'desktop',
   });
   const withoutGrant = new URL(authorizedResourceURL(server, '/sounds/tone.ogg'));
-  assert.equal(withoutGrant.searchParams.get('client_version'), '2.0.0');
+  assert.equal(withoutGrant.searchParams.get('client_version'), CLIENT_VERSION);
   assert.equal(withoutGrant.searchParams.get('client_platform'), 'desktop');
   assert.equal(withoutGrant.searchParams.has('access_token'), false);
   setServerAccessToken(server, { accessToken: 'synthetic-test-grant', expiresAt: Date.now() + 60_000 });
