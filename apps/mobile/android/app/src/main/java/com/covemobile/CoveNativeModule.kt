@@ -56,14 +56,15 @@ class CoveNativeModule(private val reactContext: ReactApplicationContext) :
   fun resolveServerAddresses(hostname: String, promise: Promise) {
     val value = hostname.trim().removePrefix("[").removeSuffix("]")
     if (value.isEmpty() || value.length > 253 || value.any { it.isWhitespace() || it == '/' || it == '\\' }) {
-      promise.resolve(emptyList<String>())
+      promise.resolve(Arguments.createArray())
       return
     }
     dnsExecutor.execute {
       try {
-        promise.resolve(InetAddress.getAllByName(value).mapNotNull { it.hostAddress })
+        // Promise callbacks accept a WritableNativeArray, not a Kotlin List.
+        promise.resolve(Arguments.fromList(InetAddress.getAllByName(value).mapNotNull { it.hostAddress }))
       } catch (_: Exception) {
-        promise.resolve(emptyList<String>())
+        promise.resolve(Arguments.createArray())
       }
     }
   }
