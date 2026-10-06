@@ -9023,12 +9023,8 @@ body:has(
   }
 }
 
-/* ── 聊天开合方案 B：列宽瞬时切换（一次重排），面板只用 transform 滑动 ──
-   旧实现把 --chat-width 0↔288 的变化放进 grid-template-columns 过渡，
-   每一帧都让全部消息重新折行，消息多时严重卡顿。现在：
-   1) 去掉 shell 的网格过渡（rail 展开改为瞬时切换）；
-   2) 聊天列宽只在 class 切换瞬间变化一次；
-   3) 面板用 translateX 滑入滑出（纯合成器动画，零重排）。 */
+/* 普通聊天保持原来的开合方式。共享态在下方单独处理：工作区连续让位，
+   聊天面板固定宽度滑动，避免消息在动画期间逐帧重新折行。 */
 .cove-shell {
   transition: none;
   --chat-panel-width: 380px;
@@ -9037,8 +9033,8 @@ body:has(
 .cove-shell.mode-available.chat-open {
   --chat-panel-width: 286px;
 }
-.cove-shell.mode-watching.chat-open,
-.cove-shell.mode-self.chat-open {
+.cove-shell.mode-watching,
+.cove-shell.mode-self {
   --chat-panel-width: 288px;
 }
 @media (max-width: 1220px) {
@@ -9046,8 +9042,8 @@ body:has(
     --chat-panel-width: 300px;
   }
   .cove-shell.mode-available.chat-open,
-  .cove-shell.mode-watching.chat-open,
-  .cove-shell.mode-self.chat-open {
+  .cove-shell.mode-watching,
+  .cove-shell.mode-self {
     --chat-panel-width: 270px;
   }
 }
@@ -9056,7 +9052,7 @@ body:has(
   transform: none;
   transition: transform 320ms var(--ease-layout);
 }
-/* 收起：聊天槽脱离网格流（主区瞬时补位），面板滑出到右缘外。 */
+/* 收起时面板滑出右缘；宽窗口的共享态始终脱离网格流，见下方规则。 */
 .cove-shell.chat-closed .chat-slot {
   position: absolute;
   top: 0;
@@ -9068,14 +9064,41 @@ body:has(
   box-shadow: -18px 0 40px rgba(28, 40, 55, 0.12);
   transform: translateX(100%);
 }
-/* 接缝把手跟随面板滑动（宽窗口用面板宽，窄抽屉分支沿用 --chat-overlay-width）。 */
+/* 共享态宽窗口用空的第三列为聊天预留空间。只过渡这列的宽度，视频随之
+   连续缩放、居中；面板本身始终固定宽度并用同款曲线移动，不挤压消息。
+   房间栏仍由自身的 width 过渡驱动，不修改其展开方式。 */
 @media (min-width: 1024px) {
+  .cove-shell.mode-watching,
+  .cove-shell.mode-self {
+    grid-template-columns: auto minmax(0, 1fr) var(--chat-width);
+    transition: grid-template-columns 320ms var(--ease-layout);
+  }
+  .cove-shell.mode-watching .chat-slot,
+  .cove-shell.mode-self .chat-slot {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 300;
+    width: var(--chat-panel-width);
+    background: linear-gradient(180deg, var(--room-top), var(--room-bottom));
+    box-shadow: none;
+  }
   .chat-edge-toggle-anchor {
     transform: translateX(calc(-1 * var(--chat-panel-width)));
   }
 }
 .cove-shell.chat-closed .chat-edge-toggle-anchor {
   transform: translateX(0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cove-shell.mode-watching,
+  .cove-shell.mode-self,
+  .cove-shell.mode-watching .chat-edge-toggle-anchor,
+  .cove-shell.mode-self .chat-edge-toggle-anchor {
+    transition: none;
+  }
 }
 
 /* 功能球右侧栏以最右端为锚定点：展开时从最右端的“离开语音”先伸出，

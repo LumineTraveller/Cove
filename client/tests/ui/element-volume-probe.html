@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Element volume probe</title>
+  </head>
+  <body>
+    <script type="module">
+      const results = [];
+      const errors = [];
+      window.elementVolumeProbe = { done: false, results, errors };
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const rmsOf = (analyser) => {
+        const data = new Float32Array(analyser.fftSize);
+        analyser.getFloatTimeDomainData(data);
+        let sum = 0;
+        for (const value of data) sum += value * value;
+        return Number(Math.sqrt(sum / data.length).toFixed(6));
+      };
+      const peakOf = (analyser) => {
+        const data = new Float32Array(analyser.fftSize);
+        analyser.getFloatTimeDomainData(data);
+        let peak = 0;
+        for (const value of data) peak = Math.max(peak, Math.abs(value));
+        return Number(peak.toFixed(6));
+      };
+
+      try {
+        // 系统回环：录到的是扬声器实际混音，用来判断"到底有没有变小声"。
+        const capture = await navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          audio: true,
+        });
+        const loopTrack = capture.getAudioTracks()[0];
+        results.push({ step: "loopback", hasAudio: Boolean(loopTrack), state: loopTrack?.readyState, label: loopTrack?.label });
+        capture.getVideoTracks().forEach((track) => track.stop());
+        if (!loopTrack) throw new Error("loopback audio track unavailable");
+
+        const loopCtx = new AudioContext();
+        await loopCtx.resume();
+        const loopAnalyser = loopCtx.createAnalyser();
+        loopAnalyser.fftSize = 2048;
+        const loopSink = loopCtx.createGain();
+        loopSink.gain.value = 0; // 只测量，不回放到扬声器，避免自激。
+        loopCtx.createMediaStreamSource(new MediaStream([loopTrack])).connect(loopAnalyser);
+        loopAnalyser.connect(loopSink).connect(loopCtx.destination);
+
+        // 待测音源：440Hz 正弦，等价于一路远端音轨。
+        const toneCtx = new AudioContext();
+        await toneCtx.resume();
+        const oscillator = toneCtx.createOscillator();
+        oscillator.frequency.value = 440;
+        const toneGain = toneCtx.createGain();
+        toneGain.gain.value = 0.2;
+        oscillator.connect(toneGain);
+        oscillator.start();
+        const streamDestination = toneCtx.createMediaStreamDestination();
+        toneGain.connect(streamDestination);
+        const toneTrack = streamDestination.stream.getAudioTracks()[0];
+        await sleep(400);
+
+        const sweep = async (label, apply, values) => {
+          for (const value of values) {
+            apply(value);
+            await sleep(520);
+            results.push({ step: label, value, rms: rmsOf(loopAnalyser), peak: peakOf(loopAnalyser) });
+          }
+        };
+
+        // 案例 A：MediaStream 音轨交给 <video> 元素播放，只改 element.volume。
+        const streamVideo = document.createElement("video");
+        streamVideo.srcObject = new MediaStream([toneTrack]);
+        document.body.append(streamVideo);
+        await streamVideo.play().catch((error) => errors.push(`streamVideo.play: ${String(error)}`));
+        await sleep(600);
+        await sweep("A-mediastream-element-volume", (value) => { streamVideo.volume = value; }, [1, 0.5, 0.25, 0.1]);
+        streamVideo.muted = true;
+        await sleep(520);
+        results.push({ step: "A-mediastream-element-muted", value: true, rms: rmsOf(loopAnalyser), peak: peakOf(loopAnalyser) });
+        results.push({ step: "A-state", paused: streamVideo.paused, readyState: streamVideo.readyState, track: toneTrack.readyState });
+        streamVideo.muted = false;
+        streamVideo.pause();
+        streamVideo.srcObject = null;
+        await sleep(400);
+
+        // 案例 B（对照）：解码文件元素，同样只改 element.volume。
+        const sampleRate = 8000;
+        const frames = sampleRate;
+        const buffer = new ArrayBuffer(44 + frames * 2);
+        const view = new DataView(buffer);
+        const writeText = (offset, text) => {
+          for (let index = 0; index < text.length; index += 1) view.setUint8(offset + index, text.charCodeAt(index));
+        };
+        writeText(0, "RIFF");
+        view.setUint32(4, 36 + frames * 2, true);
+        writeText(8, "WAVEfmt ");
+        view.setUint32(16, 16, true);
+        view.setUint16(20, 1, true);
+        view.setUint16(22, 1, true);
+        view.setUint32(24, sampleRate, true);
+        view.setUint32(28, sampleRate * 2, true);
+        view.setUint16(32, 2, true);
+        view.setUint16(34, 16, true);
+        writeText(36, "data");
+        view.setUint32(40, frames * 2, true);
+        for (let index = 0; index < frames; index += 1)
+          view.setInt16(44 + index * 2, Math.round(Math.sin((2 * Math.PI * 440 * index) / sampleRate) * 6000), true);
+        const blobVideo = document.createElement("video");
+        blobVideo.src = URL.createObjectURL(new Blob([buffer], { type: "audio/wav" }));
+        blobVideo.loop = true;
+        document.body.append(blobVideo);
+        await blobVideo.play().catch((error) => errors.push(`blobVideo.play: ${String(error)}`));
+        await sleep(600);
+        await sweep("B-blob-element-volume", (value) => { blobVideo.volume = value; }, [1, 0.5, 0.25, 0.1]);
+        blobVideo.pause();
+        await sleep(400);
+
+        // 案例 C：Web Audio 增益（修复采用的通路）。C1 无媒体元素，C2 带静音激活元素。
+        const gainCtx = new AudioContext();
+        await gainCtx.resume();
+        const gainSource = gainCtx.createMediaStreamSource(new MediaStream([toneTrack]));
+        const gainNode = gainCtx.createGain();
+        gainSource.connect(gainNode).connect(gainCtx.destination);
+        await sleep(500);
+        await sweep("C1-webaudio-no-element", (value) => { gainNode.gain.value = value; }, [1, 0.5, 0.25, 2]);
+        gainNode.gain.value = 0;
+        await sleep(300);
+
+        const activation = new Audio();
+        activation.muted = true;
+        activation.volume = 0;
+        activation.srcObject = new MediaStream([toneTrack]);
+        await activation.play().catch((error) => errors.push(`activation.play: ${String(error)}`));
+        await sleep(500);
+        await sweep("C2-webaudio-with-muted-activation-element", (value) => { gainNode.gain.value = value; }, [1, 0.5, 0.25, 2, 0]);
+      } catch (error) {
+        errors.push(String(error?.stack ?? error));
+      }
+      window.elementVolumeProbe.done = true;
+    </script>
+  </body>
+</html>

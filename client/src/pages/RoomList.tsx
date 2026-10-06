@@ -38,6 +38,14 @@ interface LobbyPresenceSnapshot {
   voiceCounts: Record<string, number>;
 }
 
+/** 把相对路径头像 URL 拼接上 serverURL。 */
+function resolveRoomAvatarUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  if (url.startsWith('data:') || url.startsWith('http:') || url.startsWith('https:')) return url;
+  const base = ((socket as any).io?.uri ?? '').replace(/\/$/, '');
+  return base ? `${base}${url}` : url;
+}
+
 export default function RoomList({ profile, onProfileChange, accountId, onLogout, sessionReady, serverURL, theme, onThemeChange }: Props) {
   const navigate = useNavigate();
   const rtc = useWebRTC(socket, '__lobby__');
@@ -257,7 +265,7 @@ export default function RoomList({ profile, onProfileChange, accountId, onLogout
                     >
                       <span className="lobby-room-card-avatar">
                         {room.avatarUrl ? (
-                          <img src={room.avatarUrl} alt="" />
+                          <img src={resolveRoomAvatarUrl(room.avatarUrl) ?? undefined} alt="" />
                         ) : (
                           room.name.slice(0, 1).toUpperCase()
                         )}

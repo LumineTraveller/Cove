@@ -14,9 +14,11 @@ import {
 } from './ms';
 import { createLobbyPresenceSnapshot, sanitizeClientPlatform, type ClientPlatform } from './presence';
 import { soundpackVoiceAudience } from './soundpackAudience';
+import { normalizeSoundpack } from './soundpackNormalization';
 import { createVoicePresenceEvent, voicePresenceMessage, type VoicePresenceAction } from './voicePresence';
 import { summarizeRtpStat, summarizeTransportStat } from './mediaDiagnostics';
 import { AccountAuthError, createAccountStore } from './accountAuth';
+import { createAvatarStorage, mapAvatarUrls, avatarOrigin } from './avatarStorage';
 import {
   createServerSecurityStore,
   isClientProtocolSupported,
@@ -48,8 +50,7 @@ app.use(express.json({ limit: '15mb' }));
 
 const io = new Server(httpServer, {
   cors: { origin: '*', methods: ['GET', 'POST'] },
-  // GIF avatars are kept as data URLs so the browser can animate them. An 8 MiB
-  // file expands to roughly 11.2 MiB in base64; leave room for the packet.
+  // Uploads may contain an 8 MiB GIF. Outbound avatars use file URLs instead.
   maxHttpBufferSize: 16 * 1024 * 1024,
   // Keep packet offsets slightly longer than the 5s peer deadline. Otherwise
   // a quiet client's last offset may expire before its recovery window ends.
@@ -128,7 +129,9 @@ db.exec(`
     uploader TEXT NOT NULL,
     uploaderId TEXT,
     createdAt INTEGER NOT NULL,
-    sortOrder INTEGER NOT NULL DEFAULT 0
+    sortOrder INTEGER NOT NULL DEFAULT 0,
+    originalFilename TEXT,
+    normalizationVersion INTEGER NOT NULL DEFAULT 0
   );
   CREATE TABLE IF NOT EXISTS room_mutes (
     roomId TEXT NOT NULL,
@@ -178,6 +181,10 @@ if (!soundpackColumns.some(column => column.name === 'sortOrder')) {
     rows.forEach((row, index) => updateOrder.run(index, row.id));
   })(existing);
 }
+if (!soundpackColumns.some(column => column.name === 'originalFilename'))
+  db.exec('ALTER TABLE soundpacks ADD COLUMN originalFilename TEXT');
+if (!soundpackColumns.some(column => column.name === 'normalizationVersion'))
+  db.exec('ALTER TABLE soundpacks ADD COLUMN normalizationVersion INTEGER NOT NULL DEFAULT 0');
 
 // A fresh server receives a one-time administrator bootstrap credential. It is
 // never sent by the status endpoint and is removed after successful setup. In
@@ -273,7 +280,9 @@ const stmtUnmuteMember   = db.prepare('DELETE FROM room_mutes WHERE roomId = ? A
 const stmtGetSoundpacks  = db.prepare('SELECT * FROM soundpacks ORDER BY sortOrder ASC, createdAt DESC');
 const stmtGetSoundpack   = db.prepare('SELECT * FROM soundpacks WHERE id = ?');
 const stmtGetNextSoundpackOrder = db.prepare('SELECT COALESCE(MIN(sortOrder), 0) - 1 AS sortOrder FROM soundpacks');
-const stmtInsertSoundpack = db.prepare('INSERT INTO soundpacks (id, name, filename, uploader, uploaderId, createdAt, sortOrder) VALUES (?, ?, ?, ?, ?, ?, ?)');
+const stmtInsertSoundpack = db.prepare('INSERT INTO soundpacks (id, name, filename, originalFilename, normalizationVersion, uploader, uploaderId, createdAt, sortOrder) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)');
+const stmtGetLegacySoundpacks = db.prepare('SELECT * FROM soundpacks WHERE normalizationVersion = 0 ORDER BY createdAt ASC');
+const stmtMarkSoundpackNormalized = db.prepare('UPDATE soundpacks SET filename = ?, originalFilename = ?, normalizationVersion = 1 WHERE id = ? AND filename = ? AND normalizationVersion = 0');
 const stmtUpdateSoundpackOrder = db.prepare('UPDATE soundpacks SET sortOrder = ? WHERE id = ?');
 const stmtRenameSoundpack = db.prepare('UPDATE soundpacks SET name = ? WHERE id = ?');
 const stmtDeleteSoundpack = db.prepare('DELETE FROM soundpacks WHERE id = ?');
@@ -299,8 +308,8 @@ interface PrivateRoom extends Omit<Room, 'hasPassword'> { ownerId: string | null
 interface Message   { id: string; roomId: string; author: string; authorUserId?: string | null; content: string; contentUserId?: string; contentUsername?: string; type: 'chat' | 'soundpack' | 'image' | 'system'; timestamp: number }
 interface StoredMessage extends Omit<Message, 'authorUserId' | 'contentUserId' | 'contentUsername'> { authorId: string | null }
 interface MessageHistoryCursor { timestamp: number; id: string }
-interface SoundpackRecord { id: string; name: string; filename: string; uploader: string; uploaderId: string | null; createdAt: number; sortOrder: number }
-interface PublicSoundpack { id: string; name: string; filename: string; uploader: string; uploaderUserId: string | null; createdAt: number; sortOrder: number; canDelete: boolean }
+interface SoundpackRecord { id: string; name: string; filename: string; originalFilename: string | null; normalizationVersion: number; uploader: string; uploaderId: string | null; createdAt: number; sortOrder: number }
+interface PublicSoundpack { id: string; name: string; filename: string; originalFilename: string; uploader: string; uploaderUserId: string | null; createdAt: number; sortOrder: number; canDelete: boolean }
 interface RoomMember {
   socketId: string;
   userId: string;
@@ -353,6 +362,77 @@ function getMessageHistory(roomId: string, before?: MessageHistoryCursor) {
 // ── 语音包文件目录 ─────────────────────────────────────────────────────────────
 const SOUNDS_DIR = path.join(dataDir, 'sounds');
 fs.mkdirSync(SOUNDS_DIR, { recursive: true });
+const avatarStorage = createAvatarStorage(dataDir);
+
+function migrateAvatars(): void {
+  for (const table of ['accounts', 'rooms']) {
+    const rows = db.prepare(`SELECT id, avatarUrl FROM ${table} WHERE avatarUrl IS NOT NULL`).all() as { id: string; avatarUrl: string }[];
+    const update = db.prepare(`UPDATE ${table} SET avatarUrl = ? WHERE id = ?`);
+    let count = 0;
+    for (const row of rows) {
+      let source = row.avatarUrl;
+      // Recover files written by the previous room-avatar migration, whose
+      // HTTP handler mistakenly attempted to open a file named "avatar".
+      if (table === 'rooms' && source === `/api/rooms/${row.id}/avatar`) {
+        for (const ext of ['png', 'jpg', 'webp', 'gif']) {
+          const filename = path.join(dataDir, 'room-avatars', `room-${row.id}.${ext}`);
+          if (!fs.existsSync(filename)) continue;
+          source = `data:image/${ext === 'jpg' ? 'jpeg' : ext};base64,${fs.readFileSync(filename).toString('base64')}`;
+          break;
+        }
+      }
+      const saved = avatarStorage.save(source);
+      if (saved && saved !== row.avatarUrl) { update.run(saved, row.id); count++; }
+      else if (!saved) console.warn(`[avatar] unable to migrate ${table}/${row.id}`);
+    }
+    console.log(`[avatar] migrated ${table}: ${count}`);
+  }
+}
+
+function socketAvatarPayload<T>(socket: Socket, payload: T): T {
+  return mapAvatarUrls(payload, avatarOrigin(socket.handshake.headers, socket.handshake.secure),
+    serverSecurityEnabled ? socket.handshake.auth.serverAccessToken : undefined);
+}
+function requestAvatarPayload<T>(req: express.Request, payload: T): T {
+  return mapAvatarUrls(payload, avatarOrigin(req.headers, req.protocol === 'https'),
+    serverSecurityEnabled ? requestServerAccessToken(req) ?? undefined : undefined);
+}
+function emitAvatarPayload(event: string, payload: unknown, roomId?: string): void {
+  for (const socket of io.sockets.sockets.values()) {
+    if (!roomId || socket.rooms.has(roomId)) socket.emit(event, socketAvatarPayload(socket, payload));
+  }
+}
+let legacyNormalizationPromise: Promise<void> | null = null;
+let legacyNormalizationStopped = false;
+
+async function normalizeLegacySoundpacks(): Promise<void> {
+  for (const pack of stmtGetLegacySoundpacks.all() as SoundpackRecord[]) {
+    if (legacyNormalizationStopped) break;
+    const originalFilename = path.basename(pack.filename);
+    const source = path.join(SOUNDS_DIR, originalFilename);
+    const filename = `${pack.id}.normalized.mp3`;
+    const destination = path.join(SOUNDS_DIR, filename);
+    const temporary = path.join(SOUNDS_DIR, `${pack.id}.normalizing.mp3`);
+    if (!fs.existsSync(source)) {
+      console.warn(`[soundpack] 跳过缺失的原文件 ${pack.id}`);
+      continue;
+    }
+    try {
+      await normalizeSoundpack(source, temporary);
+      // Deletion may happen while FFmpeg is running. Leave the old file in
+      // place and only switch the database after the new file is complete.
+      const current = stmtGetSoundpack.get(pack.id) as SoundpackRecord | undefined;
+      if (legacyNormalizationStopped || !current || current.filename !== pack.filename) continue;
+      fs.renameSync(temporary, destination);
+      stmtMarkSoundpackNormalized.run(filename, originalFilename, pack.id, pack.filename);
+      io.emit('soundpack:normalized', { soundId: pack.id, filename, originalFilename });
+    } catch (error) {
+      console.warn(`[soundpack] 旧语音包 ${pack.id} 标准化失败，继续使用原文件`, error);
+    } finally {
+      try { fs.rmSync(temporary, { force: true }); } catch { /* retry on next start */ }
+    }
+  }
+}
 const CHAT_IMAGES_DIR = path.join(dataDir, 'chat-images');
 fs.mkdirSync(CHAT_IMAGES_DIR, { recursive: true });
 
@@ -404,24 +484,22 @@ const ROOM_COLOR_RE = /^#[0-9a-f]{6}$/i;
 const DEFAULT_ROOM_COLOR = '#FFFFFF';
 const DEFAULT_ROOM_DARK_TOP = '#111827';
 const DEFAULT_ROOM_DARK_BOTTOM = '#0B1220';
-const MAX_AVATAR_DATA_URL_LENGTH = 12 * 1024 * 1024;
 function sanitizeRoomColor(value: unknown, fallback: string | null = null): string | null {
   if (value == null || value === '') return fallback;
   if (typeof value !== 'string' || !ROOM_COLOR_RE.test(value.trim()))
     throw new RoomSettingsError('INVALID_SETTINGS', '房间背景颜色必须是六位 HEX 颜色代码');
   return value.trim().toUpperCase();
 }
-function sanitizeRoomAvatar(value: unknown, fallback: string | null = null): string | null {
+function sanitizeRoomAvatar(value: unknown, fallback: string | null = null, _roomId?: string): string | null {
   if (value == null || value === '') return fallback;
-  if (typeof value !== 'string' || value.length > MAX_AVATAR_DATA_URL_LENGTH || !/^data:image\/(?:png|jpeg|webp|gif);base64,/i.test(value))
-    throw new RoomSettingsError('INVALID_SETTINGS', '房间头像格式不受支持或文件过大');
-  return value;
+  const saved = avatarStorage.save(value);
+  if (!saved) throw new RoomSettingsError('INVALID_SETTINGS', '房间头像格式不受支持或文件过大');
+  return saved;
 }
 
 function sanitizeProfileAvatar(value: unknown): string | null {
   if (value == null || value === '') return null;
-  if (typeof value !== 'string' || value.length > MAX_AVATAR_DATA_URL_LENGTH || !/^data:image\/(?:png|jpeg|webp|gif);base64,/i.test(value)) return null;
-  return value;
+  return avatarStorage.save(value);
 }
 
 const roomCreationPending = new Set<string>();
@@ -440,18 +518,19 @@ async function createRoomForSocket(socketId: unknown, data: { name?: unknown; ma
     const secret = await hashRoomPassword(password);
     if (!io.sockets.sockets.get(socketId)?.connected || userClientIds.get(socketId) !== ownerId)
       throw new RoomSettingsError('NOT_REGISTERED', '登录连接已失效，请重试');
-    const room: Room = {
-      id: randomUUID(), name, createdAt: Date.now(), ownerName: userNames.get(socketId) ?? '',
+    const newRoomId = randomUUID();
+    const room = {
+      id: newRoomId, name, createdAt: Date.now(), ownerName: userNames.get(socketId) ?? '',
       ownerUserId: publicUserId(socketId),
       maxMembers, hasPassword: secret.passwordHash !== null,
-      avatarUrl: sanitizeRoomAvatar(data?.avatarUrl),
+      avatarUrl: sanitizeRoomAvatar(data?.avatarUrl, null, newRoomId),
       backgroundTop: sanitizeRoomColor(data?.backgroundTop, DEFAULT_ROOM_COLOR),
       backgroundBottom: sanitizeRoomColor(data?.backgroundBottom, DEFAULT_ROOM_COLOR),
       backgroundTopDark: sanitizeRoomColor(data?.backgroundTopDark, DEFAULT_ROOM_DARK_TOP),
       backgroundBottomDark: sanitizeRoomColor(data?.backgroundBottomDark, DEFAULT_ROOM_DARK_BOTTOM),
     };
     stmtInsertRoom.run(room.id, room.name, room.createdAt, ownerId, room.ownerName, maxMembers, secret.passwordHash, secret.passwordSalt, room.avatarUrl, room.backgroundTop, room.backgroundBottom, room.backgroundTopDark, room.backgroundBottomDark);
-    io.emit('rooms:updated', stmtGetRooms.all());
+    emitAvatarPayload('rooms:updated', stmtGetRooms.all());
     return room;
   } finally { roomCreationPending.delete(socketId); }
 }
@@ -482,6 +561,7 @@ function toPublicSoundpack(pack: SoundpackRecord, requesterSocketId?: string, ro
     id: pack.id,
     name: pack.name,
     filename: pack.filename,
+    originalFilename: pack.originalFilename ?? pack.filename,
     uploader: pack.uploader,
     uploaderUserId: pack.uploaderId ? publicUserIdForStableId(pack.uploaderId) : null,
     createdAt: pack.createdAt,
@@ -554,7 +634,7 @@ const requireServerAccess = (
     next();
     return;
   }
-  if (!isClientProtocolSupported(req.get('x-cove-client-protocol'))) {
+  if (!isClientProtocolSupported(req.get('x-cove-client-protocol') ?? (allowQueryToken ? req.query.client_protocol : undefined))) {
     securityDenied(res, outdatedClient());
     return;
   }
@@ -676,6 +756,11 @@ app.use('/chat-images', requirePrivateStaticAccess, express.static(CHAT_IMAGES_D
   fallthrough: false,
   cacheControl: false,
 }));
+app.use('/avatars', requirePrivateStaticAccess, express.static(avatarStorage.directory, {
+  fallthrough: false, index: false, maxAge: serverSecurityEnabled ? 0 : '1y',
+  immutable: !serverSecurityEnabled,
+  setHeaders: res => { res.setHeader('X-Content-Type-Options', 'nosniff'); },
+}));
 
 // Public release files must be available before a client can authenticate to
 // the selected server. On Linux, the default matches the release mirror path;
@@ -725,7 +810,7 @@ app.post('/api/auth/register', async (req, res) => {
   if (typeof email !== 'string' || typeof password !== 'string' || typeof username !== 'string') {
     res.status(400).json({ error: '请填写邮箱、密码和用户名' }); return;
   }
-  try { res.status(201).json(await accounts.register(email, password, username)); }
+  try { res.status(201).json(requestAvatarPayload(req, await accounts.register(email, password, username))); }
   catch (error) { authResponse(error, res); }
 });
 
@@ -737,7 +822,7 @@ app.post('/api/auth/login', async (req, res) => {
   try {
     const result = await accounts.login(email, password);
     replaceAccountSocket(result.account.id);
-    res.json(result);
+    res.json(requestAvatarPayload(req, result));
   }
   catch (error) { authResponse(error, res); }
 });
@@ -766,7 +851,7 @@ app.post('/api/auth/profile', (req, res) => {
     userNames.set(socketId, username);
     userAvatars.set(socketId, avatarUrl);
     const updated = stmtUpdateOwnerName.run(username, `account:${account.id}`, username);
-    if (updated.changes > 0) io.emit('rooms:updated', stmtGetRooms.all());
+    if (updated.changes > 0) emitAvatarPayload('rooms:updated', stmtGetRooms.all());
     broadcastOnlineUsers();
     for (const [roomId, members] of roomMembers) {
       if (!members.has(socketId)) continue;
@@ -791,7 +876,7 @@ app.get('/api/soundpacks', (req, res) => {
   res.json(packs.map(pack => toPublicSoundpack(pack, requesterSocketId, roomId)));
 });
 
-app.post('/api/soundpacks', (req, res) => {
+app.post('/api/soundpacks', async (req, res) => {
   const { name, data, mimeType, socketId, roomId } = req.body as {
     name?: string; data?: string; mimeType?: string; socketId?: string; roomId?: string;
   };
@@ -811,28 +896,44 @@ app.post('/api/soundpacks', (req, res) => {
   if (buf.length > 8 * 1024 * 1024) {
     res.status(400).json({ error: '文件过大，最大支持 8MB' }); return;
   }
-  const ext = mimeType.split('/')[1]?.replace('mpeg', 'mp3') ?? 'audio';
+  const subtype = mimeType.split('/')[1]?.split(';')[0]?.toLowerCase();
+  const ext = subtype === 'mpeg' ? 'mp3' : subtype === 'x-wav' || subtype === 'wave' ? 'wav'
+    : subtype && /^[a-z0-9]{1,8}$/.test(subtype) ? subtype : 'audio';
   const id  = Math.random().toString(36).slice(2, 9);
-  const filename = `${id}.${ext}`;
+  const originalFilename = `${id}.${ext}`;
+  const filename = `${id}.normalized.mp3`;
+  const originalPath = path.join(SOUNDS_DIR, originalFilename);
+  const temporaryPath = path.join(SOUNDS_DIR, `${id}.normalizing.mp3`);
+  const playbackPath = path.join(SOUNDS_DIR, filename);
+  let sp: SoundpackRecord;
   try {
-    fs.writeFileSync(path.join(SOUNDS_DIR, filename), buf);
-  } catch {
-    res.status(500).json({ error: '文件保存失败' }); return;
+    fs.writeFileSync(originalPath, buf, { flag: 'wx' });
+    await normalizeSoundpack(originalPath, temporaryPath);
+    fs.renameSync(temporaryPath, playbackPath);
+    const nextOrder = (stmtGetNextSoundpackOrder.get() as { sortOrder: number }).sortOrder;
+    sp = { id, name: name.trim(), filename, originalFilename, normalizationVersion: 1, uploader, uploaderId, createdAt: Date.now(), sortOrder: nextOrder };
+    stmtInsertSoundpack.run(sp.id, sp.name, sp.filename, sp.originalFilename, sp.uploader, sp.uploaderId, sp.createdAt, sp.sortOrder);
+  } catch (error) {
+    for (const file of [temporaryPath, playbackPath, originalPath]) {
+      try { fs.rmSync(file, { force: true }); } catch { /* report the original failure */ }
+    }
+    const message = error instanceof Error ? error.message : '语音包处理失败';
+    console.warn('[soundpack] 上传处理失败', error);
+    res.status(message.startsWith('语音包') || message.includes('FFmpeg') ? 400 : 500)
+      .json({ error: message });
+    return;
   }
-  const nextOrder = (stmtGetNextSoundpackOrder.get() as { sortOrder: number }).sortOrder;
-  const sp: SoundpackRecord = { id, name: name.trim(), filename, uploader, uploaderId, createdAt: Date.now(), sortOrder: nextOrder };
-  stmtInsertSoundpack.run(sp.id, sp.name, sp.filename, sp.uploader, sp.uploaderId, sp.createdAt, sp.sortOrder);
   broadcastSoundpackAdded(sp);
   res.json(toPublicSoundpack(sp, socketId, roomId));
 });
 
 // ── 房间 REST ─────────────────────────────────────────────────────────────────
 
-app.get('/api/rooms', (_req, res) => { res.json(stmtGetRooms.all()); });
+app.get('/api/rooms', (req, res) => { res.json(requestAvatarPayload(req, stmtGetRooms.all())); });
 
 app.post('/api/rooms', async (req, res) => {
   try {
-    res.json(await createRoomForSocket(req.body?.socketId, req.body));
+    res.json(requestAvatarPayload(req, await createRoomForSocket(req.body?.socketId, req.body)));
   } catch (error) {
     res.status(error instanceof RoomSettingsError && error.code === 'NOT_REGISTERED' ? 401 : 400).json(roomError(error));
   }
@@ -841,7 +942,7 @@ app.post('/api/rooms', async (req, res) => {
 app.get('/api/rooms/:id', (req, res) => {
   const room = stmtGetRoom.get(req.params.id) as Room | undefined;
   if (!room) { res.status(404).json({ error: 'Not found' }); return; }
-  res.json(room);
+  res.json(requestAvatarPayload(req, room));
 });
 
 app.get('/api/rooms/:id/messages', (req, res) => {
@@ -1053,7 +1154,7 @@ function currentVoiceList(roomId: string) {
 }
 
 function broadcastVoiceList(roomId: string) {
-  io.to(roomId).emit('voice:members-updated', currentVoiceList(roomId));
+  emitAvatarPayload('voice:members-updated', currentVoiceList(roomId), roomId);
 }
 
 function voiceCounts() {
@@ -1147,7 +1248,9 @@ function broadcastRoomMembers(roomId: string) {
   // room:state 对每个连接单独发送，isOwner 由服务端计算，不能由客户端声明。
   for (const socketId of members) {
     const clientId = userClientIds.get(socketId);
-    io.to(socketId).emit('room:state', {
+    const target = io.sockets.sockets.get(socketId);
+    if (!target) continue;
+    target.emit('room:state', socketAvatarPayload(target, {
       roomId,
       name: room.name,
       ownerName: room.ownerName,
@@ -1161,7 +1264,7 @@ function broadcastRoomMembers(roomId: string) {
       backgroundTopDark: room.backgroundTopDark,
       backgroundBottomDark: room.backgroundBottomDark,
       members: list,
-    });
+    }));
   }
   // 保留旧事件兼容旧客户端；全局列表只用于大厅显示人数。
   const names = list.map(member => member.username);
@@ -1249,7 +1352,7 @@ function stopRemoteControlForRoom(roomId: string, reason: string) {
 }
 
 function broadcastOnlineUsers() {
-  io.emit('users:online', createLobbyPresenceSnapshot(
+  emitAvatarPayload('users:online', createLobbyPresenceSnapshot(
     userNames, userAvatars, roomMembers, voiceRooms, userPlatforms, publicUserIdsBySocket(),
   ).onlineUsers);
 }
@@ -1410,6 +1513,7 @@ io.on('connection', socket => {
     registration: string | { username?: string; clientId?: string; authToken?: string; avatarUrl?: unknown; platform?: unknown; remoteControlSupported?: unknown },
     cb?: (result: { ok: boolean; error?: string; code?: string; profile?: { username: string; avatarUrl: string | null } }) => void,
   ) => {
+    const startedAt = Date.now();
     const account = typeof registration === 'string' ? null : accounts.accountForToken(registration?.authToken);
     if (typeof registration === 'string' || !registration?.authToken) {
       cb?.({ ok: false, error: '请升级客户端并先登录账号', code: 'ACCOUNT_AUTH_REQUIRED' }); return;
@@ -1418,6 +1522,16 @@ io.on('connection', socket => {
     const boundAccountId = socket.data.accountId as string | undefined;
     if (boundAccountId && boundAccountId !== account?.id) {
       cb?.({ ok: false, error: '此连接已绑定其他账号，请重新连接', code: 'ACCOUNT_SWITCH_FORBIDDEN' }); return;
+    }
+    // A lost/delayed acknowledgement may trigger the same request again. Do
+    // not amplify congestion by repeating all room and presence broadcasts.
+    if (boundAccountId === account.id && accountSockets.get(account.id) === socket.id
+      && socket.data.authToken === registration.authToken && userNames.has(socket.id)) {
+      cb?.(socketAvatarPayload(socket, { ok: true, profile: {
+        username: userNames.get(socket.id)!, avatarUrl: userAvatars.get(socket.id) ?? null,
+      } }));
+      console.log(`[registration] socket=${socket.id} reused=true ackMs=${Date.now() - startedAt}`);
+      return;
     }
     const submittedName = account?.username ?? (typeof registration === 'string' ? registration : registration?.username);
     const username = typeof submittedName === 'string' ? submittedName.trim() : '';
@@ -1452,7 +1566,7 @@ io.on('connection', socket => {
       migrateLegacyIdentity(suppliedClientId, clientId);
     if (account) {
       const migratedOwners = stmtMigrateLegacyOwnersByName.run(clientId, username.slice(0, 64), username.slice(0, 64));
-      if (migratedOwners.changes > 0) io.emit('rooms:updated', stmtGetRooms.all());
+      if (migratedOwners.changes > 0) emitAvatarPayload('rooms:updated', stmtGetRooms.all());
     }
     userNames.set(socket.id, username.slice(0, 64));
     userAvatars.set(socket.id, sanitizeProfileAvatar(account?.avatarUrl ?? (typeof registration === 'string' ? null : registration.avatarUrl)));
@@ -1468,16 +1582,18 @@ io.on('connection', socket => {
 
     // 同一设备更改用户名后，同步更新它所拥有房间的公开房主名。
     const updated = stmtUpdateOwnerName.run(username.slice(0, 64), clientId, username.slice(0, 64));
-    if (updated.changes > 0) io.emit('rooms:updated', stmtGetRooms.all());
-    refreshProfileViews();
-    socket.emit('voice:counts', voiceCounts());
-    cb?.({
+    const acknowledgement = socketAvatarPayload(socket, {
       ok: true,
       profile: {
         username: userNames.get(socket.id) ?? username.slice(0, 64),
         avatarUrl: userAvatars.get(socket.id) ?? null,
       },
     });
+    cb?.(acknowledgement);
+    console.log(`[registration] socket=${socket.id} reused=false ackMs=${Date.now() - startedAt} ackBytes=${Buffer.byteLength(JSON.stringify(acknowledgement))}`);
+    if (updated.changes > 0) emitAvatarPayload('rooms:updated', stmtGetRooms.all());
+    refreshProfileViews();
+    socket.emit('voice:counts', voiceCounts());
   });
 
   socket.on('user:update-profile', (
@@ -1487,12 +1603,15 @@ io.on('connection', socket => {
     const username = update?.username?.trim().slice(0, 64);
     const clientId = userClientIds.get(socket.id);
     if (!username || !clientId) { cb?.({ ok: false, error: '用户尚未注册' }); return; }
-    userNames.set(socket.id, username);
     const avatarUrl = sanitizeProfileAvatar(update.avatarUrl);
+    if (update.avatarUrl != null && update.avatarUrl !== '' && !avatarUrl) {
+      cb?.({ ok: false, error: '头像格式不受支持或文件过大' }); return;
+    }
+    userNames.set(socket.id, username);
     userAvatars.set(socket.id, avatarUrl);
     if (clientId.startsWith('account:')) accounts.updateProfile(clientId.slice('account:'.length), username, avatarUrl);
     const updated = stmtUpdateOwnerName.run(username, clientId, username);
-    if (updated.changes > 0) io.emit('rooms:updated', stmtGetRooms.all());
+    if (updated.changes > 0) emitAvatarPayload('rooms:updated', stmtGetRooms.all());
     refreshProfileViews();
     cb?.({ ok: true });
   });
@@ -1501,23 +1620,23 @@ io.on('connection', socket => {
     cb?: (result: ReturnType<typeof createLobbyPresenceSnapshot> & { ok: true }) => void,
   ) => {
     if (!userNames.has(socket.id)) return;
-    cb?.({
+    cb?.(socketAvatarPayload(socket, {
       ok: true,
       ...createLobbyPresenceSnapshot(userNames, userAvatars, roomMembers, voiceRooms, userPlatforms, publicUserIdsBySocket()),
-    });
+    }));
   });
 
   socket.on('rooms:get', (cb?: (result: { ok: true; rooms: Array<Room & { isOwner: boolean }> }) => void) => {
     const clientId = userClientIds.get(socket.id);
     const owners = new Map((stmtGetRoomOwners.all() as { id: string; ownerId: string | null }[]).map(row => [row.id, row.ownerId]));
-    cb?.({
+    cb?.(socketAvatarPayload(socket, {
       ok: true,
       rooms: stmtGetRooms.all().map(room => ({ ...room, isOwner: !!clientId && owners.get(room.id) === clientId })),
-    });
+    }));
   });
 
   socket.on('room:create', async (data, cb) => {
-    try { cb?.({ room: await createRoomForSocket(socket.id, data) }); }
+    try { cb?.(socketAvatarPayload(socket, { room: await createRoomForSocket(socket.id, data) })); }
     catch (error) { cb?.(roomError(error)); }
   });
 
@@ -1558,7 +1677,7 @@ io.on('connection', socket => {
       assertRoomCapacity(members, socket.id, room.maxMembers);
       if (!room.ownerId) {
         stmtClaimRoom.run(clientId, userNames.get(socket.id), roomId);
-        io.emit('rooms:updated', stmtGetRooms.all());
+        emitAvatarPayload('rooms:updated', stmtGetRooms.all());
       }
       const previousRoom = peers.get(socket.id)?.roomId;
       if (previousRoom && previousRoom !== roomId) {
@@ -1613,7 +1732,7 @@ io.on('connection', socket => {
       const password = validateRoomPassword(data.password);
       const requestedLimit = data.maxMembers === undefined ? undefined : parseRoomLimit(data.maxMembers);
       const secret = password === undefined ? undefined : await hashRoomPassword(password);
-      const avatarUrl = data.avatarUrl === undefined ? current.avatarUrl : sanitizeRoomAvatar(data.avatarUrl, null);
+      const avatarUrl = data.avatarUrl === undefined ? current.avatarUrl : sanitizeRoomAvatar(data.avatarUrl, null, roomId);
       const backgroundTop = data.backgroundTop === undefined ? current.backgroundTop : sanitizeRoomColor(data.backgroundTop, DEFAULT_ROOM_COLOR);
       const backgroundBottom = data.backgroundBottom === undefined ? current.backgroundBottom : sanitizeRoomColor(data.backgroundBottom, DEFAULT_ROOM_COLOR);
       const backgroundTopDark = data.backgroundTopDark === undefined ? current.backgroundTopDark : sanitizeRoomColor(data.backgroundTopDark, DEFAULT_ROOM_DARK_TOP);
@@ -1623,8 +1742,8 @@ io.on('connection', socket => {
         secret ? secret.passwordHash : current.passwordHash, secret ? secret.passwordSalt : current.passwordSalt,
         avatarUrl, backgroundTop, backgroundBottom, backgroundTopDark, backgroundBottomDark, roomId);
       broadcastRoomMembers(roomId);
-      io.emit('rooms:updated', stmtGetRooms.all());
-      cb?.({ ok: true, room: stmtGetRoom.get(roomId) });
+      emitAvatarPayload('rooms:updated', stmtGetRooms.all());
+      cb?.(socketAvatarPayload(socket, { ok: true, room: stmtGetRoom.get(roomId) }));
     } catch (error) { cb?.(roomError(error)); }
     finally { settingsPending = false; }
   });
@@ -1859,7 +1978,7 @@ io.on('connection', socket => {
     broadcastVoiceCounts();
     deleteRoomData(roomId);
     fs.rmSync(path.join(CHAT_IMAGES_DIR, roomId), { recursive: true, force: true });
-    io.emit('rooms:updated', stmtGetRooms.all());
+    emitAvatarPayload('rooms:updated', stmtGetRooms.all());
     io.emit('room:members:global', { roomId, members: [] });
     cb?.({ ok: true });
   });
@@ -1894,23 +2013,23 @@ io.on('connection', socket => {
     if (!voiceRooms.has(roomId)) voiceRooms.set(roomId, new Set());
     const members = voiceRooms.get(roomId)!;
     if (members.has(socket.id)) {
-      socket.emit('voice:members-updated', currentVoiceList(roomId));
+      socket.emit('voice:members-updated', socketAvatarPayload(socket, currentVoiceList(roomId)));
       cb?.({ ok: true });
       return;
     }
     const existing = [...members];
     selfMutedVoiceMembers.delete(socket.id);
 
-    socket.emit('voice:existing-members', existing.map(id => ({
+    socket.emit('voice:existing-members', socketAvatarPayload(socket, existing.map(id => ({
       socketId: id, userId: publicUserId(id), username: userNames.get(id) ?? id,
       avatarUrl: userAvatars.get(id) ?? null,
-    })));
+    }))));
 
     existing.forEach(mid =>
-      io.to(mid).emit('voice:user-joined', {
+      emitAvatarPayload('voice:user-joined', {
         socketId: socket.id, username: userNames.get(socket.id) ?? socket.id,
         avatarUrl: userAvatars.get(socket.id) ?? null,
-      })
+      }, mid)
     );
 
     members.add(socket.id);
@@ -2322,6 +2441,7 @@ io.on('connection', socket => {
     for (const targetSocketId of audience)
       io.to(targetSocketId).emit('soundpack:play', {
         soundId,
+        filename: pack.filename,
         playedBy,
         playedByUserId: publicUserId(socket.id),
         soundName: pack.name,
@@ -2359,12 +2479,9 @@ io.on('connection', socket => {
     }
 
     stmtDeleteSoundpack.run(pack.id);
-    const safeFilename = path.basename(pack.filename);
-    try {
-      const soundPath = path.join(SOUNDS_DIR, safeFilename);
-      if (fs.existsSync(soundPath)) fs.unlinkSync(soundPath);
-    } catch (error) {
-      console.warn(`[soundpack] 删除文件失败 ${safeFilename}:`, error);
+    for (const safeFilename of new Set([pack.filename, pack.originalFilename].filter((name): name is string => !!name).map(name => path.basename(name)))) {
+      try { fs.rmSync(path.join(SOUNDS_DIR, safeFilename), { force: true }); }
+      catch (error) { console.warn(`[soundpack] 删除文件失败 ${safeFilename}:`, error); }
     }
     io.emit('soundpack:deleted', { soundId: pack.id });
     cb?.({ ok: true });
@@ -2436,17 +2553,23 @@ io.on('connection', socket => {
 
 export async function startServer(port = 3001): Promise<number> {
   await initMediasoup();
+  migrateAvatars();
   return new Promise((resolve, reject) => {
     // 显式绑定 0.0.0.0（所有 IPv4 接口），确保 frp 用 127.0.0.1 也能连上。
     // 不指定 host 时 Windows 默认只绑 IPv6(::)，导致 frp 拨 127.0.0.1 被拒绝。
     httpServer.listen(port, '0.0.0.0', () => {
       const address = httpServer.address();
+      legacyNormalizationPromise = normalizeLegacySoundpacks().catch(error => {
+        console.warn('[soundpack] 旧语音包后台标准化中断，原文件保持可用', error);
+      });
       resolve(address && typeof address !== 'string' ? address.port : port);
     }).on('error', reject);
   });
 }
 
 export async function stopServer(): Promise<void> {
+  legacyNormalizationStopped = true;
+  await legacyNormalizationPromise;
   await new Promise<void>(resolve => io.close(() => resolve()));
   db.close();
 }

@@ -332,6 +332,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
   const [screenReceiveVolume, setScreenReceiveVolumeState] = useState(() =>
     loadNumber(SCREEN_RECEIVE_VOLUME_KEY, 1, 2),
   );
+  const screenReceiveVolumeRef = useRef(screenReceiveVolume);
   // 观看中的屏幕共享是否附带音频：决定观看端是否显示共享音频音量条。
   const [screenReceiveHasAudio, setScreenReceiveHasAudio] = useState(false);
   const [screenShareVolume, setScreenShareVolumeState] = useState(() =>
@@ -458,7 +459,6 @@ export function useWebRTC(socket: Socket, roomId: string) {
     Map<string, ReturnType<typeof createRemoteAudioOutput>>
   >(new Map());
   const screenStreams = useRef<Map<string, MediaStream>>(new Map());
-  const screenAudioTracks = useRef<Map<string, MediaStreamTrack>>(new Map());
   const localAudioRef = useRef<MediaStream | null>(null);
   const rawAudioRef = useRef<MediaStream | null>(null);
   const micProcessingContext = useRef<AudioContext | null>(null);
@@ -619,13 +619,18 @@ export function useWebRTC(socket: Socket, roomId: string) {
     const normalized = Number.isFinite(volume)
       ? Math.max(0, Math.min(2, volume))
       : 1;
+    screenReceiveVolumeRef.current = normalized;
     setScreenReceiveVolumeState(normalized);
     try {
       localStorage.setItem(SCREEN_RECEIVE_VOLUME_KEY, String(normalized));
     } catch {
       /* 无法保存偏好也必须应用本次音量。 */
     }
-    // 共享音频由画面元素播放；音量随状态更新在 RemoteScreenVideo 内应用。
+    // 共享音频走 Web Audio 增益：媒体元素的 volume 对 MediaStream 播放无效。
+    for (const [consumerId, entry] of consumers.current) {
+      if (entry.sourceType !== "screen-audio") continue;
+      remoteAudioOutputs.current.get(consumerId)?.setVolume(normalized);
+    }
   }, []);
 
   const setScreenShareVolume = useCallback((volume: number) => {
@@ -1641,12 +1646,9 @@ export function useWebRTC(socket: Socket, roomId: string) {
             );
           if (sourceType === "application-audio")
             removeRemoteApplicationAudio(peerId, producerId);
-          if (
-            sourceType === "screen-audio" &&
-            screenAudioTracks.current.get(peerId) === consumer.track
-          ) {
-            screenStreams.current.get(peerId)?.removeTrack(consumer.track);
-            screenAudioTracks.current.delete(peerId);
+          if (sourceType === "screen-audio") {
+            remoteAudioOutputs.current.get(consumer.id)?.close();
+            remoteAudioOutputs.current.delete(consumer.id);
             setScreenReceiveHasAudio(false);
           }
         });
@@ -1655,11 +1657,36 @@ export function useWebRTC(socket: Socket, roomId: string) {
 
         if (kind === "audio") {
           if (sourceType === "screen-audio") {
-            const previousTrack = screenAudioTracks.current.get(peerId);
-            if (previousTrack)
-              screenStreams.current.get(peerId)?.removeTrack(previousTrack);
-            screenAudioTracks.current.set(peerId, consumer.track);
-            screenStreams.current.get(peerId)?.addTrack(consumer.track);
+            // 屏幕音频不再并入画面流：媒体元素的 volume 与
+            // createMediaElementSource 对 MediaStream 播放都不生效，只有
+            // Web Audio 增益能真正改变响度（与麦克风、应用音频同一条通路）。
+            try {
+              const context = ensureAudioCtx();
+              const output = createRemoteAudioOutput(
+                context,
+                stream,
+                screenReceiveVolumeRef.current,
+                new Audio(),
+                masterOutputGain.current ?? context.destination,
+              );
+              remoteAudioOutputs.current.set(consumer.id, output);
+              void output.resume().catch((error) => {
+                console.warn(
+                  "[audio] 恢复共享音频输出失败，等待下一次点击重试",
+                  error,
+                );
+                document.addEventListener(
+                  "click",
+                  () => {
+                    if (remoteAudioOutputs.current.get(consumer.id) === output)
+                      void output.resume().catch(() => {});
+                  },
+                  { once: true },
+                );
+              });
+            } catch (error) {
+              console.warn("[audio] 无法播放共享音频", error);
+            }
             setScreenReceiveHasAudio(true);
             return true;
           }
@@ -1756,9 +1783,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
             startMeters();
           }
         } else if (kind === "video") {
-          // appData.type === 'screen'
-          const audioTrack = screenAudioTracks.current.get(peerId);
-          if (audioTrack) stream.addTrack(audioTrack);
+          // appData.type === 'screen'：画面流只含视频，音频走各自的增益通路。
           screenStreams.current.set(peerId, stream);
           setRemoteScreen({ socketId: peerId, stream });
         }
@@ -1826,14 +1851,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
         remoteAudioOutputs.current.delete(consumerId);
       }
       detachAnalyser(consumerId);
-      if (entry.sourceType === "screen-audio") {
-        const track = screenAudioTracks.current.get(entry.socketId);
-        if (track === entry.consumer.track) {
-          screenStreams.current.get(entry.socketId)?.removeTrack(track);
-          screenAudioTracks.current.delete(entry.socketId);
-          setScreenReceiveHasAudio(false);
-        }
-      }
+      if (entry.sourceType === "screen-audio") setScreenReceiveHasAudio(false);
       if (entry.kind === "video") {
         screenStreams.current.delete(entry.socketId);
         setScreenReceiveHasAudio(false);
@@ -2089,7 +2107,6 @@ export function useWebRTC(socket: Socket, roomId: string) {
         consumers.current.delete(cid);
       }
       screenStreams.current.delete(socketId);
-      screenAudioTracks.current.delete(socketId);
       setRemoteScreen((p) => (p?.socketId === socketId ? null : p));
       pendingScreenAudioByPeer.current.delete(socketId);
       removeAvailableScreen(socketId);
@@ -2782,7 +2799,6 @@ export function useWebRTC(socket: Socket, roomId: string) {
       remoteAudioOutputs.current.forEach((output) => output.close());
       remoteAudioOutputs.current.clear();
       screenStreams.current.clear();
-      screenAudioTracks.current.clear();
 
       // 停止音量计和统计
       stopMeters();

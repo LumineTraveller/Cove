@@ -38,6 +38,7 @@ interface Soundpack {
   id: string;
   name: string;
   filename: string;
+  originalFilename?: string;
   uploader: string;
   uploaderUserId?: string | null;
   createdAt: number;
@@ -353,7 +354,7 @@ export function SoundPackPanel({
   });
 
   const playSound = useCallback(
-    (soundId: string) => {
+    (soundId: string, filename?: string) => {
       const sound = packsRef.current.find((pack) => pack.id === soundId);
       if (!sound) return;
       const previous = audioRef.current;
@@ -365,7 +366,7 @@ export function SoundPackPanel({
         previous.pause();
         previous.src = "";
       }
-      const audio = new Audio(authorizedResourceURL(serverURL, `/sounds/${encodeURIComponent(sound.filename)}`));
+      const audio = new Audio(authorizedResourceURL(serverURL, `/sounds/${encodeURIComponent(filename ?? sound.filename)}`));
       audio.volume = soundpackVolumeRef.current / 100;
       audioRef.current = audio;
       setPlayingId(soundId);
@@ -392,8 +393,13 @@ export function SoundPackPanel({
   useEffect(() => {
     const onAdded = (sound: Soundpack) =>
       setPacks((previous) => [sound, ...previous]);
-    const onPlay = ({ soundId }: { soundId: string }) => {
-      if (inVoice) playSound(soundId);
+    const onPlay = ({ soundId, filename }: { soundId: string; filename?: string }) => {
+      if (inVoice) playSound(soundId, filename);
+    };
+    const onNormalized = ({ soundId, filename, originalFilename }: { soundId: string; filename: string; originalFilename: string }) => {
+      setPacks((previous) => previous.map((sound) =>
+        sound.id === soundId ? { ...sound, filename, originalFilename } : sound,
+      ));
     };
     const onDeleted = ({ soundId }: { soundId: string }) => {
       setPacks((previous) => previous.filter((sound) => sound.id !== soundId));
@@ -433,12 +439,14 @@ export function SoundPackPanel({
     };
     socket.on("soundpack:added", onAdded);
     socket.on("soundpack:play", onPlay);
+    socket.on("soundpack:normalized", onNormalized);
     socket.on("soundpack:deleted", onDeleted);
     socket.on("soundpack:renamed", onRenamed);
     socket.on("soundpack:reordered", onReordered);
     return () => {
       socket.off("soundpack:added", onAdded);
       socket.off("soundpack:play", onPlay);
+      socket.off("soundpack:normalized", onNormalized);
       socket.off("soundpack:deleted", onDeleted);
       socket.off("soundpack:renamed", onRenamed);
       socket.off("soundpack:reordered", onReordered);
@@ -692,9 +700,10 @@ export function SoundPackPanel({
     setRenameValue(sound.name);
   };
 
-  /** 下载语音包源文件到本机。服务端把上传的音频原样存在 /sounds 下，直接取回即可。 */
+  /** 播放标准化副本；下载仍取上传时的原始文件。 */
   const downloadSound = async (sound: Soundpack) => {
-    const url = authorizedResourceURL(serverURL, `/sounds/${encodeURIComponent(sound.filename)}`);
+    const originalFilename = sound.originalFilename ?? sound.filename;
+    const url = authorizedResourceURL(serverURL, `/sounds/${encodeURIComponent(originalFilename)}`);
     setDownloadNotice("");
     try {
       const response = await fetch(url);
@@ -705,7 +714,7 @@ export function SoundPackPanel({
       anchor.href = objectUrl;
       anchor.download = soundpackDownloadFileName(
         sound.name,
-        sound.filename,
+        originalFilename,
         sound.id,
       );
       anchor.rel = "noopener";

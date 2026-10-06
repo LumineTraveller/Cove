@@ -1,7 +1,9 @@
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import Module from 'node:module';
@@ -95,13 +97,33 @@ function socketFor(account: Account) {
   socket.connect();
   return { socket, register };
 }
-function emit<T>(socket: Socket, event: string, data: unknown) {
-  return new Promise<T>((resolve, reject) => socket.timeout(5_000).emit(event, data, (error: Error | null, result: T) => error ? reject(error) : resolve(result)));
+function emit<T>(socket: Socket, event: string, data?: unknown) {
+  return new Promise<T>((resolve, reject) => {
+    const ack = (error: Error | null, result: T) => error ? reject(error) : resolve(result);
+    if (data === undefined) socket.timeout(5_000).emit(event, ack);
+    else socket.timeout(5_000).emit(event, data, ack);
+  });
 }
 
 const sockets: Socket[] = [];
+const legacyAvatar = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7#cove-crop=0.1,-0.2,1.3';
 before(async () => {
   dataDir = await mkdtemp(path.join(tmpdir(), 'cove-room-integration-'));
+  // Start with a pre-normalization database/file to exercise the live upgrade.
+  const legacyDb = new DatabaseSync(path.join(dataDir, 'cove.db'));
+  legacyDb.exec('CREATE TABLE soundpacks (id TEXT PRIMARY KEY, name TEXT NOT NULL, filename TEXT NOT NULL, uploader TEXT NOT NULL, createdAt INTEGER NOT NULL)');
+  legacyDb.prepare('INSERT INTO soundpacks (id, name, filename, uploader, createdAt) VALUES (?, ?, ?, ?, ?)')
+    .run('legacy-tone', 'Legacy Tone', 'legacy-tone.wav', 'Legacy', Date.now());
+  legacyDb.exec('CREATE TABLE accounts (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, passwordHash TEXT NOT NULL, passwordSalt TEXT NOT NULL, username TEXT NOT NULL, avatarUrl TEXT, createdAt INTEGER NOT NULL)');
+  legacyDb.prepare('INSERT INTO accounts VALUES (?, ?, ?, ?, ?, ?, ?)').run('legacy-avatar-user', 'legacy-avatar@example.com', 'unused', 'unused', 'Legacy Avatar', legacyAvatar, Date.now());
+  legacyDb.exec('CREATE TABLE rooms (id TEXT PRIMARY KEY, name TEXT NOT NULL, createdAt INTEGER NOT NULL, ownerId TEXT, ownerName TEXT, avatarUrl TEXT, backgroundTop TEXT, backgroundBottom TEXT, backgroundTopDark TEXT, backgroundBottomDark TEXT)');
+  legacyDb.prepare('INSERT INTO rooms (id, name, createdAt, avatarUrl) VALUES (?, ?, ?, ?)').run('legacy-avatar-room', 'Legacy Avatar', Date.now(), legacyAvatar);
+  legacyDb.close();
+  mkdirSync(path.join(dataDir, 'sounds'));
+  execFileSync(require('ffmpeg-static') as string, [
+    '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1',
+    '-c:a', 'pcm_s16le', path.join(dataDir, 'sounds', 'legacy-tone.wav'),
+  ], { windowsHide: true });
   process.env.COVE_DATA_DIR = dataDir;
   process.env.COVE_BOOTSTRAP_TOKEN = bootstrapToken;
   process.env.COVE_SERVER_SECURITY_ENABLED = 'true';
@@ -126,6 +148,71 @@ before(async () => {
   assert.equal(bootstrap.status, 201);
   serverAccessToken = (await bootstrap.json()).accessToken;
   assert.ok(serverAccessToken);
+});
+
+test('legacy account and room avatars migrate to files without losing GIF bytes or crop', async () => {
+  const db = new DatabaseSync(path.join(dataDir, 'cove.db'));
+  try {
+    for (const table of ['accounts', 'rooms']) {
+      const row = db.prepare(`SELECT avatarUrl FROM ${table} WHERE id = ?`).get(table === 'accounts' ? 'legacy-avatar-user' : 'legacy-avatar-room') as { avatarUrl: string };
+      assert.match(row.avatarUrl, /^\/avatars\/[a-f0-9]{64}\.gif#cove-crop=0.1,-0.2,1.3$/);
+      const bytes = await readFile(path.join(dataDir, row.avatarUrl.split('#')[0]));
+      assert.equal(bytes.toString('base64'), legacyAvatar.split(',')[1].split('#')[0]);
+    }
+    const response = await fetch(`${base}/api/rooms/legacy-avatar-room`, { headers: serverHeaders() });
+    const room = await response.json();
+    assert.ok(room.avatarUrl.startsWith(`${base}/avatars/`));
+    // A media element has no custom headers. Its own recipient access token
+    // in the URL still satisfies the server's private-resource gate.
+    const image = await fetch(room.avatarUrl);
+    assert.equal(image.status, 200);
+    assert.match(image.headers.get('content-type')!, /image\/gif/);
+    assert.match(image.headers.get('cache-control')!, /private.*no-store/);
+    const noToken = new URL(room.avatarUrl); noToken.search = '';
+    assert.equal((await fetch(noToken)).status, 426);
+  } finally { db.close(); }
+});
+
+test('large avatar registration ACK is small, precedes presence and retries are idempotent', { timeout: 10_000 }, async () => {
+  const account = await register('avatar-big@example.com', 'Big Avatar');
+  const bytes = Buffer.concat([Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64'), Buffer.alloc(1024 * 1024)]);
+  const inline = `data:image/gif;base64,${bytes.toString('base64')}#cove-crop=0.1,0.2,1.5`;
+  const uploaded = await fetch(`${base}/api/auth/profile`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-cove-account-token': account.token, ...serverHeaders() },
+    body: JSON.stringify({ username: 'Big Avatar', avatarUrl: inline }),
+  });
+  assert.equal(uploaded.status, 200);
+  const socket = connectSocket(base, { autoConnect: false, reconnection: false, transports: ['polling'], upgrade: false, auth: { serverAccessToken, clientProtocol } });
+  sockets.push(socket);
+  const order: string[] = [];
+  const snapshots: any[] = [];
+  socket.on('users:online', users => { order.push('presence'); snapshots.push(users); });
+  const result = new Promise<any>(resolve => socket.on('connect', () => socket.emit('user:register', { authToken: account.token, platform: 'mobile' }, (response: any) => { order.push('ack'); resolve(response); })));
+  socket.connect();
+  const ack = await result;
+  assert.equal(ack.ok, true);
+  assert.equal(order[0], 'ack');
+  assert.ok(JSON.stringify(ack).length < 1000);
+  assert.ok(ack.profile.avatarUrl.startsWith(`${base}/avatars/`));
+  assert.deepEqual(Buffer.from(await (await fetch(ack.profile.avatarUrl)).arrayBuffer()), bytes);
+  await emit(socket, 'presence:get'); // Socket.IO ordering barrier.
+  assert.ok(JSON.stringify(snapshots).length < 10_000);
+  const snapshotCount = snapshots.length;
+  const retry = await emit<any>(socket, 'user:register', { authToken: account.token, platform: 'mobile' });
+  assert.deepEqual(retry, ack);
+  await emit(socket, 'presence:get');
+  assert.equal(snapshots.length, snapshotCount);
+  const { room } = await emit<any>(socket, 'room:create', { name: 'Avatar Room', avatarUrl: inline });
+  assert.ok(room.avatarUrl.startsWith(`${base}/avatars/`));
+  assert.deepEqual(Buffer.from(await (await fetch(room.avatarUrl)).arrayBuffer()), bytes);
+  assert.equal((await emit<any>(socket, 'room:join', room.id)).ok, true);
+  const updated = await emit<any>(socket, 'room:update-settings', { roomId: room.id, avatarUrl: room.avatarUrl });
+  assert.equal(updated.ok, true);
+  assert.equal(updated.room.avatarUrl, room.avatarUrl);
+  const profile = await emit<any>(socket, 'user:update-profile', { username: 'Big Avatar', avatarUrl: ack.profile.avatarUrl });
+  assert.equal(profile.ok, true);
+  const presence = await emit<any>(socket, 'presence:get');
+  assert.ok(JSON.stringify(presence).length < 10_000);
 });
 after(async () => {
   sockets.forEach(socket => socket.disconnect());
@@ -167,6 +254,47 @@ test('server access gates sensitive REST and Socket.IO operations', { timeout: 1
   const error = await deniedError;
   assert.equal(error.data?.code, 'CLIENT_VERSION_TOO_OLD');
   denied.disconnect();
+});
+
+test('old and newly uploaded soundpacks play normalized copies while keeping original downloads', { timeout: 15_000 }, async () => {
+  const legacyOriginal = await readFile(path.join(dataDir, 'sounds', 'legacy-tone.wav'));
+  let legacy: any;
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const response = await fetch(`${base}/api/soundpacks`, { headers: serverHeaders() });
+    assert.equal(response.status, 200);
+    legacy = (await response.json() as any[]).find(pack => pack.id === 'legacy-tone');
+    if (legacy?.filename === 'legacy-tone.normalized.mp3') break;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.equal(legacy?.filename, 'legacy-tone.normalized.mp3');
+  assert.equal(legacy.originalFilename, 'legacy-tone.wav');
+  assert.deepEqual(await readFile(path.join(dataDir, 'sounds', 'legacy-tone.wav')), legacyOriginal);
+  assert.ok((await readFile(path.join(dataDir, 'sounds', legacy.filename))).length > 0);
+
+  const account = await register('soundpack@example.com', 'Soundpack Uploader');
+  const connected = socketFor(account); sockets.push(connected.socket);
+  assert.equal((await connected.register).ok, true);
+  const upload = await fetch(`${base}/api/soundpacks`, {
+    method: 'POST',
+    headers: { ...serverHeaders(), 'content-type': 'application/json' },
+    body: JSON.stringify({
+      name: 'Fresh Tone', mimeType: 'audio/wav', socketId: connected.socket.id,
+      data: legacyOriginal.toString('base64'),
+    }),
+  });
+  assert.equal(upload.status, 200);
+  const fresh = await upload.json() as { id: string; filename: string; originalFilename: string };
+  assert.match(fresh.filename, /\.normalized\.mp3$/);
+  assert.match(fresh.originalFilename, /\.wav$/);
+  const originalDownload = await fetch(`${base}/sounds/${fresh.originalFilename}`, { headers: serverHeaders() });
+  assert.equal(originalDownload.status, 200);
+  assert.deepEqual(Buffer.from(await originalDownload.arrayBuffer()), legacyOriginal);
+  const playbackDownload = await fetch(`${base}/sounds/${fresh.filename}`, { headers: serverHeaders() });
+  assert.equal(playbackDownload.status, 200);
+  assert.ok((await playbackDownload.arrayBuffer()).byteLength > 0);
+  assert.equal((await emit<any>(connected.socket, 'soundpack:delete', { soundId: fresh.id })).ok, true);
+  assert.equal(existsSync(path.join(dataDir, 'sounds', fresh.originalFilename)), false);
+  assert.equal(existsSync(path.join(dataDir, 'sounds', fresh.filename)), false);
 });
 
 test('room join enforces password/capacity, preserves current members and restricts settings/history', { timeout: 15_000 }, async () => {

@@ -57,7 +57,6 @@ import {
   X,
 } from "@phosphor-icons/react";
 import { socket } from "../socket";
-import { applyAudioContextOutput, applyAudioElementOutput } from "../audioDevices";
 import {
   SCREEN_PRESETS,
   useWebRTC,
@@ -636,59 +635,14 @@ function LocalScreenVideo({ stream }: { stream: MediaStream }) {
 
 function RemoteScreenVideo({
   stream,
-  receiveVolume,
-  masterVolume,
-  outputDeviceId,
   controlling,
   onInput,
 }: {
   stream: MediaStream;
-  receiveVolume: number;
-  masterVolume: number;
-  outputDeviceId: string;
   controlling: boolean;
   onInput: (input: RemoteControlInput) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const boostedOutput = useRef<{ context: AudioContext; gain: GainNode } | null>(null);
-  const playbackSettings = useRef({ volume: receiveVolume * masterVolume, outputDeviceId });
-  playbackSettings.current = { volume: receiveVolume * masterVolume, outputDeviceId };
-  const syncPlaybackVolume = useCallback(() => {
-    const video = videoRef.current;
-    if (!video) return;
-    const volume = playbackSettings.current.volume;
-    if (volume > 1 && !boostedOutput.current && video.srcObject instanceof MediaStream &&
-        video.srcObject.getAudioTracks().length > 0) {
-      let context: AudioContext | null = null;
-      try {
-        // 增益以视频元素本身为源，仍由同一个播放器掌握音画时钟。
-        context = new AudioContext();
-        const source = context.createMediaElementSource(video);
-        const gain = context.createGain();
-        source.connect(gain).connect(context.destination);
-        boostedOutput.current = { context, gain };
-        void applyAudioContextOutput(context, playbackSettings.current.outputDeviceId)
-          .catch((error) => console.warn("[screen-preview] 切换增强音量输出设备失败", error));
-        void context.resume().catch((error) => {
-          console.warn("[screen-preview] 启动增强音量失败，等待点击重试", error);
-          document.addEventListener("click", () => void context?.resume().catch(() => {}), { once: true });
-        });
-      } catch (error) {
-        void context?.close();
-        console.warn("[screen-preview] 无法启用增强音量，使用标准音量", error);
-      }
-    }
-    const boosted = boostedOutput.current;
-    if (boosted) {
-      boosted.gain.gain.value = volume;
-      video.volume = 1;
-    } else {
-      video.volume = Math.min(1, volume);
-    }
-    // 只在显式静音时 muted。不能因「尚无音轨」而 muted：addtrack 事件在
-    // Chromium 的 MediaStream 上不可靠，初始 muted 后音轨到达也不会自动解除。
-    video.muted = volume === 0;
-  }, []);
   const inputSender = useMemo(() => new RemotePointerSender(onInput), [onInput]);
   const pressedKeys = useRef(new Set<string>());
   const pressedButtons = useRef(
@@ -699,63 +653,29 @@ function RemoteScreenVideo({
     const video = videoRef.current;
     if (!video) return;
     let retryPending = false;
-    let attemptPlayback: (allowMutedFallback: boolean) => void;
     const retry = () => {
       retryPending = false;
-      attemptPlayback(true);
+      void video.play().catch(() => undefined);
     };
     const queueRetry = () => {
       if (retryPending) return;
       retryPending = true;
       document.addEventListener("click", retry, { once: true });
     };
-    attemptPlayback = (allowMutedFallback) => {
-      syncPlaybackVolume();
-      void video.play().catch((error: unknown) => {
-        if (error instanceof DOMException && error.name === "AbortError") return;
-        console.warn("[screen-preview] 远程共享预览播放失败", error);
-        if (error instanceof DOMException && error.name === "NotAllowedError") {
-          if (allowMutedFallback) {
-            // 系统音轨与画面共用一个播放器后，有声自动播放可能被 Chromium
-            // 拒绝。先静音启动同一个播放器，避免连画面也一起黑掉；用户点击后
-            // 再在手势中恢复音量。
-            video.muted = true;
-            void video.play().then(queueRetry).catch((mutedError) => {
-              console.warn("[screen-preview] 静音回退仍无法播放远程画面", mutedError);
-              queueRetry();
-            });
-          } else {
-            queueRetry();
-          }
-        }
-      });
-    };
-    const onTrackAdded = () => attemptPlayback(true);
+    // 画面元素只承载视频：共享音频由 useWebRTC 的增益通路播放，元素保持静音，
+    // 自动播放因此不会被拒绝，也不需要音轨到达后再解除静音。
     video.srcObject = stream;
-    stream.addEventListener("addtrack", onTrackAdded);
-    stream.addEventListener("removetrack", syncPlaybackVolume);
-    attemptPlayback(true);
+    video.play().catch((error: unknown) => {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      console.warn("[screen-preview] 远程共享预览播放失败", error);
+      queueRetry();
+    });
     return () => {
-      stream.removeEventListener("addtrack", onTrackAdded);
-      stream.removeEventListener("removetrack", syncPlaybackVolume);
       document.removeEventListener("click", retry);
       video.pause();
       if (video.srcObject === stream) video.srcObject = null;
     };
-  }, [stream, syncPlaybackVolume]);
-  useEffect(syncPlaybackVolume, [receiveVolume, masterVolume, syncPlaybackVolume]);
-  useEffect(() => {
-    const video = videoRef.current;
-    if (video) void applyAudioElementOutput(video, outputDeviceId).catch((error) =>
-      console.warn("[screen-preview] 切换输出设备失败", error));
-    const boosted = boostedOutput.current;
-    if (boosted) void applyAudioContextOutput(boosted.context, outputDeviceId).catch((error) =>
-      console.warn("[screen-preview] 切换增强音量输出设备失败", error));
-  }, [outputDeviceId]);
-  useEffect(() => () => {
-    void boostedOutput.current?.context.close();
-    boostedOutput.current = null;
-  }, []);
+  }, [stream]);
   const point = (event: { clientX: number; clientY: number }) => {
     const video = videoRef.current;
     if (!video) return null;
@@ -869,7 +789,7 @@ function RemoteScreenVideo({
       onBlur={release}
       onContextMenu={(event) => controlling && event.preventDefault()}
     >
-      <video ref={videoRef} autoPlay playsInline />
+      <video ref={videoRef} autoPlay muted playsInline />
       <span className="remote-control-frame" />
     </div>
   );
@@ -896,6 +816,14 @@ function formatMessageDate(timestamp: number) {
 function isMessageListNearBottom(element: HTMLElement | null) {
   if (!element) return true;
   return element.scrollHeight - element.scrollTop - element.clientHeight <= 24;
+}
+
+/** 把数据库中存的相对路径头像 URL 拼接上 serverURL，data: 和 https: 直通。 */
+function resolveRoomAvatarUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  if (url.startsWith('data:') || url.startsWith('http:') || url.startsWith('https:')) return url;
+  const base = ((socket as any).io?.uri ?? '').replace(/\/$/, '');
+  return base ? `${base}${url}` : url;
 }
 
 function mergeChatMessages(current: Message[], incoming: Message[]) {
@@ -1820,7 +1748,7 @@ export function RoomAppearanceSettings({
   const bottom = backgroundMode === "dark" ? darkBottom : lightBottom;
   const setTop = backgroundMode === "dark" ? setDarkTop : setLightTop;
   const setBottom = backgroundMode === "dark" ? setDarkBottom : setLightBottom;
-  const [avatar, setAvatar] = useState(room.avatarUrl ?? null);
+  const [avatar, setAvatar] = useState(resolveRoomAvatarUrl(room.avatarUrl));
   const [maxMembers, setMaxMembers] = useState(
     room.maxMembers ? String(room.maxMembers) : "unlimited",
   );
@@ -2623,7 +2551,7 @@ export function NavigationRailV2({
             >
               <span className="room-avatar">
                 {room.avatarUrl ? (
-                  <img src={room.avatarUrl} alt="" />
+                  <img src={resolveRoomAvatarUrl(room.avatarUrl) ?? undefined} alt="" />
                 ) : (
                   <DoorOpen size={20} weight="duotone" />
                 )}
@@ -3264,9 +3192,6 @@ function ShareViewV2({
           {remote ? (
             <RemoteScreenVideo
               stream={remote.stream}
-              receiveVolume={rtc.screenReceiveVolume}
-              masterVolume={rtc.masterOutputVolume}
-              outputDeviceId={rtc.selectedAudioOutputId}
               controlling={remoteControl.state === "active"}
               onInput={onInput}
             />
@@ -4703,7 +4628,7 @@ export default function ChatRoomV2({
               <header className="workspace-header">
                 <span className="workspace-room-avatar">
                   {room.avatarUrl ? (
-                    <img src={room.avatarUrl} alt="" />
+                    <img src={resolveRoomAvatarUrl(room.avatarUrl) ?? undefined} alt="" />
                   ) : (
                     room.name.slice(0, 1)
                   )}

@@ -60,7 +60,7 @@ export function Soundboard({ socket, roomId, serverURL, ready, inVoice, profileR
     return () => { active = false; };
   }, [ready, roomId, serverURL, socket]);
 
-  const playSound = useCallback((soundId: string) => {
+  const playSound = useCallback((soundId: string, filename?: string) => {
     const sound = packsRef.current.find(item => item.id === soundId);
     if (!sound) return;
     playSequence.current += 1;
@@ -68,7 +68,7 @@ export function Soundboard({ socket, roomId, serverURL, ready, inVoice, profileR
     setPlayback({
       key: playSequence.current,
       soundId,
-      uri: authorizedResourceURL(serverURL, `/sounds/${encodeURIComponent(sound.filename)}`),
+      uri: authorizedResourceURL(serverURL, `/sounds/${encodeURIComponent(filename ?? sound.filename)}`),
     });
   }, [serverURL]);
 
@@ -80,18 +80,23 @@ export function Soundboard({ socket, roomId, serverURL, ready, inVoice, profileR
       setPacks(current => current.filter(item => item.id !== soundId));
       setPlayback(current => current?.soundId === soundId ? null : current);
     };
-    const onPlay = ({ soundId }: { soundId: string }) => playSound(soundId);
+    const onPlay = ({ soundId, filename }: { soundId: string; filename?: string }) => playSound(soundId, filename);
+    const onNormalized = ({ soundId, filename }: { soundId: string; filename: string }) => {
+      setPacks(current => current.map(sound => sound.id === soundId ? { ...sound, filename } : sound));
+    };
     const onReordered = ({ orderedIds }: { orderedIds: string[] }) => {
       setPacks(current => applySoundpackOrder(current, orderedIds));
     };
     socket.on('soundpack:added', onAdded);
     socket.on('soundpack:deleted', onDeleted);
     socket.on('soundpack:play', onPlay);
+    socket.on('soundpack:normalized', onNormalized);
     socket.on('soundpack:reordered', onReordered);
     return () => {
       socket.off('soundpack:added', onAdded);
       socket.off('soundpack:deleted', onDeleted);
       socket.off('soundpack:play', onPlay);
+      socket.off('soundpack:normalized', onNormalized);
       socket.off('soundpack:reordered', onReordered);
     };
   }, [playSound, socket]);

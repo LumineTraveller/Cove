@@ -1,0 +1,7 @@
+npm run build -w server
+
+$update = "cove-server-update-$(Get-Date -Format yyyyMMdd-HHmmss)"
+ssh cove-cloud "mkdir -p /home/admin/Cove/$update"
+scp -r ".\server\dist" "cove-cloud:/home/admin/Cove/$update/"
+
+ssh cove-cloud "set -eu; update_dir=/home/admin/Cove/$update; sudo systemctl stop cove-server; if [ -d /home/admin/.cove ]; then cp -a /home/admin/.cove /home/admin/.cove-backup-$update; fi; mv /home/admin/Cove/server/dist /home/admin/Cove/server-dist-backup-$update; mv `$update_dir/dist /home/admin/Cove/server/dist; sudo systemctl start cove-server; sudo systemctl is-active cove-server"

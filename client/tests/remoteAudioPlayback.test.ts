@@ -160,7 +160,7 @@ function playbackHarness() {
   };
 }
 
-test('screen audio joins the video stream and sync group without a duplicate audio player', async () => {
+test('screen audio plays through its own gain output instead of the video element', async () => {
   const h = playbackHarness();
   assert.equal(await h.setup(), true);
   h.rtc.setScreenReceiveVolume(0.25);
@@ -169,25 +169,32 @@ test('screen audio joins the video stream and sync group without a duplicate aud
   assert.equal(await h.consume('mic-1', 'alice', 'audio', { type: 'mic' }), true);
   assert.equal(await h.consume('app-1', 'alice', 'audio', { type: 'application-audio' }), true);
   const screen = h.streams.find(stream => stream.tracks.some(track => track.id === 'video-1'));
-  assert.deepEqual(Array.from(screen?.tracks ?? [], track => track.id), ['video-1', 'screen-1']);
-  assert.equal(h.activations.some(element =>
-    (element.srcObject as { tracks?: { id: string }[] } | null)?.tracks?.some(track => track.id === 'screen-1')), false,
-    'screen audio must not play through a second media element');
+  assert.deepEqual(Array.from(screen?.tracks ?? [], track => track.id), ['video-1'],
+    'the picture stream must stay video-only: element volume cannot scale MediaStream playback');
+  // 媒体元素的 volume 对 MediaStream 无效，只有增益通路能真正改变响度。
+  assert.equal(h.outputFor('screen-1').gain.gain.value, 0.25);
+  h.rtc.setScreenReceiveVolume(1.5);
+  assert.equal(h.outputFor('screen-1').gain.gain.value, 1.5, 'boost above 100% stays on the gain path');
+  h.rtc.setScreenReceiveVolume(0);
+  assert.equal(h.outputFor('screen-1').gain.gain.value, 0);
+  assert.throws(() => h.audibleElementFor('screen-1'), undefined,
+    'screen audio must not play through an audible media element');
   assert.equal(h.consumed.find(item => item.producerId === 'video-1')?.streamId, 'screen-alice');
   assert.equal(h.consumed.find(item => item.producerId === 'screen-1')?.streamId, 'screen-alice');
   assert.equal(h.consumed.find(item => item.producerId === 'mic-1')?.streamId, 'mic-alice');
   assert.equal(h.consumed.find(item => item.producerId === 'app-1')?.streamId, 'application-audio-alice');
   h.rtc.setMemberVolume('alice', 'user-alice', 0.7);
   assert.equal(h.outputFor('mic-1').gain.gain.value, 0.7);
+  assert.equal(h.outputFor('screen-1').gain.gain.value, 0, 'member volume must not touch screen audio');
   h.blockStorage();
-  h.rtc.setScreenReceiveVolume(0);
+  h.rtc.setScreenReceiveVolume(1);
   h.close('screen-1', true);
-  assert.deepEqual(Array.from(screen?.tracks ?? [], track => track.id), ['video-1']);
+  assert.equal(h.outputFor('screen-1').gain.disconnected, true, 'closing the consumer releases its gain output');
   assert.equal(await h.consume('screen-2', 'alice', 'audio', { type: 'screen-audio' }), true);
-  assert.deepEqual(Array.from(screen?.tracks ?? [], track => track.id), ['video-1', 'screen-2']);
+  assert.equal(h.outputFor('screen-2').gain.gain.value, 1);
   h.endTrack('screen-2');
-  assert.deepEqual(Array.from(screen?.tracks ?? [], track => track.id), ['video-1'],
-    'an ended screen-audio track must be removed from the shared video stream');
+  assert.equal(h.outputFor('screen-2').gain.disconnected, true,
+    'an ended screen-audio track must release its gain output');
   assert.equal(h.audibleElementFor('app-1').volume, 1);
   const voiceActivation = h.activations.find(element =>
     (element.srcObject as { tracks?: { id: string }[] } | null)?.tracks?.[0]?.id === 'mic-1');
@@ -215,15 +222,17 @@ test('application sharing uses independent media-element controls per sharer', a
   assert.equal(alice.muted, false);
 });
 
-test('screen stream also joins audio that arrives before video', async () => {
+test('screen audio that arrives before the picture still gets its own gain output', async () => {
   const h = playbackHarness();
   await h.setup();
+  h.rtc.setScreenReceiveVolume(0.6);
   await h.consume('screen-early', 'bob', 'audio', { type: 'screen-audio' });
   await h.consume('video-late', 'bob', 'video', { type: 'screen' });
   const stream = h.streams.find(item => item.tracks.some(track => track.id === 'video-late'));
-  assert.deepEqual(Array.from(stream?.tracks ?? [], track => track.id), ['video-late', 'screen-early']);
-  h.close('screen-early', true);
   assert.deepEqual(Array.from(stream?.tracks ?? [], track => track.id), ['video-late']);
+  assert.equal(h.outputFor('screen-early').gain.gain.value, 0.6);
+  h.close('screen-early', true);
+  assert.equal(h.outputFor('screen-early').gain.disconnected, true);
 });
 
 test('shared meters report pre-volume signal, use gain only as an audible gate and stay separate from voice', async () => {

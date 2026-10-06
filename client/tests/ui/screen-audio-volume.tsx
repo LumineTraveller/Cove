@@ -1,9 +1,12 @@
 /*
- * Shared-chat layout QA fixture.
+ * Remote screen-audio receive-volume probe.
  *
- * This deliberately mounts the real ChatRoomV2 and its real CSS/WebRTC hook.
- * The socket, SFU and capture devices below are deterministic in-page doubles;
- * no network server, user account or microphone is touched by this fixture.
+ * Mounts the real ChatRoomV2 with a deterministic in-page SFU double whose
+ * remote peer publishes a screen video producer plus a `screen-audio` producer
+ * (the shape a phone share produces). It then drives the real "共享观看音量"
+ * slider and records what the app assigns to the playing element, together with
+ * a calibrated measurement of how Chromium treats HTMLMediaElement.volume for a
+ * MediaStream audio track. No server, account, microphone or speaker is needed.
  */
 import { createRoot } from "react-dom/client";
 import { flushSync } from "react-dom";
@@ -15,12 +18,81 @@ import { applyTheme, type AppTheme } from "../../src/theme";
 import type { Message, RoomMember, RoomWithAppearance, VoiceMember } from "../../src/pages/ChatRoomV2";
 import "../../src/index.css";
 
-const api = "https://share-chat-qa.invalid";
-const roomId = "share-chat-qa-room";
+// ── 探针：记录应用对播放元素的每一次音量/静音写入 ──────────────────────────
+const probe = {
+  volumeSets: [] as { element: string; value: number; at: number }[],
+  mutedSets: [] as { element: string; value: boolean; at: number }[],
+  elementSources: [] as { element: string; ok: boolean; error?: string; at: number }[],
+  boostGains: [] as GainNode[],
+  streamSources: [] as { stream: MediaStream; node: AudioNode }[],
+  streamGains: [] as { gain: GainNode; stream: MediaStream | null }[],
+};
+(window as any).screenAudioVolumeProbe = probe;
+
+const elementTag = (element: HTMLMediaElement) =>
+  `${element.tagName.toLowerCase()}${element.className ? `.${String(element.className).trim().split(/\s+/)[0]}` : ""}`;
+
+for (const key of ["volume", "muted"] as const) {
+  const descriptor = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, key)!;
+  Object.defineProperty(HTMLMediaElement.prototype, key, {
+    configurable: true,
+    enumerable: descriptor.enumerable,
+    get(this: HTMLMediaElement) {
+      return (descriptor.get as () => unknown).call(this);
+    },
+    set(this: HTMLMediaElement, value: never) {
+      const record = { element: elementTag(this), value, at: Math.round(performance.now()) };
+      if (key === "volume") probe.volumeSets.push(record as never);
+      else probe.mutedSets.push(record as never);
+      (descriptor.set as (next: unknown) => void).call(this, value);
+    },
+  });
+}
+
+const realCreateMediaElementSource = AudioContext.prototype.createMediaElementSource;
+AudioContext.prototype.createMediaElementSource = function patched(this: AudioContext, element: HTMLMediaElement) {
+  const entry = { element: elementTag(element), ok: false, error: undefined as string | undefined, at: Math.round(performance.now()) };
+  probe.elementSources.push(entry);
+  try {
+    const node = realCreateMediaElementSource.call(this, element);
+    entry.ok = true;
+    return node;
+  } catch (error) {
+    entry.error = String(error);
+    throw error;
+  }
+};
+
+const realCreateMediaStreamSource = AudioContext.prototype.createMediaStreamSource;
+AudioContext.prototype.createMediaStreamSource = function patched(this: AudioContext, stream: MediaStream) {
+  const node = realCreateMediaStreamSource.call(this, stream);
+  probe.streamSources.push({ stream, node });
+  return node;
+};
+
+const realConnect = AudioNode.prototype.connect;
+(AudioNode.prototype as unknown as { connect: typeof realConnect }).connect = function patched<T extends AudioNode>(
+  this: AudioNode,
+  destination: T,
+  ...rest: unknown[]
+): T {
+  if (this instanceof MediaElementAudioSourceNode && destination instanceof GainNode)
+    probe.boostGains.push(destination);
+  if (this instanceof MediaStreamAudioSourceNode && destination instanceof GainNode)
+    probe.streamGains.push({
+      gain: destination,
+      stream: probe.streamSources.find((item) => item.node === this)?.stream ?? null,
+    });
+  return (realConnect as unknown as (...args: unknown[]) => T).apply(this, [destination, ...rest]);
+};
+
+const api = "https://screen-audio-volume.invalid";
+const roomId = "screen-audio-volume-room";
+const flags = new URLSearchParams(location.search);
 const now = Date.now();
 const room: RoomWithAppearance = {
   id: roomId,
-  name: "共享聊天验收",
+  name: "共享音量探针",
   createdAt: now,
   ownerName: "QA 自己",
   maxMembers: 8,
@@ -50,7 +122,7 @@ const peerMember: RoomMember = {
   avatarUrl: null,
   isOwner: false,
   isMuted: false,
-  platform: "desktop",
+  platform: "mobile",
   isSharingScreen: true,
 };
 const voiceMembers: VoiceMember[] = [
@@ -154,6 +226,25 @@ producers.set("qa-peer-screen", {
   appData: { type: "screen", adaptation: "content" },
   track: remoteSharedStream.getVideoTracks()[0],
 });
+
+// 手机共享的系统声音：持续合成音，按手机端的 appData 形状发布。
+const lateAudio = flags.has("late-audio");
+const screenToneContext = new AudioContext();
+const screenToneOscillator = screenToneContext.createOscillator();
+const screenToneDestination = screenToneContext.createMediaStreamDestination();
+const screenToneGain = screenToneContext.createGain();
+screenToneGain.gain.value = 0.2;
+screenToneOscillator.frequency.value = 320;
+screenToneOscillator.connect(screenToneGain).connect(screenToneDestination);
+screenToneOscillator.start();
+const screenAudioProducer: ProducerEntry = {
+  id: "qa-peer-screen-audio",
+  peerId: peerMember.socketId,
+  kind: "audio",
+  appData: { type: "screen-audio", client: "android" },
+  track: screenToneDestination.stream.getAudioTracks()[0],
+};
+if (!lateAudio) producers.set(screenAudioProducer.id, screenAudioProducer);
 
 function setSharedTone(tone: "red" | "blue" | "green") {
   if (currentSharedCanvas) paintCanvas(currentSharedCanvas, tone);
@@ -555,129 +646,370 @@ function setTone(tone: "red" | "blue" | "green") {
   },
 };
 
-(window as any).shareChatQaResult = (async () => {
-  render("dark");
-  // The animation runner drives the real UI itself and samples every frame;
-  // skip the legacy fixture's independent chat visibility assertions.
-  if (layoutAnimationQa) return state;
-  if (audioMeterQa) {
-    // Opt-in manual QA: a synthetic tone exercises the real receive hook and
-    // both real volume controls without accessing a microphone or live server.
-    const controls = document.createElement("div");
-    controls.style.cssText = "position:fixed;top:4px;left:340px;z-index:10000;background:#17233b;padding:8px;display:flex;gap:12px;color:white";
-    for (const [label, gain] of [["低电平", 0.04], ["高电平", 0.18], ["无声", 0]] as const) {
-      const button = document.createElement("button");
-      button.textContent = label;
-      button.onclick = async () => {
-        sharedToneGain!.gain.value = gain;
-        await sharedToneContext!.resume();
-        await Promise.all(testAudioContexts.map(context => context.resume()));
-      };
-      controls.append(button);
-    }
-    const reading = document.createElement("output");
-    controls.append(reading);
-    document.body.append(controls);
-    setInterval(() => {
-      flushSync(() => {});
-      const meter = document.querySelector<HTMLElement>(".volume-share label, .vertical-volume.purple");
-      // Keep live data visible to the browser QA runner (no private DOM API).
-      reading.textContent = `共享电平 ${meter?.style.getPropertyValue("--volume-level") || "0%"}`;
-    }, 150);
-    return state;
-  }
-  await wait(300);
-  check(findChatPanel(), "real ChatRoomV2 ordinary chat mounted");
-  check(document.body.textContent?.includes("普通聊天室消息"), "history message is visible");
-  const textarea = document.querySelector<HTMLTextAreaElement>(".chat-composer textarea");
-  check(textarea, "ordinary chat composer is present");
-  textarea!.value = "fixture ordinary message";
-  textarea!.dispatchEvent(new Event("input", { bubbles: true }));
-  textarea!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-  await wait(80);
-  check(document.body.textContent?.includes("fixture ordinary message"), "ordinary chat message sends through fake socket");
+type Sample = {
+  label: string;
+  slider: number | null;
+  elementVolume: number | null;
+  elementMuted: boolean | null;
+  elementPaused: boolean | null;
+  audioTracks: number | null;
+  boostGains: number | null;
+  gainValue: number | null;
+  measurement: string;
+  rms: number | null;
+  appGain: number | null;
+  loopRms: number | null;
+  loopPeak: number | null;
+};
 
-  const joinButton = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.title === "加入语音");
+const samples: Sample[] = [];
+const calibration: Record<string, unknown>[] = [];
+const measurement = {
+  analyser: null as AnalyserNode | null,
+  kind: "none" as string,
+};
+
+const setSlider = (input: HTMLInputElement, value: number) => {
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+  setter.call(input, String(value));
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  input.dispatchEvent(new Event("change", { bubbles: true }));
+};
+
+const measureAvg = async (analyser: AnalyserNode, ms = 700) => {
+  const samples: number[] = [];
+  const peaks: number[] = [];
+  const end = performance.now() + ms;
+  while (performance.now() < end) {
+    const data = new Float32Array(analyser.fftSize);
+    analyser.getFloatTimeDomainData(data);
+    let sum = 0;
+    let peak = 0;
+    for (const value of data) {
+      sum += value * value;
+      peak = Math.max(peak, Math.abs(value));
+    }
+    samples.push(Math.sqrt(sum / data.length));
+    peaks.push(peak);
+    await wait(24);
+  }
+  const sorted = [...samples].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)] ?? 0;
+  const mean = samples.reduce((total, value) => total + value, 0) / Math.max(1, samples.length);
+  return { mean: Number(median.toFixed(5)), peak: Number(Math.max(...peaks).toFixed(5)), n: samples.length, meanRaw: Number(mean.toFixed(5)) };
+};
+
+const rmsOf = (analyser: AnalyserNode) => {
+  const data = new Float32Array(analyser.fftSize);
+  analyser.getFloatTimeDomainData(data);
+  let sum = 0;
+  for (const value of data) sum += value * value;
+  return Number(Math.sqrt(sum / data.length).toFixed(5));
+};
+
+const screenVideo = () =>
+  document.querySelector<HTMLVideoElement>(".remote-video-surface video");
+const shareSlider = () =>
+  document.querySelector<HTMLInputElement>(
+    ".share-status-bar .volume-control input[type=range]",
+  );
+
+function attachAnalyser(context: AudioContext, input: AudioNode) {
+  const analyser = context.createAnalyser();
+  analyser.fftSize = 2048;
+  // AnalyserNode 只有被拉取时才有数据：接一个零增益负载到 destination。
+  const sink = context.createGain();
+  sink.gain.value = 0;
+  input.connect(analyser);
+  analyser.connect(sink).connect(context.destination);
+  return analyser;
+}
+
+let loopAnalyser: AnalyserNode | null = null;
+async function acquireLoopback() {
+  try {
+    const capture = await originalGetDisplayMedia({ video: true, audio: true });
+    const track = capture.getAudioTracks()[0];
+    capture.getVideoTracks().forEach((item) => item.stop());
+    if (!track) {
+      calibration.push({ loopback: 'no-audio-track' });
+      return;
+    }
+    const context = new AudioContext();
+    await context.resume();
+    loopAnalyser = attachAnalyser(context, context.createMediaStreamSource(new MediaStream([track])));
+    calibration.push({ loopback: track.label || 'ok' });
+  } catch (error) {
+    calibration.push({ loopbackError: String(error) });
+  }
+}
+
+function screenGainEntry() {
+  return (
+    [...probe.streamGains]
+      .reverse()
+      .find((item) => item.stream?.getTracks().includes(screenAudioProducer.track)) ?? null
+  );
+}
+
+function maybeAttachMeasurement() {
+  if (measurement.analyser) return;
+  // 最可靠的位置：应用自己的共享音频增益节点（页面内测量，不受系统噪声影响）。
+  const shared = screenGainEntry();
+  if (shared) {
+    measurement.analyser = attachAnalyser(shared.gain.context, shared.gain);
+    measurement.kind = "screen-gain";
+    return;
+  }
+  // 其次复用应用建立的元素增强增益（>100% 通路）。
+  const boost = probe.boostGains[probe.boostGains.length - 1];
+  if (boost) {
+    measurement.analyser = attachAnalyser(boost.context, boost);
+    measurement.kind = "boost-gain";
+    return;
+  }
+  if (!flags.has("tap")) return;
+  const video = screenVideo();
+  if (!video) return;
+  try {
+    const context = new AudioContext();
+    const source = context.createMediaElementSource(video);
+    measurement.analyser = attachAnalyser(context, source);
+    source.connect(context.destination);
+    void context.resume();
+    measurement.kind = "element-tap";
+  } catch (error) {
+    measurement.kind = `element-tap-failed: ${String(error)}`;
+  }
+}
+
+const record = async (label: string) => {
+  await wait(160);
+  maybeAttachMeasurement();
+  await wait(120);
+  const video = screenVideo();
+  const gain = probe.boostGains[probe.boostGains.length - 1] ?? null;
+  const loopMeasured = loopAnalyser ? await measureAvg(loopAnalyser) : null;
+  samples.push({
+    label,
+    slider: shareSlider() ? Number(shareSlider()!.value) : null,
+    elementVolume: video ? Number(video.volume.toFixed(4)) : null,
+    elementMuted: video ? video.muted : null,
+    elementPaused: video ? video.paused : null,
+    audioTracks:
+      video?.srcObject instanceof MediaStream
+        ? video.srcObject.getAudioTracks().length
+        : null,
+    boostGains: probe.boostGains.length,
+    gainValue: gain ? Number(gain.gain.value.toFixed(4)) : null,
+    appGain: (() => {
+      const shared = screenGainEntry();
+      return shared ? Number(shared.gain.gain.value.toFixed(4)) : null;
+    })(),
+    measurement: measurement.kind,
+    rms: measurement.analyser ? rmsOf(measurement.analyser) : null,
+    loopRms: loopMeasured?.mean ?? null,
+    loopPeak: loopMeasured?.peak ?? null,
+  });
+};
+
+async function calibrateElementVolume() {
+  // 校准 0：纯 Web Audio 通路，验证 rmsOf 与 analyser 拉取本身是否正常。
+  const controlContext = new AudioContext();
+  await controlContext.resume();
+  const controlOscillator = controlContext.createOscillator();
+  controlOscillator.frequency.value = 440;
+  const controlAnalyser = attachAnalyser(controlContext, controlOscillator);
+  controlOscillator.start();
+  await wait(360);
+  calibration.push({
+    kind: "webaudio-control",
+    state: controlContext.state,
+    rms: rmsOf(controlAnalyser),
+  });
+
+  // 校准：Chromium 是否让 HTMLMediaElement.volume 真正影响 MediaStream 音轨输出。
+  const toneContext = new AudioContext();
+  await toneContext.resume();
+  const oscillator = toneContext.createOscillator();
+  const destination = toneContext.createMediaStreamDestination();
+  oscillator.frequency.value = 440;
+  oscillator.connect(destination);
+  oscillator.start();
+  const streamAnalyser = attachAnalyser(toneContext, oscillator);
+  await wait(320);
+  calibration.push({ kind: "tone-source", rms: rmsOf(streamAnalyser) });
+  const video = document.createElement("video");
+  video.dataset.probe = "calibration";
+  video.srcObject = new MediaStream([destination.stream.getAudioTracks()[0]]);
+  document.body.append(video);
+  const measureContext = new AudioContext();
+  await measureContext.resume();
+  try {
+    const source = measureContext.createMediaElementSource(video);
+    const analyser = attachAnalyser(measureContext, source);
+    source.connect(measureContext.destination);
+    await video
+      .play()
+      .catch((error: unknown) => calibration.push({ playError: String(error) }));
+    await wait(360);
+    for (const value of [1, 0.5, 0.25, 0]) {
+      video.volume = value;
+      await wait(260);
+      calibration.push({ kind: "volume", value, rms: rmsOf(analyser) });
+    }
+    video.volume = 0.8;
+    video.muted = true;
+    await wait(260);
+    calibration.push({ kind: "muted", value: true, rms: rmsOf(analyser) });
+    video.muted = false;
+    await wait(260);
+    calibration.push({ kind: "muted", value: false, rms: rmsOf(analyser) });
+    calibration.push({
+      kind: "track",
+      readyState: video.readyState,
+      trackState: destination.stream.getAudioTracks()[0]?.readyState,
+      trackMuted: destination.stream.getAudioTracks()[0]?.muted,
+    });
+  } catch (error) {
+    calibration.push({ error: String(error) });
+  }
+  calibration.push({
+    contextStates: { tone: toneContext.state, measure: measureContext.state },
+    paused: video.paused,
+  });
+
+  // 校准 2：解码文件（非 MediaStream）的媒体元素在同一环境里是否有声。
+  // 用它区分「媒体元素整体无声」与「MediaStream 的元素取不到声音」。
+  try {
+    const sampleRate = 8000;
+    const frames = sampleRate; // 1 秒 440Hz
+    const buffer = new ArrayBuffer(44 + frames * 2);
+    const view = new DataView(buffer);
+    const writeText = (offset: number, text: string) => {
+      for (let index = 0; index < text.length; index += 1)
+        view.setUint8(offset + index, text.charCodeAt(index));
+    };
+    writeText(0, "RIFF");
+    view.setUint32(4, 36 + frames * 2, true);
+    writeText(8, "WAVEfmt ");
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    writeText(36, "data");
+    view.setUint32(40, frames * 2, true);
+    for (let index = 0; index < frames; index += 1)
+      view.setInt16(44 + index * 2, Math.round(Math.sin((2 * Math.PI * 440 * index) / sampleRate) * 12000), true);
+    const blobVideo = document.createElement("video");
+    blobVideo.dataset.probe = "blob-calibration";
+    blobVideo.src = URL.createObjectURL(new Blob([buffer], { type: "audio/wav" }));
+    blobVideo.loop = true;
+    document.body.append(blobVideo);
+    const blobContext = new AudioContext();
+    await blobContext.resume();
+    const blobSource = blobContext.createMediaElementSource(blobVideo);
+    const blobAnalyser = attachAnalyser(blobContext, blobSource);
+    blobSource.connect(blobContext.destination);
+    await blobVideo.play().catch((error: unknown) => calibration.push({ blobPlayError: String(error) }));
+    await wait(400);
+    blobVideo.volume = 1;
+    await wait(260);
+    const full = rmsOf(blobAnalyser);
+    blobVideo.volume = 0.25;
+    await wait(260);
+    const quarter = rmsOf(blobAnalyser);
+    blobVideo.volume = 1;
+    blobVideo.muted = true;
+    await wait(260);
+    const silenced = rmsOf(blobAnalyser);
+    calibration.push({
+      kind: "blob-element",
+      paused: blobVideo.paused,
+      readyState: blobVideo.readyState,
+      rmsVolume1: full,
+      rmsVolume025: quarter,
+      rmsMuted: silenced,
+    });
+  } catch (error) {
+    calibration.push({ blobError: String(error) });
+  }
+}
+
+(window as any).screenAudioVolumeResult = (async () => {
+  const preseed = flags.get("preseed");
+  if (preseed) localStorage.setItem("cove_screen_receive_volume_v1", preseed);
+  render("dark");
+  await wait(320);
+
+  const joinButton = [...document.querySelectorAll<HTMLButtonElement>("button")].find(
+    (button) => button.title === "加入语音",
+  );
   check(joinButton, "join voice control is available");
   click(joinButton!);
-  await wait(750);
-  check(document.querySelector(".control-ball.voice-active"), "voice branch is active");
+  await wait(850);
 
-  const shareButton = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.title === "共享屏幕");
-  check(shareButton, "self-share control is available");
-  click(shareButton!);
-  await wait(80);
-  const shareConfirm = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "开始共享");
-  check(shareConfirm, "screen share settings dialog is open");
-  click(shareConfirm!);
-  await wait(900);
-  check(document.querySelector(".mode-self"), "self-share layout branch is active");
-  check(findChatPanel(), "self-share chat remains mounted");
-
-  const firstShareSnapshot = (window as any).shareChatQa.getSnapshot();
-  check(firstShareSnapshot.panelBackground && !/rgba?\([^)]*,\s*0(?:\.0+)?\)/.test(firstShareSnapshot.panelBackground), "self-share panel has an opaque computed background");
-  check(!String(firstShareSnapshot.panelBackdrop).includes("blur"), "self-share panel does not blur the shared canvas");
-  check(firstShareSnapshot.slotBackground && !/rgba?\([^)]*,\s*0(?:\.0+)?\)/.test(firstShareSnapshot.slotBackground), "shared chat slot has its own surface");
-  state.metrics.push(firstShareSnapshot);
-
-  // Validate actual hit-testing and keyboard semantics at every target width.
-  // The runner changes the native content size and records the artifacts.
-  const toggle = findShareToggle();
-  check(toggle, "shared-chat toggle is rendered in self-share mode");
-  toggle!.focus();
-  toggle!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-  await wait(120);
-  check(document.querySelector(".chat-panel") === null || document.querySelector(".chat-panel")?.getBoundingClientRect().width === 0 || document.querySelector(".chat-panel")?.offsetParent === null, "keyboard activation can collapse shared chat");
-  toggle!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-  await wait(120);
-  check(findChatPanel(), "keyboard activation can expand shared chat");
-
-  const endSelf = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "结束共享");
-  check(endSelf, "self-share end control is available");
-  click(endSelf!);
-  await wait(450);
-  check(!document.querySelector(".mode-self"), "self-share branch can exit");
-
-  const watchButton = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "观看共享");
+  const watchButton = [...document.querySelectorAll<HTMLButtonElement>("button")].find(
+    (button) => button.textContent?.trim() === "观看共享",
+  );
   check(watchButton, "remote watch control is available");
   click(watchButton!);
-  await wait(850);
-  check(document.querySelector(".mode-watching"), "remote-watch layout branch is active");
-  check(findChatPanel(), "remote-watch chat is mounted");
-  const watchSnapshot = (window as any).shareChatQa.getSnapshot();
-  check(watchSnapshot.panelBackground && !/rgba?\([^)]*,\s*0(?:\.0+)?\)/.test(watchSnapshot.panelBackground), "remote-watch panel has an opaque computed background");
-  check(!String(watchSnapshot.panelBackdrop).includes("blur"), "remote-watch panel does not blur the shared canvas");
-  state.metrics.push(watchSnapshot);
+  await wait(900);
+  check(document.querySelector(".mode-watching"), "remote-watch layout is active");
 
-  const watchToggle = findShareToggle();
-  check(watchToggle, "shared-chat toggle is rendered in remote-watch mode");
-  const watchRect = watchToggle!.getBoundingClientRect();
-  const hit = document.elementFromPoint(watchRect.left + watchRect.width / 2, watchRect.top + watchRect.height / 2);
-  check(Boolean(hit && watchToggle!.contains(hit)), "remote-watch toggle passes elementFromPoint hit-test");
-  click(watchToggle!);
-  await wait(120);
-  check(!findChatPanel() || findChatPanel()!.offsetParent === null, "remote-watch toggle collapses chat by pointer");
-  click(findShareToggle()!);
-  await wait(120);
-  check(findChatPanel(), "remote-watch toggle expands chat by pointer");
+  if (lateAudio) {
+    // 手机端在画面之后才发布系统声音，这里复现同一时序。
+    producers.set(screenAudioProducer.id, screenAudioProducer);
+    publish("ms:new-producer", {
+      producerId: screenAudioProducer.id,
+      peerId: screenAudioProducer.peerId,
+      kind: screenAudioProducer.kind,
+      appData: screenAudioProducer.appData,
+    });
+    await wait(800);
+  }
+  await screenToneContext.resume();
+  await acquireLoopback();
+  await wait(200);
 
-  // Give the runner a deterministic handle for changing the synthetic frame
-  // between captures. It also verifies that the layout stays stable while the
-  // underlying canvas flips from red to blue.
-  setTone("red");
-  await wait(100);
-  setTone("blue");
-  await wait(100);
-  const afterTone = (window as any).shareChatQa.getSnapshot();
-  check(afterTone.panelBackground === watchSnapshot.panelBackground, "shared-canvas tone changes do not change chat background style");
-  state.metrics.push(afterTone);
+  const input = shareSlider();
+  const video = screenVideo();
+  state.results.push(`slider=${Boolean(input)} video=${Boolean(video)}`);
+  state.results.push(
+    `audioTracks=${
+      video?.srcObject instanceof MediaStream
+        ? video.srcObject.getAudioTracks().length
+        : "no-stream"
+    }`,
+  );
 
+  await record("initial");
+  for (const value of [100, 50, 25, 10, 0, 10, 50, 100, 150, 200, 120]) {
+    if (!input) break;
+    setSlider(input, value);
+    await record(`slider-${value}`);
+  }
+  await calibrateElementVolume();
+
+  state.metrics.push({
+    flags: [...flags.keys()],
+    samples,
+    calibration,
+    elementSources: probe.elementSources,
+    boostGains: probe.boostGains.length,
+    volumeSets: probe.volumeSets.slice(-120),
+    mutedSets: probe.mutedSets.slice(-60),
+  });
   state.passed = true;
   return state;
 })().catch((error) => ({
   ...state,
   passed: false,
-  error: String(error?.stack ?? error),
+  error: String((error as Error)?.stack ?? error),
+  metrics: [...state.metrics, { samples, calibration, elementSources: probe.elementSources }],
 }));
 
 void originalGetUserMedia;
