@@ -1,0 +1,2032 @@
+{
+  "capturedAt": "2026-10-03T16:30:02.2561438Z",
+  "source": "C:\\Users\\cyj06\\Desktop\\Projects\\Cove",
+  "head": "3a5b12c53483f916561346b8c1cc72763f15acdc",
+  "files": [
+    {
+      "path": "client/tests/ui/element-volume-probe.cjs",
+      "sha256": "D2556D906FE212244CE0A5C1BAE74DCCFA4DCA7C5DF9A4B07D5CC3F1FD8EB755",
+      "bytes": 1969
+    },
+    {
+      "path": "client/tests/ui/element-volume-probe.html",
+      "sha256": "CB73030259AD24736CD89DE11DB9DD2D4072A5CC1207B12EFCF7A0AAA3E671BD",
+      "bytes": 6590
+    },
+    {
+      "path": "client/tests/ui/screen-audio-volume.cjs",
+      "sha256": "F81643AA0319A6F02B19608A56C87291CFA1A8ACDC420750C47FE65B9C77B6CA",
+      "bytes": 2661
+    },
+    {
+      "path": "client/tests/ui/screen-audio-volume.html",
+      "sha256": "06006CC8D83B2CAE79D6209EC97E94834A8C83E7BA59CF0E77ED083A641C905C",
+      "bytes": 306
+    },
+    {
+      "path": "client/tests/ui/screen-audio-volume.tsx",
+      "sha256": "B5EE7A933F2BAFDB21ACF28C67225EA8D56722067185D7041696438C1F29420C",
+      "bytes": 35427
+    },
+    {
+      "path": "client/tests/ui/share-chat-animation.cjs",
+      "sha256": "7F05494BC0420DC7AAFCD0BBE24BB7074353167CA7237057FBBE713010B15C6C",
+      "bytes": 9029
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/Makefile.am",
+      "sha256": "18088CCF769B9554C5CDEC25B6D158A86133F57E22A634AFF5EE6EDF7C68EECD",
+      "bytes": 3731
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/TRAINING-README",
+      "sha256": "6469CF49320ED9333BF4EA1A12B470AA6267CFFD94E8C39D94D9A385F21A37D0",
+      "bytes": 311
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/autogen.sh",
+      "sha256": "660C1E1AECB7B1A0882C6F6F23E7B944622C53463636B6BE23B3E836049F471F",
+      "bytes": 227
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/configure.ac",
+      "sha256": "96CA75A29EC57CCF6D6EA263EEA18E83A6D4C5C24D336B51E45B48A36B3E9B2D",
+      "bytes": 3778
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/doc/Doxyfile.in",
+      "sha256": "675E80C1B411494AD185051EBCF562D0C8434FD96A6EABFFCECEFE46CF657CB1",
+      "bytes": 518
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/examples/rnnoise_demo.c",
+      "sha256": "09E23C4A6900C7C155506A2A7D432BD2C8073E0BE046AE5739DFD8A067DEFE58",
+      "bytes": 2145
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/m4/attributes.m4",
+      "sha256": "C31ADF40E1F77C0DEE9EB0FBEB750E883288FE33031E6E2B8CBFE6C4CB708D9C",
+      "bytes": 10727
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/rnnoise-uninstalled.pc.in",
+      "sha256": "D5FDFC8A2AFC82D1692F755AAB97C07ED4B9DE220071ECE7A8CD043C1F355B52",
+      "bytes": 320
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/rnnoise.pc.in",
+      "sha256": "11AE2A7F1F3B560E95C1C26F6C0F5DB3A165FF6F58E15B1E1BCF5A7A4D8B2E2D",
+      "bytes": 293
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/src/compile.sh",
+      "sha256": "7D8E1889D730BC9B651D9D89D678EA2C4FB0AE7A465497F297D3F852E0A38329",
+      "bytes": 138
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/src/rnn_train.py",
+      "sha256": "7ACA61A81834CA26F524A7A5C4AF3223770E0082FB5CD4B1F3FF3B73E4C9264F",
+      "bytes": 2047
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/training/bin2hdf5.py",
+      "sha256": "B7FAEEE17B058C3F18AD2615B7DE2E50DDC4011621061CE896B4F256A3A78A4E",
+      "bytes": 299
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/training/dump_rnn.py",
+      "sha256": "72A7F682D3A29A960123C527D36A77965B1102E352E71F3022E774E875C50874",
+      "bytes": 3710
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/training/rnn_train.py",
+      "sha256": "A2E2B29C3C4BC60F977CDB5ED8913F2B907A98DD2CAB7CB26D9EDC6458BC7D66",
+      "bytes": 4611
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/update_version",
+      "sha256": "6CDA5AA913410301198D91CE3DA86F4A943E8800F8D8AA70A6046545E939361C",
+      "bytes": 2334
+    },
+    {
+      "path": "server/src/avatarStorage.ts",
+      "sha256": "0C874240DA2BB4BB1CD62D35DFA895FF9D9FFB0BF14EE186D4CDB95780ECBCE4",
+      "bytes": 4155
+    },
+    {
+      "path": "server/src/soundpackNormalization.ts",
+      "sha256": "C589E188F20F3461686D54B8F24B2078FC4D700B6913E67E8930B99CBDA972D3",
+      "bytes": 3669
+    },
+    {
+      "path": "server/tests/avatarStorage.test.ts",
+      "sha256": "81084FBFB0BD446167736D6EFE8E545B21D8709AC125ACAF334CB657D48EA84B",
+      "bytes": 3170
+    },
+    {
+      "path": "server/tests/soundpackNormalization.test.ts",
+      "sha256": "6F13CFE146223E27908861AD39371C788D9CFC69110FA6EF1E3A23D167A44C11",
+      "bytes": 2713
+    },
+    {
+      "path": ".github/workflows/release-client.yml",
+      "sha256": "D1917D67DBA5B515B200CAC6D493D22F9880812A186281B7A1430DB3C5A59B93",
+      "bytes": 4801
+    },
+    {
+      "path": ".github/workflows/release-mobile.yml",
+      "sha256": "B035A51EB32968C61F1094709A21BE65CF56D090551698983BE7E1BB13267E45",
+      "bytes": 6411
+    },
+    {
+      "path": ".gitignore",
+      "sha256": "693C131252E4B34DCF28FAE938ED12AA526C848898E0A124A97124CB984FC51E",
+      "bytes": 755
+    },
+    {
+      "path": "AGENTS.md",
+      "sha256": "7023960A290A6F7AD33D5246CF6AE9AB1672A1B527AF0DE549B7A94CBB31B4EB",
+      "bytes": 4869
+    },
+    {
+      "path": "CHANGELOG.md",
+      "sha256": "0DBBBF604F5C8D63BF67DE0330DE26EC181973AEC20E03C4ADA5D785E573630C",
+      "bytes": 26142
+    },
+    {
+      "path": "Cove-UI-Migration-Plan.md",
+      "sha256": "61F5944C0E1C308FCC73BE8668429F2D3F7EFD8DE84738B3CD7107CFF3EEC82A",
+      "bytes": 13229
+    },
+    {
+      "path": "README.md",
+      "sha256": "6449017BA40459BC6AB6D1B819E613B4884F56D62C6602DA22D9E08FC46BF390",
+      "bytes": 14303
+    },
+    {
+      "path": "RELEASE_NOTES.md",
+      "sha256": "440506A10DD5AA6DBB3F9B56A92B555A337887796DD10C34A80DAE799A2AD6A0",
+      "bytes": 2475
+    },
+    {
+      "path": "assets/branding/cove-icon-master.png",
+      "sha256": "15D768A1DE04B0B38B6040446BF9505CFEA777D033A7E33F0BC35053178D83AB",
+      "bytes": 1123921
+    },
+    {
+      "path": "client/.npmrc",
+      "sha256": "ED716C3024F744E4BC6404594CAF31D231930ADC35BE5792B563FCB1C7D2709F",
+      "bytes": 56
+    },
+    {
+      "path": "client/build/icon.ico",
+      "sha256": "B4B20D2AB52D52D8456C2A34DA9BA670312580F880744E7C5E33FE5DF936401C",
+      "bytes": 138639
+    },
+    {
+      "path": "client/electron/application-audio-helper.cs",
+      "sha256": "F2E75321659DD14EF852EDA44ABB11BA974F4C9F908244287A4EA756C4791179",
+      "bytes": 17772
+    },
+    {
+      "path": "client/electron/application-audio.ts",
+      "sha256": "41CE39CCE8D62052E89E892E0E2DE3447476EEE2176FAAFE0F0764A31A0BC13B",
+      "bytes": 6530
+    },
+    {
+      "path": "client/electron/build-application-audio.cjs",
+      "sha256": "8C26CB99855DC0C2FFDD7EB31163044D4DC0FC46A5B17D65865ADDD03C3CF9CE",
+      "bytes": 1035
+    },
+    {
+      "path": "client/electron/build-remote-input.cjs",
+      "sha256": "74330F1EA3380FF762D8439CA35D99E753DD1EA45A4ECC813831B47651E07335",
+      "bytes": 1194
+    },
+    {
+      "path": "client/electron/external-links.ts",
+      "sha256": "CFD1AFC7C7B7F8EE18EE47B09E33CB26563208C8564B052B86CC2057CEBCBB02",
+      "bytes": 344
+    },
+    {
+      "path": "client/electron/gitee-installer-cache.ts",
+      "sha256": "9AB892EA91289A77977505133D92B2F7D5CC005E6F6708481AFD3E5B37DA24B7",
+      "bytes": 5712
+    },
+    {
+      "path": "client/electron/main.ts",
+      "sha256": "93AA0F81D52DA2D0085D12FBC1D08103FC7711DDC121EFB4286F5605660E183D",
+      "bytes": 19919
+    },
+    {
+      "path": "client/electron/preload.ts",
+      "sha256": "8DB4916FB2C15056B55038DB701AD92A819D89B7457A53935939867675CBBFE4",
+      "bytes": 5202
+    },
+    {
+      "path": "client/electron/remote-control-activation.ts",
+      "sha256": "109509D2F3695C49D03A483D7A1E67A64B58401071D046883E8C248792346682",
+      "bytes": 409
+    },
+    {
+      "path": "client/electron/remote-control.ts",
+      "sha256": "566DD7E0DB37AAEEF6B42B91CD2B6C2EBCBBDC1378A9C7FC845011714B53FE76",
+      "bytes": 7174
+    },
+    {
+      "path": "client/electron/remote-input-helper.cs",
+      "sha256": "6FC1BB96E4C0CF8747DE9A53BFDFCB3547D9B042E1EDD386213A59C4283EE87F",
+      "bytes": 15007
+    },
+    {
+      "path": "client/electron/remote-input-queue.ts",
+      "sha256": "6A2A1501C10C0ACFEEAEF248123B38890FA61A907E2256AF5F40B5E403584F44",
+      "bytes": 3533
+    },
+    {
+      "path": "client/electron/server-certificate-policy.ts",
+      "sha256": "123CFC0F8434068C01991A9097AB9E463E3F44FC24D67A30EE34F338FF371C62",
+      "bytes": 850
+    },
+    {
+      "path": "client/electron/tsconfig.json",
+      "sha256": "8D538417F8F425AAD7C887837863EFA63C35C32341462CC0C021C10B9576BE37",
+      "bytes": 260
+    },
+    {
+      "path": "client/electron/update-config.ts",
+      "sha256": "20CF31C3701190D64FAC35EA97470E091208A614A99A8D24828D88598913BCA2",
+      "bytes": 158
+    },
+    {
+      "path": "client/electron/update-sources.ts",
+      "sha256": "AEE2608F8DE913850592992B73F36E74AE8E0340E496A8C566160BA57BAD5791",
+      "bytes": 4658
+    },
+    {
+      "path": "client/electron/update-state.ts",
+      "sha256": "73961CCF81911AA9B251FA32705424CF5688100E7B088194A946AF04C36E67C2",
+      "bytes": 3839
+    },
+    {
+      "path": "client/electron/updater-core.ts",
+      "sha256": "4BE966510DB227E33330F3E0E34423036171355FE15241455A2ABC317C876E13",
+      "bytes": 15123
+    },
+    {
+      "path": "client/electron/updater.ts",
+      "sha256": "11D1DA42EC4D4D5A198DEA301B57628C812E2125E44F18D8941F31B3548D9764",
+      "bytes": 2985
+    },
+    {
+      "path": "client/index.html",
+      "sha256": "E4F056E3F72C13B716346D0741BCEFFEE459770B28B727C50E55C8A54EEF6D40",
+      "bytes": 294
+    },
+    {
+      "path": "client/package.json",
+      "sha256": "8EE968733B4D27EB2C48133B032B04AEAB471F4C12CD66379AB0681B3FC12C5B",
+      "bytes": 5040
+    },
+    {
+      "path": "client/postcss.config.js",
+      "sha256": "FA650B380ADFABB151A0B352F7135E107E6352345F899060F1C5C231228F94BF",
+      "bytes": 83
+    },
+    {
+      "path": "client/public/assets/cove-icon.png",
+      "sha256": "8A75DE1535EEC132EEE190C169EB5DD794CCD1A3D8F23CA421DA3E260313EA08",
+      "bytes": 105218
+    },
+    {
+      "path": "client/public/assets/cove-login-loop.mp4",
+      "sha256": "175B5002988E536370442B9A0078937ABE0A108544544F473D5FF8EED525AD79",
+      "bytes": 412460
+    },
+    {
+      "path": "client/public/third-party/RNNoise.txt",
+      "sha256": "E4AB40404493D521AD912E4C0B0D9CC57EAFDDB2CE849E18FDFEC632D9F26BED",
+      "bytes": 14466
+    },
+    {
+      "path": "client/src/App.tsx",
+      "sha256": "E5690D00B27ABFCCDCA02A92273576D4F5D9A8CDAC105660A1F5104875CD98BA",
+      "bytes": 42461
+    },
+    {
+      "path": "client/src/aboutQuotes.ts",
+      "sha256": "73EA9C6A98E5207F21A0ECD285F80360529B6699E51114893D11F5A8F14FFAD2",
+      "bytes": 3351
+    },
+    {
+      "path": "client/src/accountAuth.ts",
+      "sha256": "585DFF2934163675847887D96E8F11003AD874D77CF292A20690B24E002F2656",
+      "bytes": 10781
+    },
+    {
+      "path": "client/src/applicationAudio.ts",
+      "sha256": "3235D6B8189AEFA018441950CFF7AE641078A523D6233E9F32D71A331B25DE36",
+      "bytes": 5001
+    },
+    {
+      "path": "client/src/audioDevices.ts",
+      "sha256": "733509F74A3C4F6814EB5974F7887B40C2934C816AD7316C5CF894E6F299E224",
+      "bytes": 5985
+    },
+    {
+      "path": "client/src/audioTrim.ts",
+      "sha256": "6A5708EBBC07891947501DB6B6ACBCED5684F3429748603E596069AD56793358",
+      "bytes": 1896
+    },
+    {
+      "path": "client/src/autoHideScrollbars.ts",
+      "sha256": "835EF170A0A956ED36296AC181F4635FF825B4E93FEC97F9048700C3ED764AEE",
+      "bytes": 3675
+    },
+    {
+      "path": "client/src/chatImages.ts",
+      "sha256": "131F0FE7F982DFE3EFC7072955CC8645C6670E5856FEDE50888BD2DCB890CFC0",
+      "bytes": 1382
+    },
+    {
+      "path": "client/src/chatLinks.ts",
+      "sha256": "6D69EAF36C0B76005CE245A51206C32347567043D743909EE013A3705DF2D846",
+      "bytes": 2632
+    },
+    {
+      "path": "client/src/components/AudioTrimEditor.tsx",
+      "sha256": "A0467FADED2E742BD0A8EEEE06E2C7B2111831D28847E6576D3ED4AC12AA60F4",
+      "bytes": 10249
+    },
+    {
+      "path": "client/src/components/Avatar.tsx",
+      "sha256": "E8556D93FDE6E6B1DFF8342DF1E26DA94ED7BA439FDCD3ECBD29A8C549AA898F",
+      "bytes": 1547
+    },
+    {
+      "path": "client/src/components/AvatarCropDialog.tsx",
+      "sha256": "69795685A2DBDA99777CC53840D14C9C36138F4E223A473463A561044082C7A8",
+      "bytes": 7585
+    },
+    {
+      "path": "client/src/components/CreateRoomDialog.tsx",
+      "sha256": "2D9A46C5BE31F8AF02F520FCFA8425B5B60E013B1FD61439067E3A374D89847A",
+      "bytes": 4198
+    },
+    {
+      "path": "client/src/components/MicrophoneNoiseControl.tsx",
+      "sha256": "1BDD90812A01C682384780836A5CEF2E1EADA7435A245FC5A076D2CA03CD9627",
+      "bytes": 7273
+    },
+    {
+      "path": "client/src/components/ProfileModal.tsx",
+      "sha256": "5B1C9709666FCA21EC30345E420AB1479A29636AEBACA74E8DF55FCD41199097",
+      "bytes": 6711
+    },
+    {
+      "path": "client/src/components/ServerCertificateToggle.tsx",
+      "sha256": "52D3C6FDA57C83528D0124791B0B8D0350998A4B568893CDAC0EF5F3E46C9E6F",
+      "bytes": 1716
+    },
+    {
+      "path": "client/src/components/SoundPackPanel.tsx",
+      "sha256": "5CD57E0731E4C7FCD8563AFB30CAAE146F9592E843F4AA1E9E130D41AD3557D6",
+      "bytes": 63798
+    },
+    {
+      "path": "client/src/components/UpdateCenter.tsx",
+      "sha256": "BF3B2A91C9606D048747AE8B41D04B010675459549FDA9DFCBF281FCA8C201CF",
+      "bytes": 19326
+    },
+    {
+      "path": "client/src/components/UserProfileModal.tsx",
+      "sha256": "4628274FA25BA7267DD1BB3E5B415D11FDD08BAFAA95A613C87A49944801CEE2",
+      "bytes": 3528
+    },
+    {
+      "path": "client/src/connectionDeadline.ts",
+      "sha256": "200215D94402D84ED18B6D67C942918BC7A58004150534FA3AFBDA8275728188",
+      "bytes": 1163
+    },
+    {
+      "path": "client/src/electron.d.ts",
+      "sha256": "D11D80F5A163E876ACA6B68D89514CE5D278F16E5A6369FEEB93251DA4F869A9",
+      "bytes": 2604
+    },
+    {
+      "path": "client/src/hooks/useScreenFullscreen.ts",
+      "sha256": "2B45702B935C814EEE8D6B622753B073B7ADC02D8B5A8374CDE7846B2AFFF718",
+      "bytes": 3089
+    },
+    {
+      "path": "client/src/hooks/useSortableList.ts",
+      "sha256": "DAEA4485BE921F39FCD57EE7502785A9F94F55ADE7A141733DD5C42E8470C6A2",
+      "bytes": 20955
+    },
+    {
+      "path": "client/src/hooks/useWebRTC.ts",
+      "sha256": "926E75C6B0E58B9C5C0595E246D207AE2927F17C90809079B501B3977E1092EA",
+      "bytes": 141845
+    },
+    {
+      "path": "client/src/index.css",
+      "sha256": "3278CDEF385AD03A20DAA422ADBEAB4B2F8F069A2007E85F7ECB634906ACC854",
+      "bytes": 5057
+    },
+    {
+      "path": "client/src/main.tsx",
+      "sha256": "1923C812A2ED3F4F37FA0BB15245F7D66FFC466942AC2ABE315231511C710609",
+      "bytes": 522
+    },
+    {
+      "path": "client/src/mediaDiagnostics.ts",
+      "sha256": "8A4EFE188CB51ACE2A93AB49428CC410CB41EFA8D63E579289702CA01C4CCF5B",
+      "bytes": 6644
+    },
+    {
+      "path": "client/src/memberOrdering.ts",
+      "sha256": "FDE71943BAA29BF70AE99FEA978894908707C208FCD1D792F3BE315961D0C877",
+      "bytes": 712
+    },
+    {
+      "path": "client/src/microphoneCandidate.ts",
+      "sha256": "31EE784A54891A6A259BFF0B0C74D0C6C93761F77495A76DE83436736BF3FBBE",
+      "bytes": 2028
+    },
+    {
+      "path": "client/src/microphoneEcho.ts",
+      "sha256": "674AD4272416D06EC49FBA41ED86C7BE5A7B1A45D7DAD8F4803BECABF72B2888",
+      "bytes": 3482
+    },
+    {
+      "path": "client/src/microphoneProcessing.ts",
+      "sha256": "5D6BE234506DAB3A22959ACF0630108ED39A8670247A8CA2C52D7F04063139F1",
+      "bytes": 5667
+    },
+    {
+      "path": "client/src/pages/ChatRoomV2.tsx",
+      "sha256": "3FA9A7CE1C8E4B461345263CA5C9A2FC3F2C9EB5C6F44A93A8BD107516856C06",
+      "bytes": 187893
+    },
+    {
+      "path": "client/src/pages/RoomList.tsx",
+      "sha256": "263312ADB5A918D5B3C01CEBEE08CF7D2658886C809D55D9DFD22A724D7E8D66",
+      "bytes": 15292
+    },
+    {
+      "path": "client/src/profile.ts",
+      "sha256": "5B03F2AA9D803FC2FA4A857E81A3C637475160FCA7740F0C1DEAAC5DAB421CF0",
+      "bytes": 5459
+    },
+    {
+      "path": "client/src/profileRemarks.ts",
+      "sha256": "83BCDA6B8A5986DA8B3E51E93AC0145729B1546401CFB55966D70A7E3DCA58E1",
+      "bytes": 1416
+    },
+    {
+      "path": "client/src/remoteControl.ts",
+      "sha256": "3A73CB5C411237E1544A98AC737E83B826BF1ED02BD04BF0736397EB21EAD9D3",
+      "bytes": 2825
+    },
+    {
+      "path": "client/src/remoteControlSession.ts",
+      "sha256": "5E71A1F6CE56F7069F4F71B76C3E63329855B36DDE08B67F4A1CDC56331F7063",
+      "bytes": 6403
+    },
+    {
+      "path": "client/src/rnnoise-v2.wasm",
+      "sha256": "4F513A50613DE74378331237886138EAB52FA2650E8B1A41EB587D932D9B8850",
+      "bytes": 1440118
+    },
+    {
+      "path": "client/src/rnnoiseMicrophone.ts",
+      "sha256": "F51B683B6E66E13EA74828C48E704F7BEB787C66CF9567E7F70FD0EFF58A186C",
+      "bytes": 3778
+    },
+    {
+      "path": "client/src/rnnoiseProcessor.js",
+      "sha256": "983A1625A8D1CEE19127753C71764A374978632398740946ED1AF28B59886075",
+      "bytes": 4031
+    },
+    {
+      "path": "client/src/rnnoiseWasmLoader.js",
+      "sha256": "8F8814B16D30F3AED8ABBFE1CACA7E9AB878840010943A99A83EE1BC1DA42EBF",
+      "bytes": 12878
+    },
+    {
+      "path": "client/src/roomSettings.ts",
+      "sha256": "D12F93DB7EE6EAC584C080FDD7D9FD21608F37FD9EE67B0AD1A134B6D06865B6",
+      "bytes": 1465
+    },
+    {
+      "path": "client/src/screenCapture.ts",
+      "sha256": "B191118337F5E0F4923E208DD37013FB6976316FEDD24C3B5F5AE9555711041E",
+      "bytes": 4834
+    },
+    {
+      "path": "client/src/serverCertificate.ts",
+      "sha256": "7E239189C7CA80726CFF9555E9F4A36B81DCD6970026D1A51299A6B0FA900E3C",
+      "bytes": 941
+    },
+    {
+      "path": "client/src/serverIdentity.ts",
+      "sha256": "D6CA467A4188C74786E7DE149D74493EBFDD736E09E6B0FFE33C4C8CA39ECC60",
+      "bytes": 4776
+    },
+    {
+      "path": "client/src/serverSecurity.ts",
+      "sha256": "F7F2F6D7903AEC14A66DD65CA35A0C2E220B4C4D714D971A3125F2DD13F7420F",
+      "bytes": 10658
+    },
+    {
+      "path": "client/src/serverUpdateUrl.ts",
+      "sha256": "4F85CA84806E084513749E18430DC0A0A12AB6EF09C6CB51FE3D3EE30BE35D7C",
+      "bytes": 589
+    },
+    {
+      "path": "client/src/sessionRegistration.ts",
+      "sha256": "85F80142A8A26D57BE4816E45C74D9CE5AE5B848FFCA9B9B8A9AD8FFE45E6E87",
+      "bytes": 2150
+    },
+    {
+      "path": "client/src/socket.ts",
+      "sha256": "1D50A74E030D5E7B6174040022A309A62764F67A8143C9A79FB42EFF9F27AA23",
+      "bytes": 1871
+    },
+    {
+      "path": "client/src/sortableList.ts",
+      "sha256": "A35E2CDDB037DC122FC146BBB0515325E8AE26E1863D81B081C7B38F75971896",
+      "bytes": 2848
+    },
+    {
+      "path": "client/src/soundpackDownload.ts",
+      "sha256": "39032C1FCA1104A0290C4CD025303F37DDB0872C5C5E5206517D41B7BE3582A9",
+      "bytes": 1475
+    },
+    {
+      "path": "client/src/theme.ts",
+      "sha256": "29698677C48730C8DEB8E376E849AADBB63DE2AD43DCAA6AEDF4DA45B4F78BEB",
+      "bytes": 2496
+    },
+    {
+      "path": "client/src/types.ts",
+      "sha256": "296C1637FDE230C4059EB691EBA9A0E7D86F41F6AF38AD8FDE2622B4E4040A64",
+      "bytes": 1921
+    },
+    {
+      "path": "client/src/ui-v2.css",
+      "sha256": "A8512945CE1A767EF283CF383749C042239EFB106530314CE6A669A19FCE6527",
+      "bytes": 214996
+    },
+    {
+      "path": "client/src/update.ts",
+      "sha256": "36BAAD447035CA2C9635DA750DE8396912537C24F8DD4DD649CA64D191C33769",
+      "bytes": 571
+    },
+    {
+      "path": "client/src/utils/disconnectGrace.ts",
+      "sha256": "CE0618C78B2B7A5AC71405D8FAD86B9D896D263246608091C086D8CCCC114811",
+      "bytes": 702
+    },
+    {
+      "path": "client/src/voiceConnectionRecovery.ts",
+      "sha256": "1F2BC9749F1D1DD8EBB98E23AEB8314A256345ECC6973449CAB1B9EE73EF5969",
+      "bytes": 2510
+    },
+    {
+      "path": "client/src/voiceTransportPolicy.ts",
+      "sha256": "3ACA1E4F3BDD49BF697D001D4832FBA40CF417A812A8844F8E8C5BCD59E9F4AF",
+      "bytes": 668
+    },
+    {
+      "path": "client/tailwind.config.js",
+      "sha256": "A6B431682360A6650DC5B09BF29080EFE2BDF48B7C378B2FAFB4E2E0C7CCDE6E",
+      "bytes": 158
+    },
+    {
+      "path": "client/test-electron.js",
+      "sha256": "01D1BCBE8F9BDC89EA928D652C89CE74C8ED2CFA6E37464D888D919A9E6AC0A2",
+      "bytes": 188
+    },
+    {
+      "path": "client/tests/accountAuth.test.ts",
+      "sha256": "58061909D9045D095D58F1E9E7623F9B34AB73E3CFE1B33D4C4255D785CA870A",
+      "bytes": 3980
+    },
+    {
+      "path": "client/tests/applicationAudio.test.ts",
+      "sha256": "9632D7F8759586B0BD9431E65E7B1D7FF027C94AE21B9CB529A2391F3EB3BB1B",
+      "bytes": 4784
+    },
+    {
+      "path": "client/tests/applicationAudioSources.native.cjs",
+      "sha256": "A8D76EE6858499341EF2D48408D4DE0F2B98BC23BCC8C029E98FFF07A7D19F26",
+      "bytes": 1528
+    },
+    {
+      "path": "client/tests/applicationAudioSources.native.cs",
+      "sha256": "F084F5287BBB547BA2AABE0FFAB4FA6C07D4DB1A6F20DE8B2964BA26ED6D7573",
+      "bytes": 9463
+    },
+    {
+      "path": "client/tests/applicationAudioSources.test.ts",
+      "sha256": "4771A8D4D8BCBAA73F17EBD342956DEF362D026BE02FDD535A4F4A3FA925BC37",
+      "bytes": 5440
+    },
+    {
+      "path": "client/tests/audioDevices.test.ts",
+      "sha256": "CFA573298F03E0A352F025CDFEB8589552401D7D3CF7FC150E91B1D9AF6A7B54",
+      "bytes": 5992
+    },
+    {
+      "path": "client/tests/chatImages.test.ts",
+      "sha256": "4DF380FDA0F98E1F1BD768D0A1F8B467D18550A64BEBDB7F070DD63BB7B09990",
+      "bytes": 1431
+    },
+    {
+      "path": "client/tests/chatLinks.test.ts",
+      "sha256": "79C62D57EDF2D3AF75FC658E17778FD93F3AB2B3B9696946501F07744116F2A6",
+      "bytes": 2722
+    },
+    {
+      "path": "client/tests/connectionDeadline.test.ts",
+      "sha256": "825ACAFDE9E9D28BE6DDFD688EC2C8CBA26121A1616E381EA949FE685667905B",
+      "bytes": 1706
+    },
+    {
+      "path": "client/tests/fixtures/audio-host.html",
+      "sha256": "1F9660EB86A41D1871C13EB70B0D52082E44BE019802B1B709C70AFF6A46BDD7",
+      "bytes": 119
+    },
+    {
+      "path": "client/tests/gitee-installer-cache.test.cjs",
+      "sha256": "7D757670911166C2568C47D0D877D2AA0A3CC699FED07D2DFF05CA549491A2D2",
+      "bytes": 7511
+    },
+    {
+      "path": "client/tests/mediaDiagnostics.test.ts",
+      "sha256": "87C7BF9B575CD3766D0B3B1A79EE5300F0E87F4598DA29C46804210885AF5D67",
+      "bytes": 3375
+    },
+    {
+      "path": "client/tests/memberOrdering.test.ts",
+      "sha256": "D7D8D3A2A364D8DD9F37C5172092FC07E824A6DDF325543FB1D390C215605748",
+      "bytes": 986
+    },
+    {
+      "path": "client/tests/microphoneEcho.electron.cjs",
+      "sha256": "10ED32627D6C91F4C475AF151B2B9B2FEFC97C3D463E8C047A5F81B7D145FE89",
+      "bytes": 3048
+    },
+    {
+      "path": "client/tests/microphoneEcho.test.ts",
+      "sha256": "E7BCE02572393BBA9DD46B32B85B1930E63351AF90FA101B53E70339C308DD35",
+      "bytes": 5342
+    },
+    {
+      "path": "client/tests/microphoneProcessing.electron.cjs",
+      "sha256": "2A426AC5F88CAA23B69E06564DA28DB66F0C3E2CA0BCFC10160152627318A7FA",
+      "bytes": 10990
+    },
+    {
+      "path": "client/tests/microphoneProcessing.test.ts",
+      "sha256": "AC1E73E1E3DF8B68E3BE1F3E29DA068EEFFAD82786C5E62569EB7102F8750550",
+      "bytes": 4893
+    },
+    {
+      "path": "client/tests/remoteAudioPlayback.test.ts",
+      "sha256": "9368066BEDBADA55E0249CAA402BA5FB62168502345FA87189CFA6CD1A3D4908",
+      "bytes": 13438
+    },
+    {
+      "path": "client/tests/remoteControl.test.ts",
+      "sha256": "45B5FDB7FC4F0F191CBF0C9B6B24C64ACC4FE5A2A2A80F6FF8C3D7E1C52A5AEA",
+      "bytes": 2903
+    },
+    {
+      "path": "client/tests/remoteControlSession.test.ts",
+      "sha256": "711EF418EAE5BF62448958C1A245F00AF146982B26038B3731A2078CDD541199",
+      "bytes": 7839
+    },
+    {
+      "path": "client/tests/remoteInputController.test.ts",
+      "sha256": "2D659BCC57ECA10BD43C6D58081C6860BA64CD852A192DBB1D02F12A922BF57B",
+      "bytes": 5424
+    },
+    {
+      "path": "client/tests/remoteInputHelper.test.ts",
+      "sha256": "CDBBF35F039B1FBEBA717C7442EB2642D9DE0CE4F5814252AE366D45007E5C16",
+      "bytes": 1423
+    },
+    {
+      "path": "client/tests/remoteInputQueue.test.ts",
+      "sha256": "C03102B20D481F996775509310679F7E9C4AA4948025405903EEE5237E9C1B60",
+      "bytes": 4743
+    },
+    {
+      "path": "client/tests/rnnoise.electron.cjs",
+      "sha256": "45C3467D4556A67F969D0D8CAECCE1FEB33CF90B16AD88638C526AAC843EA001",
+      "bytes": 7035
+    },
+    {
+      "path": "client/tests/rnnoise.test.ts",
+      "sha256": "3E04737B2AC02B4F32D86C97D19CD8CE38F2B893C181061C1E17E7D5E7479F18",
+      "bytes": 7591
+    },
+    {
+      "path": "client/tests/roomSettings.test.ts",
+      "sha256": "64CD4D086546E8453E6F98F61D9A21073C75BE14D27935AEB18D68CD033FACA4",
+      "bytes": 1417
+    },
+    {
+      "path": "client/tests/screenCapture.test.ts",
+      "sha256": "DB11B6092981E9757E6C53CD1900817F7966137BAD1A71576A13BAEEF6B287AD",
+      "bytes": 8066
+    },
+    {
+      "path": "client/tests/server-certificate-policy.test.cjs",
+      "sha256": "88AC4FD6A26C413B8405E0F492237204EC4190938F3DF3279C20723CE16E836B",
+      "bytes": 3688
+    },
+    {
+      "path": "client/tests/serverIdentity.test.ts",
+      "sha256": "40134D89374D0CBAB12804283D8E550823D043BB9FE65D80AE41DC5A12A8F2A7",
+      "bytes": 2069
+    },
+    {
+      "path": "client/tests/serverSecurity.test.ts",
+      "sha256": "6EA21F01E0DACE849115C9C14B4C8867705B700431235B93F7E9C39A48E41CA0",
+      "bytes": 2620
+    },
+    {
+      "path": "client/tests/sessionRegistration.test.ts",
+      "sha256": "B786EF7DEF134F1DEA78C6A5D904FF4C11E12221081F04D09999EE3B83518296",
+      "bytes": 4336
+    },
+    {
+      "path": "client/tests/sortableList.test.ts",
+      "sha256": "26A3416CBD30C78BEA11A4A4B56ADDA3608FEF2659A5D9B48319BF657D1E043C",
+      "bytes": 3320
+    },
+    {
+      "path": "client/tests/soundpackDownload.test.ts",
+      "sha256": "E3693EFA00724670CEBE79A196D871F6DBB50D0A65374A024268F17C6DB7D727",
+      "bytes": 2326
+    },
+    {
+      "path": "client/tests/ui/connection-recovery.cjs",
+      "sha256": "79636FBA1416E1F30CD21CB84FB5206BFD8A64E34E86797D20A16F80485DF79C",
+      "bytes": 1182
+    },
+    {
+      "path": "client/tests/ui/connection-recovery.html",
+      "sha256": "FD70539F08AD8A4AA584C64CECC744BC8A4505A8A1119163E4C6D7C60E91CACC",
+      "bytes": 234
+    },
+    {
+      "path": "client/tests/ui/connection-recovery.tsx",
+      "sha256": "6C9C653131852A041BA047ACAEF6FADE669A231B9CD151BA693E3793E89BDC2B",
+      "bytes": 4263
+    },
+    {
+      "path": "client/tests/ui/login-memory.electron.cjs",
+      "sha256": "AA67347F33D13F20A6A239A30BCC4AD5A610ED8283D1A8D6E605576084876D67",
+      "bytes": 3433
+    },
+    {
+      "path": "client/tests/ui/login-memory.html",
+      "sha256": "919D97F117E51FD52904F18ED5B169B9281E72D591C57A8E44D7C546E04321DA",
+      "bytes": 280
+    },
+    {
+      "path": "client/tests/ui/login-memory.tsx",
+      "sha256": "180DC2BCBCED070E6EA6D06EFD0DDBCDD01B3D14DEB3E17F6E0065396459A560",
+      "bytes": 2141
+    },
+    {
+      "path": "client/tests/ui/rnnoise-qa.html",
+      "sha256": "B419BBC734B8C14798DF9205F730579A97568D2FFEEB8355B72E05B7A8379B3B",
+      "bytes": 268
+    },
+    {
+      "path": "client/tests/ui/rnnoise-qa.tsx",
+      "sha256": "5BAF3ACFA985BB526B9E4C8BB4D2BBEE8F3250C613C8BBCB8F63A4B4C5A97C44",
+      "bytes": 1707
+    },
+    {
+      "path": "client/tests/ui/share-chat-qa.cjs",
+      "sha256": "4391057961E11A6209E87571A5C15794AD09546BF87E0C68CC807E67C0FDC46C",
+      "bytes": 5393
+    },
+    {
+      "path": "client/tests/ui/share-chat-qa.html",
+      "sha256": "041B8FEC4A8C39EAB7C710EF132E46755AD634B61471F2CACF558EEEABFE488A",
+      "bytes": 292
+    },
+    {
+      "path": "client/tests/ui/share-chat-qa.tsx",
+      "sha256": "EF3C7F2A52856E939780995C3483023ABFDA9098EE02D54F210A80DB9019E8AD",
+      "bytes": 25162
+    },
+    {
+      "path": "client/tests/ui/sortable-qa.cjs",
+      "sha256": "F56AAF1AFEB8702B7FF16521B0EB0023C3931D8F33572A00FFF65B4193933E48",
+      "bytes": 3923
+    },
+    {
+      "path": "client/tests/ui/sortable-qa.html",
+      "sha256": "86C548E4C10937A78F4AE97ED6DCA24C5B072AAF04AF8D3F35F444A7AF2572EF",
+      "bytes": 701
+    },
+    {
+      "path": "client/tests/ui/sortable-qa.tsx",
+      "sha256": "E78475619E4E7D0132D034CA641DE611BA8749F8A6D65B7AC15C293951D27EC7",
+      "bytes": 7231
+    },
+    {
+      "path": "client/tests/updateCenter.test.ts",
+      "sha256": "D82C2D1EB5D89EDB103862E0349BB85BE5270038023AF10DD9D9F180F88B9029",
+      "bytes": 2218
+    },
+    {
+      "path": "client/tests/updater.test.cjs",
+      "sha256": "9DE07876A73B1AF35E30A10D9E24804814C2DD66822BDE774491A07443BE5994",
+      "bytes": 25617
+    },
+    {
+      "path": "client/tests/voiceConnectionRecovery.test.ts",
+      "sha256": "10C7CE26714B96EB95E1256B72ADBEEAB7AA63E5DA0B00B6CBD14E099BD651ED",
+      "bytes": 6584
+    },
+    {
+      "path": "client/tools/prepare-rnnoise-assets.cjs",
+      "sha256": "38CD6349A10B5BA13546386874E4FB4D7661D568A9C05E250B2BCE1F745161DD",
+      "bytes": 902
+    },
+    {
+      "path": "client/tsconfig.json",
+      "sha256": "558684B39249205A036FD7CCF09D0B5A13E8126D7CC5C66FBE6C1E56AA699C69",
+      "bytes": 592
+    },
+    {
+      "path": "client/tsconfig.node.json",
+      "sha256": "9E2ABB169EA87B7190613A1D4DA57CA608463A453BD4231FA3AEEE5E308370DD",
+      "bytes": 213
+    },
+    {
+      "path": "client/vite.config.ts",
+      "sha256": "8D948AC85AF7A7BDF36524B4268BB1941C7EB41C4A8B01D934DA1518F3C7249B",
+      "bytes": 235
+    },
+    {
+      "path": "design-audit/cove-ui-2026-08-23/01-login.png",
+      "sha256": "86F6A02C8D3A943E085BCDFBE745FCFF4C57F101ADD371527B5CE8DFBC25A7D3",
+      "bytes": 17033
+    },
+    {
+      "path": "design-audit/cove-ui-2026-08-23/02-empty-room-list.png",
+      "sha256": "8C198B003379D935A5A55248556148C1AFC91E308F8919780035C4EA0EB04AD7",
+      "bytes": 16722
+    },
+    {
+      "path": "design-audit/cove-ui-2026-08-23/03-create-room.png",
+      "sha256": "1BF6E16D5CA39F2725E3A888058EA35CBCD9ED45DE86620BD0AD59041D61F074",
+      "bytes": 14591
+    },
+    {
+      "path": "design-audit/cove-ui-2026-08-23/04-owner-room.png",
+      "sha256": "1133EB02C501639FDC89F94936E69804BA0A9EEB992E998E7FA60246DEC0FD9F",
+      "bytes": 23689
+    },
+    {
+      "path": "design-audit/cove-ui-2026-08-23/05-reload-membership-gap.png",
+      "sha256": "A64D3E536B8E08DA831BC2F63094CA506F91959A94A4C8DA08D165735661B205",
+      "bytes": 20692
+    },
+    {
+      "path": "design-audit/cove-ui-2026-08-23/audit.md",
+      "sha256": "9CE0AB4412E915141718BF461D84F68E5F7BEB0A987F626031EFFFD2E4435CF5",
+      "bytes": 5636
+    },
+    {
+      "path": "design-qa/profile-card-implementation.png",
+      "sha256": "325BCFAC642AC854ECED9E4A0A0F8FC617555CE03FD2FD81A160BE4E0E96412A",
+      "bytes": 23944
+    },
+    {
+      "path": "design-qa/soundpack-grid-comparison.png",
+      "sha256": "C5F17C7498ACBFADADB7344DA35F1D545F4E3FECA73AF8259BB0A9867F99BCC9",
+      "bytes": 128922
+    },
+    {
+      "path": "design-qa/soundpack-grid-crop.png",
+      "sha256": "19F3605BBE9E002DEE28B99E5C0A3041B1CAD3645D648617E87D59FED88AC4C7",
+      "bytes": 12377
+    },
+    {
+      "path": "design-qa/soundpack-grid-hover.png",
+      "sha256": "AB4AE6BFF20405C8EF8E8437E95608E046EB318E05D7770DBF910B48F568DDE2",
+      "bytes": 12552
+    },
+    {
+      "path": "design-qa/soundpack-grid-implementation-v2.png",
+      "sha256": "02063F2DF812B38688AB1589B0C4E6E90B954E5AB3D3FF8738FFF89C2E6FC9BD",
+      "bytes": 26595
+    },
+    {
+      "path": "design-qa/soundpack-grid-implementation.png",
+      "sha256": "B5686307A90FEEE0468C35AD16AD77BA4661462EDBAD802B0F93B2F175531E72",
+      "bytes": 33491
+    },
+    {
+      "path": "design-qa/soundpack-grid-reference.png",
+      "sha256": "5A28106D9F4D19F6E1A9B6CD8E7D597BE191D47324C7E409E572F63C8DF1FD5F",
+      "bytes": 33731
+    },
+    {
+      "path": "docs/rnnoise-experiment.md",
+      "sha256": "E5B487F5A62D5ECF6DF5C5A8E25BA6B958C789C4C065F4638AB6031A457137B3",
+      "bytes": 6039
+    },
+    {
+      "path": "mobile/.bundle/config",
+      "sha256": "1BB9CB652452FF64FC047171561F9D7310319496A03D667703B953A716B3E589",
+      "bytes": 59
+    },
+    {
+      "path": "mobile/.eslintignore",
+      "sha256": "DBC12E2B8539B8C1C91DFEF97DC43E5860B5AF26BB64345FBA7345427B67D3FC",
+      "bytes": 48
+    },
+    {
+      "path": "mobile/.eslintrc.js",
+      "sha256": "91EA93092F14532F9CDCFCCBA449F0F67801FFD23BC445C163AE8497D2158096",
+      "bytes": 217
+    },
+    {
+      "path": "mobile/.gitignore",
+      "sha256": "DAC21ED1AF4B7E742151D04F7975ED02E520619BE7A7505B0B118876396181D0",
+      "bytes": 1085
+    },
+    {
+      "path": "mobile/.prettierrc.js",
+      "sha256": "ED7C5F7F2F0F21950C2ACBB7425D212BBCF0D7ECD3BDD440AF42C67CBB8D6851",
+      "bytes": 91
+    },
+    {
+      "path": "mobile/.watchmanconfig",
+      "sha256": "CA3D163BAB055381827226140568F3BEF7EAAC187CEBD76878E0B63E9E442356",
+      "bytes": 3
+    },
+    {
+      "path": "mobile/App.tsx",
+      "sha256": "DD1F6A55450E01DDC707FB902EB5EAE1BA48470755833B33E9D8150DA5FE2B52",
+      "bytes": 12731
+    },
+    {
+      "path": "mobile/Gemfile",
+      "sha256": "731CB657E8B565A302671772C6CDE455DFA19F7C4015B778AFEC9B7E67DA5200",
+      "bytes": 520
+    },
+    {
+      "path": "mobile/README.md",
+      "sha256": "153DAA68E21275D78F8E77FA8398DEF3F75FBAFB679D99ED47C76AC1AAFD9D6F",
+      "bytes": 7606
+    },
+    {
+      "path": "mobile/RELEASE_NOTES.md",
+      "sha256": "45188037767FFDA11041458F81AC77175650590BEE94912862BFE2E2BC3FEC94",
+      "bytes": 1110
+    },
+    {
+      "path": "mobile/__tests__/App.test.tsx",
+      "sha256": "96DE548A91228CF5890D1083B3766FAF09EB3B22DEBC05A9192452768A0B3A34",
+      "bytes": 4340
+    },
+    {
+      "path": "mobile/__tests__/ChatPanel.test.tsx",
+      "sha256": "CECF589173A3AB965E398654175609478D1BA40A837B6292FD0504F127531226",
+      "bytes": 3908
+    },
+    {
+      "path": "mobile/__tests__/LoginScreen.test.tsx",
+      "sha256": "F9628752566F9AD91A5C559369F767C3F271D9B49AEB19CC62435AA2CC2B1835",
+      "bytes": 6847
+    },
+    {
+      "path": "mobile/__tests__/MobileUpdater.test.tsx",
+      "sha256": "369ABDB4F8AD757189F48962D423F76F943C3B5AAB18A2592C5EEEDBA3189178",
+      "bytes": 7270
+    },
+    {
+      "path": "mobile/__tests__/RoomScreenAudioSettings.test.tsx",
+      "sha256": "BAB419EEEA6767EF799F777151277823AF57BA072FC181F1D4FF3695FD718305",
+      "bytes": 11153
+    },
+    {
+      "path": "mobile/__tests__/ZoomableScreenVideo.test.tsx",
+      "sha256": "1893584D2FD4BDF040BFF7BE71AD30B0E5586FD6C73DD1DA29A3B5AFF7BB184E",
+      "bytes": 5647
+    },
+    {
+      "path": "mobile/__tests__/accountAuth.test.ts",
+      "sha256": "961447FDD5CAF9A89C307D63E2DCA4FD15724753896FAAC1171DD51F253F9670",
+      "bytes": 1602
+    },
+    {
+      "path": "mobile/__tests__/audioDevices.test.ts",
+      "sha256": "031836CF833270B162CCBD01D3C9CE6936BB466A4AD8E7DA8F22AF98AB9516E5",
+      "bytes": 2264
+    },
+    {
+      "path": "mobile/__tests__/avatar.test.tsx",
+      "sha256": "676576D2A23B2C5C7CD84AB4B7860918701846FEF0082EE8D8FF453B6960D072",
+      "bytes": 1090
+    },
+    {
+      "path": "mobile/__tests__/avatarCrop.test.ts",
+      "sha256": "5653A3966B24DC88BBFA698A6A081AA716207AF09A333E2BBCC833ACA0D8247F",
+      "bytes": 1047
+    },
+    {
+      "path": "mobile/__tests__/microphoneNoise.test.ts",
+      "sha256": "3AE01274AB30B4EC6078EBEB01D2B5C73A715D9029934795F57A006897F5AB03",
+      "bytes": 3760
+    },
+    {
+      "path": "mobile/__tests__/mobileUpdate.test.ts",
+      "sha256": "765BF14AA543E7A2E1E8188CDBFA3DCDBC93A7F2941EC4884A2ED7A02866ACB1",
+      "bytes": 5969
+    },
+    {
+      "path": "mobile/__tests__/prepareUpdate.test.js",
+      "sha256": "8EE99D3D263CC955C4842A290FF6C1437BFA50FD2547AF8D8A4166EF10CE39E3",
+      "bytes": 1728
+    },
+    {
+      "path": "mobile/__tests__/roomSettings.test.ts",
+      "sha256": "D40BBD4D827ACA445654C9CD2FE1E086CD18C8398884B1DCC427ED46104121F3",
+      "bytes": 1047
+    },
+    {
+      "path": "mobile/__tests__/screenZoom.test.ts",
+      "sha256": "7A6265138C9DC8912FAE39F7F3A1CB7F2F9A4DD8809C89E4B27507C2FCB85AF7",
+      "bytes": 1045
+    },
+    {
+      "path": "mobile/__tests__/serverCertificate.test.ts",
+      "sha256": "3990FBBE9C815D0649943A9B80F0DF448E05ACF0D59E90E5C39E7E025AD26885",
+      "bytes": 2914
+    },
+    {
+      "path": "mobile/__tests__/serverIdentity.test.ts",
+      "sha256": "86798262E92F715B8C0D6CA2B5A791E44FF1A0F129FBA63D1AF1B07552197794",
+      "bytes": 1354
+    },
+    {
+      "path": "mobile/__tests__/storage.test.ts",
+      "sha256": "0880798152C39C91F2B5C2323AAF315132CCDCF87FF3B9C2A24E98BAA1397758",
+      "bytes": 2263
+    },
+    {
+      "path": "mobile/__tests__/useKeyboardInset.test.ts",
+      "sha256": "D0B226313502204067F30D3B02B9C21763ACE7FCACD5229C2ADC8F970B276086",
+      "bytes": 9988
+    },
+    {
+      "path": "mobile/__tests__/useMobileMedia.test.tsx",
+      "sha256": "32155C894805228A2FBDDE8730CDB9D372A8649FAFFA260B5AAF6831A7552C07",
+      "bytes": 20944
+    },
+    {
+      "path": "mobile/__tests__/useMobileScreenShare.test.tsx",
+      "sha256": "2E4854ECD96FBA11021D19C9A2602FAFCF80B10395199A414459D9EE3D66C26F",
+      "bytes": 10882
+    },
+    {
+      "path": "mobile/__tests__/verifyRelease.test.js",
+      "sha256": "40A1CED1E7D5AF26B31DF4256957F662F0A4DF4E1E45A0230C226907A6B60A90",
+      "bytes": 7724
+    },
+    {
+      "path": "mobile/__tests__/voiceAudioSession.test.ts",
+      "sha256": "E57E370E315EC77E8725BB7455EB1B167EC784FC16BA05FD65B5B5E88AA3E774",
+      "bytes": 978
+    },
+    {
+      "path": "mobile/__tests__/volumeSliders.test.tsx",
+      "sha256": "9B99B682F9F6714ECE5F03D6E058CCDCB36166A7CC71B05967E1C97B72F51167",
+      "bytes": 3885
+    },
+    {
+      "path": "mobile/android/app/build.gradle",
+      "sha256": "FF2D7B8B2ABC6226CD8D1D1DB5B59463B56DD4AA8E302E31B3FD610E3616E8AB",
+      "bytes": 5272
+    },
+    {
+      "path": "mobile/android/app/debug.keystore",
+      "sha256": "221E0A3106AA4C3CCC154E0A418B55020B3F9EA6E84F92E8749CD9E2F39F5E58",
+      "bytes": 2257
+    },
+    {
+      "path": "mobile/android/app/proguard-rules.pro",
+      "sha256": "AE39C24A69B7E80068723C2839F16237D45D793A3C6E66C4F482DBB2E627A599",
+      "bytes": 830
+    },
+    {
+      "path": "mobile/android/app/src/main/AndroidManifest.xml",
+      "sha256": "8C1803B41F9C872DB0F566CE7339C0CB8A1514798F1EC373F261B8C327AA2CCB",
+      "bytes": 2358
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/CMakeLists.txt",
+      "sha256": "0A2AFCCD68EBD52AF48C59E3FD8781EC0359FA13FCC89161C4262501435138DD",
+      "bytes": 731
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/cove_rnnoise.cpp",
+      "sha256": "0F1BCA2486CE25B9EA34576862CF82DF7432A9A1E7ECA00CB8D58339F0CA3CB3",
+      "bytes": 925
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/rnnoise_pcm_processor.cpp",
+      "sha256": "54B5F0E871ED8778F49334F1D56AA26CED20232C3A3C78690E677525BE8A98FC",
+      "bytes": 1213
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/rnnoise_pcm_processor.h",
+      "sha256": "72F4D32CF933A00A7A65E77C306B8F304D835D166E5EAAA1CDA7A5D796DF5202",
+      "bytes": 869
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/AUTHORS",
+      "sha256": "348B0956050157B718A11E1464633619B709B19B45172F336CEF2205AA0CEC63",
+      "bytes": 37
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/COPYING",
+      "sha256": "E2F59FF41D9D03ADC3DCF3DEFF170F8C8CF4A6EB4A9B174762A7656D23200FFA",
+      "bytes": 1581
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/README",
+      "sha256": "AB97C68D2B59AECA4CCC7DF2BE1A4D2AF03EBAA9EC5E51ACA93B8D12233069DB",
+      "bytes": 954
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/include/rnnoise.h",
+      "sha256": "9D6C8BD5607D1795B870B2A094EE2AD08CC239CAE0C0C584A701A809811156F6",
+      "bytes": 3307
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/src/_kiss_fft_guts.h",
+      "sha256": "0214DFE2AABB3B81D88FE814B8253FC2EC6DA12BBBC98E08C1011A5BD60E3B29",
+      "bytes": 6010
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/src/arch.h",
+      "sha256": "1686A3CA5817BB7D99049A1801C6AB3A7E91A5D0A6804B1C1CAFB36E5EEB62F8",
+      "bytes": 7628
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/src/celt_lpc.c",
+      "sha256": "3AD2508B5110E2A2633977A6577A87862AD8F15DF88EDBA36B1F4F2FABF9FF6A",
+      "bytes": 4815
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/src/celt_lpc.h",
+      "sha256": "2190D9BD519C4528770A28FB0E8B599EB195782FB5DCD91378EB92E3CA7D5148",
+      "bytes": 1746
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/src/common.h",
+      "sha256": "FA6069DB8F7FD18D79D5BEA55CDED6F9019570B2886908323270D07225C7C0CE",
+      "bytes": 1232
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/src/denoise.c",
+      "sha256": "B56B222B3DB7533E0D844531B80C4F9C62F2C3A534A59E2D83E447B722BB6231",
+      "bytes": 18295
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/src/kiss_fft.c",
+      "sha256": "0DB4A5555A6B9CF249D44671C07081836DD72A8011B908B8701ABD37DE703B5A",
+      "bytes": 16923
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/src/kiss_fft.h",
+      "sha256": "AB292AA012CA5A78F7550A5B1D653A240ADFCEC65F943941BD2EE88A334F669F",
+      "bytes": 6335
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/src/opus_types.h",
+      "sha256": "E2C1075E26567B8D57706D2F0042E36D5D440721FC3FD27A6FCE9F0FC8A31557",
+      "bytes": 4954
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/src/pitch.c",
+      "sha256": "72523F1C918146A2B4FD0DB906EBEFD280C04D64D4A3FBA991AA64F686315C68",
+      "bytes": 13866
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/src/pitch.h",
+      "sha256": "E2F062636F9730343A64ACCDC8E703BE616DDCC22C5C65155F92E4318C0953C0",
+      "bytes": 4693
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/src/rnn.c",
+      "sha256": "C6C343A607490996501FAD948A7EF651B9A0C570A9B214B0901C63B226169DBB",
+      "bytes": 5898
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/src/rnn.h",
+      "sha256": "7C2BCF38A81080FEEB7B718EED41517AFD44E446A44772121E1B156516DCDF28",
+      "bytes": 2057
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/src/rnn_data.c",
+      "sha256": "7B90ED18F065A34597D80B4C00E140A7C5EB6380EF8C9C6BF265384C944AE708",
+      "bytes": 425119
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/src/rnn_data.h",
+      "sha256": "E756AAD79F6F0710CD1FA4ABFD9DB3DA693E92AC3A3A90051E2C969578452653",
+      "bytes": 545
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/src/rnn_reader.c",
+      "sha256": "8E6CBB1E0ECDFCF800765FC5685D4FB1D239F104B6E7BE94A4B71A3D5D8F6BD1",
+      "bytes": 5192
+    },
+    {
+      "path": "mobile/android/app/src/main/cpp/third_party/rnnoise-master/src/tansig_table.h",
+      "sha256": "835FCDF08D5B92E249FBE9BA6CDD9758688A5FDF134EFB9DA0E42989E8C18B8A",
+      "bytes": 2304
+    },
+    {
+      "path": "mobile/android/app/src/main/java/com/covemobile/CoveNativeModule.kt",
+      "sha256": "A3A685FA3EF021E0A5B118FBA16DC5B6E44C366026D2452EF0C01CB59A169D38",
+      "bytes": 9227
+    },
+    {
+      "path": "mobile/android/app/src/main/java/com/covemobile/CoveNativePackage.kt",
+      "sha256": "54AD1E8EBB3B664FB79B9B5668CB9174BF479D6943735840B4C4EC599CCFEFFB",
+      "bytes": 664
+    },
+    {
+      "path": "mobile/android/app/src/main/java/com/covemobile/KeyboardFrame.kt",
+      "sha256": "7F3B0E40C675649D791ED3E2FA46B6801C05A414BAA4A3D49E8846DB2FA2DB6E",
+      "bytes": 742
+    },
+    {
+      "path": "mobile/android/app/src/main/java/com/covemobile/KeyboardViewportModule.kt",
+      "sha256": "3ED8BD774E2EE91DF37CB5FA5719D3EF90C0B443AD08BF5D5D7257D63FC54DFC",
+      "bytes": 4385
+    },
+    {
+      "path": "mobile/android/app/src/main/java/com/covemobile/MainActivity.kt",
+      "sha256": "77C11567A910A58E6EFB226683D736F8C8807FD775DCDDFF0FA156B14BC5582A",
+      "bytes": 851
+    },
+    {
+      "path": "mobile/android/app/src/main/java/com/covemobile/MainApplication.kt",
+      "sha256": "D0F0AE9594C0D55FF778CD5532D22CC812920D1B8025401F852AB18CD6E40088",
+      "bytes": 2384
+    },
+    {
+      "path": "mobile/android/app/src/main/java/com/covemobile/MobileUpdateModule.kt",
+      "sha256": "132A15BC7D56A9E283840B0934FD4A91EBD80DC8041B06C8825CC6A9A1FC56EB",
+      "bytes": 3768
+    },
+    {
+      "path": "mobile/android/app/src/main/java/com/covemobile/RnnoiseEngine.kt",
+      "sha256": "C15A0F913408CEC1428CFA733CFC023EA13B0C310FF7982E6A87F0119F00C8A1",
+      "bytes": 1043
+    },
+    {
+      "path": "mobile/android/app/src/main/java/com/covemobile/ServerCertificateNetwork.kt",
+      "sha256": "D75DF0B106E5AED360A6F83EEBA390BAA9198B8CD5AB881B0D0F37A32E750CB9",
+      "bytes": 4137
+    },
+    {
+      "path": "mobile/android/app/src/main/java/com/covemobile/ServerCertificatePolicy.kt",
+      "sha256": "AFEF56D77E4B91104E797971F3227DA76844B021D5B557CD8EFAC8E558AFD58E",
+      "bytes": 993
+    },
+    {
+      "path": "mobile/android/app/src/main/java/com/covemobile/VoiceKeepAliveService.kt",
+      "sha256": "1EFF3931D2F2FC6DBE96AF2C6B4C54084438AFCDBF18978DB809853BEA7DE412",
+      "bytes": 3046
+    },
+    {
+      "path": "mobile/android/app/src/main/java/com/covemobile/audio/AudioRouteRuntime.kt",
+      "sha256": "E031FB3291DD157BF4A056A38AAB9D1E33A54AC87B79B6CF77504DA41F463F9F",
+      "bytes": 11420
+    },
+    {
+      "path": "mobile/android/app/src/main/java/com/covemobile/audio/MicrophoneNoiseRuntime.kt",
+      "sha256": "1CE5C0C851979BC55A873480103C5DE5BA266A473431BB5BB958F46AEF2C13E8",
+      "bytes": 3247
+    },
+    {
+      "path": "mobile/android/app/src/main/java/com/oney/WebRTCModule/CoveScreenModule.java",
+      "sha256": "0E7B57F5AC626D2E87FE629C8BFDDC5A002596091EE636B93E97B03353D2985D",
+      "bytes": 1043
+    },
+    {
+      "path": "mobile/android/app/src/main/java/com/oney/WebRTCModule/CoveScreenRuntime.java",
+      "sha256": "05CA55A1A9C4E19A9CC45EA2F5D66F3610DBC83834DDA1497E20278E2AD97DE1",
+      "bytes": 9378
+    },
+    {
+      "path": "mobile/android/app/src/main/jni/CMakeLists.txt",
+      "sha256": "D12C023513085C8515A756DE78D1F6A1EE92B1DA841C877746D42A3B893A2AFC",
+      "bytes": 566
+    },
+    {
+      "path": "mobile/android/app/src/main/res/drawable/ic_notification.xml",
+      "sha256": "00DDB1F76C41B5243C63831940EE6A41530F85FFB04E45BDF4254EAD4ACF7FF2",
+      "bytes": 314
+    },
+    {
+      "path": "mobile/android/app/src/main/res/drawable/rn_edit_text_material.xml",
+      "sha256": "738E3AAAD53180CABA1419A6D5DB8465A0742662FE59A4BBAF05F1061CBC3390",
+      "bytes": 1917
+    },
+    {
+      "path": "mobile/android/app/src/main/res/mipmap-hdpi/ic_launcher.png",
+      "sha256": "51FC5FD94E078402829F757A5E46B531CF76D6B9A3442A700AEA2E70CB31C26B",
+      "bytes": 10576
+    },
+    {
+      "path": "mobile/android/app/src/main/res/mipmap-hdpi/ic_launcher_round.png",
+      "sha256": "51FC5FD94E078402829F757A5E46B531CF76D6B9A3442A700AEA2E70CB31C26B",
+      "bytes": 10576
+    },
+    {
+      "path": "mobile/android/app/src/main/res/mipmap-mdpi/ic_launcher.png",
+      "sha256": "4D0F6CDC7463A70EC82D5C4A0846BB2B81B3E846F9F04C252D46CD4078C0F93F",
+      "bytes": 5620
+    },
+    {
+      "path": "mobile/android/app/src/main/res/mipmap-mdpi/ic_launcher_round.png",
+      "sha256": "4D0F6CDC7463A70EC82D5C4A0846BB2B81B3E846F9F04C252D46CD4078C0F93F",
+      "bytes": 5620
+    },
+    {
+      "path": "mobile/android/app/src/main/res/mipmap-xhdpi/ic_launcher.png",
+      "sha256": "0C37A0C97F775C57690769BB0855DA06438EA08EFFA2FDA8CAC268C7A4B7AD6F",
+      "bytes": 16749
+    },
+    {
+      "path": "mobile/android/app/src/main/res/mipmap-xhdpi/ic_launcher_round.png",
+      "sha256": "0C37A0C97F775C57690769BB0855DA06438EA08EFFA2FDA8CAC268C7A4B7AD6F",
+      "bytes": 16749
+    },
+    {
+      "path": "mobile/android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png",
+      "sha256": "313ECACCECF8FD5F8E6DD30B08848BAC0DBB9DF9CB9AA24A2E2F4DCC89DC26C0",
+      "bytes": 31432
+    },
+    {
+      "path": "mobile/android/app/src/main/res/mipmap-xxhdpi/ic_launcher_round.png",
+      "sha256": "313ECACCECF8FD5F8E6DD30B08848BAC0DBB9DF9CB9AA24A2E2F4DCC89DC26C0",
+      "bytes": 31432
+    },
+    {
+      "path": "mobile/android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png",
+      "sha256": "15699531633E4D623552486E16BCAD577171DD7D312FC855EE837C72F38CBF84",
+      "bytes": 49793
+    },
+    {
+      "path": "mobile/android/app/src/main/res/mipmap-xxxhdpi/ic_launcher_round.png",
+      "sha256": "15699531633E4D623552486E16BCAD577171DD7D312FC855EE837C72F38CBF84",
+      "bytes": 49793
+    },
+    {
+      "path": "mobile/android/app/src/main/res/values/strings.xml",
+      "sha256": "E84280C182780838107E054A2A8879EFFBBDD2CF4908B00AC0454BB1CC58A0E0",
+      "bytes": 366
+    },
+    {
+      "path": "mobile/android/app/src/main/res/values/styles.xml",
+      "sha256": "0F421DD24B8DE63F7B73B98BE3D51D841D024F5452AC1F70E4C2B33A62B64F68",
+      "bytes": 282
+    },
+    {
+      "path": "mobile/android/app/src/test/cpp/CMakeLists.txt",
+      "sha256": "2E595E8D2EE0535D097192350E52CCED8131532AFC81E54DB68731A06A448426",
+      "bytes": 793
+    },
+    {
+      "path": "mobile/android/app/src/test/cpp/rnnoise_pcm_test.cpp",
+      "sha256": "957F06D0406B50C78A7320DFCD045D999E904F4364DA6CFF31E5700A1E5AD060",
+      "bytes": 2304
+    },
+    {
+      "path": "mobile/android/app/src/test/java/com/covemobile/KeyboardFrameTest.kt",
+      "sha256": "96D87933C493F1879DCF10541E096522C4AC622A9A0AA2B87BD2517067231792",
+      "bytes": 1017
+    },
+    {
+      "path": "mobile/android/app/src/test/java/com/covemobile/MobileUpdateNetworkTest.kt",
+      "sha256": "F4E2887FB375FADE99062D38143EDD1EFEAF545166BD298C65851673B095CB2F",
+      "bytes": 1008
+    },
+    {
+      "path": "mobile/android/app/src/test/java/com/covemobile/ServerCertificateNetworkTest.kt",
+      "sha256": "75065A90BBCB2C1B730583BDC9218EFD8C6EB419FBDE759896A428608E65644D",
+      "bytes": 6889
+    },
+    {
+      "path": "mobile/android/build-logic/build.gradle",
+      "sha256": "781FC1BF641D442ADCAA49A78BBFA808760FAC5BD541B8B150C5A2922C49C8D1",
+      "bytes": 1243
+    },
+    {
+      "path": "mobile/android/build-logic/settings.gradle",
+      "sha256": "B95FB014F53A202CF5EF3EEDC3A95B4F80BB7B47F338DFECE9D64DEA11FA1EB2",
+      "bytes": 162
+    },
+    {
+      "path": "mobile/android/build-logic/src/main/java/com/cove/instrumentation/CoveAndroidInstrumentationPlugin.java",
+      "sha256": "04D2C8BAD0EC29E6AFB414AECF7BD53ABFD5DE23F3A9B56B2D5149F34CC4FCC1",
+      "bytes": 1553
+    },
+    {
+      "path": "mobile/android/build-logic/src/main/java/com/cove/instrumentation/RecordedAudioVisitor.java",
+      "sha256": "D1E4E48EC8199F16A26969BDB4E063A74C51164AE0ACBFD53D4749C7EA4BBA95",
+      "bytes": 3525
+    },
+    {
+      "path": "mobile/android/build-logic/src/main/java/com/cove/instrumentation/RecordedAudioVisitorFactory.java",
+      "sha256": "F9F2F3205BF70A8E8EE602AE81AFACAE28AAE8AA484FED5CB0DA818BA88F54B6",
+      "bytes": 760
+    },
+    {
+      "path": "mobile/android/build-logic/src/main/java/com/cove/instrumentation/ScreenSharingVisitor.java",
+      "sha256": "2BC0E6CA2D91AA0AFA3E8E32A83FF88EFA5CDB3BF67C79C6E2D01A6CCEF3959C",
+      "bytes": 5301
+    },
+    {
+      "path": "mobile/android/build-logic/src/main/java/com/cove/instrumentation/ScreenSharingVisitorFactory.java",
+      "sha256": "DB43B6BB8C5BE2BC79ACE0DAEEF96842FB5B1877168EA01B3EE2CED1F54B1817",
+      "bytes": 816
+    },
+    {
+      "path": "mobile/android/build-logic/src/test/java/com/cove/instrumentation/RecordedAudioVisitorTest.java",
+      "sha256": "78F68718B0238E840586A7BF5299033343298BFD9394DA553565470690E7E835",
+      "bytes": 3163
+    },
+    {
+      "path": "mobile/android/build-logic/src/test/java/com/cove/instrumentation/ScreenSharingVisitorTest.java",
+      "sha256": "81CF4214D2398993FC1C11A56F8DE468F9BE8972F87A656CF2DFEC46EE3FBD05",
+      "bytes": 2639
+    },
+    {
+      "path": "mobile/android/build.gradle",
+      "sha256": "9B0A10F670EB1CF3A870D6736E57C3411F7A09D89AA829D6450968D87127FEFB",
+      "bytes": 1541
+    },
+    {
+      "path": "mobile/android/buildSrc/build.gradle",
+      "sha256": "DF844BF2893C3481349262F277B59D44507B4786FB96F444F598DA37A261C892",
+      "bytes": 228
+    },
+    {
+      "path": "mobile/android/gradle.properties",
+      "sha256": "3929F4440D293D286EA7A3E92D2B1A5D318BD99641AADC90A6365260AC0FE34D",
+      "bytes": 1975
+    },
+    {
+      "path": "mobile/android/gradle/wrapper/gradle-wrapper.jar",
+      "sha256": "B3A875DDC1F044746E1B1A55F645584505F4A10438C1AFEA9F15E92A7C42EC13",
+      "bytes": 46175
+    },
+    {
+      "path": "mobile/android/gradle/wrapper/gradle-wrapper.properties",
+      "sha256": "A180163249C7252412DDAEE1C7ADCF59F6494B1183136F690FBD9A3B8AAED00E",
+      "bytes": 252
+    },
+    {
+      "path": "mobile/android/gradlew",
+      "sha256": "FB68DEBC1B1ACF8EC55DC0D5E5495E1DEDD0BD6B61F304BEE61613EEB2BD9B92",
+      "bytes": 8618
+    },
+    {
+      "path": "mobile/android/gradlew.bat",
+      "sha256": "982F1B2979DD2D13505C11E92192AB43EEF338242CA61587F86F8D7FBC86F67B",
+      "bytes": 3093
+    },
+    {
+      "path": "mobile/android/settings.gradle",
+      "sha256": "A195268D700BD904FEC9F199E14F28AFB47E2EDBD90A8245AD44BF59ED6B3697",
+      "bytes": 471
+    },
+    {
+      "path": "mobile/app.json",
+      "sha256": "7AE287B652AF02A4697F402A812920520B188C85DF8D8891758E76A20C184AE3",
+      "bytes": 52
+    },
+    {
+      "path": "mobile/assets/cove-icon.png",
+      "sha256": "8A75DE1535EEC132EEE190C169EB5DD794CCD1A3D8F23CA421DA3E260313EA08",
+      "bytes": 105218
+    },
+    {
+      "path": "mobile/babel.config.js",
+      "sha256": "D76A3A8625B204EFA0F42C4BDD220F484211798F88A56F2E784BC082231CC292",
+      "bytes": 72
+    },
+    {
+      "path": "mobile/index.js",
+      "sha256": "E08A45F280028439A5ED8FA6F8A44FE472DD15141AE8BD2585D5402547116424",
+      "bytes": 1380
+    },
+    {
+      "path": "mobile/ios/.xcode.env",
+      "sha256": "3C02DCA07775B31CE4E77DFB3BB660D7C6E577474D65A6216F1EA9BEF54E1CA6",
+      "bytes": 482
+    },
+    {
+      "path": "mobile/ios/CoveMobile.xcodeproj/project.pbxproj",
+      "sha256": "397A9951F83961C598B9FCB6EC241F7DFF5C81C98677C940AAEB84D3F0CB4C47",
+      "bytes": 18328
+    },
+    {
+      "path": "mobile/ios/CoveMobile.xcodeproj/xcshareddata/xcschemes/CoveMobile.xcscheme",
+      "sha256": "F20793975AF186468D8CE7F667E8560929ECBBFCC01221FC4ED9359A43D958D5",
+      "bytes": 3306
+    },
+    {
+      "path": "mobile/ios/CoveMobile/AppDelegate.swift",
+      "sha256": "CFDF244BA23B2052FE25F94342C84ABD94EFA5BEBAFC93501E26BB85EE6C1ED7",
+      "bytes": 1233
+    },
+    {
+      "path": "mobile/ios/CoveMobile/Images.xcassets/AppIcon.appiconset/Contents.json",
+      "sha256": "1DBB810C797C4EAA99036DEB154C3239E35C6707AD9355784BAE7629557A1662",
+      "bytes": 1181
+    },
+    {
+      "path": "mobile/ios/CoveMobile/Images.xcassets/AppIcon.appiconset/Icon-1024.png",
+      "sha256": "11289F321DC43B3D0C04A5A3F8D41D6A60342471469325CF553B3A3088653C0C",
+      "bytes": 985062
+    },
+    {
+      "path": "mobile/ios/CoveMobile/Images.xcassets/AppIcon.appiconset/Icon-20@2x.png",
+      "sha256": "28DEAB8F99AB963141D15CCD555525120DFC4472D45806A4359A761A835A0BAB",
+      "bytes": 3670
+    },
+    {
+      "path": "mobile/ios/CoveMobile/Images.xcassets/AppIcon.appiconset/Icon-20@3x.png",
+      "sha256": "4E233611CE4CFFD7A661BFE80EFA0B1E6430D51686D0F3A134025C955B4540ED",
+      "bytes": 6928
+    },
+    {
+      "path": "mobile/ios/CoveMobile/Images.xcassets/AppIcon.appiconset/Icon-29@2x.png",
+      "sha256": "BFE4A857CA63B23650BEB364553E56DE0FC6C7DE040B65FEFAC8F4E5BE8A3FD4",
+      "bytes": 6595
+    },
+    {
+      "path": "mobile/ios/CoveMobile/Images.xcassets/AppIcon.appiconset/Icon-29@3x.png",
+      "sha256": "151702BE4591AC58B4EA2EB57B6DFACE57D5105DC8009B5D638E5FE64AED5F9D",
+      "bytes": 12528
+    },
+    {
+      "path": "mobile/ios/CoveMobile/Images.xcassets/AppIcon.appiconset/Icon-40@2x.png",
+      "sha256": "C4EB25F2223FF4A8DE46C903E39760C02C5CCDA037503F22D11AD5795C7883DD",
+      "bytes": 11041
+    },
+    {
+      "path": "mobile/ios/CoveMobile/Images.xcassets/AppIcon.appiconset/Icon-40@3x.png",
+      "sha256": "F23CFB1D84844FA1F29B06AB9E9E3D4C4225FD97B8769119CF18AE92B399488C",
+      "bytes": 20852
+    },
+    {
+      "path": "mobile/ios/CoveMobile/Images.xcassets/AppIcon.appiconset/Icon-60@2x.png",
+      "sha256": "F23CFB1D84844FA1F29B06AB9E9E3D4C4225FD97B8769119CF18AE92B399488C",
+      "bytes": 20852
+    },
+    {
+      "path": "mobile/ios/CoveMobile/Images.xcassets/AppIcon.appiconset/Icon-60@3x.png",
+      "sha256": "C61A0FC29F83D145E859E0A6D57AFC40B0460B04B497FF87093BA2B3DEC36AD0",
+      "bytes": 39581
+    },
+    {
+      "path": "mobile/ios/CoveMobile/Images.xcassets/Contents.json",
+      "sha256": "991AE939FBD598450A066B66404E06C5AE9B7D37E9AA0026DE9E318443BA46FB",
+      "bytes": 63
+    },
+    {
+      "path": "mobile/ios/CoveMobile/Info.plist",
+      "sha256": "317062BBB79DDFA035286935EBDC319F20E2F4FADC18C847CFD320057D73E39D",
+      "bytes": 1855
+    },
+    {
+      "path": "mobile/ios/CoveMobile/LaunchScreen.storyboard",
+      "sha256": "281B3C23E93A488586871EC242A333127F087A2FC8C7B78575D96D0B65AFD182",
+      "bytes": 4234
+    },
+    {
+      "path": "mobile/ios/CoveMobile/PrivacyInfo.xcprivacy",
+      "sha256": "B9289ECFEC677540A293FBA948DB7268C02B1D44943FA66B1E7A85BA0C31A252",
+      "bytes": 986
+    },
+    {
+      "path": "mobile/ios/Podfile",
+      "sha256": "FEB3C8F82BE9E58295E3038C8883A3FB382EA5B3EF107F101696D2AB8C71B7D6",
+      "bytes": 920
+    },
+    {
+      "path": "mobile/jest.config.js",
+      "sha256": "342EE3A20712659D38591DE2800E8D5EEEE84C0FEB693EF21DD2347FEF4D9108",
+      "bytes": 61
+    },
+    {
+      "path": "mobile/metro.config.js",
+      "sha256": "AAF6A75E73476EF1513FEE03FF44C91C30DA0C5296E21F7E58484CDBB54E93FC",
+      "bytes": 301
+    },
+    {
+      "path": "mobile/package-lock.json",
+      "sha256": "A059861FE6047E9E569EB772067C00E8C65062C716D93D48F6058A3FBBE7CF20",
+      "bytes": 484476
+    },
+    {
+      "path": "mobile/package.json",
+      "sha256": "57F6137551100952FF6B6C48232E287645C5CB1DA626C46749D622D13D6FFC59",
+      "bytes": 1893
+    },
+    {
+      "path": "mobile/scripts/prepare-update.cjs",
+      "sha256": "EFB3E02D64EC78E0905798DD62A4546A7DD464BC8AAFE88738C7B2EDAF06FED7",
+      "bytes": 4134
+    },
+    {
+      "path": "mobile/scripts/verify-release.cjs",
+      "sha256": "43FC6C792BAB0F80B3CE3838F5D5C4EB5FF0536AFAFF3A47F711F369ECBEDD8B",
+      "bytes": 11074
+    },
+    {
+      "path": "mobile/src/accountAuth.ts",
+      "sha256": "6471587D7D8E69F1B67113F67B37D59854FB394F1FE39F00A2C7CCC972B37A77",
+      "bytes": 1840
+    },
+    {
+      "path": "mobile/src/audioDevices.ts",
+      "sha256": "6A57230796E8F0AC5AFD9B453663D0EA2D5BC5FABA24EE480E63FAB62F5D239A",
+      "bytes": 2098
+    },
+    {
+      "path": "mobile/src/avatarCrop.ts",
+      "sha256": "E90E8DFFCFCCF2A2CAF139ED144F849E9086197658DF21C3C0AFADFDFF9855AA",
+      "bytes": 931
+    },
+    {
+      "path": "mobile/src/components/Avatar.tsx",
+      "sha256": "BC199090A6074A7E680E03EB0DB074A076B52F48B363F589C7A8892228C0E55E",
+      "bytes": 2097
+    },
+    {
+      "path": "mobile/src/components/ChatPanel.tsx",
+      "sha256": "9A302DDFC4F89ED4C730DEF76D9CC1AB65A105729CE29F91A113ED5B8570C6CB",
+      "bytes": 11866
+    },
+    {
+      "path": "mobile/src/components/MobileUpdater.tsx",
+      "sha256": "84E287EA828123E11310EBD53530FD11A008B46124E7A525E36E64C2EF43AD27",
+      "bytes": 8935
+    },
+    {
+      "path": "mobile/src/components/Soundboard.tsx",
+      "sha256": "416A697D56E040463E3C3CA076E79D27927BA20E30955E40CF7A37046C2D3357",
+      "bytes": 8584
+    },
+    {
+      "path": "mobile/src/components/UserProfileModal.tsx",
+      "sha256": "849C04F8A86512B4F6AC03E64B22F77A9DB866A1CDC0EDFF102390C2A8EE5812",
+      "bytes": 10972
+    },
+    {
+      "path": "mobile/src/components/ZoomableScreenVideo.tsx",
+      "sha256": "362EEF533F71B873852D61CF3EE70ED2B8DFAFEFECBCB92DE8DDD8784241A1E7",
+      "bytes": 6191
+    },
+    {
+      "path": "mobile/src/disconnectGrace.ts",
+      "sha256": "972D0B1803E6026EE042B1931ECCA75903E25793181D618C80BBEC59229EF966",
+      "bytes": 702
+    },
+    {
+      "path": "mobile/src/images.d.ts",
+      "sha256": "3575695BF8D98162E7BC236F46B423FC8C12CABA3CA237C74844165B232BA8FF",
+      "bytes": 149
+    },
+    {
+      "path": "mobile/src/microphoneNoise.ts",
+      "sha256": "CA1BDFEBD8E0BBDC5D08B698994774D9FA9A1A35017C41192037B55C2563DA80",
+      "bytes": 3408
+    },
+    {
+      "path": "mobile/src/mobileUpdate.ts",
+      "sha256": "CA4B29183A413EA4D6523BBE5142576E6CFFE55590EBDC82CFB5FFDB78592D5B",
+      "bytes": 5809
+    },
+    {
+      "path": "mobile/src/native.d.ts",
+      "sha256": "C635300B2213FBEE97EA7F4CC168BCDF5FB9BC79BEF4A2EFF1B42B93E8225E2A",
+      "bytes": 518
+    },
+    {
+      "path": "mobile/src/profileDisplayName.ts",
+      "sha256": "0C4B379C9CCBEF3B8175230130F51E76A5D1078056311F4D366C25930ED954BD",
+      "bytes": 623
+    },
+    {
+      "path": "mobile/src/profileRemarks.ts",
+      "sha256": "D5AAD74D4E320C3CDF8B506CA5AFAA35D2D8CA1805236B192F325ECE887DF14E",
+      "bytes": 1114
+    },
+    {
+      "path": "mobile/src/roomSettings.ts",
+      "sha256": "BAFEA640014B4F4D1CC59240FF288429B480AF70A0536DBBFDD1FC23FFFA53B4",
+      "bytes": 885
+    },
+    {
+      "path": "mobile/src/screenSharing.ts",
+      "sha256": "30560CFABD0B9C86EC60B1B4CF932922D8A1B51DF8BDDB57EB312897E574935D",
+      "bytes": 1257
+    },
+    {
+      "path": "mobile/src/screenZoom.ts",
+      "sha256": "0D0FF156ADAE9B82FF6885CAFA5E69C0B66C5F971E7CBCFA762B4150E897BE00",
+      "bytes": 1381
+    },
+    {
+      "path": "mobile/src/screens/LoginScreen.tsx",
+      "sha256": "3AF51110867F315952A90E8312D82DE801CB1A3AF9FE34EF6D0A3F7516D3CED8",
+      "bytes": 18182
+    },
+    {
+      "path": "mobile/src/screens/RoomListScreen.tsx",
+      "sha256": "0502D9E319C124D71BC6229953851925B275AC5E9054205A887B4F9DFCB7CDB4",
+      "bytes": 15137
+    },
+    {
+      "path": "mobile/src/screens/RoomScreen.tsx",
+      "sha256": "AB9CF20DB2CAAD6F1120C2D472FE259CE158FE4A70066E4FC0B43B6DCFBE9FCA",
+      "bytes": 53674
+    },
+    {
+      "path": "mobile/src/serverCertificate.ts",
+      "sha256": "F9149487A7D26E46DB74EFA5466C8314589DBD19E5E23EEA552C3F590E7EF186",
+      "bytes": 811
+    },
+    {
+      "path": "mobile/src/serverIdentity.ts",
+      "sha256": "2FC95FAD7A28BEDF834C4040235ACC2711588DF1068FED5D31FEAD4D108B3A1D",
+      "bytes": 4693
+    },
+    {
+      "path": "mobile/src/serverSecurity.ts",
+      "sha256": "A52A654E0775C38B0194B512CC50E4567DE5F6A3C0D5E5AEC1B404801BAEF616",
+      "bytes": 8166
+    },
+    {
+      "path": "mobile/src/socket.ts",
+      "sha256": "C022B73746BFEC8D0A59AEF3AA8AF98AFE3BB2BBD520131FC22651F339C89469",
+      "bytes": 502
+    },
+    {
+      "path": "mobile/src/storage.ts",
+      "sha256": "DBBB97F453C738C5E6E2773C192C37961EEF25C7F557965B6669439A633EC772",
+      "bytes": 7376
+    },
+    {
+      "path": "mobile/src/theme.ts",
+      "sha256": "B5953EBBACB78284AD0C8186F50478FD0542A4670C7418122148D8000475F2E0",
+      "bytes": 504
+    },
+    {
+      "path": "mobile/src/types.ts",
+      "sha256": "491E2AA3112955E3EB71F84E522BF3CE878893D9E3E2381142109748F05E7962",
+      "bytes": 1603
+    },
+    {
+      "path": "mobile/src/updateConfig.ts",
+      "sha256": "2CFBA7B14C4783A87D546C34A1C14A366DA0A01CADF334CAA0215F31B5B42994",
+      "bytes": 149
+    },
+    {
+      "path": "mobile/src/useKeyboardInset.ts",
+      "sha256": "2DD847F51C0EFDEF27B2A76C00A810A97F59132D9FF58DF561D360224C1FDF13",
+      "bytes": 8890
+    },
+    {
+      "path": "mobile/src/useMobileMedia.ts",
+      "sha256": "6222C54F970E6EAD5AE23EAC0F1570702B16D1CD06821D786D14416A5F672619",
+      "bytes": 38701
+    },
+    {
+      "path": "mobile/src/useMobileScreenShare.ts",
+      "sha256": "D337695D674671C66C49A65691B79ED532AF36F4392C3283141D56661155D7ED",
+      "bytes": 10882
+    },
+    {
+      "path": "mobile/src/voiceAudioSession.ts",
+      "sha256": "BE59AF6812A0D0B05F372929E69A7F1019EE33BEF0410DE7C9F117DFAFD78A54",
+      "bytes": 505
+    },
+    {
+      "path": "mobile/tsconfig.json",
+      "sha256": "946EFC4927586CFF5DD6D1AD1C64F277C0417B2B084D8398B4889538C064988B",
+      "bytes": 223
+    },
+    {
+      "path": "mobile/update.json",
+      "sha256": "8B290977371C89D871B6B7DB667247A54ADE12969A300173B1512FCB9B525A1F",
+      "bytes": 1497
+    },
+    {
+      "path": "package-lock.json",
+      "sha256": "DBC8442D5E5F3071CAC84A7B9BCAFC3C538FF8BCB2FE5ACE0CD804D40B8066F9",
+      "bytes": 456246
+    },
+    {
+      "path": "package.json",
+      "sha256": "4E6238FCA6AAC1E09D5C5478A1DAE1FB8BD5299C7D3F73BE05C2DE13EAB1615D",
+      "bytes": 958
+    },
+    {
+      "path": "scripts/publish-mobile-release-to-cloud.ps1",
+      "sha256": "34C45317E54297E4170063FECC7CEABB66AA006BE31269E64F4E5F70216FBD60",
+      "bytes": 5815
+    },
+    {
+      "path": "scripts/publish-release-to-cloud.ps1",
+      "sha256": "F1D3851C8F2A6CCBB52263C08397495E81B82CF6561C2276EDF44EF6CADFA02A",
+      "bytes": 7325
+    },
+    {
+      "path": "scripts/release-http.cjs",
+      "sha256": "B48C46351D7E68F682C76358040486205D8EB725C03C0E7A858541E8899B4567",
+      "bytes": 2317
+    },
+    {
+      "path": "server/build/icon.ico",
+      "sha256": "B4B20D2AB52D52D8456C2A34DA9BA670312580F880744E7C5E33FE5DF936401C",
+      "bytes": 138639
+    },
+    {
+      "path": "server/build/installer.nsh",
+      "sha256": "BC348E5F7F43864B4CDAFDD95CC371B1DF209310D9734E1C4B5A1DB86C239216",
+      "bytes": 443
+    },
+    {
+      "path": "server/electron/main.ts",
+      "sha256": "223D9F0714CB4F43AD4261213897720B89E833BA1AD68E433672F0824674FE5E",
+      "bytes": 9945
+    },
+    {
+      "path": "server/electron/tsconfig.json",
+      "sha256": "8D538417F8F425AAD7C887837863EFA63C35C32341462CC0C021C10B9576BE37",
+      "bytes": 260
+    },
+    {
+      "path": "server/package.json",
+      "sha256": "482486CF511A6FE056072877F22EDDC74A516F1E9E3F6E0836D75EBE69D53AC6",
+      "bytes": 2745
+    },
+    {
+      "path": "server/src/accountAuth.ts",
+      "sha256": "C0DE3CD791889B9EBA90A88FD3F3B4167554B95F7EB1DD15C336E118439B1AD3",
+      "bytes": 6471
+    },
+    {
+      "path": "server/src/disconnectGrace.ts",
+      "sha256": "18B095730B87950E26C6708A9460C233A3DE519164A56AACBF6BC60D96AC7E3D",
+      "bytes": 850
+    },
+    {
+      "path": "server/src/index.ts",
+      "sha256": "C60CF8569A7732498E4A0CD9AF84D616870FFABEB4A1BC8182441DFA8944D558",
+      "bytes": 119683
+    },
+    {
+      "path": "server/src/mediaDiagnostics.ts",
+      "sha256": "6AA995D9BA7406B9B1BBFD618F7CB6D805F79D5DFCDEB1784C948B6EE77DBD9F",
+      "bytes": 3362
+    },
+    {
+      "path": "server/src/ms.ts",
+      "sha256": "E70D2EAB6C369702E8FFBC61898089276B84B70D09A705A0FA55BC2999A231B2",
+      "bytes": 4916
+    },
+    {
+      "path": "server/src/presence.ts",
+      "sha256": "7ABD3C0FD6163636CBDB99360703C07F7F361A4AF1F85B65B97D20A38EB5DD4E",
+      "bytes": 1590
+    },
+    {
+      "path": "server/src/remoteControl.ts",
+      "sha256": "36E3BE362B3C63337A0DA04AB47130E4C38B13F42156C4FF3292B7DDF34D45C6",
+      "bytes": 9650
+    },
+    {
+      "path": "server/src/roomSettings.ts",
+      "sha256": "626EFC7B0A8B50F5C8934619805A4C491CC6A5DCB16992E28FA7783E58166063",
+      "bytes": 1826
+    },
+    {
+      "path": "server/src/serverSecurity.ts",
+      "sha256": "7C9D4CB0CE6E61CB8322DA03CF93EADE1992ADB39AB42D297754A5CDDBF24BCA",
+      "bytes": 15133
+    },
+    {
+      "path": "server/src/soundpackAudience.ts",
+      "sha256": "DCCF87E153301B98CB95F3997CDC0293A18F4B817076AE18B7F36B9FA4FD9307",
+      "bytes": 318
+    },
+    {
+      "path": "server/src/voicePresence.ts",
+      "sha256": "84C6EAE96AE416DA0A486D801C20DC43110B7F802B6F08480496796C16A0BECA",
+      "bytes": 718
+    },
+    {
+      "path": "server/tests/accountAuth.test.ts",
+      "sha256": "4325B2C80A505F12C57C730E459422E9A4D1CD1BA7BC1B721149A328C7B59FAA",
+      "bytes": 3846
+    },
+    {
+      "path": "server/tests/connectionRecovery.test.ts",
+      "sha256": "D4D6DE26F75A379355E938EB5198999E0754BA7B27112457EDAC6CCA785574EA",
+      "bytes": 2133
+    },
+    {
+      "path": "server/tests/disconnectGrace.test.ts",
+      "sha256": "0A5838464530EBD459CA2FE4AF571477EDF58D8D0AF4AB68C1D6C5138AA54F88",
+      "bytes": 2169
+    },
+    {
+      "path": "server/tests/mediaDiagnostics.test.ts",
+      "sha256": "275482785A2585898DCCAF7CEEB9147425E20770A100FCE84FF045DD494B7C72",
+      "bytes": 1800
+    },
+    {
+      "path": "server/tests/presence.test.ts",
+      "sha256": "01A628E6A1BD9C1296D4DC91B547675EEA158A7927B74B9FA0CCDE3A5D75FFB0",
+      "bytes": 2078
+    },
+    {
+      "path": "server/tests/remoteControl.test.ts",
+      "sha256": "EE908B6B4F469CE01FE7481881D0BFF9700B8F424A77DABBAFAEF64E3D9FC79D",
+      "bytes": 5455
+    },
+    {
+      "path": "server/tests/roomIntegration.test.ts",
+      "sha256": "7FB6DA18B4B2F59EBE5F9DE1C93A16D6A4C2688716ABD9D55CCD0856C128F90A",
+      "bytes": 31090
+    },
+    {
+      "path": "server/tests/roomSettings.test.ts",
+      "sha256": "8BB3FA73AB9C1E9F1F9285BCE7AE120135230C19B7F36AC34BD37A51005E70FB",
+      "bytes": 2278
+    },
+    {
+      "path": "server/tests/serverSecurity.test.ts",
+      "sha256": "819CF925968E06057ACE4742B676173FB650B18AF1E3046EACE612A7BC9C7607",
+      "bytes": 7481
+    },
+    {
+      "path": "server/tests/serverSecurityDisabledIntegration.test.ts",
+      "sha256": "CA64E10363427F947681AF729CD55D2DC4057C95EFA1D060232E7AA77BFDA8E8",
+      "bytes": 4776
+    },
+    {
+      "path": "server/tests/soundpackAudience.test.ts",
+      "sha256": "20D5C6387CCFA08DC236F15D63A24D8C698C048D371D0FD5F9B442FA97FA0F11",
+      "bytes": 898
+    },
+    {
+      "path": "server/tests/voicePresence.test.ts",
+      "sha256": "22BCA2B5FECDE4026B080C7C49CC1E6C8BA4F046EBB16D99AEF37A64D9FF5852",
+      "bytes": 694
+    },
+    {
+      "path": "server/tsconfig.build.json",
+      "sha256": "7269EDA01320985FAFB3082A5D8D7B85CF0447BB3E4D2A7CDB9F23A488EBE9E7",
+      "bytes": 106
+    },
+    {
+      "path": "server/tsconfig.json",
+      "sha256": "3861831CBC2316B527BC1241E7DF8FDF94625CA1DD2FA908B1689F93AE7E1454",
+      "bytes": 290
+    },
+    {
+      "path": "start.ps1",
+      "sha256": "A47637DA6252845803392D0DC7F264FF404FBBFEF9BFD0CC49243F314140B8A9",
+      "bytes": 1533
+    }
+  ]
+}

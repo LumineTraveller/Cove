@@ -1,0 +1,9 @@
+{
+  "name": "@cove/contracts",
+  "version": "0.0.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {"build": "tsc -p tsconfig.json"}
+}

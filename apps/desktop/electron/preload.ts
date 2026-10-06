@@ -1,0 +1,135 @@
+import { contextBridge, ipcRenderer } from "electron";
+import type { UpdateState } from "./updater-core";
+import type { RemoteControlActivation } from "./remote-control-activation";
+import type { RemoteControlInput } from "./remote-control";
+
+contextBridge.exposeInMainWorld('coveAnnotationOverlay', {
+  bind: (sessionId: string) => ipcRenderer.invoke('cove:annotation-overlay:bind', sessionId),
+  update: (token: string, frame: unknown) => ipcRenderer.invoke('cove:annotation-overlay:update', token, frame),
+  setInputActive: (token: string, active: boolean) => ipcRenderer.invoke('cove:annotation-overlay:input-mode', token, active),
+  close: (token: string) => ipcRenderer.invoke('cove:annotation-overlay:close', token),
+  onFailure: (listener: (event: { token: string; reason: string }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, event: { token: string; reason: string }) => listener(event);
+    ipcRenderer.on('cove:annotation-overlay:failure', handler);
+    return () => ipcRenderer.off('cove:annotation-overlay:failure', handler);
+  },
+  onInput: (listener: (event: { token: string; input: unknown }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, event: { token: string; input: unknown }) => listener(event);
+    ipcRenderer.on('cove:annotation-overlay:input', handler);
+    return () => ipcRenderer.off('cove:annotation-overlay:input', handler);
+  },
+});
+
+contextBridge.exposeInMainWorld("coveUpdater", {
+  getState: (): Promise<UpdateState> =>
+    ipcRenderer.invoke("cove:update:get-state"),
+  checkNow: (): Promise<UpdateState> =>
+    ipcRenderer.invoke("cove:update:check"),
+  installNow: (): Promise<boolean> => ipcRenderer.invoke("cove:update:install"),
+  openLog: (): Promise<boolean> => ipcRenderer.invoke("cove:update:open-log"),
+  onState: (listener: (state: UpdateState) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, state: UpdateState) =>
+      listener(state);
+    ipcRenderer.on("cove:update:state", handler);
+    return () => ipcRenderer.off("cove:update:state", handler);
+  },
+});
+
+contextBridge.exposeInMainWorld("coveShell", {
+  openExternal: (url: string): Promise<boolean> =>
+    ipcRenderer.invoke("cove:shell:open-external", url),
+});
+
+contextBridge.exposeInMainWorld("coveWindow", {
+  minimize: (): Promise<boolean> => ipcRenderer.invoke("cove:window:minimize"),
+  toggleMaximize: (): Promise<boolean> => ipcRenderer.invoke("cove:window:toggle-maximize"),
+  isMaximized: (): Promise<boolean> => ipcRenderer.invoke("cove:window:is-maximized"),
+  close: (): Promise<boolean> => ipcRenderer.invoke("cove:window:close"),
+  focus: (): Promise<boolean> => ipcRenderer.invoke("cove:window:focus"),
+  onState: (listener: (maximized: boolean) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, maximized: boolean) => listener(maximized);
+    ipcRenderer.on("cove:window-state", handler);
+    return () => ipcRenderer.off("cove:window-state", handler);
+  },
+  onResize: (listener: (active: boolean) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, active: boolean) => listener(active);
+    ipcRenderer.on("cove:window-resizing", handler);
+    return () => ipcRenderer.off("cove:window-resizing", handler);
+  },
+});
+
+contextBridge.exposeInMainWorld("coveClipboard", {
+  writeText: (value: string): Promise<boolean> =>
+    ipcRenderer.invoke("cove:clipboard:write-text", value),
+  writeImage: (value: Uint8Array, mimeType: "image/png" | "image/gif", pngFallback?: Uint8Array): Promise<boolean> =>
+    ipcRenderer.invoke("cove:clipboard:write-image", value, mimeType, pngFallback),
+  readGif: (): Promise<Uint8Array | null> =>
+    ipcRenderer.invoke("cove:clipboard:read-gif"),
+});
+
+contextBridge.exposeInMainWorld("coveSecurity", {
+  setServerCertificateException: (
+    serverUrl: string,
+    enabled: boolean,
+  ): Promise<string | null> =>
+    ipcRenderer.invoke(
+      "cove:security:set-server-certificate-exception",
+      serverUrl,
+      enabled,
+    ),
+  resolveServerAddresses: (hostname: string): Promise<string[]> =>
+    ipcRenderer.invoke("cove:security:resolve-server-addresses", hostname),
+});
+
+contextBridge.exposeInMainWorld("coveRemoteControl", {
+  supported: process.platform === "win32",
+  setActive: (sessionId: string | null): Promise<RemoteControlActivation> =>
+    ipcRenderer.invoke("cove:remote-control:set-active", sessionId),
+  sendInput: (sessionId: string, input: RemoteControlInput): Promise<boolean> =>
+    ipcRenderer.invoke("cove:remote-control:input", sessionId, input),
+  onEmergencyStop: (listener: (reason?: string) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, reason?: string) => listener(reason);
+    ipcRenderer.on("cove:remote-control:emergency-stop", handler);
+    return () => ipcRenderer.off("cove:remote-control:emergency-stop", handler);
+  },
+});
+
+contextBridge.exposeInMainWorld("coveAudioLatencyProfile",
+  process.env.COVE_AUDIO_LATENCY_PROFILE === "legacy" ? "legacy" : "adaptive");
+
+function onAudioChunk(channel: string, listener: (chunk: Uint8Array) => void) {
+  const handler = (_event: Electron.IpcRendererEvent, chunk: Uint8Array, sequence?: number) => {
+    try { listener(chunk); }
+    finally { if (typeof sequence === "number") ipcRenderer.send(`${channel}:ack`, sequence); }
+  };
+  ipcRenderer.on(channel, handler);
+  return () => ipcRenderer.off(channel, handler);
+}
+
+contextBridge.exposeInMainWorld("coveApplicationAudio", {
+  listSources: () => ipcRenderer.invoke("cove:application-audio:list"),
+  start: (sourceId: string) =>
+    ipcRenderer.invoke("cove:application-audio:start", sourceId),
+  stop: () => ipcRenderer.invoke("cove:application-audio:stop"),
+  onChunk: (listener: (chunk: Uint8Array) => void) => {
+    return onAudioChunk("cove:application-audio:chunk", listener);
+  },
+});
+
+// Screen sharing uses a native process-loopback capture in the main process.
+// Its exclude mode removes Cove's own rendered audio from the desktop mix.
+contextBridge.exposeInMainWorld("coveScreenAudio", {
+  start: () => ipcRenderer.invoke("cove:screen-audio:start"),
+  stop: () => ipcRenderer.invoke("cove:screen-audio:stop"),
+  onChunk: (listener: (chunk: Uint8Array) => void) => {
+    return onAudioChunk("cove:screen-audio:chunk", listener);
+  },
+});
+
+contextBridge.exposeInMainWorld("coveSystemAudio", {
+  start: () => ipcRenderer.invoke("cove:system-audio:start"),
+  stop: () => ipcRenderer.invoke("cove:system-audio:stop"),
+  onChunk: (listener: (chunk: Uint8Array) => void) => {
+    return onAudioChunk("cove:system-audio:chunk", listener);
+  },
+});

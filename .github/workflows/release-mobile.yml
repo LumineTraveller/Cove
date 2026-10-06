@@ -32,7 +32,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: mobile/package-lock.json
+          cache-dependency-path: apps/mobile/package-lock.json
 
       - name: Set up Java
         uses: actions/setup-java@v5
@@ -56,8 +56,8 @@ jobs:
             exit 1
           fi
           version="${RELEASE_TAG#mobile-v}"
-          package_version=$(node -p "require('./mobile/package.json').version")
-          gradle_version=$(grep -oE 'versionName "[0-9]+\.[0-9]+\.[0-9]+"' mobile/android/app/build.gradle | head -1 | sed -E 's/.*"([^"]+)"/\1/')
+          package_version=$(node -p "require('./apps/mobile/package.json').version")
+          gradle_version=$(grep -oE 'versionName "[0-9]+\.[0-9]+\.[0-9]+"' apps/mobile/android/app/build.gradle | head -1 | sed -E 's/.*"([^"]+)"/\1/')
           if [[ "$package_version" != "$version" || "$gradle_version" != "$version" ]]; then
             echo "Tag $RELEASE_TAG does not match mobile versions: package=$package_version gradle=$gradle_version" >&2
             exit 1
@@ -65,37 +65,42 @@ jobs:
 
       # AGENTS.md 第 4 条：Android versionCode 必须严格大于线上清单，只改显示版本号必须停止。
       - name: Verify Android versionCode increments
-        working-directory: mobile
+        working-directory: apps/mobile
         run: node scripts/verify-release.cjs --preflight "$RELEASE_TAG"
 
       - name: Install mobile dependencies
-        working-directory: mobile
+        working-directory: apps/mobile
         run: npm ci
 
+      - name: Build shared runtime packages
+        run: |
+          npm ci
+          npm run build:packages
+
       - name: Test mobile client
-        working-directory: mobile
+        working-directory: apps/mobile
         run: |
           npm test -- --runInBand
           npm run typecheck
           npm run lint
 
       - name: Build ARM release APK
-        working-directory: mobile/android
+        working-directory: apps/mobile/android
         run: |
           chmod +x gradlew
           ./gradlew assembleRelease -PreactNativeArchitectures=armeabi-v7a,arm64-v8a
 
       - name: Prepare release metadata
-        working-directory: mobile
+        working-directory: apps/mobile
         run: npm run update:prepare -- RELEASE_NOTES.md "$RELEASE_TAG"
 
       # AGENTS.md 第 5、6 条：用最终 APK 复核元数据与清单，并确认更新说明与 RELEASE_NOTES.md 同源。
       - name: Verify staged update feed against the built APK
-        working-directory: mobile
+        working-directory: apps/mobile
         run: node scripts/verify-release.cjs --feed "$RELEASE_TAG"
 
       - name: Inspect APK manifest and packaged ABIs
-        working-directory: mobile
+        working-directory: apps/mobile
         shell: bash
         run: |
           version="${RELEASE_TAG#mobile-v}"
@@ -124,7 +129,7 @@ jobs:
           fi
 
       - name: Create GitHub release
-        working-directory: mobile
+        working-directory: apps/mobile
         shell: bash
         run: |
           version="${RELEASE_TAG#mobile-v}"

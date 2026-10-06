@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'">
+<style>
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent;pointer-events:none}
+canvas{width:100%;height:100%;display:block;touch-action:none}
+/* Nonzero alpha makes empty parts of the Windows layered window receive input. */
+body.active{background:rgba(0,0,0,.004);pointer-events:auto}
+body.active canvas{pointer-events:auto;cursor:crosshair}
+body.active.laser canvas{cursor:none}
+#tools{display:none;position:fixed;top:16px;left:50%;transform:translateX(-50%);max-width:calc(100% - 24px);box-sizing:border-box;align-items:center;gap:8px;padding:8px 12px;border:1px solid #526273;border-radius:14px;background:#18232ff2;color:#edf3f8;font:13px system-ui;box-shadow:0 4px 18px #0004;user-select:none}
+body.active #tools{display:flex;flex-wrap:wrap;justify-content:center}
+button,input{font:inherit}button{border:1px solid #526273;border-radius:8px;background:#26394c;color:inherit;padding:6px 9px;cursor:pointer}
+button[aria-pressed=true]{background:#167fbe;border-color:#92d5ff}button:focus-visible,input:focus-visible{outline:2px solid #a1dbff;outline-offset:2px}
+label{display:flex;align-items:center;gap:4px}input[type=color]{width:28px;height:28px;padding:0;border:0;background:transparent}input[type=range]{width:64px}
+.hint{font-size:11px;color:#c5d3de}#exit{background:#7c3434;border-color:#c17474}
+</style></head><body><canvas aria-label="共享屏幕绘画"></canvas>
+<div id="tools" role="toolbar" aria-label="共享屏幕批注工具">
+<button data-tool="pen" aria-pressed="true">画笔</button><button data-tool="laser" aria-pressed="false">光点</button><button data-tool="eraser" aria-pressed="false">橡皮</button>
+<label>颜色<input id="color" aria-label="画笔颜色" type="color" value="#ff2b2b"></label>
+<label>粗细<input id="width" aria-label="画笔粗细" type="range" min="2" max="24" value="4"></label>
+<button id="clear">清空</button><button id="exit">退出绘画</button><span class="hint">Esc / Ctrl+Alt+Shift+A 退出</span>
+</div><script>
+const canvas = document.querySelector('canvas');
+let frame = {strokes: [], lasers: []};
+const tools = document.querySelector('#tools');
+let mode = {token: null, active: false};
+let tool = 'pen', pointer = null, queued = false;
+function send(input) { if (mode.active && mode.token) window.annotationOverlay.sendInput(mode.token, input); }
+function point(event) {
+  const x = event.clientX / innerWidth, y = event.clientY / innerHeight;
+  return x >= 0 && x <= 1 && y >= 0 && y <= 1 ? {x, y} : null;
+}
+function endStroke() {
+  if (pointer === null) return;
+  const id = pointer; pointer = null;
+  if (canvas.hasPointerCapture(id)) canvas.releasePointerCapture(id);
+  send({type: 'stroke-end'});
+}
+function clearPointer() {
+  const id = pointer; pointer = null;
+  if (id !== null && canvas.hasPointerCapture(id)) canvas.releasePointerCapture(id);
+}
+canvas.addEventListener('pointerdown', event => {
+  if (!mode.active || event.button !== 0 || pointer !== null) return;
+  const p = point(event); if (!p) return;
+  event.preventDefault();
+  if (tool === 'laser') { send({type: 'laser', point: p}); return; }
+  pointer = event.pointerId; canvas.setPointerCapture(pointer);
+  send({type: 'stroke-start', tool, color: document.querySelector('#color').value,
+    width: Math.max(.0005, Math.min(.08, Number(document.querySelector('#width').value) / Math.min(innerWidth, innerHeight))), point: p});
+});
+canvas.addEventListener('pointermove', event => {
+  if (!mode.active) return;
+  const p = point(event);
+  if (tool === 'laser') send({type: 'laser', point: p});
+  else if (pointer === event.pointerId && p) send({type: 'stroke-point', point: p});
+});
+canvas.addEventListener('pointerup', endStroke);
+canvas.addEventListener('pointercancel', endStroke);
+canvas.addEventListener('lostpointercapture', endStroke);
+canvas.addEventListener('pointerleave', () => { if (tool === 'laser') send({type: 'laser', point: null}); });
+for (const button of tools.querySelectorAll('[data-tool]')) button.addEventListener('click', () => {
+  endStroke(); send({type: 'laser', point: null}); tool = button.dataset.tool;
+  document.body.classList.toggle('laser', tool === 'laser');
+  for (const item of tools.querySelectorAll('[data-tool]')) item.setAttribute('aria-pressed', String(item === button));
+});
+document.querySelector('#clear').addEventListener('click', () => { endStroke(); send({type: 'clear'}); });
+document.querySelector('#exit').addEventListener('click', () => { endStroke(); send({type: 'exit'}); });
+addEventListener('keydown', event => { if (mode.active && event.key === 'Escape') { event.preventDefault(); endStroke(); send({type: 'exit'}); } });
+function paint() {
+  queued = false;
+  const w = innerWidth, h = innerHeight, ratio = devicePixelRatio || 1;
+  canvas.width = Math.round(w * ratio); canvas.height = Math.round(h * ratio);
+  const context = canvas.getContext('2d');
+  context.setTransform(ratio, 0, 0, ratio, 0, 0);
+  for (const stroke of frame.strokes) {
+    if (!stroke.points.length) continue;
+    const width = stroke.width * Math.min(w, h), first = stroke.points[0];
+    context.globalCompositeOperation = stroke.tool === 'eraser' ? 'destination-out' : 'source-over';
+    context.lineWidth = width; context.lineCap = 'round'; context.lineJoin = 'round';
+    context.strokeStyle = stroke.color; context.fillStyle = stroke.color;
+    context.beginPath();
+    if (stroke.points.length === 1) {
+      context.arc(first.x * w, first.y * h, width / 2, 0, Math.PI * 2); context.fill();
+    } else {
+      context.moveTo(first.x * w, first.y * h);
+      for (const p of stroke.points.slice(1)) context.lineTo(p.x * w, p.y * h);
+      context.stroke();
+    }
+  }
+  context.globalCompositeOperation = 'source-over';
+  context.fillStyle = '#ff2b2b';
+  for (const p of frame.lasers) {
+    context.beginPath(); context.arc(p.x * w, p.y * h, 4, 0, Math.PI * 2); context.fill();
+  }
+}
+function schedule() { if (!queued) { queued = true; requestAnimationFrame(paint); } }
+window.annotationOverlay.onFrame(value => { frame = value; schedule(); });
+window.annotationOverlay.onMode(value => {
+  if (!value.active || value.token !== mode.token) clearPointer();
+  mode = value; document.body.classList.toggle('active', mode.active);
+});
+addEventListener('resize', schedule);
+</script></body></html>

@@ -1,18 +1,22 @@
 {
   "name": "cove",
-  "version": "1.5.4",
+  "version": "1.5.5",
   "private": true,
   "workspaces": [
-    "server",
-    "client"
+    "apps/server",
+    "apps/desktop",
+    "packages/*"
   ],
   "scripts": {
-    "dev": "concurrently -n server,client -c cyan,green \"npm run dev -w server\" \"npm run dev -w client\"",
-    "dev:server": "npm run electron:dev -w server",
-    "dev:client": "concurrently -n vite,electron -c green,yellow \"npm run dev -w client\" \"npm run electron:dev -w client\"",
-    "dev:app": "concurrently -n server,vite,electron -c cyan,green,yellow \"npm run dev -w server\" \"npm run dev -w client\" \"npm run electron:dev -w client\"",
-    "build:server": "npm run build:electron -w server",
-    "build:client": "npm run build:electron -w client"
+    "build:packages": "npm run build -w @cove/contracts && npm run build -w @cove/client-core && npm run build -w @cove/media-core && npm run build -w @cove/diagnostics",
+    "dev": "npm run build:packages && node tooling/dev.cjs",
+    "dev:app": "npm run build:packages && node tooling/dev.cjs --electron",
+    "dev:client": "npm run build:packages && node tooling/dev.cjs --client --electron",
+    "dev:server": "npm run build:packages && node tooling/dev.cjs --server",
+    "build:client": "npm run build:packages && npm run build:electron -w cove-client -- --publish never",
+    "build:server": "npm run build:packages && npm run build:electron -w cove-server -- --publish never",
+    "check": "npm run build:packages && npm run typecheck -w cove-client && npm run build -w cove-server && npm --prefix apps/mobile run typecheck && node --test tests/architecture.test.cjs tests/dev-startup.test.cjs",
+    "test": "npm run build:packages && npm test -w @cove/client-core && npm test -w cove-server && npm test -w cove-client && npm --prefix apps/mobile test -- --runInBand"
   },
   "dependencies": {
     "7zip-bin": "^5.2.0"

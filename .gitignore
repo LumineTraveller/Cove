@@ -37,3 +37,36 @@ Thumbs.db
 server/build/vc_redist.x64.exe
 client/build/remote-input-helper.exe
 client/build/application-audio-helper.exe
+apps/server/build/vc_redist.x64.exe
+apps/desktop/build/remote-input-helper.exe
+apps/desktop/build/application-audio-helper.exe
+runtime/
+apps/desktop/output/
+
+# Local WebRTC laboratory: dependencies, sealed binaries, private keys and generated duplicates
+native/build/
+native/release/
+native/build-tools/
+native/baselines/
+native/mediasoup-worker/subprojects/*/
+apps/desktop/tests/local-media/
+tests/local-media/*.results.json
+*.exe
+*.dll
+*.node
+*.obj
+*.a
+*.lib
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+tests/local-media/**/*.results.json
+
+# Legacy working copies left outside the active workspaces after integration
+/client/
+/server/
+/mobile/*
+!/mobile/update.json

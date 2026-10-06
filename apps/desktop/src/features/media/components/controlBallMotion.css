@@ -1,0 +1,38 @@
+/* Animate intrinsic dock width through its labels: the center ball stays in
+   the same row, while text and button spacing grow/shrink together. */
+.control-ball .dock-label {
+  display: inline-block;
+  min-width: 0;
+  max-width: var(--dock-label-width, 100px);
+  overflow: hidden;
+  white-space: nowrap;
+  opacity: 1;
+  transition:
+    max-width 320ms var(--ease-layout),
+    opacity 320ms var(--ease-layout);
+}
+
+.control-ball.compact .dock-label {
+  max-width: 0;
+  opacity: 0;
+}
+
+.control-ball:is(.full, .compact) .ball-side button {
+  transition:
+    background 180ms ease,
+    color 180ms ease,
+    transform 180ms var(--ease-enter),
+    padding-inline 320ms var(--ease-layout),
+    gap 320ms var(--ease-layout);
+}
+
+.control-ball.compact .ball-side button {
+  gap: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .control-ball .dock-label,
+  .control-ball:is(.full, .compact) .ball-side button {
+    transition: none;
+  }
+}

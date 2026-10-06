@@ -1,0 +1,12 @@
+<!doctype html><meta charset="utf-8"><video muted autoplay></video><script>
+// The caller passes only the HWND of a synthetic window it created.
+window.probeWindow = async id => {
+  const stream = await navigator.mediaDevices.getUserMedia({audio:false,
+    video:{mandatory:{chromeMediaSource:'desktop',chromeMediaSourceId:id,maxWidth:8192,maxHeight:8192}}});
+  try {
+    const video = document.querySelector('video'); video.srcObject = stream; await video.play();
+    await new Promise(resolve => video.requestVideoFrameCallback(resolve));
+    return {width:video.videoWidth,height:video.videoHeight};
+  } finally {stream.getTracks().forEach(track=>track.stop());}
+};
+</script>

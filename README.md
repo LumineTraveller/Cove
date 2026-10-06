@@ -1,5 +1,7 @@
 # Cove
 
+这是独立的三端重构工作目录，不是原项目的覆盖更新。现有工作区改动一并保留；版本、媒体策略、原生采集与降噪实现不升级。模块边界和扩展约定见 [架构说明](docs/architecture/README.md)，验证记录见 [REFACTOR_STATUS.md](REFACTOR_STATUS.md)。
+
 Cove 是一个可自托管的实时语音与聊天应用。成员在房间内保持在线状态，随时加入语音、共享屏幕、播放语音包，并支持远程控制共享方的桌面。
 
 提供三个客户端形态，共用同一个服务器：
@@ -21,20 +23,30 @@ Cove 是一个可自托管的实时语音与聊天应用。成员在房间内保
 ## 仓库结构
 
 ```
-client/                  桌面客户端
-  src/                   React 渲染进程（页面、组件、媒体引擎）
-  electron/              Electron 主进程（窗口、IPC、更新器、原生音频采集、远程控制）
-  tests/                 客户端测试
-server/                  服务器
-  src/index.ts           HTTP + Socket.IO + mediasoup 信令入口（核心）
-  src/ms.ts              mediasoup SFU 封装（worker / router / transport）
-  electron/main.ts       托盘式服务器外壳，负责数据目录与配置
-  tests/                 服务器测试
-mobile/                  Android 客户端（独立包，不在 npm workspaces 内，有自己的 lockfile）
-  src/                   React Native 代码
-  scripts/               更新清单生成与发布校验脚本
-  __tests__/             Jest 测试
-  android/               原生工程与 Kotlin 模块
+apps/
+  desktop/               Electron + React 桌面客户端
+    src/app/             应用组合与登录入口
+    src/features/        房间、聊天、媒体、账户、更新等功能模块
+    electron/            Windows 采集、远控、更新器和 IPC
+    tests/               单元、原生 helper 与真实 Chromium 回归
+  server/                Node 服务端与 Electron 托盘外壳
+    src/bootstrap/       运行时装配、启动和资源释放
+    src/features/        按业务拆分的服务、HTTP 与 Socket 处理器
+    src/features/media/  mediasoup worker/router/transport
+  mobile/                独立 React Native 包与 lockfile
+    src/features/        会话、房间、媒体、键盘、更新等功能模块
+    scripts/             APK 清单与发布校验
+    __tests__/           Jest 回归
+    android/             原生工程、RNNoise 与 WebRTC 插桩
+packages/
+  contracts/             共用数据协议与兼容字段
+  client-core/           ACK 请求、会话注册、断线宽限
+  media-core/            平台无关采集、处理和路由扩展接口
+  diagnostics/           结构化诊断与错误作用域接口
+tooling/                 隔离开发启动器、迁移工具与校验工具
+tests/                   跨端协议和模块边界回归
+baseline/                原工作区指纹和旧路径到新路径映射
+mobile/update.json       保留原 raw 更新清单 URL 的兼容副本
 scripts/                 发布脚本（镜像安装包到下载服务器）
 docs/                    技术实验记录
 .github/workflows/       release-client.yml、release-mobile.yml
@@ -62,52 +74,52 @@ Android    ─┘                    │
 - 屏幕类媒体**按需推流**：没有观看者时，服务端暂停 SFU 端 Producer，并通过 `screen:demand` 通知发送端暂停本地 Producer，避免继续发送无用 RTP。
 - 服务端创建的每个 Consumer 初始都处于 paused 状态；接收端完成 Consumer 配置后，必须显式发送 `ms:resume-consumer` 才会开始接收媒体。这与屏幕无人观看时的 Producer 按需暂停是两套不同流程。
 
-服务器默认监听 **3001** 端口（当前为硬编码，不支持 `PORT` 环境变量）；媒体默认使用 **40000** 端口，UDP 与 TCP 复用同一端口，因此内网穿透只需转发这一个同号端口。
+直接启动服务端时 HTTP 默认 **3001**，可通过 `COVE_HTTP_PORT` 配置；媒体默认 **40000**，UDP 与 TCP 共用同号端口。隔离开发启动器单独使用 HTTP **3301**、媒体 **41000** 和 Vite **55173**。
 
 ## 快速开始（开发）
 
 前提：Node.js LTS（建议 22）、npm。Windows 桌面客户端的部分功能（系统音频、远程控制）依赖 Windows。
 
 ```bash
-git clone https://github.com/LumineTraveller/Cove.git
-cd Cove
-npm install          # 一次安装 server 与 client 两个 workspace
+npm ci
+npm --prefix apps/mobile ci
+npm run build:packages
 ```
 
 启动方式：
 
 ```bash
-npm run dev          # 同时启动服务器(:3001) 与客户端 Vite(:5173)
+npm run dev          # 隔离服务器(:3301) 与 Vite(:55173)
 npm run dev:app      # 服务器 + Vite + Electron 桌面客户端（完整体验）
-npm run dev:server   # 仅启动托盘式服务器
+npm run dev:server   # 仅启动 Node 服务端
 npm run dev:client   # 仅启动 Vite + Electron 客户端
 
-./start.ps1          # Windows：清理 3001/5173 端口占用后一键启动全套
+./start.ps1          # Windows：启动隔离全套，不清理其他应用的端口
 ```
 
-浏览器访问 `http://localhost:5173`，或直接用 Electron 窗口。首次进入需要填写服务器地址（默认 `http://localhost:3001`）并注册账号。
+浏览器访问 `http://127.0.0.1:55173`，或使用 Electron 窗口。本地隔离服务地址为 `http://127.0.0.1:3301`，数据库和桌面档案均放在本目录的 `runtime/`，不会读取原应用的账号或生产数据。
 
-客户端通过 `localStorage.cove_server_url` 记住服务器地址，也可用 `VITE_SERVER_URL` 注入默认值。
+客户端通过 `localStorage.cove_server_url` 记住服务器地址；开发环境可用 `VITE_COVE_DEFAULT_SERVER` 注入默认值。打包后的默认策略保持不变。
 
 ### 手机端
 
 手机端是独立的 npm 包，需要单独安装依赖，并要求 JDK 17、Android SDK 与 NDK：
 
 ```bash
-cd mobile
-npm install
+cd apps/mobile
+npm ci
 npm run typecheck && npm run lint
 npm run android:apk    # 产物在 android/app/build/outputs/apk/release/
 ```
 
-详见 [`mobile/README.md`](mobile/README.md)。
+详见 [手机端说明](apps/mobile/README.md)。测试用独立 Android 包可在 `apps/mobile/android` 运行 `gradlew.bat assembleDebug -PcoveRefactor -PreactNativeArchitectures=arm64-v8a`；包名为 `com.cove.mobile.refactor`，内置 JS/Hermes，不覆盖正式版。
 
 ## 构建
 
 ```bash
-npm run build:client     # 构建桌面客户端安装包 → client/dist-app/Cove-Setup-<版本>.exe
-npm run build:server     # 构建服务器安装包   → server/dist-app/Cove-Server-Setup-<版本>.exe
-npm run build -w server  # 仅编译服务端 TS（用于 Linux systemd 部署）
+npm run build:client            # apps/desktop/dist-app/
+npm run build:server            # apps/server/dist-app/
+npm run build -w cove-server    # 仅编译 Node 服务端
 ```
 
 ## 部署与配置
@@ -155,13 +167,14 @@ server.log             桌面服务器日志
 服务端编译产物是普通 Node 程序，可以用 systemd 托管：
 
 ```bash
-npm run build -w server     # 产出 server/dist
-node server/dist/index.js   # 或交给 systemd 的 ExecStart
+npm ci && npm run build:packages
+npm run build -w cove-server
+node apps/server/dist/index.js
 ```
 
 需要放通 3001（HTTP/Socket.IO）与 `MEDIASOUP_PORT`（媒体，UDP+TCP）。公网部署必须使用 HTTPS/WSS。
 
-服务端在检测到同级的 `client/dist` 时会一并托管前端静态文件，可以直接用服务器地址访问网页版客户端。
+服务端在检测到同级的 `apps/desktop/dist` 时会一并托管前端静态文件，可以直接用服务器地址访问网页版客户端。部署必须同时带上所依赖的共享包和 workspace 运行依赖，不可只复制 `dist`。
 
 ## 服务器访问安全
 
@@ -220,17 +233,17 @@ $env:COVE_SERVER_SECURITY_ENABLED = "true"
 - 明暗主题、聊天字号调节、自签名服务器证书例外
 - 桌面端内置更新中心，手机端启动时自动检查更新
 
-自动更新下载地址与聊天服务器独立：桌面端配置 `client/electron/update-config.ts`、手机端配置 `mobile/src/updateConfig.ts` 中的 `UPDATE_DOWNLOAD_BASE_URL`，默认留空，只检查 GitHub，不从聊天服务器推导或补填下载地址。明确填写有效 HTTPS 下载地址后，启动时无需登录即可检查该服务器的更新，GitHub 保留为备用源；修改后需重新打包。官方域名为 `cove.luxe`，不预填到下载变量中。桌面端手动“从服务器下载”仍使用当前填写的聊天服务器地址。
+自动更新下载地址与聊天服务器独立：桌面端配置 `apps/desktop/electron/update-config.ts`、手机端配置 `apps/mobile/src/features/updates/updateConfig.ts` 中的 `UPDATE_DOWNLOAD_BASE_URL`，默认留空，只检查 GitHub，不从聊天服务器推导或补填下载地址。明确填写有效 HTTPS 下载地址后，启动时无需登录即可检查该服务器的更新，GitHub 保留为备用源；修改后需重新打包。官方域名为 `cove.luxe`，不预填到下载变量中。桌面端手动“从服务器下载”仍使用当前填写的聊天服务器地址。
 
 ## 测试
 
 ```bash
-npm test -w server     # 服务器：presence、语音、账号、安全、房间、远程控制、断线恢复
-npm test -w client     # 客户端：更新器、连接、音频设备、聊天、远程控制、排序等
-cd mobile && npm test  # 手机端（jest）：媒体、界面、更新、存储、证书
+npm run check
+npm test
+node tooling/runtime-smoke.cjs  # 真实 SQLite/mediasoup，本地临时数据
 ```
 
-客户端还有若干需要 Electron 运行环境的测试，见 `client/package.json` 中的 `test:microphone`、`test:rnnoise` 等脚本。手机端的 Kotlin 单元测试（键盘坐标换算、更新源网络、证书策略）不走 jest，需要在 `mobile/android` 下用 `gradlew test` 运行。
+客户端真实 Chromium 音频测试见 `apps/desktop/package.json` 的 `test:microphone`、`test:rnnoise` 等脚本。手机端 Kotlin 测试在 `apps/mobile/android` 执行 `gradlew.bat testDebugUnitTest -PcoveRefactor`。更多真实媒体与界面验证命令见架构说明。
 
 ## 发布
 
@@ -239,6 +252,8 @@ cd mobile && npm test  # 手机端（jest）：媒体、界面、更新、存储
 发布流程有严格的顺序与校验要求：**GitHub Release 先公开，下载服务器镜像最后发布**；更新清单中的版本号与 SHA-256 必须来自最终构建产物实算，不得手填。Gitee 只同步仓库代码与标签，不创建 Release、不上传附件。
 
 完整流程见 [`AGENTS.md`](AGENTS.md)；当前版本内容见 [`RELEASE_NOTES.md`](RELEASE_NOTES.md)，历史见 [`CHANGELOG.md`](CHANGELOG.md)。
+
+本次重构未发布任何更新。后续手机版发布应在核验最终 APK 和下载源之后，同时同步 `apps/mobile/update.json` 与根目录 `mobile/update.json`，保持旧客户端 raw URL 兼容。
 
 ## 已知限制
 

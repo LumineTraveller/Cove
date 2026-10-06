@@ -29,8 +29,8 @@ jobs:
       - name: Verify tag matches client version
         shell: pwsh
         run: |
-          $version = node -p "require('./client/package.json').version"
-          $serverVersion = node -p "require('./server/package.json').version"
+          $version = node -p "require('./apps/desktop/package.json').version"
+          $serverVersion = node -p "require('./apps/server/package.json').version"
           if ("v$version" -ne "${{ github.ref_name }}") {
             throw "Tag ${{ github.ref_name }} does not match client version $version"
           }
@@ -42,23 +42,23 @@ jobs:
           }
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci && npm run build:packages
 
       - name: Test desktop client
-        run: npm test -w client
+        run: npm test -w cove-client
 
       - name: Test server
-        run: npm test -w server
+        run: npm test -w cove-server
 
       - name: Build Windows release
-        run: npm run build:electron -w client -- --publish never
+        run: npm run build:electron -w cove-client -- --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
       - name: Prepare server Visual C++ runtime
         shell: pwsh
         run: |
-          $runtime = "server/build/vc_redist.x64.exe"
+          $runtime = "apps/server/build/vc_redist.x64.exe"
           Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile $runtime
           $signature = Get-AuthenticodeSignature -FilePath $runtime
           if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Microsoft Corporation') {
@@ -66,7 +66,7 @@ jobs:
           }
 
       - name: Build Windows server release
-        run: npm run build:electron -w server -- --publish never
+        run: npm run build:electron -w cove-server -- --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
@@ -75,11 +75,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $version = node -p "require('./client/package.json').version"
-          $installer = "client/dist-app/Cove-Setup-$version.exe"
+          $version = node -p "require('./apps/desktop/package.json').version"
+          $installer = "apps/desktop/dist-app/Cove-Setup-$version.exe"
           $blockmap = "$installer.blockmap"
-          $manifest = "client/dist-app/latest.yml"
-          $serverInstaller = "server/dist-app/Cove-Server-Setup-$version.exe"
+          $manifest = "apps/desktop/dist-app/latest.yml"
+          $serverInstaller = "apps/server/dist-app/Cove-Server-Setup-$version.exe"
           $serverBlockmap = "$serverInstaller.blockmap"
 
           foreach ($asset in @($installer, $blockmap, $manifest, $serverInstaller, $serverBlockmap)) {

@@ -1,0 +1,56 @@
+.share-operations { position: relative; }
+.share-operations-trigger { display:flex; align-items:center; gap:6px; height:38px; padding:0 11px; border-radius:11px; font-size:10px; color:var(--muted); white-space:nowrap; }
+.share-operations-trigger:hover, .share-operations-trigger[aria-expanded="true"] { background:var(--surface); color:var(--ink); }
+.share-operations-popover { position:absolute; right:0; bottom:calc(100% + 8px); width:184px; max-width:calc(100vw - 24px); padding:6px; display:flex; flex-direction:column; gap:3px; border:1px solid var(--line-strong); border-radius:15px; background:var(--surface); color:var(--ink); box-shadow:var(--shadow); z-index:70; animation:annotation-pop-in 160ms var(--ease-enter); }
+.share-operations-popover > button { min-height:40px; padding:8px 10px; display:flex; align-items:center; gap:9px; border-radius:10px; text-align:left; font-size:12px; }
+.share-operations-popover > button:hover:not(:disabled) { background:var(--surface-strong); }
+.share-operations-popover > .remote-forbidden { color:var(--danger); }
+.share-operations-popover button:disabled { opacity:.42; cursor:not-allowed; }
+.annotation-menu-error { color:var(--danger); font-size:11px; padding:6px; overflow-wrap:anywhere; }
+.annotation-menu-request-count { min-width:15px; height:15px; border-radius:50%; background:var(--danger); color:#fff; display:grid; place-items:center; font-size:9px; }
+.annotation-layer-status { position:absolute; left:50%; bottom:12px; transform:translateX(-50%); max-width:calc(100% - 24px); padding:7px 12px; border-radius:10px; color:var(--danger); background:var(--surface); font-size:12px; overflow-wrap:anywhere; z-index:4; }
+.screen-annotation-layer { position:absolute; z-index:25; pointer-events:none; overflow:hidden; }
+.annotation-content-layer { position:absolute; pointer-events:none; overflow:hidden; }
+.annotation-owner-status { position:absolute; bottom:12px; left:12px; right:12px; padding:8px 12px; border-radius:10px; background:var(--surface); color:var(--ink); font-size:12px; z-index:26; }
+.annotation-owner-status button { margin-left:10px; color:var(--blue); text-decoration:underline; }
+.annotation-canvas, .annotation-input-surface { position:absolute; inset:0; width:100%; height:100%; }
+.annotation-canvas { pointer-events:none; }
+.annotation-input-surface { pointer-events:auto; touch-action:none; cursor:crosshair; outline:none!important; }
+.annotation-input-surface:focus-visible { box-shadow:inset 0 0 0 2px var(--blue); }
+.tool-laser .annotation-input-surface { cursor:none; }
+.annotation-laser-dot { position:absolute; width:8px; height:8px; border-radius:50%; background:#ff2b2b; box-shadow:0 0 5px 2px #ff2b2b88; transform:translate(-50%,-50%); pointer-events:none; z-index:1; }
+.annotation-toolbar, .annotation-tool-ball, .annotation-tool-panel { position:absolute; pointer-events:auto; color:var(--ink); background:var(--surface); border:1px solid var(--line-strong); box-shadow:0 5px 22px #0003; z-index:3; }
+.annotation-toolbar { width:52px; padding:5px; display:flex; flex-direction:column; gap:4px; border-radius:28px; overflow-y:auto; overscroll-behavior:contain; scrollbar-width:none; animation:annotation-tools-in 160ms var(--ease-enter); }
+.annotation-toolbar::-webkit-scrollbar { display:none; }
+.annotation-toolbar > button { position:relative; width:40px; height:40px; min-height:40px; display:grid; place-items:center; border-radius:50%; color:var(--muted); }
+.annotation-toolbar > button:hover { color:var(--ink); background:var(--surface-strong); }
+.annotation-toolbar > button.selected { color:var(--blue); background:var(--surface-strong); }
+.annotation-toolbar > button[aria-label="激光笔"], .annotation-tool-ball .phosphor-circle { color:#ef4444; }
+.annotation-tool-ball { width:44px; height:44px; display:grid; place-items:center; border-radius:50%; touch-action:none; cursor:grab; color:var(--blue); animation:annotation-tools-in 160ms var(--ease-enter); }
+.annotation-tool-ball:active { cursor:grabbing; }
+.annotation-tool-ball:hover { background:var(--surface-strong); }
+.tool-laser .annotation-tool-ball { color:#ef4444; }
+.annotation-request-count { position:absolute; top:0; right:0; min-width:15px; height:15px; border-radius:50%; background:var(--danger); color:#fff; font-size:9px; display:grid; place-items:center; }
+.annotation-tool-panel { border-radius:16px; padding:10px; overflow:auto; overscroll-behavior:contain; animation:annotation-tools-in 160ms var(--ease-enter); }
+.annotation-tool-panel header { display:flex; align-items:center; justify-content:space-between; gap:6px; font-size:12px; font-weight:650; margin-bottom:10px; }
+.annotation-tool-panel header > button { width:26px; height:26px; border-radius:8px; display:grid; place-items:center; color:var(--muted); }
+.annotation-tool-panel header > button:hover { background:var(--surface-strong); color:var(--ink); }
+.annotation-colors { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-bottom:12px; }
+.annotation-colors button, .annotation-colors input { width:24px; height:24px; padding:0; border:1px solid #8886; border-radius:50%; display:grid; place-items:center; }
+.annotation-colors button[aria-pressed="true"] { outline:2px solid var(--blue); outline-offset:2px; }
+.annotation-width-control { display:grid; gap:8px; font-size:11px; }
+.annotation-width-control > span { display:flex; justify-content:space-between; }
+.annotation-width-control input { width:100%; accent-color:var(--blue); }
+.annotation-permissions { display:flex; flex-wrap:wrap; gap:4px; }
+.annotation-permissions button { flex:1 0 auto; min-height:32px; padding:4px 6px; border-radius:8px; font-size:11px; background:var(--surface-strong); color:var(--muted); }
+.annotation-permissions button[aria-pressed="true"] { color:var(--blue); box-shadow:inset 0 0 0 1px var(--blue); }
+.annotation-permissions button:disabled, .annotation-permission-request button:disabled { opacity:.5; cursor:wait; }
+.annotation-tool-panel p { margin-top:8px; color:var(--muted); font-size:10px; line-height:1.5; }
+.annotation-permission-request { display:flex; gap:4px; align-items:center; margin-top:8px; font-size:11px; }
+.annotation-permission-request > span { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.annotation-permission-request button { padding:5px 6px; border-radius:7px; background:var(--surface-strong); color:var(--blue); }
+.annotation-permission-request button:last-child { color:var(--muted); }
+@keyframes annotation-pop-in { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:translateY(0); } }
+@keyframes annotation-tools-in { from { opacity:0; transform:scale(.8); } to { opacity:1; transform:scale(1); } }
+@media (prefers-reduced-motion:reduce) { .annotation-toolbar, .annotation-tool-ball, .annotation-tool-panel, .share-operations-popover { animation:none; } }
+@media (max-width:600px) { .share-operations-trigger { padding:0 6px; gap:4px; } .share-status-left > b { max-width:85px; } }
