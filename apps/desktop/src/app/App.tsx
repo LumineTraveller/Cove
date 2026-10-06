@@ -71,6 +71,12 @@ import {
   type AppTheme,
 } from '../features/settings/theme';
 import { UpdateCenter } from '../features/updates/components/UpdateCenter';
+import {
+  CLIENT_UPGRADE_EVENT,
+  createClientVersionGate,
+  fetchClientVersionPolicy,
+  type ClientUpgradeRequirement,
+} from '../features/updates/clientVersion';
 import type { UserProfile } from '../types';
 
 const DEFAULT_SERVER =
@@ -200,11 +206,41 @@ export default function App() {
   const [connectionProblem, setConnectionProblem] = useState<ConnectionProblem>(null);
   const [connectionDiagnostic, setConnectionDiagnostic] = useState<string | null>(null);
   const [connectionRetryVersion, setConnectionRetryVersion] = useState(0);
+  const [requiredUpgrades, setRequiredUpgrades] = useState<Record<string, ClientUpgradeRequirement>>({});
+  const versionGateRef = useRef<ReturnType<typeof createClientVersionGate> | null>(null);
+  if (!versionGateRef.current) {
+    versionGateRef.current = createClientVersionGate({
+      fetchPolicy: fetchClientVersionPolicy,
+      onRequired: requirement => setRequiredUpgrades(current => ({ ...current, [requirement.serverURL]: requirement })),
+      onSupported: (url) => setRequiredUpgrades(current => {
+        if (!current[url]) return current;
+        const next = { ...current };
+        delete next[url];
+        return next;
+      }),
+    });
+  }
   const serverURL = getServerURL();
   const accountSession = readAccountSession(serverURL);
   const needLogin = !profile.username || !serverUrl || !accountSession || serverUnlockRequired;
   const updateServerURL =
     needLogin || editingServer ? normalizeServerSecurityURL(draftUrl) : serverURL;
+  const activeUpgrade = requiredUpgrades[normalizeServerSecurityURL(updateServerURL)];
+  const upgradeBlocked = Boolean(requiredUpgrades[normalizeServerSecurityURL(serverURL)]);
+  const retryVersionPolicy = useCallback(async () => {
+    const url = normalizeServerSecurityURL(updateServerURL);
+    if (url) await versionGateRef.current!.check(url);
+  }, [updateServerURL]);
+
+  useEffect(() => {
+    const onUpgrade = (event: Event) => {
+      const requirement = (event as CustomEvent<ClientUpgradeRequirement>).detail;
+      const url = normalizeServerSecurityURL(requirement?.serverURL ?? '');
+      if (url) versionGateRef.current?.observe(url, requirement);
+    };
+    window.addEventListener(CLIENT_UPGRADE_EVENT, onUpgrade);
+    return () => window.removeEventListener(CLIENT_UPGRADE_EVENT, onUpgrade);
+  }, []);
 
   useEffect(() => {
     try {
@@ -246,6 +282,7 @@ export default function App() {
         .then((status) => {
           if (!active) return;
           setServerSecurityProbe({ phase: 'ready', status });
+          versionGateRef.current?.observe(normalizedServerUrl, status.versionPolicy);
           if (!status.enabled || status.configured) setDraftBootstrapToken('');
         })
         .catch(() => {
@@ -265,6 +302,11 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (upgradeBlocked) {
+      setConnected(false);
+      setInitialConnectionPending(false);
+      return;
+    }
     if (needLogin || editingServer) return;
     let active = true;
     let sessionRetryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -363,6 +405,7 @@ export default function App() {
         setConnectionDiagnostic(null);
       },
       onRejected: (response) => {
+        if (response.code === 'CLIENT_VERSION_TOO_OLD' && pauseForUpgrade(response)) return;
         setConnected(false);
         socket.disconnect();
         setInitialConnectionPending(false);
@@ -402,6 +445,21 @@ export default function App() {
       lastConnectError = null;
       registration.start();
     };
+    const pauseForUpgrade = (payload: unknown) => {
+      const result = versionGateRef.current!.observe(normalizeServerSecurityURL(serverURL), payload);
+      if (result.status !== 'required') return false;
+      registration.cancel();
+      deadline.cancel();
+      if (sessionRetryTimer) {
+        clearTimeout(sessionRetryTimer);
+        sessionRetryTimer = null;
+      }
+      socket.disconnect();
+      setConnected(false);
+      setInitialConnectionPending(false);
+      setConnectionDiagnostic(`服务器要求 Cove ${result.policy.minimumClientVersion} 或更高版本，请完成更新。登录记录已保留。`);
+      return true;
+    };
     const disconnect = (reason: string) => {
       registration.cancel();
       if (active) {
@@ -422,10 +480,11 @@ export default function App() {
       socket.disconnect();
       setConnectionDiagnostic(`服务器访问验证失败：${message || '访问令牌无效或已过期'}`);
     };
-    const connectError = (cause: Error & { data?: { code?: string } }) => {
+    const connectError = (cause: Error & { data?: { code?: string; minimumClientVersion?: string } }) => {
       if (!active) return;
       lastConnectError = describeSocketConnectError(cause);
       setConnectionDiagnostic(lastConnectError);
+      if (cause.data?.code === 'CLIENT_VERSION_TOO_OLD' && pauseForUpgrade(cause.data)) return;
       if (requiresServerAccessRecovery(cause.data?.code)) {
         requireServerUnlock(cause.message);
         return;
@@ -467,6 +526,12 @@ export default function App() {
         console.warn('[security] 无法配置服务器证书例外:', error);
       }
       if (!active) return;
+      const versionCheck = await versionGateRef.current!.check(normalizeServerSecurityURL(serverURL));
+      if (!active) return;
+      if (versionCheck.status === 'required') {
+        pauseForUpgrade(versionCheck.policy);
+        return;
+      }
       applyServerAccessToSocket(serverURL);
       socket.connect();
       if (socket.connected) register();
@@ -484,9 +549,10 @@ export default function App() {
       socket.off('account:session-replaced', sessionReplaced);
       socket.disconnect();
     };
-  }, [connectionRetryVersion, editingServer, needLogin, serverURL]);
+  }, [connectionRetryVersion, editingServer, needLogin, serverURL, upgradeBlocked]);
 
   const handleLogin = async () => {
+    if (activeUpgrade) return;
     const username = draftName.trim();
     const securityEnabled =
       serverSecurityProbe.phase === 'ready' && serverSecurityProbe.status.enabled;
@@ -517,6 +583,11 @@ export default function App() {
         nextServerUrl,
         allowUntrustedCertificate,
       );
+      const versionCheck = await versionGateRef.current!.check(nextServerUrl);
+      if (versionCheck.status === 'required') {
+        setAuthPending(false);
+        return;
+      }
       await ensureServerAccess({
         serverURL: nextServerUrl,
         password: draftServerPassword,
@@ -676,7 +747,7 @@ export default function App() {
   const serverSecurityUnconfigured = serverSecurityEnabled && !serverSecurityStatus.configured;
   const serverBootstrapAvailable =
     serverSecurityUnconfigured && serverSecurityStatus.bootstrapAvailable;
-  const serverSecurityReady = serverSecurityProbe.phase === 'ready';
+  const serverSecurityReady = serverSecurityProbe.phase === 'ready' && !activeUpgrade;
   const serverSecurityHint =
     serverSecurityProbe.phase === 'idle'
       ? '等待输入服务器地址'
@@ -696,7 +767,7 @@ export default function App() {
     return (
       <main className="auth-page">
         <WindowTitleBar showBrand={false} />
-        <UpdateCenter allowDetails={false} serverURL={updateServerURL} />
+        <UpdateCenter allowDetails={false} serverURL={updateServerURL} requiredUpgrade={activeUpgrade} onRetryVersion={retryVersionPolicy} />
         <div className="auth-shell">
           <section className="auth-showcase" aria-label="Cove 产品介绍">
             <div className="auth-brand">
@@ -1064,7 +1135,7 @@ export default function App() {
         />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
-      <UpdateCenter serverURL={updateServerURL} />
+      <UpdateCenter serverURL={updateServerURL} requiredUpgrade={activeUpgrade} onRetryVersion={retryVersionPolicy} />
       {connected !== true && (
         <div
           className="cove-connection-scrim"
@@ -1144,14 +1215,18 @@ export default function App() {
                   )}
                 </div>
                 <h2 id="connection-title" className="cove-connection-title">
-                  {connectionProblem === 'session-in-use'
+                  {activeUpgrade
+                    ? '需要更新 Cove'
+                    : connectionProblem === 'session-in-use'
                     ? '账号旧连接仍在线'
                     : connected === false
                     ? '暂时无法连接'
                     : '正在连接服务器'}
                 </h2>
                 <p className="cove-connection-copy">
-                  {connectionProblem === 'session-in-use'
+                  {activeUpgrade
+                    ? `服务器要求 ${activeUpgrade.minimumClientVersion} 或更高版本。已暂停连接，请在更新窗口中完成下载并重启安装；本机登录记录已保留。`
+                    : connectionProblem === 'session-in-use'
                     ? '服务器仍认为同一登录令牌对应的旧信令连接在线。Cove 会等待服务端完成旧连接超时检测；仍未恢复时会保留本机账号状态，不会误清登录凭据。'
                     : initialConnectionPending
                     ? 'Cove 最多尝试 30 秒；你也可以立即取消并修改服务器地址。'

@@ -16,6 +16,25 @@ const cloudSource = {
   id: 'cloud', label: '当前服务器', version: '0.7.0',
   feedUrl: `${cloudServerUrl}/releases/v0.7.0/`, latencyMs: 10,
 };
+
+test('update source sorting uses SemVer precedence, including prerelease and build metadata', () => {
+  assert.ok(compareReleaseVersions('v2.0.0', '1.10.0') > 0);
+  assert.ok(compareReleaseVersions('2.0.0', '2.0.0-rc.1') > 0);
+  assert.ok(compareReleaseVersions('2.0.0-rc.10', '2.0.0-rc.2') > 0);
+  assert.equal(compareReleaseVersions('2.0.0+build.10', '2.0.0+build.2'), 0);
+});
+
+test('a mirror cannot advertise a prerelease as stable or use a malformed release tag', async () => {
+  for (const tag of ['v2.0.0-rc.1', 'v2.0.0junk', 'v02.0.0', 'v2.0.0+']) {
+    const fetchImpl = async input => new Response(JSON.stringify({
+      tag_name: String(input).includes('api.github.com') ? 'v2.0.0' : tag,
+      prerelease: false, draft: false,
+    }), { status: 200 });
+    const sources = await discoverUpdateSources(cloudServerUrl, fetchImpl, 1000);
+    assert.equal(sources.length, 1, tag);
+    assert.equal(sources[0].id, 'github');
+  }
+});
 test('compiled Electron adapter imports electron-updater at runtime', () => {
   assert.doesNotThrow(() => require('../dist-electron/updater.js'));
 });

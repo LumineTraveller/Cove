@@ -1,3 +1,4 @@
+import { compareSemanticVersions } from '@cove/contracts';
 import { UPDATE_DOWNLOAD_BASE_URL } from './update-config';
 
 // Discover the configured HTTPS download server first and GitHub as fallback.
@@ -49,17 +50,8 @@ function createServerSource(serverUrl: string): SourceDefinition | null {
   };
 }
 
-function numericVersion(version: string): number[] {
-  return version.replace(/^v/i, '').split(/[.-]/).map(part => Number.parseInt(part, 10) || 0);
-}
-
 export function compareReleaseVersions(left: string, right: string): number {
-  const a = numericVersion(left);
-  const b = numericVersion(right);
-  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
-    if ((a[index] ?? 0) !== (b[index] ?? 0)) return (a[index] ?? 0) - (b[index] ?? 0);
-  }
-  return 0;
+  return compareSemanticVersions(left.replace(/^v/i, ''), right.replace(/^v/i, '')) ?? 0;
 }
 
 async function discoverSource(
@@ -79,7 +71,9 @@ async function discoverSource(
     });
     if (!response.ok) throw new Error(`${source.label} Release API 返回 HTTP ${response.status}`);
     const release = await response.json() as { tag_name?: unknown; prerelease?: unknown; draft?: unknown };
-    if (release.draft === true || release.prerelease === true || typeof release.tag_name !== 'string' || !/^v?\d+\.\d+\.\d+/.test(release.tag_name)) {
+    if (release.draft === true || release.prerelease === true || typeof release.tag_name !== 'string' ||
+        !/^v?\d+\.\d+\.\d+(?:\+[0-9A-Za-z.-]+)?$/.test(release.tag_name) ||
+        compareSemanticVersions(release.tag_name.replace(/^v/i, ''), release.tag_name.replace(/^v/i, '')) === null) {
       throw new Error(`${source.label} 没有可用的正式版本`);
     }
     const tag = release.tag_name;

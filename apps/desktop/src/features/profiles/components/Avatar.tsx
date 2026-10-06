@@ -1,4 +1,6 @@
 import { avatarCropPresentation } from '../profile';
+import { authorizedResourceURL } from '../../connection/serverSecurity';
+import { getServerURL } from '../../connection/socket';
 
 interface Props {
   username: string;
@@ -25,7 +27,7 @@ export function Avatar({ username, avatarUrl, size = 'md', className = '' }: Pro
     >
       {avatarUrl ? (
         <img
-          src={crop?.source ?? avatarUrl}
+          src={authorizedResourceURL(getServerURL(), crop?.source ?? avatarUrl)}
           alt={`${username} 的头像`}
           className="h-full w-full object-cover"
           style={

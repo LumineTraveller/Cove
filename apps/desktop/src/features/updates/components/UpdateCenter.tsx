@@ -12,6 +12,11 @@ import {
   X,
 } from 'lucide-react';
 import packageInfo from '../../../../package.json';
+import {
+  OFFICIAL_RELEASE_URL,
+  requiresClientUpgrade,
+  type ClientUpgradeRequirement,
+} from '../clientVersion';
 import { getServerDownloadUrl, SERVER_DOWNLOAD_LINKS_ENABLED } from '../serverUpdateUrl';
 import {
   UPDATE_CENTER_OPEN_EVENT,
@@ -279,10 +284,14 @@ export function UpdateCenter({
   embedded = false,
   serverURL = '',
   allowDetails = true,
+  requiredUpgrade,
+  onRetryVersion,
 }: {
   embedded?: boolean;
   serverURL?: string;
   allowDetails?: boolean;
+  requiredUpgrade?: ClientUpgradeRequirement;
+  onRetryVersion?: () => Promise<unknown>;
 }) {
   const [state, setState] = useState<UpdateState>(initialState);
   const [open, setOpen] = useState(false);
@@ -292,12 +301,18 @@ export function UpdateCenter({
   const dismissedRef = useRef(false);
   const popoverRef = useRef<HTMLElement | null>(null);
   const previousStatusRef = useRef(state.status);
+  const requiredCheckRef = useRef('');
 
-  const checkNow = useCallback(async () => {
+  const checkNow = useCallback(async (recheckVersion = true) => {
     manualCheckRef.current = true;
     dismissedRef.current = false;
     setActionError('');
     if (!embedded) setOpen(true);
+    // A user retry can confirm a server rollback. Failure keeps the existing
+    // gate; it must not delay the first automatic update discovery.
+    if (recheckVersion && requiredUpgrade) {
+      try { await onRetryVersion?.(); } catch { /* A failed probe does not lift the gate or prevent a download retry. */ }
+    }
     const updater = window.coveUpdater;
     if (!updater) {
       setState({ status: 'disabled', message: '当前环境没有提供应用内更新服务。' });
@@ -312,7 +327,18 @@ export function UpdateCenter({
         message: cause instanceof Error ? cause.message : '检查更新失败，请稍后重试。',
       });
     }
-  }, [embedded]);
+  }, [embedded, onRetryVersion, requiredUpgrade]);
+
+  useEffect(() => {
+    if (!requiredUpgrade) {
+      requiredCheckRef.current = '';
+      return;
+    }
+    const key = `${requiredUpgrade.serverURL}|${requiredUpgrade.minimumClientVersion}`;
+    if (requiredCheckRef.current === key) return;
+    requiredCheckRef.current = key;
+    void checkNow(false);
+  }, [checkNow, requiredUpgrade]);
 
   useEffect(() => {
     const updater = window.coveUpdater;
@@ -374,7 +400,7 @@ export function UpdateCenter({
 
   // 点击更新浮窗以外的任何位置即关闭，和其余弹窗保持一致。
   useEffect(() => {
-    if (embedded || !open) return;
+    if (embedded || !open || requiredUpgrade) return;
     const onPointerDown = (event: PointerEvent) => {
       const target = event.target;
       if (target instanceof Node && popoverRef.current?.contains(target)) return;
@@ -384,10 +410,14 @@ export function UpdateCenter({
     };
     document.addEventListener('pointerdown', onPointerDown, true);
     return () => document.removeEventListener('pointerdown', onPointerDown, true);
-  }, [embedded, open]);
+  }, [embedded, open, requiredUpgrade]);
 
   const installNow = async () => {
     setActionError('');
+    if (requiredUpgrade && (!state.version || requiresClientUpgrade(requiredUpgrade, state.version))) {
+      setActionError('下载的版本尚未满足服务器要求，请下载所需正式版本。');
+      return;
+    }
     try {
       const updater = window.coveUpdater;
       if (!updater) throw new Error('当前环境没有安装服务。');
@@ -431,7 +461,18 @@ export function UpdateCenter({
     }
   };
 
+  const openRequiredDownload = async () => {
+    setActionError('');
+    const url = requiredUpgrade?.downloadUrl ?? OFFICIAL_RELEASE_URL;
+    try {
+      if (window.coveShell) {
+        if (!(await window.coveShell.openExternal(url))) throw new Error();
+      } else window.open(url, '_blank', 'noopener,noreferrer');
+    } catch { setActionError('无法打开下载入口，请稍后再试。'); }
+  };
+
   const closeStatus = () => {
+    if (requiredUpgrade) return;
     dismissedRef.current = true;
     manualCheckRef.current = false;
     setOpen(false);
@@ -444,8 +485,17 @@ export function UpdateCenter({
   const currentVersion = `Cove v${packageInfo.version}`;
   const targetVersion = state.version ? ` → v${state.version}` : '';
   const busy = isUpdateBusy(state.status);
+  const installable = !requiredUpgrade || Boolean(state.version && !requiresClientUpgrade(requiredUpgrade, state.version));
+  const upgradeNotice = requiredUpgrade ? (
+    <p className="update-warning" role="alert">
+      服务器要求 Cove {requiredUpgrade.minimumClientVersion} 或更高版本，已暂停连接。
+      登录记录已保留；下载完成后请选择重启并更新。
+      {state.status === 'not-available' && '当前更新源尚未提供所需版本，请重试或手动下载。'}
+      {state.status === 'downloaded' && !installable && '当前下载包尚未满足要求，请使用正式下载入口。'}
+    </p>
+  ) : null;
 
-  if (!embedded && !open) return null;
+  if (!embedded && !open && !requiredUpgrade) return null;
 
   if (embedded) {
     return (
@@ -453,7 +503,7 @@ export function UpdateCenter({
         <div className="update-details-summary">
           <StatusIcon state={state} />
           <div className="update-details-summary-copy" aria-live="polite">
-            <strong>{statusTitle(state)}</strong>
+            <strong>{requiredUpgrade ? '需要更新 Cove' : statusTitle(state)}</strong>
             <small>
               {currentVersion}
               {targetVersion}
@@ -479,10 +529,11 @@ export function UpdateCenter({
         </div>
 
         <UpdateProgress state={state} clock={clock} />
+        {upgradeNotice}
 
         {(state.status === 'downloaded' || state.status === 'installing') && (
           <div className="update-details-actions">
-            {state.status === 'downloaded' && (
+            {state.status === 'downloaded' && installable && (
               <button
                 type="button"
                 className="update-primary-action"
@@ -555,23 +606,24 @@ export function UpdateCenter({
       <div className="update-status-heading">
         <StatusIcon state={state} />
         <div className="update-status-heading-copy" aria-live="polite">
-          <strong>{statusTitle(state)}</strong>
+          <strong>{requiredUpgrade ? '需要更新 Cove' : statusTitle(state)}</strong>
           <small>
             {currentVersion}
             {targetVersion}
             {state.sourceLabel ? ` · ${state.sourceLabel}` : ''}
           </small>
         </div>
-        <button
+        {!requiredUpgrade && <button
           type="button"
           className="update-status-close"
           onClick={closeStatus}
           aria-label="关闭更新提示"
         >
           <X size={16} />
-        </button>
+        </button>}
       </div>
       <p className="update-status-message">{compactStatusMessage(state)}</p>
+      {upgradeNotice}
       <UpdateProgress state={state} clock={clock} compact />
       {actionError && (
         <p className="update-action-error" role="alert">
@@ -579,7 +631,7 @@ export function UpdateCenter({
         </p>
       )}
       <div className="update-status-actions">
-        {state.status === 'downloaded' && (
+        {state.status === 'downloaded' && installable && (
           <button
             type="button"
             className="update-primary-action"
@@ -614,6 +666,16 @@ export function UpdateCenter({
             <FileText size={15} />
             详细信息
           </button>
+        )}
+        {requiredUpgrade && (
+          <>
+            <button type="button" className="update-secondary-action" onClick={() => void openRequiredDownload()}>
+              <ExternalLink size={15} />正式下载入口
+            </button>
+            <button type="button" className="update-details-action" onClick={() => void openRelease('github')}>
+              GitHub 发布页
+            </button>
+          </>
         )}
       </div>
     </aside>

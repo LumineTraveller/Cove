@@ -1,4 +1,13 @@
-export const CLIENT_PROTOCOL_VERSION = 2;
+import { CLIENT_PROTOCOL_VERSION } from '@cove/contracts';
+export { CLIENT_PROTOCOL_VERSION } from '@cove/contracts';
+
+import {
+  CLIENT_PLATFORM,
+  CLIENT_VERSION,
+  notifyClientUpgrade,
+  readClientVersionPolicy,
+  type ClientVersionPolicy,
+} from '../updates/clientVersion';
 
 export type ServerSecurityErrorCode =
   | 'INVALID_PASSWORD'
@@ -23,6 +32,7 @@ export interface ServerSecurityStatus {
   tokenEpoch: number;
   authorized: boolean;
   secureTransportRequired: boolean;
+  versionPolicy?: ClientVersionPolicy;
 }
 
 export interface ServerAccessGrant {
@@ -161,6 +171,8 @@ function requestURL(serverURL: string, target: string): string {
 export function serverRequestInit(serverURL: string, init: RequestInit = {}): RequestInit {
   const headers = new Headers(init.headers);
   headers.set('X-Cove-Client-Protocol', String(CLIENT_PROTOCOL_VERSION));
+  headers.set('X-Cove-Client-Version', CLIENT_VERSION);
+  headers.set('X-Cove-Client-Platform', CLIENT_PLATFORM);
   const token = getServerAccessToken(serverURL);
   if (token) headers.set('Authorization', `Bearer ${token}`);
   return { ...init, headers };
@@ -171,16 +183,35 @@ export function serverFetch(
   target: string,
   init: RequestInit = {},
 ): Promise<Response> {
-  return fetch(requestURL(serverURL, target), serverRequestInit(serverURL, init));
+  return fetch(requestURL(serverURL, target), serverRequestInit(serverURL, init)).then(async response => {
+    if (!response.ok) {
+      const payload = await response.clone().json().catch(() => null);
+      if (payload?.code === 'CLIENT_VERSION_TOO_OLD') notifyClientUpgrade(serverURL, payload);
+    }
+    return response;
+  });
+}
+
+export function serverSocketAuth(serverURL: string) {
+  return {
+    serverAccessToken: getServerAccessToken(serverURL),
+    clientProtocol: CLIENT_PROTOCOL_VERSION,
+    clientVersion: CLIENT_VERSION,
+    clientPlatform: CLIENT_PLATFORM,
+  };
 }
 
 export function authorizedResourceURL(serverURL: string, target: string): string {
+  if (/^(?:data|blob):/i.test(target)) return target;
   const url = requestURL(serverURL, target);
   const token = getServerAccessToken(serverURL);
-  if (!token) return url;
   try {
     const parsed = new URL(url);
-    parsed.searchParams.set('access_token', token);
+    if (parsed.origin !== new URL(serverURL).origin) return url;
+    parsed.searchParams.set('client_protocol', String(CLIENT_PROTOCOL_VERSION));
+    parsed.searchParams.set('client_version', CLIENT_VERSION);
+    parsed.searchParams.set('client_platform', CLIENT_PLATFORM);
+    if (token) parsed.searchParams.set('access_token', token);
     return parsed.toString();
   } catch {
     return url;
@@ -222,6 +253,8 @@ export async function readServerSecurityStatus(serverURL: string): Promise<Serve
     };
   }
   const payload = await assertResponse(response);
+  const versionPolicy = readClientVersionPolicy(payload);
+  notifyClientUpgrade(serverURL, payload);
   // The first development build of protocol 2 did not include `enabled` but
   // did include the remaining status fields. Continue to recognize it as an
   // enabled server during migration.
@@ -238,6 +271,7 @@ export async function readServerSecurityStatus(serverURL: string): Promise<Serve
     tokenEpoch: typeof payload.tokenEpoch === 'number' ? payload.tokenEpoch : 0,
     authorized: payload.authorized === true,
     secureTransportRequired: payload.secureTransportRequired === true,
+    ...(versionPolicy ? { versionPolicy } : {}),
   };
 }
 

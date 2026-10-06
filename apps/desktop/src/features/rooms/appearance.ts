@@ -1,4 +1,5 @@
 import { socket } from '../connection/socket';
+import { authorizedResourceURL } from '../connection/serverSecurity';
 import type { Room } from '../../types';
 
 export type RoomWithAppearance = Room & {
@@ -33,7 +34,6 @@ export function colorLuminance(value: string) {
 
 export function resolveRoomAvatarUrl(url: string | null | undefined): string | null {
   if (!url) return null;
-  if (url.startsWith('data:') || url.startsWith('http:') || url.startsWith('https:')) return url;
   const base = ((socket as any).io?.uri ?? '').replace(/\/$/, '');
-  return base ? `${base}${url}` : url;
+  return base ? authorizedResourceURL(base, url) : url;
 }

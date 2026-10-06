@@ -1,6 +1,6 @@
 {
   "name": "cove-client",
-  "version": "1.5.5",
+  "version": "2.0.0",
   "description": "Cove - 即时通讯客户端",
   "author": "Cove",
   "private": true,
@@ -31,7 +31,7 @@
     "test:window-resize": "tsx --test tests/windowResize.test.ts",
     "test:sortable": "tsx --test tests/sortableList.test.ts",
     "test:soundpack-download": "tsx --test tests/soundpackDownload.test.ts",
-    "test:update-center": "tsx --test tests/updateCenter.test.ts",
+    "test:update-center": "tsx --test tests/updateCenter.test.ts tests/clientVersion.test.ts && node --test tests/requiredUpgradeView.test.cjs",
     "test": "npm run test:updater && npm run test:connection && npm run test:media-transports && npm run test:audio-devices && npm run test:chat-images && npm run test:chat-links && npm run test:media-diagnostics && npm run test:screen-capture && npm run test:member-ordering && npm run test:account-auth && npm run test:remote-control && npm run test:annotations && npm run test:rooms && npm run test:sortable && npm run test:soundpack-download && npm run test:update-center",
     "electron:dev": "npm run electron:compile && electron .",
     "build": "npm run prepare:rnnoise-assets && tsc && vite build",

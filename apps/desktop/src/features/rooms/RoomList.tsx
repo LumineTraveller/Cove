@@ -18,7 +18,7 @@ import { useWebRTC } from '../media/useWebRTC';
 import type { OnlineUser, Room, UserProfile } from '../../types';
 import type { AppTheme } from '../settings/theme';
 import { createRoomPayload } from './roomSettings';
-import { serverFetch } from '../connection/serverSecurity';
+import { authorizedResourceURL, serverFetch } from '../connection/serverSecurity';
 import { getProfileDisplayName, loadProfileRemarks } from '../profiles/profileRemarks';
 import {
   GlobalSettingsV2,
@@ -51,9 +51,8 @@ interface LobbyPresenceSnapshot {
 /** 把相对路径头像 URL 拼接上 serverURL。 */
 function resolveRoomAvatarUrl(url: string | null | undefined): string | null {
   if (!url) return null;
-  if (url.startsWith('data:') || url.startsWith('http:') || url.startsWith('https:')) return url;
   const base = ((socket as any).io?.uri ?? '').replace(/\/$/, '');
-  return base ? `${base}${url}` : url;
+  return base ? authorizedResourceURL(base, url) : url;
 }
 
 export default function RoomList({

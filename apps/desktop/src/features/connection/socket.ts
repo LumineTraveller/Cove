@@ -1,5 +1,5 @@
 import { io } from 'socket.io-client';
-import { CLIENT_PROTOCOL_VERSION, getServerAccessToken } from './serverSecurity';
+import { serverSocketAuth } from './serverSecurity';
 
 const CLIENT_ID_KEY = 'cove_client_id';
 
@@ -41,15 +41,9 @@ export function getServerURL(): string {
 // socket 在模块加载时创建，login 后 reload 页面使新 URL 生效
 export const socket = io(getServerURL(), {
   autoConnect: false,
-  auth: {
-    serverAccessToken: getServerAccessToken(getServerURL()),
-    clientProtocol: CLIENT_PROTOCOL_VERSION,
-  },
+  auth: serverSocketAuth(getServerURL()),
 });
 
 export function applyServerAccessToSocket(serverURL: string): void {
-  socket.auth = {
-    serverAccessToken: getServerAccessToken(serverURL),
-    clientProtocol: CLIENT_PROTOCOL_VERSION,
-  };
+  socket.auth = serverSocketAuth(serverURL);
 }
