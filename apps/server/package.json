@@ -1,6 +1,6 @@
 {
   "name": "cove-server",
-  "version": "1.5.4",
+  "version": "2.0.0",
   "description": "Cove - 即时通讯服务器",
   "author": "Cove",
   "private": true,
@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.build.json",
-    "test": "tsx --test tests/avatarStorage.test.ts tests/presence.test.ts tests/soundpackAudience.test.ts tests/soundpackNormalization.test.ts tests/voicePresence.test.ts tests/mediaDiagnostics.test.ts tests/mediaLifecycle.test.ts tests/mediaNativeIntegration.test.ts tests/accountAuth.test.ts tests/serverSecurity.test.ts tests/serverSecurityConfig.test.ts tests/serverSecurityDefaultIntegration.test.ts tests/serverSecurityDisabledIntegration.test.ts tests/remoteControl.test.ts tests/disconnectGrace.test.ts tests/connectionRecovery.test.ts tests/roomSettings.test.ts tests/roomIntegration.test.ts tests/annotations.test.ts tests/annotationSocketIntegration.test.ts",
+    "test": "tsx --test tests/avatarStorage.test.ts tests/presence.test.ts tests/soundpackAudience.test.ts tests/soundpackNormalization.test.ts tests/voicePresence.test.ts tests/mediaDiagnostics.test.ts tests/mediaLifecycle.test.ts tests/mediaNativeIntegration.test.ts tests/accountAuth.test.ts tests/clientVersion.test.ts tests/serverSecurity.test.ts tests/serverSecurityConfig.test.ts tests/serverSecurityDefaultIntegration.test.ts tests/serverSecurityDisabledIntegration.test.ts tests/remoteControl.test.ts tests/disconnectGrace.test.ts tests/connectionRecovery.test.ts tests/roomSettings.test.ts tests/roomIntegration.test.ts tests/annotations.test.ts tests/annotationSocketIntegration.test.ts",
     "electron:compile": "tsc -p electron/tsconfig.json",
     "electron:dev": "npm run electron:compile && electron .",
     "rebuild:native": "cd ../../node_modules/better-sqlite3 && npx prebuild-install -r electron -t 29.4.6 --arch x64 --platform win32",

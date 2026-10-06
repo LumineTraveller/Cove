@@ -71,7 +71,7 @@ let serverAccessToken = '';
 let startServer: (port?: number) => Promise<number>;
 let stopServer: () => Promise<void>;
 const bootstrapToken = 'integration-bootstrap-credential-123456789';
-const clientProtocol = 2;
+const clientProtocol = 3;
 const originalDataDir = process.env.COVE_DATA_DIR;
 const originalBootstrapToken = process.env.COVE_BOOTSTRAP_TOKEN;
 const originalServerSecurityEnabled = process.env.COVE_SERVER_SECURITY_ENABLED;
@@ -80,6 +80,8 @@ type Account = { token: string; account: { id: string; email: string; username: 
 const serverHeaders = (token = serverAccessToken) => ({
   authorization: `Bearer ${token}`,
   'x-cove-client-protocol': String(clientProtocol),
+  'x-cove-client-version': '2.0.0',
+  'x-cove-client-platform': 'desktop',
 });
 async function register(email: string, username: string): Promise<Account> {
   const response = await fetch(`${base}/api/auth/register`, { method: 'POST', headers: { 'content-type': 'application/json', ...serverHeaders() }, body: JSON.stringify({ email, password: 'password-123', username }) });
@@ -92,7 +94,7 @@ async function login(email: string): Promise<Account> {
   return response.json() as Promise<Account>;
 }
 function socketFor(account: Account) {
-  const socket = connectSocket(base, { autoConnect: false, reconnection: false, auth: { serverAccessToken, clientProtocol } });
+  const socket = connectSocket(base, { autoConnect: false, reconnection: false, auth: { serverAccessToken, clientProtocol,clientVersion:'2.0.0',clientPlatform:'desktop' } });
   const register = new Promise<any>(resolve => socket.on('connect', () => socket.emit('user:register', { username: account.account.username, clientId: `client-${account.account.id}-1234`, authToken: account.token }, resolve)));
   socket.connect();
   return { socket, register };
@@ -139,10 +141,17 @@ before(async () => {
     tokenEpoch: 1,
     authorized: false,
     secureTransportRequired: false,
+    serverVersion: '2.0.0',
+    clientPlatform: null,
+    releaseVersion: '2.0.0',
+    minimumClientVersion: '2.0.0',
+    requiredClientProtocol: 3,
+    upgradeRequired: true,
+    downloadUrl: 'https://github.com/LumineTraveller/Cove/releases/tag/v2.0.0',
   });
   const bootstrap = await fetch(`${base}/api/security/bootstrap`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...serverHeaders() },
     body: JSON.stringify({ bootstrapToken, password: 'server-password-123' }),
   });
   assert.equal(bootstrap.status, 201);
@@ -182,7 +191,7 @@ test('large avatar registration ACK is small, precedes presence and retries are 
     body: JSON.stringify({ username: 'Big Avatar', avatarUrl: inline }),
   });
   assert.equal(uploaded.status, 200);
-  const socket = connectSocket(base, { autoConnect: false, reconnection: false, transports: ['polling'], upgrade: false, auth: { serverAccessToken, clientProtocol } });
+  const socket = connectSocket(base, { autoConnect: false, reconnection: false, transports: ['polling'], upgrade: false, auth: { serverAccessToken, clientProtocol,clientVersion:'2.0.0',clientPlatform:'desktop' } });
   sockets.push(socket);
   const order: string[] = [];
   const snapshots: any[] = [];
@@ -233,7 +242,7 @@ test('server access gates sensitive REST and Socket.IO operations', { timeout: 1
   assert.equal(rooms.status, 426);
   const legacyResponse = await rooms.json() as { code?: string; error?: string };
   assert.equal(legacyResponse.code, 'CLIENT_VERSION_TOO_OLD');
-  assert.match(legacyResponse.error ?? '', /客户端版本过旧/);
+  assert.match(legacyResponse.error ?? '', /客户端需要升级到 2.0.0/);
   const legacyLogin = await fetch(`${base}/api/auth/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -244,7 +253,7 @@ test('server access gates sensitive REST and Socket.IO operations', { timeout: 1
   const status = await fetch(`${base}/api/security/status`, { headers: { authorization: `Bearer ${serverAccessToken}` } });
   assert.equal((await status.json()).authorized, true);
   const wrongPassword = await fetch(`${base}/api/security/access`, {
-    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'not-the-server-password' }),
+    method: 'POST', headers: { 'content-type': 'application/json', ...serverHeaders() }, body: JSON.stringify({ password: 'not-the-server-password' }),
   });
   assert.equal(wrongPassword.status, 401);
 
@@ -462,7 +471,7 @@ test('controller leaving voice terminates the remote control session and notifie
   const controllerAccount = await register('rc-controller@example.com', 'RC Controller');
   // 远程控制要求双方都是支持远控的桌面客户端注册。
   const desktopSocket = (account: Account) => {
-    const socket = connectSocket(base, { autoConnect: false, reconnection: false, auth: { serverAccessToken, clientProtocol } });
+    const socket = connectSocket(base, { autoConnect: false, reconnection: false, auth: { serverAccessToken, clientProtocol,clientVersion:'2.0.0',clientPlatform:'desktop' } });
     const register = new Promise<any>(resolve => socket.on('connect', () => socket.emit('user:register', {
       username: account.account.username,
       clientId: `client-${account.account.id}-rc`,

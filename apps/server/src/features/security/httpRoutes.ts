@@ -1,4 +1,5 @@
 import express from 'express';
+import {clientUpgradePolicy, requestClientIdentity} from './clientVersion';
 
 import {
   isSecureHttpRequest,
@@ -67,11 +68,14 @@ export function registerSecurityRoutes(deps: RegisterSecurityRoutesDependencies)
       return;
     }
     const current = deps.serverSecurity.status();
+    const identity = requestClientIdentity(req);
+    res.setHeader('Cache-Control', 'no-store');
     res.json({
       enabled: deps.serverSecurityEnabled,
       ...current,
       authorized: deps.serverSecurityEnabled && !!deps.serverSecurity.accessForToken(bearer),
       secureTransportRequired: deps.serverSecurityEnabled && !isSecureHttpRequest(req),
+      ...clientUpgradePolicy(identity.version, identity.platform, identity.protocol),
     });
   });
 

@@ -57,7 +57,7 @@ test('default gate rejects unauthenticated REST and sockets; real desktop and mo
   delete process.env.COVE_SERVER_SECURITY_ENABLED;
   delete process.env.COVE_BOOTSTRAP_TOKEN_FILE;
   process.env.COVE_BOOTSTRAP_TOKEN = bootstrap;
-  const headers = { 'x-cove-client-protocol': '2' };
+  const headers = { 'x-cove-client-protocol': '3', 'x-cove-client-version':'2.0.0','x-cove-client-platform':'desktop' };
   const deniedSocket = async (auth: object, expected: string) => {
     const socket = connectSocket(base, { autoConnect: false, reconnection: false, auth });
     sockets.push(socket);
@@ -82,7 +82,7 @@ test('default gate rejects unauthenticated REST and sockets; real desktop and mo
     });
     assert.equal(uninitializedRegistration.status, 503);
     assert.equal((await uninitializedRegistration.json()).code, 'SERVER_NOT_INITIALIZED');
-    await deniedSocket({ clientProtocol: 2 }, 'SERVER_NOT_INITIALIZED');
+    await deniedSocket({ clientProtocol: 3,clientVersion:'2.0.0',clientPlatform:'desktop' }, 'SERVER_NOT_INITIALIZED');
     await assert.rejects(desktopAccess({ serverURL: base, password }), { code: 'BOOTSTRAP_REQUIRED' });
 
     const desktopGrant = await desktopAccess({ serverURL: base, password, bootstrapToken: bootstrap });
@@ -95,7 +95,7 @@ test('default gate rejects unauthenticated REST and sockets; real desktop and mo
     assert.equal(unauthorizedLogin.status, 401);
     assert.equal((await unauthorizedLogin.json()).code, 'SERVER_ACCESS_REQUIRED');
     const wrong = await fetch(base + '/api/security/access', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'wrong-test-password' }),
+      method: 'POST', headers: { ...headers,'content-type': 'application/json' }, body: JSON.stringify({ password: 'wrong-test-password' }),
     });
     assert.equal(wrong.status, 401); assert.equal((await wrong.json()).code, 'INVALID_PASSWORD');
     const mobileGrant = await mobileAccess({ serverURL: base, password });
@@ -105,8 +105,8 @@ test('default gate rejects unauthenticated REST and sockets; real desktop and mo
       assert.equal(rooms.status, 200);
     }
     await deniedSocket({}, 'CLIENT_VERSION_TOO_OLD');
-    await deniedSocket({ clientProtocol: 2 }, 'SERVER_ACCESS_REQUIRED');
-    const socket = connectSocket(base, { autoConnect: false, reconnection: false, auth: { clientProtocol: 2, serverAccessToken: mobileGrant!.accessToken } });
+    await deniedSocket({ clientProtocol: 3,clientVersion:'2.0.0',clientPlatform:'desktop' }, 'SERVER_ACCESS_REQUIRED');
+    const socket = connectSocket(base, { autoConnect: false, reconnection: false, auth: { clientProtocol: 3,clientVersion:'0.8.0',clientPlatform:'mobile', serverAccessToken: mobileGrant!.accessToken } });
     sockets.push(socket);
     await new Promise<void>((resolve, reject) => { socket.once('connect', resolve); socket.once('connect_error', reject); socket.connect(); });
     assert.equal(socket.connected, true);

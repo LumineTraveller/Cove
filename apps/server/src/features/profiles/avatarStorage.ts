@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { createHash, randomUUID } from 'crypto';
+import {CLIENT_PROTOCOL_VERSION} from '@cove/contracts';
 
 const assetPath = /^\/avatars\/([a-f0-9]{64}\.(?:png|jpg|webp|gif))$/;
 const cropPattern = /^#cove-crop=-?\d+(?:\.\d+)?,-?\d+(?:\.\d+)?,\d+(?:\.\d+)?$/;
@@ -69,7 +70,7 @@ export function mapAvatarUrls<T>(value: T, origin: string, accessToken?: string)
           const url = new URL(item, origin);
           if (accessToken) {
             url.searchParams.set('access_token', accessToken);
-            url.searchParams.set('client_protocol', '2');
+            url.searchParams.set('client_protocol', String(CLIENT_PROTOCOL_VERSION));
           }
           return [key, url.href];
         }

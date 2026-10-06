@@ -7,6 +7,7 @@ import { createIdentityService } from '../features/sessions/identity';
 import { createRoomService } from '../features/rooms/roomService';
 import { createSoundpackService } from '../features/soundpacks/soundpackService';
 import { createHttpSecurity } from '../features/security/httpSecurity';
+import {clientUpgradePolicy, clientUpgradeError, isClientIdentitySupported, requestClientIdentity, requireClientVersion} from '../features/security/clientVersion';
 import { createMediaService } from '../features/media/mediaService';
 import { createVoiceService } from '../features/voice/voiceService';
 import { createMembershipService } from '../features/rooms/membershipService';
@@ -61,6 +62,17 @@ export function createServerRuntime() {
   app.use(cors({ origin: '*' }));
 
   app.use(express.json({ limit: '15mb' }));
+  // These probes and release files stay public so an unsupported client can
+  // learn how to update before either password or account authentication.
+  app.get('/api/version', (req, res) => {
+    const identity = requestClientIdentity(req);
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(clientUpgradePolicy(identity.version, identity.platform, identity.protocol));
+  });
+  app.use('/api', (req, res, next) => {
+    if (req.path === '/security/status' && req.method === 'GET') { next(); return; }
+    requireClientVersion(req, res, next);
+  });
 
   const io = new Server(httpServer, {
     cors: { origin: '*', methods: ['GET', 'POST'] },
@@ -847,6 +859,17 @@ export function createServerRuntime() {
   });
 
   io.use((socket, next) => {
+    const identity = socket.handshake.auth as {clientVersion?: unknown; clientPlatform?: unknown; clientProtocol?: unknown} | undefined;
+    if (!isClientIdentitySupported(identity?.clientVersion, identity?.clientPlatform, identity?.clientProtocol)) {
+      const upgrade = clientUpgradeError(identity?.clientVersion, identity?.clientPlatform, identity?.clientProtocol);
+      const transportError = new Error(upgrade.error) as Error & {data?: typeof upgrade};
+      transportError.data = upgrade;
+      next(transportError);
+      return;
+    }
+    socket.data.clientVersion = identity?.clientVersion;
+    socket.data.clientPlatform = identity?.clientPlatform;
+    socket.data.clientProtocol = identity?.clientProtocol;
     if (!serverSecurityEnabled) {
       next();
       return;
@@ -908,11 +931,12 @@ export function createServerRuntime() {
   recoveryAdapter.restoreSession = async (pid, offset) => {
     const session = await restoreSession(pid, offset);
     if (session) {
-      const data = session.data as { authToken?: string; serverAccessToken?: string };
+      const data = session.data as { authToken?: string; serverAccessToken?: string; clientVersion?: unknown; clientPlatform?: unknown; clientProtocol?: unknown };
       const token = data?.authToken;
       const serverAccessToken = data?.serverAccessToken;
       if (
         !peers.has(session.sid) ||
+        !isClientIdentitySupported(data.clientVersion, data.clientPlatform, data.clientProtocol) ||
         (serverSecurityEnabled && !serverSecurity.accessForToken(serverAccessToken)) ||
         (token && !accounts.accountForToken(token))
       ) {
