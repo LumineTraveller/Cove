@@ -1,11 +1,22 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {compareSemanticVersions, isSupportedClientVersion} from '@cove/contracts';
+import {compareSemanticVersions, isSupportedClientVersion, minimumClientVersionForPlatform, CLIENT_PROTOCOL_VERSION} from '@cove/contracts';
 
 test('2.0.0 gate uses semantic precedence, including prerelease and build metadata', () => {
   for (const version of ['0.7.0','1.9.9','1.10.0','2.0.0-rc.1','2.0.0-beta.10']) assert.equal(isSupportedClientVersion(version),false,version);
   for (const version of ['2.0.0','2.0.0+build.123','2.0.1','2.10.0','10.0.0']) assert.equal(isSupportedClientVersion(version),true,version);
   for (const version of [undefined,null,2,'','v2.0.0','2.0','02.0.0','2.0.0-01','2.0.0+','2.0.0\n','9007199254740992.0.0']) assert.equal(isSupportedClientVersion(version),false,String(version));
+});
+
+test('mobile and desktop release lines have distinct minimum versions under protocol 3', () => {
+  assert.equal(CLIENT_PROTOCOL_VERSION,3);
+  assert.equal(minimumClientVersionForPlatform('mobile'),'0.8.0');
+  assert.equal(minimumClientVersionForPlatform('desktop'),'2.0.0');
+  assert.equal(minimumClientVersionForPlatform('browser'),null);
+  assert.equal(isSupportedClientVersion('0.8.0',minimumClientVersionForPlatform('mobile')),true);
+  assert.equal(isSupportedClientVersion('0.8.0-rc.1',minimumClientVersionForPlatform('mobile')),false);
+  assert.equal(isSupportedClientVersion('0.7.0',minimumClientVersionForPlatform('mobile')),false);
+  assert.equal(isSupportedClientVersion('0.8.0',minimumClientVersionForPlatform('desktop')),false);
 });
 
 test('semver ordering is numeric for core and prerelease identifiers', () => {

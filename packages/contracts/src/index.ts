@@ -1,5 +1,5 @@
 /** Public wire models. Optional fields remain optional for legacy peers. */
-export {COVE_RELEASE_VERSION, MINIMUM_CLIENT_VERSION, compareSemanticVersions, isSupportedClientVersion} from './versionPolicy';
+export {COVE_RELEASE_VERSION, MINIMUM_CLIENT_VERSION, MINIMUM_MOBILE_CLIENT_VERSION, CLIENT_RELEASE_VERSIONS, CLIENT_MINIMUM_VERSIONS, minimumClientVersionForPlatform, compareSemanticVersions, isSupportedClientVersion} from './versionPolicy';
 export type ClientPlatform = 'desktop' | 'mobile';
 export type MediaSourceType = 'mic' | 'screen' | 'screen-audio' | 'application-audio';
 
@@ -94,8 +94,8 @@ export interface RegistrationRequest {
   platform: ClientPlatform;
   remoteControlSupported?: boolean;
 }
-/** This is the existing server-access marker, not a new mandatory negotiation. */
-export const CLIENT_PROTOCOL_VERSION = 2;
+/** Protocol 3 requires application version and platform negotiation. */
+export const CLIENT_PROTOCOL_VERSION = 3;
 
 export type {
   AnnotationAck,
