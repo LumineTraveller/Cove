@@ -4,7 +4,12 @@ export type RemoteControlInput =
   | { type: 'wheel'; deltaX: number; deltaY: number; x: number; y: number }
   | { type: 'key'; code: string; down: boolean };
 
-/** Leading/trailing 16ms pointer throttle; every non-pointer is an ordering barrier. */
+// 16ms capped native cursor updates near 60Hz even on 120/144Hz controllers.
+// Bound mouse traffic to 125Hz, leaving headroom under the server's 240/s
+// input limit for button, wheel and keyboard edges. No synthetic positions.
+export const REMOTE_POINTER_INTERVAL_MS = 8;
+
+/** Leading/trailing pointer throttle; every non-pointer is an ordering barrier. */
 export class RemotePointerSender {
   private lastSent = -Infinity;
   private pending: Extract<RemoteControlInput, { type: 'pointer' }> | null = null;
@@ -22,7 +27,7 @@ export class RemotePointerSender {
       return;
     }
     this.pending = input;
-    const remaining = 16 - (this.now() - this.lastSent);
+    const remaining = REMOTE_POINTER_INTERVAL_MS - (this.now() - this.lastSent);
     if (remaining <= 0) this.flush();
     else if (this.timer === null) this.timer = setTimeout(() => this.flush(), remaining);
   }

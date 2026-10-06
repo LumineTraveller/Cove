@@ -281,6 +281,9 @@ internal static class RemoteInputHelper
         StartMouseActivityHook();
         var serializer = new JavaScriptSerializer { MaxJsonLength = 8192 };
         try {
+            // Pay serializer/dispatcher JIT cost before declaring readiness.
+            // The unknown type is a no-op: no pointer, button or key injection.
+            Handle(serializer.Deserialize<Message>("{\"type\":\"noop\",\"seq\":1}"));
             Console.WriteLine("{\"ready\":true}");
             Console.Out.Flush();
             string line;
