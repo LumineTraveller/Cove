@@ -23,7 +23,7 @@ jest.mock('../src/features/connection/serverSecurity', () => ({
   getServerAccessToken: jest.fn(() => 'server-access-token'),
   clearServerAccessToken: jest.fn(),
   ensureServerAccess: jest.fn(),
-  serverFetch: jest.fn(),
+  serverFetch: jest.fn(async () => ({ ok: true, json: async () => ({ serverVersion: '2.0.0', minimumClientVersion: '0.8.0', upgradeRequired: false }) })),
   requiresServerAccessRecovery: (code: unknown) => ['SERVER_NOT_INITIALIZED', 'SERVER_ACCESS_REQUIRED', 'SERVER_ACCESS_INVALID', 'INSECURE_TRANSPORT'].includes(String(code)),
 }));
 const mockSocket = { on: jest.fn(), off: jest.fn(), connect: jest.fn(), disconnect: jest.fn() };

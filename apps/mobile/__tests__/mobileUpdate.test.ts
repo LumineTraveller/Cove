@@ -22,6 +22,10 @@ test('uses actual Android versionCode rather than desktop or display versions', 
   expect((await checkAndroidUpdate({ ...installed, versionCode: 7 }, async () => feed())).candidate).toBeNull();
 });
 
+test('a higher versionCode cannot offer a semantically older release', async () => {
+  expect((await checkAndroidUpdate({ ...installed, versionName: '2.0.0' }, async () => feed())).candidate).toBeNull();
+});
+
 test('falls back to a working mirror and reports partial failure', async () => {
   const result = await checkAndroidUpdate(installed, async s => {
     if (s === 'github') throw new Error('offline');

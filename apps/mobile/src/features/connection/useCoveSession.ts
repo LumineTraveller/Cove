@@ -30,6 +30,11 @@ import {
   type ServerSecurityStatus,
 } from './serverSecurity';
 import { resolveServerIdentity } from './serverIdentity';
+import { MOBILE_RELEASE_VERSION } from './clientVersion';
+import {
+  readUpgradePolicy,
+  requireClientUpgrade,
+} from '../updates/versionPolicy';
 
 export function useCoveSession() {
   const insets = useSafeAreaInsets();
@@ -47,9 +52,8 @@ export function useCoveSession() {
   useEffect(() => {
     readSessionConfig()
       .then(async saved => {
-        // In the default password-free mode the remembered account can resume
-        // immediately. An enabled server will reject the first socket attempt
-        // without an access token and return the user to the unlock form.
+        // Remembered account data is retained; an enabled server asks for a new
+        // process-local access token before resuming the session.
         setConfig(saved);
         setRememberedServers(await readRememberedServers());
       })
@@ -77,6 +81,7 @@ export function useCoveSession() {
           clientId: config.clientId,
           authToken: config.accountToken,
           platform: 'mobile',
+          clientVersion: MOBILE_RELEASE_VERSION,
         },
         (
           timeoutError: Error | null,
@@ -84,6 +89,11 @@ export function useCoveSession() {
         ) => {
           if (!active) return;
           if (timeoutError || response?.ok === false) {
+            if (response?.code === 'CLIENT_VERSION_TOO_OLD') {
+              requireClientUpgrade(response);
+              nextSocket.disconnect();
+              return;
+            }
             if (response?.error?.includes('登录已失效')) {
               setSavingConfig(true);
               setSelectedRoom(null);
@@ -138,6 +148,11 @@ export function useCoveSession() {
       if (!active) return;
       setSessionReady(false);
       const code = (cause as Error & { data?: { code?: string } }).data?.code;
+      if (code === 'CLIENT_VERSION_TOO_OLD') {
+        requireClientUpgrade((cause as Error & { data?: unknown }).data);
+        nextSocket.disconnect();
+        return;
+      }
       if (requiresServerAccessRecovery(code)) {
         requireServerUnlock(cause.message);
         return;
@@ -177,6 +192,19 @@ export function useCoveSession() {
       config.allowInvalidServerCertificate === true,
     )
       .then(() => {
+        // An offline public-version probe must not disable Socket.IO's retry
+        // loop. The handshake still enforces the server's minimum version.
+        return serverFetch(config.serverURL, '/api/version').catch(() => null);
+      })
+      .then(async response => {
+        if (!active) return;
+        if (response?.ok) {
+          const policy = readUpgradePolicy(await response.json());
+          if (policy?.upgradeRequired) {
+            requireClientUpgrade(policy);
+            return;
+          }
+        }
         if (active) nextSocket.connect();
       })
       .catch(cause => {

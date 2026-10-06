@@ -6,6 +6,7 @@ import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
+import com.facebook.react.bridge.ReadableMap
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.io.ByteArrayOutputStream
@@ -32,6 +33,7 @@ internal fun mobileUpdateFeedUrl(source: String, serverURL: String): String? = w
 class MobileUpdateModule(context: ReactApplicationContext) : ReactContextBaseJavaModule(context) {
   private val executor = Executors.newFixedThreadPool(2)
   private val client = createMobileUpdateClient()
+  private val apkUpdater = MobileApkUpdater(context)
 
   override fun getName() = "CoveMobileUpdate"
 
@@ -77,7 +79,40 @@ class MobileUpdateModule(context: ReactApplicationContext) : ReactContextBaseJav
     }
   }
 
+  @ReactMethod fun downloadApk(source: String, serverURL: String, release: ReadableMap, promise: Promise) {
+    try {
+      val expected = MobileApkRelease(
+        release.getString("versionName") ?: "", release.getDouble("versionCode").toLong(),
+        release.getInt("minAndroidApi"), release.getString("packageName") ?: "",
+        release.getString("tag") ?: "", release.getString("filename") ?: "",
+        release.getDouble("size").toLong(), release.getString("sha256") ?: "",
+      )
+      executor.execute {
+        try { apkUpdater.download(source, serverURL, expected); promise.resolve(expected.sha256) }
+        catch (error: Exception) { promise.reject("APK_DOWNLOAD", "更新下载或校验失败：${error.message}", error) }
+      }
+    } catch (error: Exception) { promise.reject("APK_METADATA", "安装包元数据无效", error) }
+  }
+
+  @ReactMethod fun cancelDownload(promise: Promise) { apkUpdater.cancel(); promise.resolve(null) }
+
+  @ReactMethod fun installApk(sha256: String, promise: Promise) {
+    executor.execute {
+      try { apkUpdater.install(sha256); promise.resolve(null) }
+      catch (error: Exception) {
+        val code = if (error.message == "INSTALL_PERMISSION_REQUIRED") "INSTALL_PERMISSION_REQUIRED" else "APK_INSTALL"
+        promise.reject(code, if (code == "INSTALL_PERMISSION_REQUIRED") "请自行允许 Cove 安装更新，然后返回点击安装。" else "无法启动安装：${error.message}", error)
+      }
+    }
+  }
+
+  @ReactMethod fun openInstallSettings(promise: Promise) {
+    try { apkUpdater.openInstallSettings(); promise.resolve(null) }
+    catch (error: Exception) { promise.reject("INSTALL_SETTINGS", "无法打开安装权限设置", error) }
+  }
+
   override fun invalidate() {
+    apkUpdater.cancel()
     client.dispatcher.cancelAll()
     client.connectionPool.evictAll()
     executor.shutdownNow()

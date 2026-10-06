@@ -13,6 +13,12 @@ const config = {
     // Keep React Native on its own React 19 runtime, not desktop React 18.
     nodeModulesPaths: [path.resolve(__dirname, 'node_modules')],
     disableHierarchicalLookup: true,
+    // npm file links resolve to a physical path on Windows, including when
+    // Gradle uses a temporary short drive mapping for native builds.
+    extraNodeModules: {
+      '@cove/contracts': path.resolve(__dirname, '../../packages/contracts'),
+      '@cove/client-core': path.resolve(__dirname, '../../packages/client-core'),
+    },
   },
 };
 

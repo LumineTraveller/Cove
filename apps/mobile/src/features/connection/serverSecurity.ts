@@ -1,4 +1,11 @@
-export const CLIENT_PROTOCOL_VERSION = 2;
+import { CLIENT_PROTOCOL_VERSION } from '@cove/contracts';
+import {
+  readUpgradePolicy,
+  requireClientUpgrade,
+  type ClientUpgradePolicy,
+} from '../updates/versionPolicy';
+import { MOBILE_RELEASE_VERSION } from './clientVersion';
+export { CLIENT_PROTOCOL_VERSION };
 
 export type ServerSecurityErrorCode =
   | 'INVALID_PASSWORD'
@@ -16,7 +23,7 @@ export type ServerSecurityErrorCode =
   | 'SECURITY_UNAVAILABLE'
   | 'BOOTSTRAP_REQUIRED';
 
-export interface ServerSecurityStatus {
+export interface ServerSecurityStatus extends Partial<ClientUpgradePolicy> {
   enabled: boolean;
   configured: boolean;
   bootstrapAvailable: boolean;
@@ -129,20 +136,31 @@ export function serverRequestInit(
 ): RequestInit {
   const headers = new Headers(init.headers);
   headers.set('X-Cove-Client-Protocol', String(CLIENT_PROTOCOL_VERSION));
+  headers.set('X-Cove-Client-Version', MOBILE_RELEASE_VERSION);
+  headers.set('X-Cove-Client-Platform', 'mobile');
   const token = getServerAccessToken(serverURL);
   if (token) headers.set('Authorization', `Bearer ${token}`);
   return { ...init, headers };
 }
 
-export function serverFetch(
+export async function serverFetch(
   serverURL: string,
   target: string,
   init: RequestInit = {},
 ): Promise<Response> {
-  return fetch(
+  const response = await fetch(
     requestURL(serverURL, target),
     serverRequestInit(serverURL, init),
   );
+  if (response.status === 426 && typeof response.clone === 'function') {
+    const payload = await response
+      .clone()
+      .json()
+      .catch(() => ({}));
+    if (payload.code === 'CLIENT_VERSION_TOO_OLD')
+      requireClientUpgrade(payload);
+  }
+  return response;
 }
 
 export function authorizedResourceURL(
@@ -151,10 +169,14 @@ export function authorizedResourceURL(
 ): string {
   const url = requestURL(serverURL, target);
   const token = getServerAccessToken(serverURL);
-  if (!token) return url;
   try {
     const parsed = new URL(url);
-    parsed.searchParams.set('access_token', token);
+    // Never attach a server token or version metadata to external chat images.
+    if (parsed.origin !== new URL(serverURL).origin) return url;
+    if (token) parsed.searchParams.set('access_token', token);
+    parsed.searchParams.set('client_version', MOBILE_RELEASE_VERSION);
+    parsed.searchParams.set('client_platform', 'mobile');
+    parsed.searchParams.set('client_protocol', String(CLIENT_PROTOCOL_VERSION));
     return parsed.toString();
   } catch {
     return url;
@@ -172,6 +194,8 @@ async function assertResponse(
 ): Promise<Record<string, unknown>> {
   const payload = await readPayload(response);
   if (!response.ok) {
+    if (payload.code === 'CLIENT_VERSION_TOO_OLD')
+      requireClientUpgrade(payload);
     throw new ServerSecurityClientError(
       typeof payload.error === 'string'
         ? payload.error
@@ -199,6 +223,8 @@ export async function readServerSecurityStatus(
     };
   }
   const payload = await assertResponse(response);
+  const policy = readUpgradePolicy(payload);
+  if (policy?.upgradeRequired) requireClientUpgrade(policy);
   const enabled =
     payload.enabled === true ||
     (payload.enabled !== false &&
@@ -212,6 +238,7 @@ export async function readServerSecurityStatus(
     tokenEpoch: typeof payload.tokenEpoch === 'number' ? payload.tokenEpoch : 0,
     authorized: payload.authorized === true,
     secureTransportRequired: payload.secureTransportRequired === true,
+    ...policy,
   };
 }
 
@@ -279,6 +306,12 @@ export async function ensureServerAccess(options: {
     clearServerAccessToken(options.serverURL);
   }
   const status = await readServerSecurityStatus(options.serverURL);
+  if (status.upgradeRequired)
+    throw new ServerSecurityClientError(
+      '当前版本不符合服务器要求，请完成更新后连接。',
+      426,
+      'CLIENT_VERSION_TOO_OLD',
+    );
   if (!status.enabled) return null;
   if (!status.configured) {
     if (!options.bootstrapToken?.trim())

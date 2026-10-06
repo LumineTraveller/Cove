@@ -1,4 +1,6 @@
 import { UPDATE_DOWNLOAD_BASE_URL } from './updateConfig';
+import { compareSemanticVersions } from '@cove/contracts';
+import { MOBILE_MINIMUM_VERSION } from '../connection/clientVersion';
 
 export type UpdateSource = 'github' | 'cloud';
 export const UPDATE_SOURCES: UpdateSource[] = ['github', 'cloud'];
@@ -28,6 +30,7 @@ export interface UpdateCheckResult {
   candidate: UpdateCandidate | null;
   checkedSources: UpdateSource[];
   errors: string[];
+  minimumClientVersion: string;
 }
 
 // Native requests have their own deadline; this also covers a missing/hung bridge callback.
@@ -141,9 +144,18 @@ export async function checkAndroidUpdate(
   const results = await Promise.all(
     sources.map(async source => {
       try {
+        const raw = await withUpdateTimeout(fetchFeed(source));
+        const feed = JSON.parse(raw);
+        const minimum = feed.minimumClientVersion ?? MOBILE_MINIMUM_VERSION;
+        if (
+          typeof minimum !== 'string' ||
+          !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(minimum)
+        )
+          throw new Error('更新清单的最低客户端版本无效');
         return {
           source,
-          release: parseUpdateFeed(await withUpdateTimeout(fetchFeed(source))),
+          release: parseUpdateFeed(raw),
+          minimum,
         };
       } catch {
         errors.push(`${SOURCE_NAMES[source]} 检查失败`);
@@ -161,7 +173,15 @@ export async function checkAndroidUpdate(
         : 'GitHub 无法检查更新，请检查网络后重试',
     );
   const newer = successful
-    .filter(r => r.release && r.release.versionCode > installed.versionCode)
+    .filter(
+      r =>
+        r.release &&
+        r.release.versionCode > installed.versionCode &&
+        (compareSemanticVersions(
+          r.release.versionName,
+          installed.versionName,
+        ) ?? 1) >= 0,
+    )
     .sort(
       (a, b) =>
         b.release!.versionCode - a.release!.versionCode ||
@@ -169,7 +189,15 @@ export async function checkAndroidUpdate(
     );
   const latest = newer[0]?.release;
   const checkedSources = successful.map(r => r.source);
-  if (!latest) return { candidate: null, checkedSources, errors };
+  const minimumClientVersion = successful.reduce(
+    (highest, item) =>
+      (compareSemanticVersions(item.minimum, highest) ?? 0) > 0
+        ? item.minimum
+        : highest,
+    MOBILE_MINIMUM_VERSION,
+  );
+  if (!latest)
+    return { candidate: null, checkedSources, errors, minimumClientVersion };
   const matching = newer.filter(
     r => r.release!.versionCode === latest.versionCode,
   );
@@ -192,5 +220,6 @@ export async function checkAndroidUpdate(
     candidate: { release: latest, sources: matching.map(r => r.source) },
     checkedSources,
     errors,
+    minimumClientVersion,
   };
 }

@@ -80,6 +80,13 @@ def enableProguardInReleaseBuilds = false
  */
 def jscFlavor = 'io.github.react-native-community:jsc-android:2026004.+'
 
+// Native APK downloads use the same checked-in HTTPS origin as the update UI.
+// An empty configuration deliberately permits only the pinned GitHub source.
+def updateConfigSource = file("../../src/features/updates/updateConfig.ts").getText("UTF-8")
+def updateConfigMatch = updateConfigSource =~ /UPDATE_DOWNLOAD_BASE_URL[^=]*=\s*(['"])(.*?)\1/
+if (!updateConfigMatch.find()) throw new GradleException("Cannot read mobile update origin")
+def updateDownloadBaseUrl = updateConfigMatch.group(2)
+
 android {
     ndkVersion rootProject.ext.ndkVersion
     buildToolsVersion rootProject.ext.buildToolsVersion
@@ -90,8 +97,9 @@ android {
         applicationId "com.cove.mobile"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 12
-        versionName "0.7.0"
+        versionCode 13
+        versionName "0.8.0"
+        buildConfigField "String", "COVE_UPDATE_DOWNLOAD_BASE_URL", groovy.json.JsonOutput.toJson(updateDownloadBaseUrl)
     }
     signingConfigs {
         debug {
