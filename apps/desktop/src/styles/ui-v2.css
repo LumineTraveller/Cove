@@ -3032,13 +3032,6 @@ select:focus-visible {
 .remote-video-surface.controlling {
   cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 8 8'%3E%3Ccircle cx='4' cy='4' r='1.6' fill='white' stroke='%23252a30' stroke-width='.45'/%3E%3C/svg%3E") 4 4, default;
 }
-.remote-control-frame {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  border: 1px solid rgba(103, 215, 161, 0.65);
-  box-shadow: inset 0 0 0 2px rgba(103, 215, 161, 0.12);
-}
 .share-view {
   position: relative;
   min-height: 0;
@@ -3078,6 +3071,16 @@ select:focus-visible {
 .share-view.screen-maximized .video-surface,
 .share-view.application-fullscreen-view .video-surface {
   border-radius: 0;
+}
+/* The app fullscreen surface reaches y=0. Its transparent native titlebar
+   otherwise captures the first 38px as a drag region instead of video input.
+   The share status bar and Escape retain fullscreen exit controls. */
+body:has(.share-view.screen-maximized) .cove-window-titlebar {
+  display: none;
+}
+.share-view.screen-maximized,
+.video-surface:fullscreen {
+  -webkit-app-region: no-drag;
 }
 .share-view.application-fullscreen-view .video-surface {
   flex: 1;

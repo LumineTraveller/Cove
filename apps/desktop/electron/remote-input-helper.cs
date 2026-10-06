@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Web.Script.Serialization;
@@ -120,6 +122,10 @@ internal static class RemoteInputHelper
     private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
     [DllImport("user32.dll")]
     private static extern int GetSystemMetrics(int index);
+    [DllImport("user32.dll")]
+    private static extern bool GetPhysicalCursorPos(out POINT point);
+    [DllImport("user32.dll")]
+    private static extern bool SetProcessDPIAware();
     [DllImport("user32.dll", CharSet = CharSet.Auto)]
     private static extern IntPtr SendMessageTimeout(IntPtr window, uint message,
         UIntPtr wParam, IntPtr lParam, uint flags, uint timeout, out UIntPtr result);
@@ -167,6 +173,11 @@ internal static class RemoteInputHelper
         return (int)Math.Round(value * 65535.0);
     }
 
+    private static void Inject(INPUT input) {
+        if (SendInput(1, new[] { input }, Marshal.SizeOf(typeof(INPUT))) != 1)
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Windows rejected remote input");
+    }
+
     private static void SendMouse(uint flags, uint data, double x, double y) {
         var input = new INPUT {
             type = INPUT_MOUSE,
@@ -175,7 +186,7 @@ internal static class RemoteInputHelper
                 dwFlags = flags, time = 0, dwExtraInfo = UIntPtr.Zero,
             } },
         };
-        SendInput(1, new[] { input }, Marshal.SizeOf(typeof(INPUT)));
+        Inject(input);
     }
 
     private static ushort KeyCode(string code) {
@@ -203,13 +214,16 @@ internal static class RemoteInputHelper
                 time = 0, dwExtraInfo = UIntPtr.Zero,
             } },
         };
-        SendInput(1, new[] { input }, Marshal.SizeOf(typeof(INPUT)));
+        Inject(input);
     }
 
+    private static bool Suppressed;
     private static void Handle(Message message) {
+        Suppressed = false;
         if (message == null || String.IsNullOrEmpty(message.type)) return;
         var isMouse = message.type == "pointer" || message.type == "button" || message.type == "wheel";
         if (isMouse && LocalMouseActive()) {
+            Suppressed = true;
             // 本机用户正在操作鼠标：立即释放远控按下的鼠标键并丢弃本次远控输入。
             PendingMinimize = IntPtr.Zero;
             if (PressedButtons.Count > 0) ReleaseMouseButtons();
@@ -259,25 +273,36 @@ internal static class RemoteInputHelper
     }
 
     private static void ReleaseMouseButtons() {
+        Exception failure = null;
         foreach (var button in new List<string>(PressedButtons)) {
             uint flag = button == "left" ? MOUSEEVENTF_LEFTUP : button == "right" ? MOUSEEVENTF_RIGHTUP : MOUSEEVENTF_MIDDLEUP;
-            SendMouse(flag, 0, 0, 0);
+            try { SendMouse(flag, 0, 0, 0); }
+            catch (Exception error) { if (failure == null) failure = error; }
         }
         PressedButtons.Clear();
+        if (failure != null) throw failure;
     }
 
     private static void ReleaseAll() {
         PendingMinimize = IntPtr.Zero;
+        Exception failure = null;
         foreach (var key in new List<ushort>(PressedKeys)) {
             var input = new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = key, dwFlags = KEYEVENTF_KEYUP } } };
-            SendInput(1, new[] { input }, Marshal.SizeOf(typeof(INPUT)));
+            try { Inject(input); }
+            catch (Exception error) { if (failure == null) failure = error; }
         }
-        ReleaseMouseButtons();
+        try { ReleaseMouseButtons(); }
+        catch (Exception error) { if (failure == null) failure = error; }
         PressedKeys.Clear(); PressedButtons.Clear();
+        if (failure != null) throw failure;
     }
 
     public static void Main(string[] args) {
+        // Absolute SendInput addresses physical primary-screen pixels. Keep
+        // caption hit-testing and diagnostic cursor coordinates in that space.
+        SetProcessDPIAware();
         if (args.Length > 0) UInt32.TryParse(args[0], out CoveProcessId);
+        var diagnostic = Array.IndexOf(args, "--diagnostic") >= 0;
         StartMouseActivityHook();
         var serializer = new JavaScriptSerializer { MaxJsonLength = 8192 };
         try {
@@ -292,9 +317,15 @@ internal static class RemoteInputHelper
                     var message = serializer.Deserialize<Message>(line);
                     if (message != null && message.type == "stop") break;
                     if (message == null || message.seq <= 0) break;
+                    var before = diagnostic ? Stopwatch.GetTimestamp() : 0;
                     Handle(message);
                     // Consumption acknowledgement only; no network round trip.
-                    Console.WriteLine("{\"seq\":" + message.seq + "}");
+                    if (diagnostic) {
+                        POINT cursor; GetPhysicalCursorPos(out cursor);
+                        Console.WriteLine(serializer.Serialize(new { seq = message.seq, suppressed = Suppressed,
+                            handleMs = (Stopwatch.GetTimestamp() - before) * 1000.0 / Stopwatch.Frequency,
+                            cursorX = cursor.x, cursorY = cursor.y }));
+                    } else Console.WriteLine("{\"seq\":" + message.seq + "}");
                     Console.Out.Flush();
                 } catch {
                     Console.WriteLine("{\"error\":true}");
@@ -302,6 +333,12 @@ internal static class RemoteInputHelper
                     break;
                 }
             }
-        } finally { ReleaseAll(); }
+        } finally {
+            try { ReleaseAll(); }
+            catch {
+                Console.WriteLine("{\"error\":true}");
+                Console.Out.Flush();
+            }
+        }
     }
 }

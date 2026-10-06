@@ -10,7 +10,10 @@ const yaml = require('js-yaml');
 const asar = require('@electron/asar');
 const root = path.resolve(__dirname, '..');
 const output = path.join(root, 'apps/desktop/dist-app-remote-input-2.0.1');
-const installer = path.join(output, 'Cove-Setup-2.0.1.exe');
+const installerName = process.argv[2] ?? 'Cove-Setup-2.0.1.exe';
+assert.ok(['Cove-Setup-2.0.1.exe', 'Cove-Setup-2.0.1-raw-input.exe'].includes(installerName));
+const rawInputCandidate = installerName.includes('raw-input');
+const installer = path.join(output, installerName);
 const rollback = path.join(root, 'runtime/rollback-2.0.0/Cove-Setup-2.0.0.exe');
 async function fingerprint(file, algorithm = 'sha256', encoding = 'hex') {
   const hash = createHash(algorithm);
@@ -60,11 +63,12 @@ async function main() {
   const policy = JSON.parse(fs.readFileSync(liveFile, 'utf8'));
   assert.equal(policy.minimumClientVersion, '2.0.0'); assert.equal(policy.requiredClientProtocol, 3);
   assert.equal(policy.upgradeRequired, false);
-  const smoke = JSON.parse(fs.readFileSync(path.join(root, 'runtime/remote-input-packaged-smoke.json'), 'utf8'));
+  const smoke = JSON.parse(fs.readFileSync(path.join(root, rawInputCandidate ? 'runtime/remote-input-raw-packaged-smoke.json' : 'runtime/remote-input-packaged-smoke.json'), 'utf8'));
   assert.equal(smoke.archiveSha256, payload.find(row => row.entry === 'resources\\app.asar').sha256);
   assert.equal(smoke.actualPackagedExecutableStarted, true); assert.equal(smoke.helpersExited, true);
   const report = { verifiedAt: new Date().toISOString(), appId: manifest.build.appId, productName: manifest.build.productName,
     packageName: packed.name, version: packed.version, sourceFixCommits: ['d4c18a4', '152bfce'],
+    rawInputCandidate, sourceHead: process.env.COVE_CANDIDATE_SOURCE_HEAD ?? null,
     installer: { path: installer, size: fs.statSync(installer).size, sha256: await fingerprint(installer), sha512: metadata.files[0].sha512 },
     rollback: { path: rollback, size: fs.statSync(rollback).size, version: '2.0.0', sha256: rollbackSha256,
       source: 'https://github.com/LumineTraveller/Cove/releases/download/v2.0.0/Cove-Setup-2.0.0.exe', publishedDigestMatched: true },
@@ -72,7 +76,7 @@ async function main() {
     liveVersionPolicy: { url: 'http://39.106.95.59:3001/api/version', requestedVersion: '2.0.1', requestedPlatform: 'desktop',
       requestedProtocol: 3, observedAt: fs.statSync(liveFile).mtime.toISOString(), policy },
     packagedSmoke: smoke, installed: false, published: false, serverChanged: false, mobileChanged: false };
-  fs.writeFileSync(path.join(root, 'runtime/remote-input-2.0.1-artifact.json'), JSON.stringify(report, null, 2) + '\n');
+  fs.writeFileSync(path.join(root, rawInputCandidate ? 'runtime/remote-input-raw-artifact.json' : 'runtime/remote-input-2.0.1-artifact.json'), JSON.stringify(report, null, 2) + '\n');
   console.log(JSON.stringify({ verifiedAt: report.verifiedAt, installer: report.installer, rollback: report.rollback,
     payloadEntriesMatched: payload.length, liveVersionAccepted: true, packagedStartupAndRevokePassed: true }, null, 2));
 }

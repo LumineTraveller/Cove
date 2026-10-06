@@ -85,6 +85,47 @@ test('native warmup injects nothing; a stubbed OS boundary preserves drag, wheel
       assert.deepEqual(held.filter(row => row.seq).map(row => row.seq), [1, 2]);
       assert.deepEqual(held.filter(row => row.injected).slice(-2).map(row => [row.injected.type, row.injected.flags]),
         [[1, 2], [0, 4]], 'stop releases held key and mouse button before exiting');
+      // A rejected real OS boundary must produce a failure, never a successful
+      // consumption ACK. The fixture remains a recorder and injects nothing.
+      const rejectedSource = stubbed.replace('private static uint SendInput(',
+        'private static bool RejectOnce = true;\n    private static uint SendInput(')
+        .replace('return count;', 'if (RejectOnce) { RejectOnce = false; return 0; } return count;');
+      const rejectedPath = path.join(temp, 'rejected.cs');
+      const rejectedExecutable = path.join(temp, 'rejected.exe');
+      fs.writeFileSync(rejectedPath, rejectedSource);
+      const rejectedBuild = spawnSync(compiler, ['/nologo', '/target:exe', '/optimize+', '/platform:x64',
+        `/out:${rejectedExecutable}`, '/reference:System.Web.Extensions.dll', '/reference:System.Windows.Forms.dll', rejectedPath],
+        { encoding: 'utf8', windowsHide: true, timeout: 10_000 });
+      assert.equal(rejectedBuild.status, 0, rejectedBuild.stdout + rejectedBuild.stderr);
+      const rejectedChild = spawnSync(rejectedExecutable, ['0'], { input: [
+        { type: 'key', code: 'ShiftLeft', down: true, seq: 1 },
+        { type: 'pointer', x: .75, y: .25, seq: 2 },
+      ].map(message => JSON.stringify(message)).join('\n') + '\n',
+        encoding: 'utf8', windowsHide: true, timeout: 3000 });
+      assert.equal(rejectedChild.status, 0, rejectedChild.stderr);
+      const rejected = rejectedChild.stdout.trim().split(/\r?\n/).map(line => JSON.parse(line));
+      assert.equal(rejected.filter(row => row.seq).length, 0);
+      assert.deepEqual(rejected.filter(row => row.error), [{ error: true }]);
+      assert.deepEqual(rejected.filter(row => row.injected).map(row => [row.injected.type, row.injected.flags]),
+        [[1, 0], [1, 2]], 'failed press stops input and still attempts a held-key release');
+      fs.writeFileSync(rejectedPath, stubbed.replace('return count;',
+        'return input.type == 1 && input.U.ki.dwFlags == 2 && input.U.ki.wVk == 0xA0 ? 0U : count;'));
+      const releaseBuild = spawnSync(compiler, ['/nologo', '/target:exe', '/optimize+', '/platform:x64',
+        `/out:${rejectedExecutable}`, '/reference:System.Web.Extensions.dll', '/reference:System.Windows.Forms.dll', rejectedPath],
+        { encoding: 'utf8', windowsHide: true, timeout: 10_000 });
+      assert.equal(releaseBuild.status, 0, releaseBuild.stdout + releaseBuild.stderr);
+      const releaseFailure = spawnSync(rejectedExecutable, ['0'], { input: [
+        { type: 'key', code: 'ShiftLeft', down: true, seq: 1 },
+        { type: 'key', code: 'ControlLeft', down: true, seq: 2 },
+        { type: 'button', button: 'left', down: true, x: .5, y: .5, seq: 3 },
+        { type: 'stop' },
+      ].map(message => JSON.stringify(message)).join('\n') + '\n',
+        encoding: 'utf8', windowsHide: true, timeout: 3000 });
+      assert.equal(releaseFailure.status, 0);
+      const released = releaseFailure.stdout.trim().split(/\r?\n/).map(line => JSON.parse(line));
+      assert.deepEqual(released.filter(row => row.error), [{ error: true }]);
+      assert.deepEqual(released.filter(row => row.injected).slice(-3).map(row => [row.injected.type, row.injected.flags]),
+        [[1, 2], [1, 2], [0, 4]], 'one rejected key release must not skip another key or the mouse release');
     } finally {
       // Retain this small fixture beside the other diagnostic evidence. The
       // active cleanup inventory is read-only and owns any later removal.

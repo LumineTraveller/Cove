@@ -117,7 +117,9 @@ async function main() {
     assert.equal(hash(fs.readFileSync(path.join(appDir, 'resources', helper))), hash(fs.readFileSync(path.join(root, 'apps/desktop/build', helper))));
   const fuses = await getCurrentFuseWire(executable);
   assert.equal(fuses[FuseV1Options.EnableNodeCliInspectArguments], 49, 'inspect pause must be enabled before launching the formal app');
-  const candidates = fs.readdirSync(path.join(root, 'runtime')).filter(name => name.startsWith('cove-native-input-fixture-')).sort();
+  const candidates = fs.readdirSync(path.join(root, 'runtime')).filter(name => name.startsWith('cove-native-input-fixture-'))
+    .filter(name => !fs.readFileSync(path.join(root, 'runtime', name, 'fixture.cs'), 'utf8').includes('RejectOnce'))
+    .sort((a, b) => fs.statSync(path.join(root, 'runtime', a, 'fixture.cs')).mtimeMs - fs.statSync(path.join(root, 'runtime', b, 'fixture.cs')).mtimeMs);
   assert.ok(candidates.length);
   const fixtureDir = path.join(root, 'runtime', candidates.at(-1));
   const fixtureSource = fs.readFileSync(path.join(fixtureDir, 'fixture.cs'), 'utf8');
@@ -237,7 +239,8 @@ async function main() {
       nativeBoundary: 'recording-only SendInput replacement; no real system input',
       globalShortcutBoundary: 'owned callback map; no real system shortcut registration',
       excluded: ['installation/rollback execution', 'real OS cursor', 'WAN', 'video feedback'], testDir };
-    fs.writeFileSync(path.join(root, 'runtime/remote-input-packaged-smoke.json'), JSON.stringify(report, null, 2) + '\n');
+    const reportName = process.env.COVE_PACKAGE_SMOKE_RAW === '1' ? 'remote-input-raw-packaged-smoke.json' : 'remote-input-packaged-smoke.json';
+    fs.writeFileSync(path.join(root, 'runtime', reportName), JSON.stringify(report, null, 2) + '\n');
     console.log(JSON.stringify(report, null, 2));
     await command('Runtime.evaluate', { expression: '__covePackageSmoke.quit()' }); socket.close();
     await exited;
