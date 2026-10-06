@@ -1,4 +1,5 @@
 /** Public wire models. Optional fields remain optional for legacy peers. */
+export {COVE_RELEASE_VERSION, MINIMUM_CLIENT_VERSION, compareSemanticVersions, isSupportedClientVersion} from './versionPolicy';
 export type ClientPlatform = 'desktop' | 'mobile';
 export type MediaSourceType = 'mic' | 'screen' | 'screen-audio' | 'application-audio';
 
