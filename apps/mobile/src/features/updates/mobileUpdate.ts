@@ -1,5 +1,8 @@
 import { UPDATE_DOWNLOAD_BASE_URL } from './updateConfig';
-import { compareSemanticVersions } from '@cove/contracts';
+import {
+  compareSemanticVersions,
+  isSupportedClientVersion,
+} from '@cove/contracts';
 import { MOBILE_MINIMUM_VERSION } from '../connection/clientVersion';
 
 export type UpdateSource = 'github' | 'cloud';
@@ -125,6 +128,49 @@ export function releaseURL(
   }/${encodeURIComponent(release.tag)}${
     download ? `/${encodeURIComponent(release.filename)}` : ''
   }`;
+}
+
+/** Explicit browser downloads may use the currently selected chat server. */
+export function manualServerApkURL(
+  serverURL: string,
+  rawFeed: string,
+  installed: InstalledVersion,
+  expected?: AndroidRelease,
+  minimum = MOBILE_MINIMUM_VERSION,
+): string {
+  const base = getMobileUpdateServerBaseUrl(serverURL);
+  if (!base) throw new Error('当前服务器没有可用的 HTTPS 下载地址。');
+  const release = parseUpdateFeed(rawFeed);
+  if (!release) throw new Error('服务器尚未提供手机版安装包。');
+  if (
+    release.minAndroidApi > installed.androidApi ||
+    release.versionCode < installed.versionCode ||
+    !isSupportedClientVersion(release.versionName, installed.versionName) ||
+    !isSupportedClientVersion(release.versionName, minimum)
+  )
+    throw new Error('服务器安装包版本较旧或不兼容，请使用 GitHub 备用下载。');
+  if (
+    expected &&
+    (
+      [
+        'versionName',
+        'versionCode',
+        'minAndroidApi',
+        'packageName',
+        'tag',
+        'filename',
+        'size',
+        'sha256',
+      ] as const
+    ).some(key => release[key] !== expected[key])
+  )
+    throw new Error(
+      '服务器安装包与已确认的更新不一致，请使用 GitHub 备用下载。',
+    );
+  const url = releaseURL(release, 'cloud', true, base);
+  if (new URL(url).origin !== new URL(base).origin)
+    throw new Error('服务器下载地址不是同源 HTTPS 地址。');
+  return url;
 }
 
 /** Both mirrors are checked; a fast but stale mirror must not hide a newer release. */

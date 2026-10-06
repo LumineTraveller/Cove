@@ -27,6 +27,7 @@ import {
 import {
   checkAndroidUpdate,
   getMobileUpdateServerBaseUrl,
+  manualServerApkURL,
   releaseURL,
   SOURCE_NAMES,
   withUpdateTimeout,
@@ -58,7 +59,12 @@ interface UpdateBridge {
 const UpdateContext = createContext<{
   version: string;
   check: () => void;
+  selectServer: (serverURL: string) => void;
 } | null>(null);
+const ignoreServerSelection = (_serverURL: string) => {};
+export function useMobileUpdateServerSelection() {
+  return useContext(UpdateContext)?.selectServer ?? ignoreServerSelection;
+}
 const RECHECK_INTERVAL = 6 * 60 * 60 * 1000;
 const bridgeFor = () => {
   const bridge = NativeModules.CoveMobileUpdate as UpdateBridge | undefined;
@@ -96,6 +102,7 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
   const [verifiedHash, setVerifiedHash] = useState<string | null>(null);
   const [opening, setOpening] = useState(false);
   const [installPermission, setInstallPermission] = useState(false);
+  const [manualServerURL, selectServer] = useState('');
   const mounted = useRef(false);
   const running = useRef(false);
   const downloadRunning = useRef(false);
@@ -337,6 +344,43 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
     }
   };
 
+  const openServerBrowser = async () => {
+    if (opening || !manualServerURL) return;
+    setOpening(true);
+    try {
+      const base = getMobileUpdateServerBaseUrl(manualServerURL);
+      if (!base)
+        throw new Error(
+          '当前服务器没有可用的 HTTPS 下载地址，请使用 GitHub 备用下载。',
+        );
+      const bridge = bridgeFor();
+      // This server is queried only after this explicit click, never by the
+      // startup/foreground checks or the verified native APK downloader.
+      const [raw, installed] = await Promise.all([
+        withUpdateTimeout(bridge.fetchUpdateFeed('cloud', base)),
+        withUpdateTimeout(bridge.getInstalledVersion(), 5000),
+      ]);
+      const url = manualServerApkURL(
+        base,
+        raw,
+        installed,
+        candidate?.release,
+        minimum.current,
+      );
+      await Linking.openURL(url);
+      if (mounted.current)
+        setMessage('已在系统浏览器打开服务器安装包，请下载后手动确认安装。');
+    } catch (error) {
+      if (mounted.current)
+        setMessage(
+          (error instanceof Error ? error.message : '服务器下载失败。') +
+            ' 可重试或使用 GitHub 备用下载。',
+        );
+    } finally {
+      if (mounted.current) setOpening(false);
+    }
+  };
+
   const cancel = async () => {
     ++downloadGeneration.current;
     await bridgeFor()
@@ -357,6 +401,7 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
     <UpdateContext.Provider
       value={{
         version,
+        selectServer,
         check: () => {
           void check(true);
         },
@@ -505,6 +550,36 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
               </Text>
             )}
             {!!message && <Text style={styles.hint}>{message}</Text>}
+            <TouchableOpacity
+              accessibilityRole="button"
+              disabled={opening || downloading || !manualServerURL}
+              onPress={() => {
+                void openServerBrowser();
+              }}
+              style={styles.secondary}
+            >
+              <Text style={styles.body}>从服务器下载</Text>
+            </TouchableOpacity>
+            {!manualServerURL && (
+              <Text style={styles.hint}>
+                请先在登录页选择服务器，再从服务器下载。
+              </Text>
+            )}
+            {!candidate && (
+              <TouchableOpacity
+                accessibilityRole="button"
+                onPress={() => {
+                  void Linking.openURL(
+                    'https://github.com/LumineTraveller/Cove/releases',
+                  ).catch(() =>
+                    setMessage('无法打开 GitHub 备用下载，请重试。'),
+                  );
+                }}
+                style={styles.secondary}
+              >
+                <Text style={styles.body}>GitHub 备用下载</Text>
+              </TouchableOpacity>
+            )}
             {required && fallbackURL.current && (
               <TouchableOpacity
                 accessibilityRole="button"

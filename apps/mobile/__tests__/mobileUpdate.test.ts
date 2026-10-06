@@ -1,4 +1,4 @@
-import { checkAndroidUpdate, getMobileUpdateServerBaseUrl, parseUpdateFeed, releaseURL, type AndroidRelease } from '../src/features/updates/mobileUpdate';
+import { checkAndroidUpdate, getMobileUpdateServerBaseUrl, manualServerApkURL, parseUpdateFeed, releaseURL, type AndroidRelease } from '../src/features/updates/mobileUpdate';
 import { UPDATE_DOWNLOAD_BASE_URL } from '../src/features/updates/updateConfig';
 
 export const release: AndroidRelease = {
@@ -8,6 +8,16 @@ export const release: AndroidRelease = {
 };
 const installed = { versionName: '0.3.1', versionCode: 5, androidApi: 36 };
 const feed = (r: unknown = release) => JSON.stringify({ schemaVersion: 1, platform: 'android', release: r });
+
+test('manual server browser URLs stay same-origin and require compatible verified metadata', () => {
+  const manualRelease = { ...release, versionName: '0.9.0', versionCode: 14, tag: 'mobile-v0.9.0', filename: 'Cove-Mobile-0.9.0.apk' };
+  const current = { versionName: '0.8.0', versionCode: 13, androidApi: 36 };
+  expect(manualServerApkURL('https://selected.example.test/cove/', feed({ ...manualRelease, downloadUrl: 'https://evil.test/file.apk' }), current, manualRelease)).toBe('https://selected.example.test/cove/releases/mobile-v0.9.0/Cove-Mobile-0.9.0.apk');
+  expect(() => manualServerApkURL('http://selected.example.test', feed(manualRelease), current)).toThrow('HTTPS');
+  expect(() => manualServerApkURL('https://selected.example.test', feed({ ...manualRelease, sha256: 'b'.repeat(64) }), current, manualRelease)).toThrow('不一致');
+  expect(() => manualServerApkURL('https://selected.example.test', feed(release), current)).toThrow('版本较旧');
+  expect(() => manualServerApkURL('https://selected.example.test', feed({ ...manualRelease, minAndroidApi: 37 }), current)).toThrow('不兼容');
+});
 
 test('empty bootstrap feed and desktop releases never count as a mobile update', () => {
   expect(parseUpdateFeed(feed(null))).toBeNull();

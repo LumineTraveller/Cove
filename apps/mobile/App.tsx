@@ -1,4 +1,5 @@
 import { useCoveSession } from './src/features/connection/useCoveSession';
+import { useCallback, useEffect } from 'react';
 
 import { ActivityIndicator, StatusBar, StyleSheet, Text, View } from 'react-native';
 import { WifiOff } from 'lucide-react-native';
@@ -12,7 +13,7 @@ import { LoginScreen } from './src/features/accounts/screens/LoginScreen';
 import { colors } from './src/features/settings/theme';
 
 
-import { MobileUpdateProvider } from './src/features/updates/components/MobileUpdater';
+import { MobileUpdateProvider, useMobileUpdateServerSelection } from './src/features/updates/components/MobileUpdater';
 
 
 
@@ -23,6 +24,14 @@ export default function App() {
 
 function CoveSession() {
   const { loadingConfig, config, savingConfig, authError, handleLogin, rememberedServers, handleForget, probeServerSecurity, socket, selectedRoom, sessionReady, leaveRoom, setSelectedRoom, handleChangeServer, connectionError, insets } = useCoveSession();
+  const selectUpdateServer = useMobileUpdateServerSelection();
+  useEffect(() => {
+    if (config?.serverURL) selectUpdateServer(config.serverURL);
+  }, [config?.serverURL, selectUpdateServer]);
+  const probeSelectedServer = useCallback((serverURL: string, allowInvalidServerCertificate: boolean) => {
+    selectUpdateServer(serverURL);
+    return probeServerSecurity(serverURL, allowInvalidServerCertificate);
+  }, [probeServerSecurity, selectUpdateServer]);
 
 if (loadingConfig) {
     return (
@@ -36,7 +45,7 @@ if (loadingConfig) {
 
   if (!config) {
     return <LoginScreen saving={savingConfig} error={authError} onSubmit={handleLogin}
-      rememberedServers={rememberedServers} onForget={handleForget} onProbeServerSecurity={probeServerSecurity} />;
+      rememberedServers={rememberedServers} onForget={handleForget} onProbeServerSecurity={probeSelectedServer} />;
   }
 
   return (

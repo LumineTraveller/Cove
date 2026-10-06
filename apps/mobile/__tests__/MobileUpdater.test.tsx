@@ -1,4 +1,5 @@
 import TestRenderer, { act } from 'react-test-renderer';
+import { useEffect } from 'react';
 import {
   AppState,
   Linking,
@@ -12,6 +13,7 @@ import {
 import {
   MobileUpdateButton,
   MobileUpdateProvider,
+  useMobileUpdateServerSelection,
 } from '../src/features/updates/components/MobileUpdater';
 import * as updateConfig from '../src/features/updates/updateConfig';
 import type { ClientUpgradePolicy } from '../src/features/updates/versionPolicy';
@@ -81,13 +83,11 @@ beforeEach(() => {
     installApk: install,
     openInstallSettings: openSettings,
   };
-  getVersion
-    .mockReset()
-    .mockResolvedValue({
-      versionName: '0.8.0',
-      versionCode: 13,
-      androidApi: 36,
-    });
+  getVersion.mockReset().mockResolvedValue({
+    versionName: '0.8.0',
+    versionCode: 13,
+    androidApi: 36,
+  });
   fetchFeed.mockReset().mockResolvedValue(feed());
   download.mockReset().mockResolvedValue(release.sha256);
   install.mockReset().mockResolvedValue(undefined);
@@ -97,23 +97,97 @@ beforeEach(() => {
     onState = callback;
     return { remove: jest.fn() };
   });
-  jest.spyOn(Linking, 'openURL').mockResolvedValue(true);
+  jest.spyOn(Linking, 'openURL').mockReset().mockResolvedValue(true);
 });
 afterEach(async () => {
   if (renderer) await act(async () => renderer.unmount());
   jest.restoreAllMocks();
   jest.useRealTimers();
 });
-async function mount() {
+function SelectServer({ serverURL }: { serverURL: string }) {
+  const selectServer = useMobileUpdateServerSelection();
+  useEffect(() => {
+    selectServer(serverURL);
+  }, [selectServer, serverURL]);
+  return null;
+}
+async function mount(serverURL = '') {
   await act(async () => {
     renderer = TestRenderer.create(
       <MobileUpdateProvider>
+        <SelectServer serverURL={serverURL} />
         <MobileUpdateButton />
         <Text>session remains usable</Text>
       </MobileUpdateProvider>,
     );
   });
 }
+
+test('selected chat server is only queried when the server browser download button is clicked', async () => {
+  jest.replaceProperty(updateConfig, 'UPDATE_DOWNLOAD_BASE_URL', '');
+  await mount('https://selected-chat.example.test/cove');
+  await act(async () => jest.advanceTimersByTimeAsync(1001));
+  expect(fetchFeed.mock.calls).toEqual([['github', '']]);
+  expect(download).not.toHaveBeenCalled();
+  await press('从服务器下载');
+  expect(fetchFeed).toHaveBeenLastCalledWith(
+    'cloud',
+    'https://selected-chat.example.test/cove',
+  );
+  expect(Linking.openURL).toHaveBeenCalledWith(
+    'https://selected-chat.example.test/cove/releases/mobile-v0.9.0/Cove-Mobile-0.9.0.apk',
+  );
+  expect(download).not.toHaveBeenCalled();
+  expect(install).not.toHaveBeenCalled();
+});
+
+test('server download works as a manual browser fallback after GitHub check fails', async () => {
+  jest.replaceProperty(updateConfig, 'UPDATE_DOWNLOAD_BASE_URL', '');
+  fetchFeed.mockImplementation(source =>
+    source === 'github'
+      ? Promise.reject(new Error('offline'))
+      : Promise.resolve(feed()),
+  );
+  await mount('https://selected-chat.example.test');
+  await act(async () => jest.advanceTimersByTimeAsync(1001));
+  await press('检查手机端更新');
+  await press('从服务器下载');
+  expect(Linking.openURL).toHaveBeenCalledWith(
+    'https://selected-chat.example.test/releases/mobile-v0.9.0/Cove-Mobile-0.9.0.apk',
+  );
+  expect(download).not.toHaveBeenCalled();
+  expect(install).not.toHaveBeenCalled();
+});
+
+test('server download refuses mismatched mirror metadata and retains GitHub fallback', async () => {
+  jest.replaceProperty(updateConfig, 'UPDATE_DOWNLOAD_BASE_URL', '');
+  fetchFeed.mockImplementation(source =>
+    Promise.resolve(
+      source === 'github'
+        ? feed()
+        : feed({ ...release, sha256: 'b'.repeat(64) }),
+    ),
+  );
+  await mount('https://selected-chat.example.test');
+  await act(async () => jest.advanceTimersByTimeAsync(1001));
+  await press('从服务器下载');
+  expect(Linking.openURL).not.toHaveBeenCalled();
+  expect(contents()).toContain('不一致');
+  await press('打开发布页面');
+  expect(Linking.openURL).toHaveBeenCalledWith(
+    'https://github.com/LumineTraveller/Cove/releases/tag/mobile-v0.9.0',
+  );
+});
+
+test('server download explains an insecure selected server without issuing a request', async () => {
+  jest.replaceProperty(updateConfig, 'UPDATE_DOWNLOAD_BASE_URL', '');
+  await mount('http://selected-chat.example.test');
+  await act(async () => jest.advanceTimersByTimeAsync(1001));
+  await press('从服务器下载');
+  expect(fetchFeed.mock.calls).toEqual([['github', '']]);
+  expect(Linking.openURL).not.toHaveBeenCalled();
+  expect(contents()).toContain('HTTPS');
+});
 async function startup() {
   await mount();
   await act(async () => jest.advanceTimersByTimeAsync(1001));
