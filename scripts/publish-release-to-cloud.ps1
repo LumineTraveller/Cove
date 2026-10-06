@@ -48,8 +48,15 @@ function Invoke-ReleaseHttp([string]$mode, [string]$url, [string]$userAgent, [st
     $arguments = @($httpHelper, $mode, $url, $userAgent)
     if ($mode -eq 'download') { $arguments += $outputPath }
     if ($expectedSize) { $arguments += $expectedSize }
-    $output = & node @arguments
-    if ($LASTEXITCODE -ne 0) { throw "HTTP 请求失败：$url" }
+    $previousEncoding = [Console]::OutputEncoding
+    try {
+        [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+        $output = & node @arguments
+        $httpExitCode = $LASTEXITCODE
+    } finally {
+        [Console]::OutputEncoding = $previousEncoding
+    }
+    if ($httpExitCode -ne 0) { throw "HTTP 请求失败：$url" }
     if ($mode -eq 'json') { return (($output -join [Environment]::NewLine) | ConvertFrom-Json) }
     if ($output) { Write-Output $output }
 }

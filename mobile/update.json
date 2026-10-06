@@ -3,13 +3,13 @@
   "platform": "android",
   "release": {
     "packageName": "com.cove.mobile",
-    "versionName": "0.7.0",
-    "versionCode": 12,
+    "versionName": "0.8.0",
+    "versionCode": 13,
     "minAndroidApi": 24,
-    "tag": "mobile-v0.7.0",
-    "filename": "Cove-Mobile-0.7.0.apk",
-    "size": 55943498,
-    "sha256": "d318c1aeaef36558a30dd7826075bb7a1d939ec8a2a82a236440f358a1753e61",
-    "notes": "# Cove Mobile v0.7.0\n\n发布日期：2026-09-28。Android versionCode：12。\n\n## 新增与修复\n\n- 新增手机屏幕共享，可选择是否同时共享应用播放音频；屏幕视频使用 AV1，不支持 AV1 的设备或服务器会明确提示，不回退到 H.264。共享音频采集需要 Android 10 及以上，并受应用录制策略限制。\n- 修复手机麦克风降噪链路的失真问题，重新提供 RNNoise 选项；默认降噪模式改为系统降噪，每次冷启动恢复默认值。\n- 调整 Android 原生音频处理与 React Native 模块构建/初始化路径，避免原生处理配置导致应用启动即闪退。\n- 新增独立的 HTTPS 更新下载地址配置。默认留空时不访问预设服务器地址；启动更新检查仍可使用 GitHub，配置地址后才会同时检查对应下载服务器。\n- 改进登录表单在软键盘弹出时的可视区域处理。\n\n## 安装说明\n\n下载 `Cove-Mobile-0.7.0.apk` 后覆盖安装。应用 ID 与签名保持不变。\n正式分发包支持 ARM64 与 ARMv7，最低 Android 7.0；不包含 x86 模拟器架构。"
+    "tag": "mobile-v0.8.0",
+    "filename": "Cove-Mobile-0.8.0.apk",
+    "size": 55992638,
+    "sha256": "a9f9d9f8e108d7e1462c2e69781d427d5634ada63625b958c93566406382a4ed",
+    "notes": "# Cove Mobile v0.8.0\n\n发布日期：2026-10-06。Android versionCode：13。对应桌面客户端及服务端版本：2.0.0。\n\n## 改进与修复\n\n- 保留服务器密码输入、一次性初始化、访问令牌及登录恢复；HTTP、Socket.IO 和同源媒体请求使用手机自身版本 0.8.0 与协议 3。\n- 连接前检查分平台最低版本。需要升级时暂停连接；Android 下载更新后验证 APK 大小、SHA-256、应用 ID、版本号及签名，安装由系统界面确认。\n- 自动更新继续使用独立配置的 HTTPS 下载基址，默认留空时使用 GitHub。普通更新由用户选择下载；失败可重试，已校验的下载可复用。\n- 更新弹窗增加“从服务器下载”按钮；用户点击后检查当前 HTTPS 服务器的更新清单，核对候选版本与校验值，再在浏览器打开同源 APK 下载地址。\n- 手机 0.7.0 及更早已发布版本仍通过原有更新弹窗在浏览器中下载本次 APK，无法远程补上自动下载能力。0.8.0 更新清单保持旧版可读取的格式。\n\n## 安装说明\n\n下载 Cove-Mobile-0.8.0.apk 后覆盖安装，应用 ID 和签名保持不变。\n正式分发支持 ARM64 和 ARMv7，最低 Android 7.0；不包含 x86 模拟器架构。"
   }
 }
