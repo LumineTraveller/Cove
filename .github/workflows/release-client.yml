@@ -42,7 +42,7 @@ jobs:
           }
 
       - name: Install dependencies
-        run: npm ci && npm run build:packages
+        run: npm ci --registry=https://registry.npmjs.org --replace-registry-host=registry.npmmirror.com && npm run build:packages
 
       - name: Test desktop client
         run: npm test -w cove-client

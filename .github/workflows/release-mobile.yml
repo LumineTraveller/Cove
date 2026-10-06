@@ -70,11 +70,11 @@ jobs:
 
       - name: Install mobile dependencies
         working-directory: apps/mobile
-        run: npm ci
+        run: npm ci --registry=https://registry.npmjs.org --replace-registry-host=registry.npmmirror.com
 
       - name: Build shared runtime packages
         run: |
-          npm ci
+          npm ci --registry=https://registry.npmjs.org --replace-registry-host=registry.npmmirror.com
           npm run build:packages
 
       - name: Test mobile client
