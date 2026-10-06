@@ -1,0 +1,39 @@
+{
+  "summaryOnly": true,
+  "fullManifest": "../../../runtime/remote-input-raw-artifact.json",
+  "sourceHead": "76992b24e8ad6a84c8fc6405f21d7e4a67274274",
+  "verifiedAt": "2026-10-06T20:06:35.801Z",
+  "appId": "com.cove.app",
+  "productName": "Cove",
+  "packageName": "cove-client",
+  "version": "2.0.1",
+  "installer": {
+    "relativePath": "apps/desktop/dist-app-remote-input-2.0.1/Cove-Setup-2.0.1-raw-input.exe",
+    "size": 106571080,
+    "sha256": "61575ce828ce524273f98f89917ace52a522f46aeb94935d3f98501f78a0caad",
+    "sha512": "NmBbMJqcb6CFztU/3m0HW1+9MXmrBeYCbr/zdkrqXBqTH6eWKYmjPvypja7FG4HzVcCNQkVAsnlmRKlD4NXIqw=="
+  },
+  "rollback": {
+    "relativePath": "runtime/rollback-2.0.0/Cove-Setup-2.0.0.exe",
+    "size": 106487680,
+    "sha256": "6a80c3ca1237cde6f13887dbc668d6f7df3a20e9c2783547ac52ac4475233115"
+  },
+  "payloadEntriesMatched": 5,
+  "matchedEntries": ["Cove.exe", "resources/app.asar", "resources/remote-input-helper.exe", "resources/annotation-window-helper.exe", "resources/application-audio-helper.exe"],
+  "packagedASARSHA256": "3518725b152e8ab13f3619b4c2095ce84cad8d2ef66964af8476dc0a5a108b08",
+  "actualPackagedStartupObservedAt": "2026-10-06T20:02:49.118Z",
+  "packagedStartupAndRevokePassed": true,
+  "installedProbe": {
+    "observedAt": "2026-10-06T20:07:18.836Z",
+    "runningCoveProcesses": 0,
+    "installedASARSHA256": "f0944ac08f738849d92321b5c83ed6ed4ccc8373677586d196d19b3e2c2dc299",
+    "unchangedByTask": true
+  },
+  "installedByTask": false,
+  "published": false,
+  "deployed": false,
+  "serverChanged": false,
+  "mobileChanged": false,
+  "merged": false,
+  "handoffBlocker": "exec-server transport disconnected after verification; source commit exists, final documentation commit was not made"
+}
