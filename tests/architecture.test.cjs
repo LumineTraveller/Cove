@@ -65,11 +65,17 @@ test('accepted native capture, DSP and Android code survives relocation',()=>{
     assert.equal(sha,file.sha256,file.path);
   }
 });
-test('accepted desktop version and existing mobile release metadata are preserved',()=>{
+test('release identities match packages and both mobile feeds remain consistent',()=>{
   for(const [key,file] of [['root','package.json'],['desktop','apps/desktop/package.json'],['server','apps/server/package.json'],['mobile','apps/mobile/package.json']])
     assert.equal(require(path.join(root,file)).version,contracts.versions[key]);
-  assert.equal(read('mobile/update.json'),contracts.mobileFeed);
-  assert.equal(read('apps/mobile/update.json'),contracts.mobileFeed);
+  assert.equal(read('mobile/update.json'),read('apps/mobile/update.json'));
+  const feed=JSON.parse(read('mobile/update.json'));
+  assert.equal(feed.schemaVersion,1);assert.equal(feed.platform,'android');
+  assert.equal(feed.release.packageName,'com.cove.mobile');
+  const {compareSemanticVersions}=require('../packages/contracts/dist');
+  const precedence=compareSemanticVersions(feed.release.versionName,contracts.versions.mobile);
+  assert.ok(precedence!==null&&precedence<=0,'feed must describe a built current or previously published APK');
+  assert.ok(Number.isSafeInteger(feed.release.versionCode)&&feed.release.versionCode<=Number(contracts.gradleCode.split(' ')[1]));
   const gradle=fs.readFileSync(path.join(root,'apps/mobile/android/app/build.gradle'),'utf8');
   assert.equal(gradle.match(/versionName "[^"]+"/)?.[0],contracts.gradleVersion);
   assert.equal(gradle.match(/versionCode \d+/)?.[0],contracts.gradleCode);

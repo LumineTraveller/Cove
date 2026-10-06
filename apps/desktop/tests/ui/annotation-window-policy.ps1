@@ -3,6 +3,8 @@ Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 public static class AnnotationPolicyProbe {
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
   [StructLayout(LayoutKind.Sequential)] public struct Rect { public int Left, Top, Right, Bottom; }
   [StructLayout(LayoutKind.Sequential)] public struct Point { public int X, Y; }
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd, out Rect rect);
@@ -27,4 +29,4 @@ $origin = New-Object AnnotationPolicyProbe+Point
 [AnnotationPolicyProbe]::DwmGetWindowAttribute([IntPtr]$Hwnd,9,[ref]$dwm,16) | Out-Null
 [AnnotationPolicyProbe]::ClientToScreen([IntPtr]$Hwnd,[ref]$origin) | Out-Null
 @{ affinityRead=$ok; affinity=$affinity; mouseTransparent=($style -band 0x20) -ne 0; noActivate=($style -band 0x08000000) -ne 0;
-outer=$outer;client=$client;dwm=$dwm;origin=$origin } | ConvertTo-Json -Compress
+outer=$outer;client=$client;dwm=$dwm;origin=$origin; foregroundHwnd=[AnnotationPolicyProbe]::GetForegroundWindow().ToInt64(); nativeVisible=[AnnotationPolicyProbe]::IsWindowVisible([IntPtr]$Hwnd) } | ConvertTo-Json -Compress

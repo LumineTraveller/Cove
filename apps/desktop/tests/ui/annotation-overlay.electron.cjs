@@ -22,12 +22,23 @@ app.whenReady().then(async()=>{
   const captioned = process.env.COVE_UI_QA_CAPTIONED === '1';
   const target = new BrowserWindow({x:120,y:120,width:640,height:360,frame:captioned,show:true,
     backgroundColor:'#ffffff',webPreferences:{sandbox:true}});
-  await target.loadURL('data:text/html,'+encodeURIComponent('<body style="margin:0;background:#fff;color:#164e63"><h1>Cove synthetic annotation target</h1><p>No personal screen is captured.</p><div style="width:100px;height:100px;background:#22c55e"></div></body>'));
-  target.focus();
+  await target.loadURL('data:text/html,'+encodeURIComponent('<title>Cove synthetic annotation target</title><body style="margin:0;background:#fff;color:#164e63"><h1>Cove synthetic annotation target</h1><p>No personal screen is captured.</p><div style="width:100px;height:100px;background:#22c55e"></div></body>'));
+  // A hidden launcher can suppress Windows' first ShowWindow call. The target
+  // is an intentionally visible synthetic app for this native capture check.
+  target.show(); target.moveTop(); target.focus();
   const nativeHandle = win => win.getNativeWindowHandle().readBigUInt64LE().toString();
-  const sources = await desktopCapturer.getSources({types:['window'],thumbnailSize:{width:0,height:0}});
-  const source = sources.find(item=>item.id.split(':')[1]===nativeHandle(target));
-  if(!source)throw new Error('Synthetic capture source was not enumerated');
+  let source,sourceCount=0,syntheticSources=[];
+  for(let attempt=0;attempt<12&&!source;attempt++) {
+    const sources = await desktopCapturer.getSources({types:['window'],thumbnailSize:{width:0,height:0}});
+    sourceCount=sources.length;syntheticSources=sources.filter(item=>item.name==='Cove synthetic annotation target').map(item=>({id:item.id,name:item.name}));
+    source = sources.find(item=>item.id.split(':')[1]===nativeHandle(target));
+    if(!source)await delay(250);
+  }
+  if(!source) {
+    const policy=spawnSync('powershell.exe',['-NoProfile','-File',path.join(__dirname,'annotation-window-policy.ps1'),'-Hwnd',nativeHandle(target)],{encoding:'utf8',windowsHide:true});
+    console.error('synthetic-source-precondition',JSON.stringify({target:nativeHandle(target),sourceCount,syntheticSources,targetPolicy:policy.stdout.trim()}));
+    throw new Error('Synthetic capture source was not enumerated; target='+nativeHandle(target));
+  }
   const probe = new BrowserWindow({show:false,webPreferences:{offscreen:true,partition:'annotation-capture-probe'}});
   const probeSession = session.fromPartition('annotation-capture-probe');
   probeSession.setPermissionRequestHandler((_contents,permission,callback)=>callback(permission==='media'));
@@ -74,7 +85,7 @@ app.whenReady().then(async()=>{
     await wait(()=>js("Boolean(document.querySelector('.control-ball.voice-active'))"),'voice active');
     await start();
     await js('window.shareChatQa.addPeerAnnotation()');
-    target.setAlwaysOnTop(true); target.show(); target.moveTop(); target.focus();
+    target.setAlwaysOnTop(true); target.show(); target.moveTop(); app.focus({steal:true}); target.focus();
     await wait(()=>Boolean(overlay()?.isVisible()),'local overlay visible');
     await wait(async()=>{const p=await pixel(.6,.4);return p[0]>200&&p[1]>150&&p[3]>100;},'painted viewer stroke');
     const rgba = await pixel(.6,.4);
@@ -159,7 +170,7 @@ app.whenReady().then(async()=>{
     await js('window.shareChatQa.addPeerAnnotation()');
     // The read-only window mirror follows the foreground source. Windows may
     // activate another app when the drawing window gives up focus on exit.
-    target.focus(); await wait(()=>overlay()?.isVisible(),'refocused shared window mirror');
+    target.show(); target.moveTop(); app.focus({steal:true}); target.focus(); await wait(()=>overlay()?.isVisible(),'refocused shared window mirror');
     check(Boolean(overlay()?.isVisible()),'owner exits tools and the foreground shared window keeps its mirror');
     await click('.share-operations-trigger'); await clickText('在共享屏幕绘画');
     await wait(()=>controller.inputActive,'drawing reentry');
@@ -215,8 +226,13 @@ app.whenReady().then(async()=>{
     console.log(`PASS ${checks.length} native annotation overlay checks`);
     clearTimeout(timeout);app.exit(0);
   } catch(error) {
+    const policyFor = window => !window || window.isDestroyed() ? null : spawnSync('powershell.exe',['-NoProfile','-File',path.join(__dirname,'annotation-window-policy.ps1'),'-Hwnd',nativeHandle(window)],{encoding:'utf8',windowsHide:true}).stdout.trim();
     const nativeState={targetFocused:!target.isDestroyed()&&target.isFocused(),bounds:controller.bounds,
-      loaded:controller.loaded,source:controller.source,hasWindow:Boolean(overlay()),failed:controller.failed};
+      loaded:controller.loaded,source:controller.source,hasWindow:Boolean(overlay()),failed:controller.failed,
+      targetVisible:controller.targetVisible, inputActive:controller.inputActive,
+      targetHwnd:!target.isDestroyed()&&nativeHandle(target),overlayHwnd:overlay()&&nativeHandle(overlay()),
+      targetPolicy:policyFor(target),overlayPolicy:policyFor(overlay()),
+      strokeCount:controller.frame.strokes.length,laserCount:controller.frame.lasers.length};
     fs.writeFileSync(path.join(artifacts,'result.json'),JSON.stringify({passed:false,error:String(error),checks,failures,nativeState},null,2));
     console.error('native-state',JSON.stringify(nativeState));
     console.error(error);controller.close();owner.destroy();if(!target.isDestroyed())target.destroy();clearTimeout(timeout);app.exit(1);
