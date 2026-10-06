@@ -1,0 +1,109 @@
+{
+  "verifiedAt": "2026-10-06T18:48:55.447Z",
+  "appId": "com.cove.app",
+  "productName": "Cove",
+  "packageName": "cove-client",
+  "version": "2.0.1",
+  "sourceFixCommits": [
+    "d4c18a4",
+    "152bfce"
+  ],
+  "installer": {
+    "path": "C:\\Users\\cyj06\\Documents\\Codex\\2026-10-06\\task-2\\Cove-remote-input-fix\\apps\\desktop\\dist-app-remote-input-2.0.1\\Cove-Setup-2.0.1.exe",
+    "size": 106570641,
+    "sha256": "6a3eb185ea82d2adbc2debb080f6ec9854a7b2270384f39776c8f027247612a9",
+    "sha512": "NwbT2vJXCfEZg8/M0a/wkqQozUWbVLsgAAgqw903Rc15Z5YxFSRWbTDddn3tk+GYAQAava54UWw1Z3mcungl/g=="
+  },
+  "rollback": {
+    "path": "C:\\Users\\cyj06\\Documents\\Codex\\2026-10-06\\task-2\\Cove-remote-input-fix\\runtime\\rollback-2.0.0\\Cove-Setup-2.0.0.exe",
+    "size": 106487680,
+    "version": "2.0.0",
+    "sha256": "6a80c3ca1237cde6f13887dbc668d6f7df3a20e9c2783547ac52ac4475233115",
+    "source": "https://github.com/LumineTraveller/Cove/releases/download/v2.0.0/Cove-Setup-2.0.0.exe",
+    "publishedDigestMatched": true
+  },
+  "installerPayloadMatchedUnpacked": [
+    {
+      "entry": "Cove.exe",
+      "size": 244542464,
+      "sha256": "b6f6a585bf4e9ab547de007578ea6970bbc7b746c29ac0e2691f3e46c4d7fbf5"
+    },
+    {
+      "entry": "resources\\app.asar",
+      "size": 8916106,
+      "sha256": "f0944ac08f738849d92321b5c83ed6ed4ccc8373677586d196d19b3e2c2dc299"
+    },
+    {
+      "entry": "resources\\remote-input-helper.exe",
+      "size": 13312,
+      "sha256": "82e1d5097e57e32933440c83d4d0894d1b7cdcffdbba48cb21e091be7b8ae026"
+    },
+    {
+      "entry": "resources\\annotation-window-helper.exe",
+      "size": 5632,
+      "sha256": "b5da4085df798259e457b1dca7501e3135ffd850096208a93c03e5aca4bc8d24"
+    },
+    {
+      "entry": "resources\\application-audio-helper.exe",
+      "size": 14848,
+      "sha256": "502afa76196014d89c6b724537cb8e932473fc6f8b9acf49c477468c6ec7cdfd"
+    }
+  ],
+  "packedProductionNativeNoopStopPassed": true,
+  "liveVersionPolicy": {
+    "url": "http://39.106.95.59:3001/api/version",
+    "requestedVersion": "2.0.1",
+    "requestedPlatform": "desktop",
+    "requestedProtocol": 3,
+    "observedAt": "2026-10-06T18:44:40.146Z",
+    "policy": {
+      "serverVersion": "2.0.0",
+      "clientPlatform": "desktop",
+      "releaseVersion": "2.0.0",
+      "minimumClientVersion": "2.0.0",
+      "requiredClientProtocol": 3,
+      "upgradeRequired": false,
+      "downloadUrl": "https://github.com/LumineTraveller/Cove/releases/tag/v2.0.0"
+    }
+  },
+  "packagedSmoke": {
+    "capturedAt": "2026-10-06T18:40:47.870Z",
+    "executable": "C:\\Users\\cyj06\\Documents\\Codex\\2026-10-06\\task-2\\Cove-remote-input-fix\\apps\\desktop\\dist-app-remote-input-2.0.1\\win-unpacked\\Cove.exe",
+    "archiveSha256": "f0944ac08f738849d92321b5c83ed6ed4ccc8373677586d196d19b3e2c2dc299",
+    "identity": {
+      "version": "2.0.1",
+      "runtimeName": "cove-client",
+      "manifestName": "cove-client",
+      "appId": "com.cove.app"
+    },
+    "actualPackagedExecutableStarted": true,
+    "loginAndBrandingRendered": true,
+    "hiddenAndProfileIsolated": true,
+    "networkAndUpdaterIsolated": true,
+    "foreignIpcDenied": true,
+    "nativeWarmupZeroInput": true,
+    "authorizedIpcAccepted": true,
+    "queuedBurstAccepted": 80,
+    "burstJournalBeforeRevoke": 4,
+    "revokeDiscardsPendingMoves": true,
+    "nativeHeldInputReleased": true,
+    "staleSessionInputDenied": true,
+    "lateAckCannotResume": true,
+    "emergencyStopsAndReleases": true,
+    "helpersExited": true,
+    "nativeBoundary": "recording-only SendInput replacement; no real system input",
+    "globalShortcutBoundary": "owned callback map; no real system shortcut registration",
+    "excluded": [
+      "installation/rollback execution",
+      "real OS cursor",
+      "WAN",
+      "video feedback"
+    ],
+    "testDir": "C:\\Users\\cyj06\\Documents\\Codex\\2026-10-06\\task-2\\Cove-remote-input-fix\\runtime\\packaged-remote-input-E1pRQo"
+  },
+  "installed": false,
+  "published": false,
+  "serverChanged": false,
+  "mobileChanged": false,
+  "versionStampCommit": "f7adb6c"
+}

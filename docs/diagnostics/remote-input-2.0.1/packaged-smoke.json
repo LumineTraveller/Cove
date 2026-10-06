@@ -1,0 +1,35 @@
+{
+  "capturedAt": "2026-10-06T18:40:47.870Z",
+  "executable": "C:\\Users\\cyj06\\Documents\\Codex\\2026-10-06\\task-2\\Cove-remote-input-fix\\apps\\desktop\\dist-app-remote-input-2.0.1\\win-unpacked\\Cove.exe",
+  "archiveSha256": "f0944ac08f738849d92321b5c83ed6ed4ccc8373677586d196d19b3e2c2dc299",
+  "identity": {
+    "version": "2.0.1",
+    "runtimeName": "cove-client",
+    "manifestName": "cove-client",
+    "appId": "com.cove.app"
+  },
+  "actualPackagedExecutableStarted": true,
+  "loginAndBrandingRendered": true,
+  "hiddenAndProfileIsolated": true,
+  "networkAndUpdaterIsolated": true,
+  "foreignIpcDenied": true,
+  "nativeWarmupZeroInput": true,
+  "authorizedIpcAccepted": true,
+  "queuedBurstAccepted": 80,
+  "burstJournalBeforeRevoke": 4,
+  "revokeDiscardsPendingMoves": true,
+  "nativeHeldInputReleased": true,
+  "staleSessionInputDenied": true,
+  "lateAckCannotResume": true,
+  "emergencyStopsAndReleases": true,
+  "helpersExited": true,
+  "nativeBoundary": "recording-only SendInput replacement; no real system input",
+  "globalShortcutBoundary": "owned callback map; no real system shortcut registration",
+  "excluded": [
+    "installation/rollback execution",
+    "real OS cursor",
+    "WAN",
+    "video feedback"
+  ],
+  "testDir": "C:\\Users\\cyj06\\Documents\\Codex\\2026-10-06\\task-2\\Cove-remote-input-fix\\runtime\\packaged-remote-input-E1pRQo"
+}
