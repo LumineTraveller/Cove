@@ -63,3 +63,16 @@ test('account sessions are scoped to their server and can be cleared', () => {
   clearAccountSession();
   assert.equal(readAccountSession(), null);
 });
+
+test('multiple accounts on one server retain distinct history and logout/forget affect only the selected account', () => {
+  Object.defineProperty(globalThis, 'localStorage', { value: new MemoryStorage(), configurable: true });
+  const a = { serverUrl: 'https://same.test', serverKey: 'same-key', token: 'token-a', accountId: 'a', email: 'a@test.com' };
+  const b = { ...a, token: 'token-b', accountId: 'b', email: 'b@test.com' };
+  rememberAccountSession(a); rememberAccountSession(b);
+  assert.equal(readRememberedLogins().length, 2);
+  clearAccountSession(b.serverUrl);
+  assert.equal(readRememberedLogins().find(entry => entry.accountId === 'a')?.token, 'token-a');
+  assert.equal(readRememberedLogins().find(entry => entry.accountId === 'b')?.token, undefined);
+  forgetRememberedLogin(a.serverUrl, 'b');
+  assert.deepEqual(readRememberedLogins().map(entry => entry.accountId), ['a']);
+});
