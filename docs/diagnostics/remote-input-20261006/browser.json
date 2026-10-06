@@ -1,0 +1,36 @@
+{
+  "capturedAt": "2026-10-06T18:09:10.931Z",
+  "electron": "44.0.0",
+  "chromium": "152.0.7977.54",
+  "scope": "hidden Chromium synthetic DOM pointermove -> actual sender and browser timers",
+  "excluded": [
+    "real hardware",
+    "network",
+    "native injection",
+    "video feedback"
+  ],
+  "results": [
+    {
+      "label": "Baseline",
+      "sampled": 144,
+      "emitted": 62,
+      "lastSampleIndex": 143,
+      "meanAgeMs": 3.5274193575305324,
+      "p95AgeMs": 8.400000035762787,
+      "maxAgeMs": 12,
+      "p95SendGapMs": 17.5,
+      "maxSendGapMs": 18.899999976158142
+    },
+    {
+      "label": "Candidate",
+      "sampled": 144,
+      "emitted": 111,
+      "lastSampleIndex": 143,
+      "meanAgeMs": 4.19459459749428,
+      "p95AgeMs": 8.199999988079071,
+      "maxAgeMs": 9.100000023841858,
+      "p95SendGapMs": 12,
+      "maxSendGapMs": 12.600000023841858
+    }
+  ]
+}
