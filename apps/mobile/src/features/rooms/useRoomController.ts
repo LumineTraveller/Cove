@@ -205,8 +205,8 @@ export function useRoomController({
           if (socket.recovered) socket.emit('room:leave', room.id);
         });
       // Only actually leaving the room tears down media, not a temporary disconnect.
-      // eslint-disable-next-line react-hooks/exhaustive-deps
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [room.id, socket],
   );
   useEffect(() => {
