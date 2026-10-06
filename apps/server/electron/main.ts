@@ -59,12 +59,12 @@ function openLog() {
 
 // ── 配置文件 (~/.cove/server-config.json) ─────────────────────────────────────
 // 控制 mediasoup 的公网 IP 和端口（SakuraFrp 远程访问时需要设置），
-// 以及是否启用服务器访问密码。安全功能随代码发布但默认保持关闭。
+// 以及是否启用服务器访问密码。新配置默认启用，保留显式关闭选项。
 // 示例内容：
 // {
 //   "mediasoupIp": "114.51.4.19",
 //   "mediasoupPort": 40000,
-//   "serverSecurityEnabled": false
+//   "serverSecurityEnabled": true
 // }
 
 const CONFIG_PATH = path.join(DATA_DIR, 'server-config.json');
@@ -197,7 +197,8 @@ function buildMenu(localIP: string): Electron.Menu {
           fs.writeFileSync(CONFIG_PATH, JSON.stringify({
             mediasoupIp: '127.0.0.1',
             mediasoupPort: 40000,
-            serverSecurityEnabled: false,
+            // New profiles enforce the existing server-access protocol.
+            serverSecurityEnabled: true,
           }, null, 2));
         }
         shell.openPath(CONFIG_PATH);

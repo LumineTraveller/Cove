@@ -147,7 +147,7 @@ server.log             桌面服务器日志
 | `MEDIASOUP_PORT` | WebRTC 媒体端口，默认 `40000`。隧道的公网端口必须与之相同 |
 | `COVE_DATA_DIR` | 数据目录，默认 `~/.cove` |
 | `COVE_DOWNLOAD_DIR` | 安装包与更新清单的静态目录。Linux 默认 `/var/www/cove-download`，让服务器自身充当下载镜像 |
-| `COVE_SERVER_SECURITY_ENABLED` | 是否启用服务器访问门禁，默认关闭 |
+| `COVE_SERVER_SECURITY_ENABLED` | 服务器访问门禁默认开启；显式设为 `false`、`0`、`no` 或 `off` 可关闭 |
 | `COVE_BOOTSTRAP_TOKEN` / `COVE_BOOTSTRAP_TOKEN_FILE` | 由部署系统提供一次性初始化凭据，代替自动生成的 `bootstrap-token.txt` |
 | `COVE_TRUST_PROXY` | 反向代理正确设置了 `X-Forwarded-Proto` 时设为 `true` |
 | `MEDIASOUP_WORKER_BIN` | mediasoup worker 可执行文件路径（打包后指向 `app.asar.unpacked`，通常无需手动设置） |
@@ -158,7 +158,7 @@ server.log             桌面服务器日志
 {
   "mediasoupIp": "203.0.113.10",
   "mediasoupPort": 40000,
-  "serverSecurityEnabled": false
+  "serverSecurityEnabled": true
 }
 ```
 
@@ -178,15 +178,17 @@ node apps/server/dist/index.js
 
 ## 服务器访问安全
 
-服务器访问密码能力随程序安装，但**默认关闭**。关闭时沿用现有账号登录流程，新旧客户端都不需要服务器访问密码，也不会生成初始化凭据。
+服务器访问密码能力**默认开启**，桌面端与移动端按服务器返回的状态显示密码输入并完成验证。显式关闭时沿用现有账号登录流程，新旧客户端都不需要服务器访问密码，也不会生成初始化凭据。未设置、空值或无法识别的开关值都保持开启，避免配置拼写错误绕过门禁。
 
-需要启用时，在启动服务器前设置：
+通常无需设置启用开关；需要明确关闭时，在启动服务器前设置：
 
 ```powershell
-$env:COVE_SERVER_SECURITY_ENABLED = "true"
+$env:COVE_SERVER_SECURITY_ENABLED = "false"
 ```
 
-打包的服务器也可以在 `~/.cove/server-config.json` 中设置 `"serverSecurityEnabled": true` 后重启。启用后的首次启动会在数据目录生成一次性管理员凭据 `bootstrap-token.txt`，也可以改用 `COVE_BOOTSTRAP_TOKEN` 或 `COVE_BOOTSTRAP_TOKEN_FILE` 由部署系统提供。
+打包服务器新建的 `~/.cove/server-config.json` 默认写入 `"serverSecurityEnabled": true`。已有配置不会自动改写：其中显式的布尔值会在启动时覆盖环境变量；已有 `false` 仍保持关闭，需要启用时由管理员改为 `true` 后重启。普通 Node 服务器直接使用环境变量开关，不读取这个打包配置文件。
+
+开启后的新服务器需要先初始化。首次启动沿用现有机制，在数据目录生成一次性管理员凭据 `bootstrap-token.txt`，也可以由部署系统通过 `COVE_BOOTSTRAP_TOKEN` 或 `COVE_BOOTSTRAP_TOKEN_FILE` 提供；服务器访问密码由管理员在客户端初始化时设置，源码不包含默认密码。尚未初始化时受保护的 REST 和 Socket.IO 请求会被拒绝。本次源码变更没有读取或设置实际凭据，也没有启用正在运行的服务器；真实凭据应在用户后续发布时本地配置。
 
 客户端第一次连接新服务器时用这个凭据设置独立的“服务器访问密码”。**它与账号密码、房间密码是三套互不相同的凭据**，初始化成功后一次性凭据会被删除（使用环境变量时由外部密钥管理）。
 

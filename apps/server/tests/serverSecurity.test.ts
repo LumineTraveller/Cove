@@ -150,11 +150,9 @@ test('client protocol marker distinguishes supported clients from legacy clients
   assert.equal(isClientProtocolSupported(undefined), false);
 });
 
-test('server password enforcement is disabled unless explicitly enabled', () => {
-  assert.equal(isServerSecurityEnabled(undefined), false);
-  assert.equal(isServerSecurityEnabled('false'), false);
-  assert.equal(isServerSecurityEnabled('0'), false);
-  assert.equal(isServerSecurityEnabled('true'), true);
-  assert.equal(isServerSecurityEnabled('1'), true);
-  assert.equal(isServerSecurityEnabled('ON'), true);
+test('server password enforcement defaults on and only explicit opt-out disables it', () => {
+  for (const value of [undefined, '', '  ', 'true', '1', 'ON', 'yes', 'invalid'])
+    assert.equal(isServerSecurityEnabled(value), true, String(value));
+  for (const value of ['false', '0', 'no', 'OFF', ' false '])
+    assert.equal(isServerSecurityEnabled(value), false, value);
 });

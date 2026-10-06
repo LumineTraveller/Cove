@@ -19,12 +19,12 @@ import { CLIENT_PROTOCOL_VERSION } from '@cove/contracts';
 export { CLIENT_PROTOCOL_VERSION } from '@cove/contracts';
 
 /**
- * The server-password protocol is shipped dormant so compatible clients can
- * be released before the server starts enforcing it. Enabling it is an
- * explicit deployment decision and requires a server restart.
+ * Require server access by default. Deployments can explicitly opt out with
+ * COVE_SERVER_SECURITY_ENABLED=false (or 0/no/off), followed by a restart.
+ * Missing or unrecognized settings must not silently disable the gate.
  */
 export function isServerSecurityEnabled(value = process.env.COVE_SERVER_SECURITY_ENABLED): boolean {
-  return /^(?:1|true|yes|on)$/i.test(value?.trim() ?? '');
+  return !/^(?:0|false|no|off)$/i.test(value?.trim() ?? '');
 }
 
 export type ServerSecurityErrorCode =

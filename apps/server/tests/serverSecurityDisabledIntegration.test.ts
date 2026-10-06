@@ -23,7 +23,7 @@ class TestDatabase {
   close() { this.db.close(); }
 }
 
-test('default mode keeps legacy REST and Socket.IO clients working', { timeout: 15_000 }, async () => {
+test('explicitly disabled mode keeps legacy REST and Socket.IO clients working', { timeout: 15_000 }, async () => {
   const originalLoad = (Module as any)._load;
   const originalDataDir = process.env.COVE_DATA_DIR;
   const originalEnabled = process.env.COVE_SERVER_SECURITY_ENABLED;
@@ -53,7 +53,7 @@ test('default mode keeps legacy REST and Socket.IO clients working', { timeout: 
   };
 
   process.env.COVE_DATA_DIR = dataDir;
-  delete process.env.COVE_SERVER_SECURITY_ENABLED;
+  process.env.COVE_SERVER_SECURITY_ENABLED = 'false';
   delete process.env.COVE_BOOTSTRAP_TOKEN;
 
   try {
