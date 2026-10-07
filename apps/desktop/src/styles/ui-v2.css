@@ -2853,6 +2853,9 @@ select:focus-visible {
 .choice-grid.resolution-grid {
   grid-template-columns: repeat(4, 1fr);
 }
+.choice-grid.fps-grid {
+  grid-template-columns: repeat(3, 1fr);
+}
 .choice-grid button {
   height: 38px;
   border: 1px solid var(--line);

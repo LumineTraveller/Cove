@@ -836,13 +836,7 @@ export default function ChatRoomV2({
           onPreset={setPendingPreset}
           onFps={setPendingFps}
           onAudio={() => setPendingAudio((value) => !value)}
-          onGameMode={() =>
-            setPendingGameMode((value) => {
-              const next = !value;
-              if (next) setPendingFps(60);
-              return next;
-            })
-          }
+          onGameMode={() => setPendingGameMode((value) => !value)}
           onConfirm={() => {
             const shouldUpdate = editingScreen && rtc.isSharing;
             setRemoteNotice('');

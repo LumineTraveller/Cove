@@ -132,7 +132,7 @@ export function useScreenAnalysis(deps: useScreenAnalysisDependencies) {
   /**
    * mediasoup 不读取视频像素，因此在发送端把画面缩到 160×90，每 250ms 比较一次
    * 亮度变化。连续静止后降到 15fps；有画面变化时
-   * 使用用户选择的最高 60fps。采样只有约 1.4 万像素，开销远低于视频编码。
+   * 使用用户选择的最高帧率。采样只有约 1.4 万像素，开销远低于视频编码。
    */
   const startScreenAnalysis = useCallback(
     (stream: MediaStream, preset: ScreenPreset, maxFps: Fps, nativeResolution: boolean) => {

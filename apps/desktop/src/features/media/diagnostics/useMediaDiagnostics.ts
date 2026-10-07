@@ -354,7 +354,7 @@ export function useMediaDiagnostics(deps: useMediaDiagnosticsDependencies) {
       userAgent: navigator.userAgent,
       screen: {
         preset: deps.screenPreset,
-        requestedFps: deps.screenGameMode ? 60 : deps.fps,
+        requestedFps: deps.fps,
         gameMode: deps.screenGameMode,
         nativeResolution: deps.screenNativeResolution,
         configuredMaxBitrate: SCREEN_MAX_BITRATE_BPS,

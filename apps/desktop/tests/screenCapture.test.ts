@@ -4,8 +4,11 @@ import {
   createScreenEncodingPlan,
   isScreenEncodingWithinPlan,
   screenEncodingPlanLabel,
+  screenCaptureVideoConstraints,
+  SCREEN_FPS_OPTIONS,
   SCREEN_PRESETS,
   SCREEN_RAMP_GRACE_MS,
+  SCREEN_START_BITRATE_BPS,
   toScreenRtpEncoding,
   withScreenEncodingPlan,
   type ScreenActivity,
@@ -85,7 +88,7 @@ test('a window below the selected preset is never enlarged', () => {
 
 test('every preset, frame-rate and activity overrides the implicit 2.5 Mbps default', () => {
   for (const preset of Object.keys(SCREEN_PRESETS) as ScreenPreset[]) {
-    for (const maxFps of [30, 60] as const) {
+    for (const maxFps of SCREEN_FPS_OPTIONS) {
       for (const activity of ['static', 'active', 'motion'] as ScreenActivity[]) {
         const plan = createScreenEncodingPlan({ preset, maxFps, activity });
         const encoding = toScreenRtpEncoding(plan);
@@ -94,6 +97,44 @@ test('every preset, frame-rate and activity overrides the implicit 2.5 Mbps defa
         assert.equal(encoding.scaleResolutionDownBy, 1);
       }
     }
+  }
+});
+
+test('120 FPS requests preferred/maximum capture cadence without a hard minimum', () => {
+  assert.deepEqual(screenCaptureVideoConstraints(120), { frameRate: { ideal: 120, max: 120 } });
+  assert.equal(SCREEN_START_BITRATE_BPS, 10_000_000, 'the startup budget stays safe at every cadence');
+});
+
+test('120 FPS changing content and game motion preserve resolution preferences and sender caps', () => {
+  for (const preset of Object.keys(SCREEN_PRESETS) as ScreenPreset[]) {
+    for (const nativeResolution of [false, true]) {
+      for (const activity of ['active', 'motion'] as const) {
+        const options = { preset, nativeResolution, activity, sourceWidth: 3840, sourceHeight: 2160 };
+        const previous = createScreenEncodingPlan({ ...options, maxFps: 60 });
+        const plan = createScreenEncodingPlan({ ...options, maxFps: 120 });
+        assert.equal(plan.fps, 120);
+        assert.equal(plan.outputWidth, previous.outputWidth);
+        assert.equal(plan.outputHeight, previous.outputHeight);
+        assert.equal(plan.degradationPreference, previous.degradationPreference);
+        assert.equal(toScreenRtpEncoding(plan).maxFramerate, 120);
+        assert.equal(toScreenRtpEncoding(plan).maxBitrate, 200_000_000);
+      }
+    }
+  }
+});
+
+test('a selected 120 FPS sender drops to idle 15 and restores 120 without losing sender fields', () => {
+  let parameters: RTCRtpSendParameters = {
+    transactionId: '120-fps-sender', codecs: [], headerExtensions: [], rtcp: {},
+    encodings: [{ rid: 'screen', active: false, maxFramerate: 60 }],
+  };
+  for (const [activity, fps] of [['active', 120], ['static', 15], ['motion', 120]] as const) {
+    const plan = createScreenEncodingPlan({ preset: '1080p', maxFps: 120, activity });
+    parameters = withScreenEncodingPlan(parameters, plan);
+    assert.equal(parameters.encodings[0].maxFramerate, fps);
+    assert.equal(parameters.encodings[0].rid, 'screen');
+    assert.equal(parameters.encodings[0].active, false);
+    assert.equal(parameters.transactionId, '120-fps-sender');
   }
 });
 

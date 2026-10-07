@@ -22,7 +22,7 @@
     "test:chat-images": "tsx --test tests/chatImages.test.ts",
     "test:chat-links": "tsx --test tests/chatLinks.test.ts",
     "test:media-diagnostics": "tsx --test tests/mediaDiagnostics.test.ts",
-    "test:screen-capture": "tsx --test tests/screenCapture.test.ts tests/screenVideoPresentation.test.ts",
+    "test:screen-capture": "tsx --test tests/screenCapture.test.ts tests/screenPreferences.test.ts tests/screenPublishing.test.ts tests/screenVideoPresentation.test.ts",
     "test:member-ordering": "tsx --test tests/memberOrdering.test.ts",
     "test:account-auth": "tsx --test tests/accountAuth.test.ts tests/serverIdentity.test.ts tests/serverSecurity.test.ts tests/accountPasswordStore.test.ts tests/accountPasswordMemory.test.ts",
     "test:remote-control": "tsx --test tests/remoteControl.test.ts tests/remoteInputQueue.test.ts tests/remoteInputController.test.ts tests/remoteControlSession.test.ts tests/remoteInputHelper.test.ts",

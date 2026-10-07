@@ -57,6 +57,7 @@ import {
   type ScreenPreset,
 } from './screen/screenCapture';
 import { ApplicationAudioPipeline } from './application-audio/applicationAudio';
+import { loadScreenPreferences, saveScreenPreferences } from './screen/screenPreferences';
 
 export { SCREEN_PRESETS } from './screen/screenCapture';
 export type { ScreenPreset } from './screen/screenCapture';
@@ -69,11 +70,23 @@ export function useWebRTC(socket: Socket, roomId: string) {
   const [isSharing, setIsSharing] = useState(false);
   const [isApplicationAudioSharing, setIsApplicationAudioSharing] = useState(false);
   const [applicationAudioLabel, setApplicationAudioLabel] = useState<string | null>(null);
-  const [screenPreset, setScreenPreset] = useState<ScreenPreset>('720p');
-  const [fps, setFps] = useState<Fps>(30);
-  const [shareAudio, setShareAudio] = useState(false);
-  const [screenGameMode, setScreenGameMode] = useState(false);
-  const [screenNativeResolution, setScreenNativeResolution] = useState(false);
+  const [initialScreenPreferences] = useState(loadScreenPreferences);
+  const [screenPreset, setScreenPreset] = useState<ScreenPreset>(initialScreenPreferences.preset);
+  const [fps, setFps] = useState<Fps>(initialScreenPreferences.fps);
+  const [shareAudio, setShareAudio] = useState(initialScreenPreferences.audio);
+  const [screenGameMode, setScreenGameMode] = useState(initialScreenPreferences.gameMode);
+  const [screenNativeResolution, setScreenNativeResolution] = useState(
+    initialScreenPreferences.nativeResolution,
+  );
+  useEffect(() => {
+    saveScreenPreferences({
+      preset: screenPreset,
+      fps,
+      audio: shareAudio,
+      gameMode: screenGameMode,
+      nativeResolution: screenNativeResolution,
+    });
+  }, [screenPreset, fps, shareAudio, screenGameMode, screenNativeResolution]);
   const [screenActivity, setScreenActivity] = useState<ScreenActivity>('active');
   const [screenEncodingPlan, setScreenEncodingPlan] = useState<ScreenEncodingPlan | null>(null);
   const [screenViewerCount, setScreenViewerCount] = useState(0);

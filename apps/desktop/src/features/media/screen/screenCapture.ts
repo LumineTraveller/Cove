@@ -6,7 +6,8 @@ export const SCREEN_PRESETS = {
 } as const;
 
 export type ScreenPreset = keyof typeof SCREEN_PRESETS;
-export type ScreenFps = 30 | 60;
+export const SCREEN_FPS_OPTIONS = [30, 60, 120] as const;
+export type ScreenFps = (typeof SCREEN_FPS_OPTIONS)[number];
 export type ScreenActivity = 'static' | 'active' | 'motion';
 
 /**
@@ -19,6 +20,12 @@ export const SCREEN_RAMP_GRACE_MS = 5_000;
 // Override WebRTC's implicit single-stream 2.5 Mbps default; this is a ceiling,
 // not a target or minimum. Congestion control still chooses the actual rate.
 export const SCREEN_MAX_BITRATE_BPS = 200_000_000;
+export const SCREEN_START_BITRATE_BPS = 10_000_000;
+
+/** Preferred/maximum capture cadence; a slower source remains usable. */
+export function screenCaptureVideoConstraints(maxFps: ScreenFps): MediaTrackConstraints {
+  return { frameRate: { ideal: maxFps, max: maxFps } };
+}
 
 export interface ScreenEncodingPlan {
   preset: ScreenPreset;
@@ -42,7 +49,7 @@ export interface ScreenRtpEncodingParameters {
 export function screenEncodingProfile(maxFps: ScreenFps, activity: ScreenActivity) {
   if (activity === 'static') return { fps: 15 };
   // Any changing content may use the user's selected cadence. Small windows
-  // should not require >12% of the screen to change to unlock 60 FPS.
+  // should not require >12% of the screen to change to unlock the selected FPS.
   return { fps: maxFps };
 }
 
