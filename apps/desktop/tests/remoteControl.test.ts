@@ -126,3 +126,32 @@ test('browser mouse buttons map only supported controls', () => {
   assert.equal(remoteMouseButton(2), 'right');
   assert.equal(remoteMouseButton(4), null);
 });
+
+test('fullscreen aspect-ratio rounding preserves the top row and both corners at different pixel scales', () => {
+  for (const scale of [1, 1.25, 1.5, 2]) {
+    const rect = { left: 0, top: 0, width: 1707 / scale, height: 1067 / scale };
+    for (const x of [0, rect.width / 2, rect.width]) {
+      const top = normalizedVideoPoint(x, 0, rect, 2560, 1600, scale)!;
+      assert.ok(top, `top edge at ${scale} scale`);
+      assert.equal(top.y, 0);
+      assert.equal(top.x, x / rect.width);
+      assert.equal(normalizedVideoPoint(x, -0.01, rect, 2560, 1600, scale), null,
+        'never map points outside the actual video element');
+    }
+    const bottom = normalizedVideoPoint(rect.width, rect.height, rect, 2560, 1600, scale)!;
+    assert.deepEqual(bottom, { x: 1, y: 1 });
+    const side = { left: -1707, top: 0, width: 1707 / scale, height: 1066 / scale };
+    assert.deepEqual(normalizedVideoPoint(side.left, side.top, side, 2560, 1600, scale), { x: 0, y: 0 },
+      'negative monitor origins and tiny side gutters are accepted');
+  }
+});
+
+test('edge rounding tolerance does not admit genuine black bars or expand with high DPI', () => {
+  const rect = { left: 0, top: 0, width: 1600, height: 1000 };
+  assert.equal(normalizedVideoPoint(800, 0, rect, 1920, 1080, 1.5), null);
+  assert.equal(normalizedVideoPoint(800, 49.9, rect, 1920, 1080, 1.5), null);
+  assert.deepEqual(normalizedVideoPoint(800, 50, rect, 1920, 1080, 1.5), { x: 0.5, y: 0 });
+  const narrowBar = { left: 0, top: 0, width: 1600, height: 902 };
+  assert.equal(normalizedVideoPoint(800, 0, narrowBar, 1920, 1080, 2), null,
+    'one CSS pixel at 200% is a two-physical-pixel bar, not rounding');
+});

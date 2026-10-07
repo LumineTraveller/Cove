@@ -261,7 +261,7 @@ async function main() {
       nativeBoundary: 'recording-only SendInput replacement; no real system input',
       globalShortcutBoundary: 'owned callback map; no real system shortcut registration',
       excluded: ['installation/rollback execution', 'real OS cursor', 'WAN', 'video feedback'], testDir };
-    const reportName = process.env.COVE_PACKAGE_SMOKE_UNIFIED === '1' ? 'remote-input-unified-packaged-smoke.json' : process.env.COVE_PACKAGE_SMOKE_RAW === '1' ? 'remote-input-raw-packaged-smoke.json' : 'remote-input-packaged-smoke.json';
+    const reportName = process.env.COVE_PACKAGE_SMOKE_EDGE === '1' ? 'fullscreen-edge-packaged-smoke.json' : process.env.COVE_PACKAGE_SMOKE_UNIFIED === '1' ? 'remote-input-unified-packaged-smoke.json' : process.env.COVE_PACKAGE_SMOKE_RAW === '1' ? 'remote-input-raw-packaged-smoke.json' : 'remote-input-packaged-smoke.json';
     fs.writeFileSync(path.join(root, 'runtime', reportName), JSON.stringify(report, null, 2) + '\n');
     console.log(JSON.stringify(report, null, 2));
     await command('Runtime.evaluate', { expression: '__covePackageSmoke.quit()' }); socket.close();

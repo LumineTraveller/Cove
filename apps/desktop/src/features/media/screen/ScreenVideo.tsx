@@ -82,6 +82,7 @@ export function RemoteScreenVideo({
       video.getBoundingClientRect(),
       video.videoWidth,
       video.videoHeight,
+      window.devicePixelRatio,
     );
   }, [videoRef]);
   const rememberPoint = useCallback((mapped: { x: number; y: number } | null) => {
