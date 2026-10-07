@@ -89,6 +89,72 @@ body.sortable-dragging * {
   background: rgba(103, 232, 249, 0.16);
   color: #a5f3fc;
 }
+.soundpack-groups {
+  display: grid;
+}
+.soundpack-group-items {
+  min-height: 68px;
+}
+.soundpack-group-divider {
+  display: flex;
+  width: 100%;
+  height: 32px;
+  margin: 5px 0;
+  padding: 15px 0;
+  border: 0;
+  background: transparent;
+  cursor: grab;
+  touch-action: none;
+}
+.soundpack-group-divider > span,
+.soundpack-group-drag-line > span {
+  display: block;
+  width: 100%;
+  height: 1px;
+  background: var(--line, rgba(255, 255, 255, 0.2));
+}
+.soundpack-group-divider:hover > span,
+.soundpack-group-divider:focus-visible > span,
+[data-soundpack-group-preview] .soundpack-group-divider > span {
+  background: var(--blue, #67e8f9);
+}
+.soundpack-group-divider:focus-visible {
+  outline: 2px solid var(--blue, #67e8f9);
+  outline-offset: 2px;
+}
+.soundpack-group-divider:disabled {
+  cursor: default;
+}
+.soundpack-add-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 3px;
+  margin-left: auto;
+  border: 0;
+  background: transparent;
+  color: var(--muted, rgba(255, 255, 255, 0.5));
+  font-size: 11px;
+}
+.soundpack-add-group:hover:not(:disabled) {
+  color: var(--blue, #67e8f9);
+}
+.soundpack-add-group:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.soundpack-group-drag-line {
+  z-index: 900;
+  display: flex;
+  align-items: center;
+}
+.soundpack-group-drag-line > span {
+  background: var(--blue, #67e8f9);
+}
+.soundpack-dragging,
+.soundpack-dragging * {
+  cursor: grabbing !important;
+}
 .soundpack-card-placeholder {
   border: 1px dashed rgba(148, 163, 184, 0.45);
   border-radius: 16px;

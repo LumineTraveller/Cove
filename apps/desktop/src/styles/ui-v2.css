@@ -2868,8 +2868,7 @@ select:focus-visible {
   background: #edf4ff;
   color: var(--blue);
 }
-/* 与 .member-context / .audio-device-actions 等既有约定保持一致：禁用档位既不该
-   给指针反馈，也不该在悬停时亮起。原生分辨率与游戏模式锁定的两行都靠这里。 */
+/* Disabled native-resolution choices retain their layout without hover feedback. */
 .choice-grid button:disabled {
   cursor: not-allowed;
 }
@@ -7657,6 +7656,15 @@ body .cove-window-controls button {
    clipping, which means these popover-scoped rules would no longer reach it.
    `.soundpack-item-overlay.soundpack-item` re-attaches the same declarations so
    the picked-up card keeps the exact geometry and type of the resting card. */
+/* During a drag, the destination placeholder is the only hover feedback. */
+body.soundpack-dragging .soundpack-management-popover .soundpack-item:not(.playing) {
+  background: #fff;
+  border-color: var(--line);
+}
+:root[data-theme="dark"] body.soundpack-dragging .soundpack-management-popover .soundpack-item:not(.playing) {
+  background: #17212c;
+  border-color: var(--line);
+}
 .soundpack-management-popover .soundpack-item,
 .soundpack-item-overlay.soundpack-item {
   min-height: 68px;
