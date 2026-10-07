@@ -5,6 +5,7 @@ import {
   isScreenEncodingWithinPlan,
   screenEncodingPlanLabel,
   SCREEN_PRESETS,
+  screenCodecOptions,
   SCREEN_RAMP_GRACE_MS,
   toScreenRtpEncoding,
   withScreenEncodingPlan,
@@ -187,6 +188,30 @@ test('the startup ramp guard is a no-op for activities that already keep resolut
 test('the startup ramp guard covers a real bitrate climb rather than a single frame', () => {
   assert.ok(SCREEN_RAMP_GRACE_MS >= 3_000);
   assert.ok(SCREEN_RAMP_GRACE_MS <= 10_000);
+});
+
+test('startup estimate follows actual encoded pixels and cadence without a bitrate floor', () => {
+  const options = { preset: '1440p' as const, maxFps: 60 as const, activity: 'motion' as const };
+  const small = createScreenEncodingPlan({ ...options, sourceWidth: 1280, sourceHeight: 720 });
+  const fullHd = createScreenEncodingPlan({ ...options, sourceWidth: 1920, sourceHeight: 1080 });
+  const quadHd = createScreenEncodingPlan({ ...options, sourceWidth: 2560, sourceHeight: 1440 });
+  const native4K = createScreenEncodingPlan({ ...options, sourceWidth: 3840, sourceHeight: 2160, nativeResolution: true });
+  assert.equal(screenCodecOptions(small, 100_000_000).videoGoogleStartBitrate, 6636);
+  assert.equal(screenCodecOptions(fullHd, 100_000_000).videoGoogleStartBitrate, 14930);
+  assert.equal(screenCodecOptions(quadHd, 100_000_000).videoGoogleStartBitrate, 26542);
+  assert.equal(screenCodecOptions(native4K, 100_000_000).videoGoogleStartBitrate, 59720);
+  for (const plan of [small, fullHd, quadHd, native4K]) {
+    const codecOptions = screenCodecOptions(plan, 100_000_000);
+    assert.equal(codecOptions.videoGoogleMaxBitrate, 200_000);
+    assert.equal('videoGoogleMinBitrate' in codecOptions, false);
+  }
+  assert.equal(screenCodecOptions(fullHd).videoGoogleStartBitrate, 10_000);
+  assert.equal(screenCodecOptions(quadHd).videoGoogleStartBitrate, 10_000);
+  assert.equal(screenCodecOptions(quadHd, 3_000_000).videoGoogleStartBitrate, 10_000);
+  assert.equal(screenCodecOptions(quadHd, Number.NaN).videoGoogleStartBitrate, 10_000);
+  assert.equal(screenCodecOptions(quadHd, 20_000_000).videoGoogleStartBitrate, 17_000);
+  const staticPlan = createScreenEncodingPlan({ ...options, activity: 'static', sourceWidth: 1920, sourceHeight: 1080 });
+  assert.equal(screenCodecOptions(staticPlan).videoGoogleStartBitrate, 3732);
 });
 
 test('ordinary active content honors selected 60 FPS without changing detail or native preferences', () => {

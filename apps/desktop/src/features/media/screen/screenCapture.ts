@@ -33,6 +33,29 @@ export interface ScreenEncodingPlan {
   degradationPreference: RTCDegradationPreference;
 }
 
+/**
+ * A pixel/cadence seed can use headroom already observed on the send transport.
+ * Without that evidence, retain the existing 10 Mbps bootstrap: blindly raising
+ * the initial probes delays cold startup on a constrained link. The 0.12
+ * bits/pixel/frame heuristic and bootstrap are neither steady-state targets nor
+ * minima. GCC still controls the actual rate; no runtime rate forcing is used.
+ */
+export function screenCodecOptions(plan: ScreenEncodingPlan, availableOutgoingBitrate?: number) {
+  const pixelBudgetBps = plan.outputWidth * plan.outputHeight * plan.fps * 0.12;
+  const observedBudgetBps =
+    typeof availableOutgoingBitrate === 'number' && Number.isFinite(availableOutgoingBitrate)
+      ? Math.max(0, availableOutgoingBitrate) * 0.85
+      : 0;
+  const initialBitrateBps = Math.min(pixelBudgetBps, Math.max(10_000_000, observedBudgetBps));
+  return {
+    videoGoogleStartBitrate: Math.max(
+      1,
+      Math.round(Math.min(SCREEN_MAX_BITRATE_BPS, initialBitrateBps) / 1_000),
+    ),
+    videoGoogleMaxBitrate: SCREEN_MAX_BITRATE_BPS / 1_000,
+  };
+}
+
 export interface ScreenRtpEncodingParameters {
   maxBitrate: number;
   maxFramerate: number;

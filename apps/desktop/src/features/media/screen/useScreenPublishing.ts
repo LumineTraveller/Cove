@@ -5,7 +5,7 @@ import { Device } from 'mediasoup-client';
 import { type RtcVideoCounterSample } from '../diagnostics/mediaDiagnostics';
 import {
   createScreenEncodingPlan,
-  SCREEN_MAX_BITRATE_BPS,
+  screenCodecOptions,
   toScreenRtpEncoding,
   type ScreenActivity,
   type ScreenEncodingPlan,
@@ -174,6 +174,24 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
         deps.videoCounterPrev.current = null;
         deps.remoteLossPrev.current = null;
 
+        // Voice and screen share use the same send transport. Its current BWE
+        // can justify a larger seed; an unconnected/unsupported report cannot.
+        let availableOutgoingBitrate: number | undefined;
+        try {
+          const report = await deps.sendTransport.current!.getStats();
+          report.forEach((stat) => {
+            if (
+              stat.type === 'candidate-pair' && stat.state === 'succeeded' &&
+              (stat.nominated === true || stat.selected === true) &&
+              typeof stat.availableOutgoingBitrate === 'number'
+            ) availableOutgoingBitrate = stat.availableOutgoingBitrate;
+          });
+        } catch {
+          // The first producer may not have created a PeerConnection yet.
+        }
+        const codecOptions = screenCodecOptions(initialPlan, availableOutgoingBitrate);
+        console.info('[media-diag] 屏幕起播估计', { codecOptions, availableOutgoingBitrate });
+
         const negotiatedCodecs = deps.deviceRef.current?.rtpCapabilities.codecs ?? [];
         const codecCandidates = ['video/av1', 'video/vp9']
           .map((mimeType) =>
@@ -203,11 +221,8 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
                   preferredCodec: codec?.mimeType ?? 'auto',
                 },
                 encodings: [toScreenRtpEncoding(initialPlan)],
-                // 初始带宽估计（kbps），不是上限；与 SFU 启动估计一致，之后由拥塞控制调整。
-                codecOptions: {
-                  videoGoogleStartBitrate: 10_000,
-                  videoGoogleMaxBitrate: SCREEN_MAX_BITRATE_BPS / 1_000,
-                },
+                // 按实际输出像素/帧率播种初始估计（kbps）；之后由拥塞控制调整，无最低码率。
+                codecOptions,
                 ...(codec ? { codec } : {}),
                 stopTracks: false,
                 disableTrackOnPause: false,
