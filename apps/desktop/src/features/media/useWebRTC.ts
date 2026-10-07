@@ -2,6 +2,7 @@ import { useVolumeControls } from './audio/useVolumeControls';
 import { useAudioDevices } from './audio/useAudioDevices';
 import { useAudioMeters } from './audio/useAudioMeters';
 import { useMediaDiagnostics } from './diagnostics/useMediaDiagnostics';
+import { type diagnosticVideoCounters } from './diagnostics/mediaDiagnostics';
 import { useMediaTransports } from './transport/useMediaTransports';
 import { useScreenViewing } from './screen/useScreenViewing';
 import { useMicrophoneControls } from './microphone/useMicrophoneControls';
@@ -262,6 +263,9 @@ export function useWebRTC(socket: Socket, roomId: string) {
       timestamp: string;
       stats: MediaStats;
       trackSettings: MediaTrackSettings | null;
+      rawVideoCounters: ReturnType<typeof diagnosticVideoCounters>;
+      encodingPlan: ScreenEncodingPlan | null;
+      contentHint: string | null;
     }[]
   >([]);
   const {
