@@ -90,7 +90,7 @@ test('every preset, frame-rate and activity overrides the implicit 2.5 Mbps defa
         const plan = createScreenEncodingPlan({ preset, maxFps, activity });
         const encoding = toScreenRtpEncoding(plan);
         assert.equal(encoding.maxBitrate, 200_000_000, `${preset}/${maxFps}/${activity}`);
-        assert.equal(encoding.maxFramerate, activity === 'static' ? 15 : activity === 'motion' ? maxFps : 30);
+        assert.equal(encoding.maxFramerate, activity === 'static' ? 15 : maxFps);
         assert.equal(encoding.scaleResolutionDownBy, 1);
       }
     }
@@ -145,7 +145,7 @@ test('native sharing preserves a 4K source regardless of preset and content acti
       assert.equal(plan.outputHeight, 2160);
       assert.equal(plan.scaleResolutionDownBy, 1);
       assert.equal(plan.degradationPreference, 'maintain-resolution');
-      assert.equal(plan.fps, activity === 'static' ? 15 : activity === 'active' ? 30 : 60);
+      assert.equal(plan.fps, activity === 'static' ? 15 : 60);
       assert.equal(toScreenRtpEncoding(plan).scaleResolutionDownBy, 1);
       assert.equal(toScreenRtpEncoding(plan).maxBitrate, 200_000_000);
     }
@@ -187,4 +187,13 @@ test('the startup ramp guard is a no-op for activities that already keep resolut
 test('the startup ramp guard covers a real bitrate climb rather than a single frame', () => {
   assert.ok(SCREEN_RAMP_GRACE_MS >= 3_000);
   assert.ok(SCREEN_RAMP_GRACE_MS <= 10_000);
+});
+
+test('ordinary active content honors selected 60 FPS without changing detail or native preferences', () => {
+  for (const nativeResolution of [false, true]) {
+    const plan = createScreenEncodingPlan({ preset: '1080p', maxFps: 60, activity: 'active', nativeResolution });
+    assert.equal(plan.fps, 60);
+    assert.equal(plan.contentHint, 'detail');
+    assert.equal(plan.degradationPreference, 'maintain-resolution');
+  }
 });

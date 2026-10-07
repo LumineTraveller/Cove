@@ -41,8 +41,9 @@ export interface ScreenRtpEncodingParameters {
 
 export function screenEncodingProfile(maxFps: ScreenFps, activity: ScreenActivity) {
   if (activity === 'static') return { fps: 15 };
-  if (activity === 'motion' && maxFps === 60) return { fps: 60 };
-  return { fps: 30 };
+  // Any changing content may use the user's selected cadence. Small windows
+  // should not require >12% of the screen to change to unlock 60 FPS.
+  return { fps: maxFps };
 }
 
 function positiveDimension(value: number | undefined, fallback: number): number {
