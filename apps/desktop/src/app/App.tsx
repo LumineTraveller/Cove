@@ -191,10 +191,16 @@ export default function App() {
   const [passwordMemoryAvailable, setPasswordMemoryAvailable] = useState(false);
   const [passwordMemoryNotice, setPasswordMemoryNotice] = useState('');
   const passwordFillGeneration = useRef(0);
+  const passwordMemoryResultRevision = useRef(0);
+  const [passwordRestoreVersion, setPasswordRestoreVersion] = useState(0);
   useEffect(() => {
     let active = true;
+    const revision = ++passwordMemoryResultRevision.current;
     void passwordMemoryStatus().then(result => {
-      if (active) { setPasswordMemoryAvailable(result.available); if (!result.available) setPasswordMemoryNotice(PASSWORD_MEMORY_UNAVAILABLE); }
+      if (active && revision === passwordMemoryResultRevision.current) {
+        setPasswordMemoryAvailable(result.available);
+        if (!result.available) setPasswordMemoryNotice(PASSWORD_MEMORY_UNAVAILABLE);
+      }
     });
     return () => { active = false; passwordFillGeneration.current += 1; };
   }, []);
@@ -242,6 +248,27 @@ export default function App() {
   const serverURL = getServerURL();
   const accountSession = readAccountSession(serverURL);
   const needLogin = !profile.username || !serverUrl || !accountSession || serverUnlockRequired;
+  useEffect(() => {
+    const server = normalizeLoginServer(draftUrl);
+    if (!needLogin || authMode !== 'login' || !server || !validAccountEmail(draftEmail)) return;
+    let active = true;
+    const generation = ++passwordFillGeneration.current;
+    // Debounce scope edits, but never overwrite a password typed while IPC is pending.
+    const timer = window.setTimeout(() => {
+      if (!active || generation !== passwordFillGeneration.current) return;
+      const revision = ++passwordMemoryResultRevision.current;
+      void readAccountPassword(server, draftEmail).then(result => {
+        if (revision === passwordMemoryResultRevision.current) setPasswordMemoryAvailable(result.available);
+        if (!active || generation !== passwordFillGeneration.current) return;
+        setPasswordMemoryNotice(!result.available ? PASSWORD_MEMORY_UNAVAILABLE : !result.ok ? PASSWORD_MEMORY_FAILED : '');
+        if (result.ok && result.password) {
+          setDraftPassword(result.password);
+          setRememberPassword(true);
+        }
+      });
+    }, 150);
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [draftUrl, draftEmail, authMode, needLogin, passwordRestoreVersion]);
   const updateServerURL =
     needLogin || editingServer ? normalizeServerSecurityURL(draftUrl) : serverURL;
   const activeUpgrade = requiredUpgrades[normalizeServerSecurityURL(updateServerURL)];
@@ -718,15 +745,8 @@ export default function App() {
     setAuthMode('login');
     setDraftUrl(entry.serverUrl);
     setDraftEmail(entry.email);
-    setDraftPassword('');
-    setRememberPassword(false);
-    const generation = ++passwordFillGeneration.current;
-    void readAccountPassword(entry.serverUrl, entry.email).then(result => {
-      if (generation !== passwordFillGeneration.current) return;
-      setPasswordMemoryAvailable(result.available);
-      setPasswordMemoryNotice(!result.available ? PASSWORD_MEMORY_UNAVAILABLE : !result.ok ? PASSWORD_MEMORY_FAILED : '');
-      if (result.ok && result.password) { setDraftPassword(result.password); setRememberPassword(true); }
-    });
+    invalidatePasswordFill();
+    setPasswordRestoreVersion(version => version + 1);
     setDraftServerPassword('');
     setDraftBootstrapToken('');
     setAllowUntrustedCertificate(entry.allowInvalidServerCertificate === true);
@@ -736,10 +756,14 @@ export default function App() {
 
   const forgetLogin = async (entry: RememberedLogin) => {
     if (authPending) return;
-    passwordFillGeneration.current += 1;
+    const selected = normalizeLoginServer(draftUrl) === normalizeLoginServer(entry.serverUrl) && draftEmail.trim().toLowerCase() === entry.email.trim().toLowerCase();
+    if (selected) invalidatePasswordFill();
+    const generation = passwordFillGeneration.current;
     const removal = await removeAccountPassword(entry.serverUrl, entry.email);
-    if (!removal.ok) { setPasswordMemoryNotice(PASSWORD_MEMORY_FAILED); return; }
-    if (normalizeLoginServer(draftUrl) === normalizeLoginServer(entry.serverUrl) && draftEmail.trim().toLowerCase() === entry.email.trim().toLowerCase()) invalidatePasswordFill();
+    if (!removal.ok) {
+      if (generation === passwordFillGeneration.current) setPasswordMemoryNotice(PASSWORD_MEMORY_FAILED);
+      return;
+    }
     const saved = entry.token ? entry : null;
     if (saved)
       void serverFetch(saved.serverUrl, '/api/auth/logout', {
@@ -894,6 +918,27 @@ export default function App() {
                 ))}
               </div>
 
+              <div className="auth-password-memory">
+                <label><input type="checkbox" aria-label="记住账号密码" checked={rememberPassword}
+                  disabled={!passwordMemoryAvailable || authPending}
+                  onChange={async event => {
+                    const generation = ++passwordFillGeneration.current;
+                    const selected = event.target.checked;
+                    setRememberPassword(selected);
+                    if (!selected) {
+                      const result = await removeAccountPassword(draftUrl, draftEmail);
+                      if (generation === passwordFillGeneration.current && !result.ok) setPasswordMemoryNotice(PASSWORD_MEMORY_FAILED);
+                    }
+                  }} /><span>记住账号密码（系统加密）</span></label>
+                <button type="button" disabled={authPending} onClick={async () => {
+                  invalidatePasswordFill();
+                  const generation = passwordFillGeneration.current;
+                  const result = await clearAccountPasswords();
+                  if (generation === passwordFillGeneration.current) setPasswordMemoryNotice(result.ok ? '已清除记住的账号密码，账号记录仍保留。' : PASSWORD_MEMORY_FAILED);
+                }}>清除已记住密码</button>
+              </div>
+              {passwordMemoryNotice && <p className="auth-password-memory-notice" role="status">{passwordMemoryNotice}</p>}
+
               <form
                 className="auth-form"
                 onSubmit={(event) => {
@@ -936,13 +981,13 @@ export default function App() {
                           type="button"
                           className="auth-history-button"
                           aria-label="打开服务器历史"
-                          title={rememberedLogins.length > 0 ? '服务器历史' : '暂无服务器历史'}
+                          title={rememberedLogins.length > 0 ? '选择已保存账号并填入密码' : '暂无已保存账号'}
                           aria-expanded={showServerHistory}
                           aria-controls="auth-server-history"
                           disabled={authPending || rememberedLogins.length === 0}
                           onClick={() => setShowServerHistory((current) => !current)}
                         >
-                          <Clock3 size={19} />
+                          <Clock3 size={16} /><span>已保存账号</span>
                         </button>
                       )}
                     </div>
@@ -1096,23 +1141,6 @@ export default function App() {
                     />
                   </div>
                 </label>
-
-                <div className="auth-password-memory">
-                  <label><input type="checkbox" aria-label="记住账号密码" checked={rememberPassword}
-                    disabled={!passwordMemoryAvailable || authPending}
-                    onChange={async event => {
-                      passwordFillGeneration.current += 1;
-                      const selected = event.target.checked;
-                      setRememberPassword(selected);
-                      if (!selected) { const result = await removeAccountPassword(draftUrl, draftEmail); if (!result.ok) setPasswordMemoryNotice(PASSWORD_MEMORY_FAILED); }
-                    }} /><span>记住账号密码（系统加密）</span></label>
-                  <button type="button" disabled={authPending} onClick={async () => {
-                    invalidatePasswordFill();
-                    const result = await clearAccountPasswords();
-                    setPasswordMemoryNotice(result.ok ? '已清除记住的账号密码，账号记录仍保留。' : PASSWORD_MEMORY_FAILED);
-                  }}>清除已记住密码</button>
-                </div>
-                {passwordMemoryNotice && <p className="auth-password-memory-notice" role="status">{passwordMemoryNotice}</p>}
 
                 {authError && (
                   <p className="auth-error" role="alert">

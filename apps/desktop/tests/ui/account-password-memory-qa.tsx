@@ -1,6 +1,3 @@
-import { createRoot } from 'react-dom/client';
-import '../../src/styles/index.css';
-
 // Isolated Electron profile and fictional accounts only. No real authentication service.
 const serverUrl = 'http://127.0.0.1:3317';
 const history = ['alice', 'bob'].map(accountId => ({
@@ -25,5 +22,5 @@ window.fetch = async (input, init) => {
   else throw new Error('Unexpected synthetic request');
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 };
-const { default: App } = await import('../../src/app/App');
-createRoot(document.getElementById('root')!).render(<App />);
+// Exercise the production entry, including StrictMode and scrollbar handling.
+await import('../../src/main');

@@ -4846,7 +4846,8 @@ body .cove-window-controls button {
 /* 登录页：与频道大厅共用浅色 Cove 视觉语言，避免窄长表单造成的压迫感。 */
 .auth-page {
   width: 100%;
-  min-height: 100%;
+  height: 100%;
+  min-height: 0;
   padding: 28px;
   display: grid;
   /* 登录/注册切换时注册多一行用户名，卡片会变高。垂直居中会让上下边缘同时
@@ -5065,11 +5066,16 @@ body .cove-window-controls button {
   padding-right: 7px;
 }
 .auth-history-button {
-  width: 38px;
+  min-width: 38px;
   height: 38px;
+  padding: 0 8px;
   flex: 0 0 auto;
-  display: grid;
-  place-items: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 11px;
+  white-space: nowrap;
   border-left: 1px solid #e4ebf3;
   border-radius: 10px;
   color: #8193a7;
