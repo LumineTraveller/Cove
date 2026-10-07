@@ -1,0 +1,235 @@
+{
+  "passed": true,
+  "observedAt": "2026-10-07T04:03:38.356Z",
+  "geometry": {
+    "observedAt": "2026-10-07T04:03:37.1354204Z",
+    "hwnd": 2889456,
+    "visible": true,
+    "outer": {
+      "left": 0,
+      "top": 0,
+      "right": 2560,
+      "bottom": 1600
+    },
+    "client": {
+      "left": 0,
+      "top": 0,
+      "right": 2560,
+      "bottom": 1600
+    },
+    "clientOrigin": {
+      "x": 0,
+      "y": 0
+    },
+    "rows": [
+      {
+        "x": 0,
+        "y": 0,
+        "hit": 1
+      },
+      {
+        "x": 1,
+        "y": 0,
+        "hit": 1
+      },
+      {
+        "x": 1280,
+        "y": 0,
+        "hit": 1
+      },
+      {
+        "x": 2558,
+        "y": 0,
+        "hit": 1
+      },
+      {
+        "x": 2559,
+        "y": 0,
+        "hit": 1
+      },
+      {
+        "x": 0,
+        "y": 0,
+        "hit": 1
+      },
+      {
+        "x": 1,
+        "y": 0,
+        "hit": 1
+      },
+      {
+        "x": 1280,
+        "y": 0,
+        "hit": 1
+      },
+      {
+        "x": 2558,
+        "y": 0,
+        "hit": 1
+      },
+      {
+        "x": 2559,
+        "y": 0,
+        "hit": 1
+      },
+      {
+        "x": 0,
+        "y": 1,
+        "hit": 1
+      },
+      {
+        "x": 1,
+        "y": 1,
+        "hit": 1
+      },
+      {
+        "x": 1280,
+        "y": 1,
+        "hit": 1
+      },
+      {
+        "x": 2558,
+        "y": 1,
+        "hit": 1
+      },
+      {
+        "x": 2559,
+        "y": 1,
+        "hit": 1
+      },
+      {
+        "x": 0,
+        "y": 2,
+        "hit": 1
+      },
+      {
+        "x": 1,
+        "y": 2,
+        "hit": 1
+      },
+      {
+        "x": 1280,
+        "y": 2,
+        "hit": 1
+      },
+      {
+        "x": 2558,
+        "y": 2,
+        "hit": 1
+      },
+      {
+        "x": 2559,
+        "y": 2,
+        "hit": 1
+      },
+      {
+        "x": 0,
+        "y": 10,
+        "hit": 1
+      },
+      {
+        "x": 1,
+        "y": 10,
+        "hit": 1
+      },
+      {
+        "x": 1280,
+        "y": 10,
+        "hit": 1
+      },
+      {
+        "x": 2558,
+        "y": 10,
+        "hit": 1
+      },
+      {
+        "x": 2559,
+        "y": 10,
+        "hit": 1
+      }
+    ],
+    "displays": [
+      {
+        "primary": true,
+        "bounds": {
+          "Location": {
+            "IsEmpty": true,
+            "X": 0,
+            "Y": 0
+          },
+          "Size": {
+            "IsEmpty": false,
+            "Width": 2560,
+            "Height": 1600
+          },
+          "X": 0,
+          "Y": 0,
+          "Width": 2560,
+          "Height": 1600,
+          "Left": 0,
+          "Top": 0,
+          "Right": 2560,
+          "Bottom": 1600,
+          "IsEmpty": false
+        },
+        "workingArea": {
+          "Location": {
+            "IsEmpty": true,
+            "X": 0,
+            "Y": 0
+          },
+          "Size": {
+            "IsEmpty": false,
+            "Width": 2560,
+            "Height": 1528
+          },
+          "X": 0,
+          "Y": 0,
+          "Width": 2560,
+          "Height": 1528,
+          "Left": 0,
+          "Top": 0,
+          "Right": 2560,
+          "Bottom": 1528,
+          "IsEmpty": false
+        }
+      }
+    ]
+  },
+  "displays": [
+    {
+      "bounds": {
+        "x": 0,
+        "y": 0,
+        "width": 1707,
+        "height": 1067
+      },
+      "scaleFactor": 1.5
+    }
+  ],
+  "scope": "visible actual ShareViewV2/Fullscreen API; physical Windows source events and captured-output production native replay are separate phases; no WAN or video latency",
+  "phases": [],
+  "replay": [],
+  "escaped": true,
+  "realNativeEscape": true,
+  "escapeWithControlActive": true,
+  "focusedBeforeEscape": true,
+  "escapeReleased": true,
+  "reentered": true,
+  "stoppedInputs": 0,
+  "revokedInputRejected": true,
+  "activityMonitorAvailable": true,
+  "userActivityObserved": false,
+  "failures": [],
+  "cleanup": {
+    "cleanup": true,
+    "userActivityObserved": false,
+    "cursorRestored": true,
+    "actual": {
+      "x": 1192,
+      "y": 400
+    },
+    "foregroundRestored": true,
+    "restoreSkippedForUserActivity": false
+  }
+}

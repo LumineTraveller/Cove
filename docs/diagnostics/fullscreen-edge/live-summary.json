@@ -1,0 +1,157 @@
+{
+  "productSourceHead": "aaed71019747e60eecaa8a36f5c011e9a6f0f62d",
+  "passed": true,
+  "sourceObservedAt": "2026-10-07T04:01:03.184Z",
+  "activeEscapeObservedAt": "2026-10-07T04:03:38.356Z",
+  "scope": "visible actual ShareViewV2/Fullscreen API; physical Windows source events and captured-output production native replay are separate phases; no WAN or video latency",
+  "physicalSystemScale": 1.5,
+  "physicalMonitorCount": 1,
+  "phases": [
+    {
+      "zoom": 1,
+      "dpr": 1.5,
+      "viewport": {
+        "width": 1707,
+        "height": 1067,
+        "dpr": 1.5
+      },
+      "videoRect": {
+        "x": 0,
+        "y": 0,
+        "width": 1707.3333740234375,
+        "height": 1067.3333740234375,
+        "top": 0,
+        "right": 1707.3333740234375,
+        "bottom": 1067.3333740234375,
+        "left": 0
+      },
+      "fittedTopGutterCss": 0.12500762939453125,
+      "sourcePhysicalMoves": 49,
+      "maxSourceAxisErrorPixels": 0,
+      "rawEvents": 46,
+      "mappedEvents": 46,
+      "topPhysicalMoves": 35,
+      "topRawEvents": 34,
+      "topMappedEvents": 34,
+      "topPhysicalSpan": {
+        "from": {
+          "x": 0,
+          "y": 0
+        },
+        "to": {
+          "x": 2559,
+          "y": 0
+        }
+      },
+      "topRawSpan": {
+        "from": 0,
+        "to": 1706
+      }
+    },
+    {
+      "zoom": 1.25,
+      "dpr": 1.875,
+      "viewport": {
+        "width": 1366,
+        "height": 854,
+        "dpr": 1.875
+      },
+      "videoRect": {
+        "x": 0,
+        "y": 0,
+        "width": 1365.86669921875,
+        "height": 853.86669921875,
+        "top": 0,
+        "right": 1365.86669921875,
+        "bottom": 853.86669921875,
+        "left": 0
+      },
+      "fittedTopGutterCss": 0.100006103515625,
+      "sourcePhysicalMoves": 49,
+      "maxSourceAxisErrorPixels": 0,
+      "rawEvents": 46,
+      "mappedEvents": 46,
+      "topPhysicalMoves": 35,
+      "topRawEvents": 34,
+      "topMappedEvents": 34,
+      "topPhysicalSpan": {
+        "from": {
+          "x": 0,
+          "y": 0
+        },
+        "to": {
+          "x": 2559,
+          "y": 0
+        }
+      },
+      "topRawSpan": {
+        "from": 0,
+        "to": 1364.800048828125
+      }
+    },
+    {
+      "zoom": 1.5,
+      "dpr": 2.25,
+      "viewport": {
+        "width": 1138,
+        "height": 711,
+        "dpr": 2.25
+      },
+      "videoRect": {
+        "x": 0,
+        "y": 0,
+        "width": 1138.2222900390625,
+        "height": 711.5555419921875,
+        "top": 0,
+        "right": 1138.2222900390625,
+        "bottom": 711.5555419921875,
+        "left": 0
+      },
+      "fittedTopGutterCss": 0.08330535888671875,
+      "sourcePhysicalMoves": 49,
+      "maxSourceAxisErrorPixels": 0,
+      "rawEvents": 46,
+      "mappedEvents": 46,
+      "topPhysicalMoves": 35,
+      "topRawEvents": 34,
+      "topMappedEvents": 34,
+      "topPhysicalSpan": {
+        "from": {
+          "x": 0,
+          "y": 0
+        },
+        "to": {
+          "x": 2559,
+          "y": 0
+        }
+      },
+      "topRawSpan": {
+        "from": 0,
+        "to": 1137.3333740234375
+      }
+    }
+  ],
+  "nativeReplay": {
+    "count": 138,
+    "maxAxisErrorPixels": 1,
+    "suppressed": 0
+  },
+  "realNativeEscapeWithControlActive": true,
+  "remoteSurfaceFocusedBeforeEscape": true,
+  "escapeReleased": true,
+  "reentered": true,
+  "revokedInputRejected": true,
+  "activityMonitorAvailable": true,
+  "userActivityObserved": false,
+  "cursorRestored": true,
+  "foregroundRestored": true,
+  "helperSha256": "da833402340d40b61bf96db06edb5df738753d02f594057970725788a92dd342",
+  "helperMatchedPackagedPayload": true,
+  "controllerMatchedPackagedPayload": true,
+  "limits": [
+    "source physical sampling and captured-output native replay are separate; no same-host feedback loop",
+    "Windows/Chromium produces 46 DOM raw events from 49 system moves, including absent 0-to-1 physical-pixel events at x=0 for each row; all delivered raw events are sent",
+    "one physical display at 150% system scaling; three page zooms, no mixed-DPI multimonitor hardware",
+    "no WAN, installation, or video latency measurement"
+  ]
+}

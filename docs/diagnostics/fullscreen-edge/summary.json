@@ -202,10 +202,12 @@
   "reentered": true,
   "escaped": true,
   "stoppedInputs": 0,
-  "physicalDesktopTest": "pending desktop coordination",
+  "physicalDesktopTest": "passed: visible real Windows full-width source sampling and captured-output native replay at 2026-10-07T04:01:03.184Z",
   "limits": [
-    "offscreen UI input test, not physical source mouse movement",
-    "one physical monitor available; negative origin geometry covered only by unit tests",
-    "remote Goldenglow package hash not independently observed"
-  ]
+    "offscreen preliminary UI evidence; real Windows evidence is recorded separately in live-summary.json",
+    "one physical monitor at 150% system scaling and three page zooms; mixed-DPI multimonitor hardware unavailable",
+    "remote Goldenglow package hash not independently observed; no WAN or installation execution"
+  ],
+  "activeEscapeTest": "passed: real native Escape with active control and video focus at 2026-10-07T04:03:38.356Z",
+  "realWindowsEvidence": "live-summary.json"
 }
