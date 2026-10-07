@@ -1,0 +1,211 @@
+{
+  "sourceHead": "aaed71019747e60eecaa8a36f5c011e9a6f0f62d",
+  "baselineObservedAt": "2026-10-07T03:24:56.155Z",
+  "fixedObservedAt": "2026-10-07T03:29:17.035Z",
+  "baseline": [
+    {
+      "zoom": 1,
+      "viewport": {
+        "width": 1707,
+        "height": 1067,
+        "dpr": 1
+      },
+      "video": {
+        "width": 2560,
+        "height": 1600
+      },
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 1707,
+        "height": 1067,
+        "top": 0,
+        "right": 1707,
+        "bottom": 1067,
+        "left": 0
+      },
+      "topHit": "VIDEO",
+      "topMapped": null,
+      "rawTop": 4,
+      "sent": 12,
+      "sentTop": 0
+    },
+    {
+      "zoom": 1.25,
+      "viewport": {
+        "width": 1366,
+        "height": 854,
+        "dpr": 1.25
+      },
+      "video": {
+        "width": 2560,
+        "height": 1600
+      },
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 1365.5999755859375,
+        "height": 853.6000366210938,
+        "top": 0,
+        "right": 1365.5999755859375,
+        "bottom": 853.6000366210938,
+        "left": 0
+      },
+      "topHit": "VIDEO",
+      "topMapped": null,
+      "rawTop": 4,
+      "sent": 12,
+      "sentTop": 0
+    },
+    {
+      "zoom": 1.5,
+      "viewport": {
+        "width": 1138,
+        "height": 711,
+        "dpr": 1.5
+      },
+      "video": {
+        "width": 2560,
+        "height": 1600
+      },
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 1138,
+        "height": 711.3333740234375,
+        "top": 0,
+        "right": 1138,
+        "bottom": 711.3333740234375,
+        "left": 0
+      },
+      "topHit": "VIDEO",
+      "topMapped": null,
+      "rawTop": 4,
+      "sent": 12,
+      "sentTop": 0
+    }
+  ],
+  "fixed": [
+    {
+      "zoom": 1,
+      "viewport": {
+        "width": 1707,
+        "height": 1067,
+        "dpr": 1
+      },
+      "video": {
+        "width": 2560,
+        "height": 1600
+      },
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 1707,
+        "height": 1067,
+        "top": 0,
+        "right": 1707,
+        "bottom": 1067,
+        "left": 0
+      },
+      "topHit": "VIDEO",
+      "topMapped": {
+        "x": 0.5,
+        "y": 0
+      },
+      "rawTop": 4,
+      "sent": 16,
+      "sentTop": 4
+    },
+    {
+      "zoom": 1.25,
+      "viewport": {
+        "width": 1366,
+        "height": 854,
+        "dpr": 1.25
+      },
+      "video": {
+        "width": 2560,
+        "height": 1600
+      },
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 1365.5999755859375,
+        "height": 853.6000366210938,
+        "top": 0,
+        "right": 1365.5999755859375,
+        "bottom": 853.6000366210938,
+        "left": 0
+      },
+      "topHit": "VIDEO",
+      "topMapped": {
+        "x": 0.5001464647119267,
+        "y": 0
+      },
+      "rawTop": 4,
+      "sent": 16,
+      "sentTop": 4
+    },
+    {
+      "zoom": 1.5,
+      "viewport": {
+        "width": 1138,
+        "height": 711,
+        "dpr": 1.5
+      },
+      "video": {
+        "width": 2560,
+        "height": 1600
+      },
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 1138,
+        "height": 711.3333740234375,
+        "top": 0,
+        "right": 1138,
+        "bottom": 711.3333740234375,
+        "left": 0
+      },
+      "topHit": "VIDEO",
+      "topMapped": {
+        "x": 0.5,
+        "y": 0
+      },
+      "rawTop": 4,
+      "sent": 16,
+      "sentTop": 4
+    }
+  ],
+  "nativeTopHitCodes": [
+    1
+  ],
+  "nativeGeometry": {
+    "outer": {
+      "left": 0,
+      "top": 0,
+      "right": 2560,
+      "bottom": 1600
+    },
+    "client": {
+      "left": 0,
+      "top": 0,
+      "right": 2560,
+      "bottom": 1600
+    },
+    "origin": {
+      "x": 0,
+      "y": 0
+    }
+  },
+  "exited": true,
+  "reentered": true,
+  "escaped": true,
+  "stoppedInputs": 0,
+  "physicalDesktopTest": "pending desktop coordination",
+  "limits": [
+    "offscreen UI input test, not physical source mouse movement",
+    "one physical monitor available; negative origin geometry covered only by unit tests",
+    "remote Goldenglow package hash not independently observed"
+  ]
+}

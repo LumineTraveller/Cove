@@ -1,0 +1,12 @@
+{
+  "observedAt": "2026-10-07T03:29:09.931Z",
+  "appAsarSha256": "88c6c1379908860e4a2d7fc921531ffd54855280f8ef622baef68144c46e90ec",
+  "remoteInputHelperSha256": "f633c96636f187ee4bfacff3132652ab5bac606e99c2e28a13048d83c56a497b",
+  "matchesUnifiedCandidate": true,
+  "sourceHead": "d0e354095ae89de84483cf804948037905c8a10f",
+  "mainPid": 68528,
+  "mainStartedUTC": "2026-10-07T02:45:19.291754Z",
+  "helperPid": 94748,
+  "helperStartedUTC": "2026-10-07T02:48:47.349362Z",
+  "processMetadataSource": "Earlier read-only Win32_Process observation; no parameters or credentials"
+}

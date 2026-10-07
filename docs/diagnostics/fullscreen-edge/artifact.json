@@ -1,0 +1,117 @@
+{
+  "verifiedAt": "2026-10-07T03:40:33.200Z",
+  "appId": "com.cove.app",
+  "productName": "Cove",
+  "packageName": "cove-client",
+  "version": "2.0.1",
+  "sourceFixCommits": [
+    "d4c18a4",
+    "76992b2",
+    "74331dc"
+  ],
+  "importedDesktopPasswordSource": "01a06308da0006b59c1427f3e01cc984190d33a9",
+  "rawInputCandidate": false,
+  "unifiedCandidate": true,
+  "fullscreenEdgeCandidate": true,
+  "sourceHead": "aaed71019747e60eecaa8a36f5c011e9a6f0f62d",
+  "fullscreenEdgeMappingSourceSha256": "7380f7602258278ca7bd67c593ef31a7a70364b2262f58c5361508d4140eefbb",
+  "installer": {
+    "path": "C:\\Users\\cyj06\\Documents\\Codex\\2026-10-06\\task-2\\Cove-remote-input-fix\\apps\\desktop\\dist-app-remote-input-2.0.1\\Cove-Setup-2.0.1-fullscreen-edge-account-memory.exe",
+    "size": 106573126,
+    "sha256": "d783adf8f736d5a40a06b6614703387b744c94e65a4c9cd6c8296c6939ec661d",
+    "sha512": "8/bjEWsKoziGC+L5Ml8J9+DAVbCbqe7+zWxXp3e+CNXRtCxZ4jhEL7WQkQyVaDps3bed6JwymywsO94SWRsFEA=="
+  },
+  "rollback": {
+    "path": "C:\\Users\\cyj06\\Documents\\Codex\\2026-10-06\\task-2\\Cove-remote-input-fix\\runtime\\rollback-2.0.0\\Cove-Setup-2.0.0.exe",
+    "size": 106487680,
+    "version": "2.0.0",
+    "sha256": "6a80c3ca1237cde6f13887dbc668d6f7df3a20e9c2783547ac52ac4475233115",
+    "source": "https://github.com/LumineTraveller/Cove/releases/download/v2.0.0/Cove-Setup-2.0.0.exe",
+    "publishedDigestMatched": true
+  },
+  "installerPayloadMatchedUnpacked": [
+    {
+      "entry": "Cove.exe",
+      "size": 244542464,
+      "sha256": "5513171e2094e3298e3fead52cf96ced780a7d4049104f4973f094ed910abaff"
+    },
+    {
+      "entry": "resources\\app.asar",
+      "size": 8928187,
+      "sha256": "1db0ccb2e96e8b3a3184ba0606bec559eb4487e3d06335c18d46824194323989"
+    },
+    {
+      "entry": "resources\\remote-input-helper.exe",
+      "size": 16384,
+      "sha256": "da833402340d40b61bf96db06edb5df738753d02f594057970725788a92dd342"
+    },
+    {
+      "entry": "resources\\annotation-window-helper.exe",
+      "size": 5632,
+      "sha256": "3495b56cadb9afbde04a39f5213858d48b9e9a7712f927738fc323cc22140d3a"
+    },
+    {
+      "entry": "resources\\application-audio-helper.exe",
+      "size": 14848,
+      "sha256": "fe17eae51c925e19015a80223a94677bbfd98cb10db1339134e0c61ee47e83ed"
+    }
+  ],
+  "packedProductionNativeNoopStopPassed": true,
+  "liveVersionPolicy": {
+    "url": "http://39.106.95.59:3001/api/version",
+    "requestedVersion": "2.0.1",
+    "requestedPlatform": "desktop",
+    "requestedProtocol": 3,
+    "observedAt": "2026-10-06T18:44:40.146Z",
+    "policy": {
+      "serverVersion": "2.0.0",
+      "clientPlatform": "desktop",
+      "releaseVersion": "2.0.0",
+      "minimumClientVersion": "2.0.0",
+      "requiredClientProtocol": 3,
+      "upgradeRequired": false,
+      "downloadUrl": "https://github.com/LumineTraveller/Cove/releases/tag/v2.0.0"
+    }
+  },
+  "packagedSmoke": {
+    "capturedAt": "2026-10-07T03:39:44.121Z",
+    "executable": "C:\\Users\\cyj06\\Documents\\Codex\\2026-10-06\\task-2\\Cove-remote-input-fix\\apps\\desktop\\dist-app-remote-input-2.0.1\\win-unpacked\\Cove.exe",
+    "archiveSha256": "1db0ccb2e96e8b3a3184ba0606bec559eb4487e3d06335c18d46824194323989",
+    "identity": {
+      "version": "2.0.1",
+      "runtimeName": "cove-client",
+      "manifestName": "cove-client",
+      "appId": "com.cove.app"
+    },
+    "actualPackagedExecutableStarted": true,
+    "loginAndBrandingRendered": true,
+    "hiddenAndProfileIsolated": true,
+    "networkAndUpdaterIsolated": true,
+    "foreignIpcDenied": true,
+    "nativeWarmupZeroInput": true,
+    "authorizedIpcAccepted": true,
+    "queuedBurstAccepted": 80,
+    "burstJournalBeforeRevoke": 4,
+    "revokeDiscardsPendingMoves": true,
+    "nativeHeldInputReleased": true,
+    "staleSessionInputDenied": true,
+    "lateAckCannotResume": true,
+    "emergencyStopsAndReleases": true,
+    "helpersExited": true,
+    "accountPasswordBridgeVerified": true,
+    "accountPasswordsOSCryptoVerified": true,
+    "nativeBoundary": "recording-only SendInput replacement; no real system input",
+    "globalShortcutBoundary": "owned callback map; no real system shortcut registration",
+    "excluded": [
+      "installation/rollback execution",
+      "real OS cursor",
+      "WAN",
+      "video feedback"
+    ],
+    "testDir": "C:\\Users\\cyj06\\Documents\\Codex\\2026-10-06\\task-2\\Cove-remote-input-fix\\runtime\\packaged-remote-input-02TAa4"
+  },
+  "installed": false,
+  "published": false,
+  "serverChanged": false,
+  "mobileChanged": false
+}
