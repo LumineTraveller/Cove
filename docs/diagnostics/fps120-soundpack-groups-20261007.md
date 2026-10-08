@@ -101,6 +101,6 @@ node apps/desktop/node_modules/electron/cli.js apps/desktop/tests/ui/soundpack-g
 
 用户的 Library 图片 `libfile_e8ddc1103c3c8191b3c2f53f2b79ac48` 通过当前 Library 技能的已解析引用流程准备成功，但授权下载在有效期内返回 HTTP 403，消费端未取得可读图片。没有绕过拒绝或猜测图片内容；原参考截图像素仍未查看。继续实现所依据的是明确需求、现有代码和真实本地组件像素。
 
-`node --test tests/architecture.test.cjs tests/dev-startup.test.cjs` 为 6/8：两个冻结的迁移快照检查失败（原生 remote-input helper 指纹、桌面 2.0.1 与根目录 2.0.0 相等假设）。这些源文件/版本与安全基线 b5f2c85 一致，属于候选已有变化；本轮没有改原生输入代码、版本或旧迁移基线。HTTP/Socket 入口、模块依赖边界、第三方依赖、正式 Cove 身份和启动器行为检查通过。
+`node --test tests/architecture.test.cjs tests/dev-startup.test.cjs` 为 6/8：两个冻结的迁移快照检查失败（原生 remote-input helper 指纹、桌面版本 2.0.1 与冻结 desktop 版本 2.0.0 不符）。该检查逐包对照冻结快照，并不要求桌面版本等于根目录版本。这些源文件/版本与安全基线 b5f2c85 一致，属于候选已有变化；本轮没有改原生输入代码、版本或旧迁移基线。HTTP/Socket 入口、模块依赖边界、第三方依赖、正式 Cove 身份和启动器行为检查通过。
 
 没有生成安装包、安装、发布或部署；现有 Cove 品牌与应用身份不变。真实硬件 120 FPS 性能、生产网络与跨设备分组同步不在本轮证明范围内。
