@@ -3,13 +3,13 @@
   "platform": "android",
   "release": {
     "packageName": "com.cove.mobile",
-    "versionName": "0.8.0",
-    "versionCode": 13,
+    "versionName": "0.8.1",
+    "versionCode": 14,
     "minAndroidApi": 24,
-    "tag": "mobile-v0.8.0",
-    "filename": "Cove-Mobile-0.8.0.apk",
-    "size": 55992638,
-    "sha256": "a9f9d9f8e108d7e1462c2e69781d427d5634ada63625b958c93566406382a4ed",
-    "notes": "# Cove Mobile v0.8.0\n\n发布日期：2026-10-06。Android versionCode：13。对应桌面客户端及服务端版本：2.0.0。\n\n## 改进与修复\n\n- 保留服务器密码输入、一次性初始化、访问令牌及登录恢复；HTTP、Socket.IO 和同源媒体请求使用手机自身版本 0.8.0 与协议 3。\n- 连接前检查分平台最低版本。需要升级时暂停连接；Android 下载更新后验证 APK 大小、SHA-256、应用 ID、版本号及签名，安装由系统界面确认。\n- 自动更新继续使用独立配置的 HTTPS 下载基址，默认留空时使用 GitHub。普通更新由用户选择下载；失败可重试，已校验的下载可复用。\n- 更新弹窗增加“从服务器下载”按钮；用户点击后检查当前 HTTPS 服务器的更新清单，核对候选版本与校验值，再在浏览器打开同源 APK 下载地址。\n- 手机 0.7.0 及更早已发布版本仍通过原有更新弹窗在浏览器中下载本次 APK，无法远程补上自动下载能力。0.8.0 更新清单保持旧版可读取的格式。\n\n## 安装说明\n\n下载 Cove-Mobile-0.8.0.apk 后覆盖安装，应用 ID 和签名保持不变。\n正式分发支持 ARM64 和 ARMv7，最低 Android 7.0；不包含 x86 模拟器架构。"
+    "tag": "mobile-v0.8.1",
+    "filename": "Cove-Mobile-0.8.1.apk",
+    "size": 55992650,
+    "sha256": "bea9330fdab1c27f7e95d7f58dffc61f0ee3a88917a576fa6203c632e41ab24d",
+    "notes": "# Cove Mobile v0.8.1\n\n发布日期：2026-10-09。Android versionCode：14。\n\n## 修复\n\n- 修复输入服务器域名并通过密码认证后，在解析服务器地址时发生的 Android 闪退。\n- 修正域名解析结果及失败返回值的原生桥接类型，并增加登录流程回归检查。\n\n## 安装说明\n\n下载 Cove-Mobile-0.8.1.apk 后覆盖安装。应用 ID 为 com.cove.mobile，签名与已发布的 0.8.0 一致。\n支持 ARM64 和 ARMv7，最低 Android 7.0；安装由 Android 系统界面确认。"
   }
 }
