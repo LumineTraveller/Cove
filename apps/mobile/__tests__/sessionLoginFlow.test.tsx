@@ -5,6 +5,7 @@ import { useCoveSession } from '../src/features/connection/useCoveSession';
 import { clearServerAccessToken } from '../src/features/connection/serverSecurity';
 import { readSessionConfig, saveSessionConfig } from '../src/features/settings/storage';
 import type { AccountAuthRequest } from '../src/features/accounts/accountAuth';
+import { version as clientVersion } from '../package.json';
 
 const mockValues = new Map<string, string>();
 const mockListeners = new Map<string, (...args: any[]) => void>();
@@ -102,7 +103,7 @@ test.each(['login', 'register'] as const)('%s succeeds through unlock, domain DN
   }));
   expect(session.sessionReady).toBe(true);
   expect(mockSocket.emit).toHaveBeenCalledWith('user:register', expect.objectContaining({
-    authToken: 'synthetic-account-token', platform: 'mobile', clientVersion: '0.8.0',
+    authToken: 'synthetic-account-token', platform: 'mobile', clientVersion,
   }), expect.any(Function));
   const stored = [...mockValues.values()].join('');
   expect(stored).not.toContain(request.password);

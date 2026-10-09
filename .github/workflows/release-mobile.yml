@@ -88,7 +88,7 @@ jobs:
         working-directory: apps/mobile/android
         run: |
           chmod +x gradlew
-          ./gradlew assembleRelease -PreactNativeArchitectures=armeabi-v7a,arm64-v8a
+          ./gradlew testReleaseUnitTest assembleRelease -PreactNativeArchitectures=armeabi-v7a,arm64-v8a
 
       - name: Prepare release metadata
         working-directory: apps/mobile
@@ -127,6 +127,22 @@ jobs:
             echo "Unexpected x86 ABI in the mobile release APK" >&2
             exit 1
           fi
+
+      - name: Verify packaged DNS bridge fix and existing signing identity
+        working-directory: apps/mobile
+        shell: bash
+        run: |
+          version="${RELEASE_TAG#mobile-v}"
+          apk="build/updates/$RELEASE_TAG/Cove-Mobile-$version.apk"
+          node scripts/verify-native-release.cjs "$apk"
+          sdk_root="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          apksigner="$sdk_root/build-tools/36.0.0/apksigner"
+          signature_info=$("$apksigner" verify --verbose --print-certs "$apk")
+          printf '%s\n' "$signature_info"
+          signer_sha=$(printf '%s\n' "$signature_info" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
+          signer_count=$(printf '%s\n' "$signature_info" | sed -n 's/^Number of signers: //p')
+          [[ "$signer_count" == "1" ]]
+          [[ "$signer_sha" == "fac61745dc0903786fb9ede62a962b399f7348f0bb6f899b8332667591033b9c" ]]
 
       - name: Create GitHub release
         working-directory: apps/mobile
