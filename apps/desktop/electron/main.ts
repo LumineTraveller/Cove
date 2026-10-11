@@ -9,8 +9,11 @@ import {
   globalShortcut,
   ipcMain,
   shell,
+  safeStorage,
 } from "electron";
 import path from "path";
+import { AccountPasswordStore } from './account-password-store';
+import { registerAccountPasswordIpc } from './account-password-ipc';
 import { readFileSync, mkdirSync } from "node:fs";
 import { promises as dns } from "node:dns";
 import { openUpdaterLog, startAutoUpdater } from "./updater";
@@ -287,6 +290,8 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  registerAccountPasswordIpc(ipcMain, new AccountPasswordStore(path.join(app.getPath('userData'), 'account-passwords.v1.json'), safeStorage),
+    event => event.sender === mainWindow?.webContents && event.senderFrame === mainWindow?.webContents.mainFrame);
   const annotationSender = (event: Electron.IpcMainInvokeEvent) =>
     event.sender === mainWindow?.webContents && event.senderFrame === mainWindow?.webContents.mainFrame;
   ipcMain.handle('cove:annotation-overlay:bind', (event, sessionId: unknown) =>

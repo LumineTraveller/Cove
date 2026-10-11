@@ -5,7 +5,9 @@ import { Device } from 'mediasoup-client';
 import { type RtcVideoCounterSample } from '../diagnostics/mediaDiagnostics';
 import {
   createScreenEncodingPlan,
+  screenCaptureVideoConstraints,
   SCREEN_MAX_BITRATE_BPS,
+  SCREEN_START_BITRATE_BPS,
   toScreenRtpEncoding,
   type ScreenActivity,
   type ScreenEncodingPlan,
@@ -109,10 +111,10 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
       const preset = initPreset ?? deps.screenPreset;
       const gameMode = initGameMode ?? deps.screenGameMode;
       const nativeResolution = initNativeResolution ?? deps.screenNativeResolution;
-      const currentFps: Fps = gameMode ? 60 : initFps ?? deps.fps;
+      const currentFps = initFps ?? deps.fps;
       const audio = initAudio ?? deps.shareAudio;
       if (initPreset !== undefined) deps.setScreenPreset(initPreset);
-      if (initFps !== undefined || gameMode) deps.setFps(currentFps);
+      if (initFps !== undefined) deps.setFps(currentFps);
       if (initAudio !== undefined) deps.setShareAudio(initAudio);
       if (initGameMode !== undefined) deps.setScreenGameMode(initGameMode);
       if (initNativeResolution !== undefined) deps.setScreenNativeResolution(initNativeResolution);
@@ -131,7 +133,7 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
       try {
         const stream = await navigator.mediaDevices.getDisplayMedia({
           // 桌面源保持原始尺寸，720p/1080p 由 RTP 编码缩放统一控制。
-          video: { frameRate: { ideal: currentFps, max: currentFps } },
+          video: screenCaptureVideoConstraints(currentFps),
           // The native Windows bridge supplies the filtered system audio as a
           // separate track. Chromium's global loopback track is never requested,
           // because it would include Cove's own playback.
@@ -205,7 +207,7 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
                 encodings: [toScreenRtpEncoding(initialPlan)],
                 // 初始带宽估计（kbps），不是上限；与 SFU 启动估计一致，之后由拥塞控制调整。
                 codecOptions: {
-                  videoGoogleStartBitrate: 10_000,
+                  videoGoogleStartBitrate: SCREEN_START_BITRATE_BPS / 1_000,
                   videoGoogleMaxBitrate: SCREEN_MAX_BITRATE_BPS / 1_000,
                 },
                 ...(codec ? { codec } : {}),
@@ -321,7 +323,7 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
       const preset = initPreset ?? deps.screenPreset;
       const gameMode = initGameMode ?? deps.screenGameMode;
       const nativeResolution = initNativeResolution ?? deps.screenNativeResolution;
-      const currentFps: Fps = gameMode ? 60 : initFps ?? deps.fps;
+      const currentFps = initFps ?? deps.fps;
       const audio = initAudio ?? deps.shareAudio;
       if (audio && !window.coveScreenAudio) {
         window.alert('排除 Cove 自身音频的系统音频共享仅可在 Windows 桌面版中使用。');
@@ -332,7 +334,7 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
       let acquiredStream: MediaStream | null = null;
       try {
         const stream = await navigator.mediaDevices.getDisplayMedia({
-          video: { frameRate: { ideal: currentFps, max: currentFps } },
+          video: screenCaptureVideoConstraints(currentFps),
           audio: false,
         });
         acquiredStream = stream;
@@ -382,6 +384,9 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
         deps.setFps(currentFps);
         deps.setScreenGameMode(gameMode);
         deps.setScreenNativeResolution(nativeResolution);
+        // Replace the previous guard timer too, so its callback cannot restore
+        // the old FPS/preset after a quick change during the startup grace period.
+        deps.armScreenRampGuard(preset, currentFps, nativeResolution);
         deps.applyScreenActivity(
           preset,
           currentFps,
@@ -425,6 +430,7 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
     },
     [
       deps.applyScreenActivity,
+      deps.armScreenRampGuard,
       deps.closeScreenAudio,
       deps.fps,
       deps.inVoice,

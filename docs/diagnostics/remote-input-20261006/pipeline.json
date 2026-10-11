@@ -1,0 +1,464 @@
+{
+  "capturedAt": "2026-10-06T18:09:07.851Z",
+  "node": "v24.11.1",
+  "scope": "same-host generated sampling, Socket.IO loopback relay, production registry and local queue, native no-op ACK",
+  "excluded": [
+    "real mouse sampling",
+    "Electron renderer/main IPC",
+    "WAN",
+    "SendInput/OS cursor",
+    "video capture/feedback"
+  ],
+  "results": [
+    {
+      "label": "baseline-65df169-16ms",
+      "kind": "still",
+      "elapsedMs": 254.20260000000007,
+      "sampled": 1,
+      "emitted": 1,
+      "admitted": 1,
+      "consumed": 1,
+      "rejected": 0,
+      "artificialUpstreamPauseMs": 0,
+      "peakBufferedPacketsAtUnblock": 0,
+      "edgesInOrder": true,
+      "finalTailConsumed": true,
+      "transport": "websocket",
+      "sampleToSend": {
+        "count": 1,
+        "meanMs": 0.17599999999993088,
+        "p95Ms": 0.17599999999993088,
+        "maxMs": 0.17599999999993088
+      },
+      "sendToReceive": {
+        "count": 1,
+        "meanMs": 3.7124000000003434,
+        "p95Ms": 3.7124000000003434,
+        "maxMs": 3.7124000000003434
+      },
+      "localQueueAge": {
+        "count": 1,
+        "meanMs": 0.20379999999977372,
+        "p95Ms": 0.20379999999977372,
+        "maxMs": 0.20379999999977372
+      },
+      "noopPipeRoundTrip": {
+        "count": 1,
+        "meanMs": 104.13340000000017,
+        "p95Ms": 104.13340000000017,
+        "maxMs": 104.13340000000017
+      },
+      "sampleToNoopAck": {
+        "count": 1,
+        "meanMs": 108.22560000000021,
+        "p95Ms": 108.22560000000021,
+        "maxMs": 108.22560000000021
+      }
+    },
+    {
+      "label": "baseline-65df169-16ms",
+      "kind": "slow",
+      "elapsedMs": 621.3385000000003,
+      "sampled": 19,
+      "emitted": 19,
+      "admitted": 19,
+      "consumed": 19,
+      "rejected": 0,
+      "artificialUpstreamPauseMs": 0,
+      "peakBufferedPacketsAtUnblock": 0,
+      "edgesInOrder": true,
+      "finalTailConsumed": true,
+      "transport": "websocket",
+      "sampleToSend": {
+        "count": 19,
+        "meanMs": 0.03202105263158286,
+        "p95Ms": 0.07649999999966894,
+        "maxMs": 0.07649999999966894
+      },
+      "sendToReceive": {
+        "count": 19,
+        "meanMs": 0.9820947368421002,
+        "p95Ms": 3.082300000000032,
+        "maxMs": 3.082300000000032
+      },
+      "localQueueAge": {
+        "count": 19,
+        "meanMs": 1.3617473684210286,
+        "p95Ms": 25.24680000000035,
+        "maxMs": 25.24680000000035
+      },
+      "noopPipeRoundTrip": {
+        "count": 19,
+        "meanMs": 3.9548263157894565,
+        "p95Ms": 70.72659999999996,
+        "maxMs": 70.72659999999996
+      },
+      "sampleToNoopAck": {
+        "count": 19,
+        "meanMs": 6.330689473684168,
+        "p95Ms": 72.00570000000016,
+        "maxMs": 72.00570000000016
+      }
+    },
+    {
+      "label": "baseline-65df169-16ms",
+      "kind": "fast",
+      "elapsedMs": 617.8021000000003,
+      "sampled": 87,
+      "emitted": 28,
+      "admitted": 28,
+      "consumed": 26,
+      "rejected": 0,
+      "artificialUpstreamPauseMs": 0,
+      "peakBufferedPacketsAtUnblock": 0,
+      "edgesInOrder": true,
+      "finalTailConsumed": true,
+      "transport": "websocket",
+      "sampleToSend": {
+        "count": 26,
+        "meanMs": 6.589053846153897,
+        "p95Ms": 16.035499999999956,
+        "maxMs": 16.10490000000027
+      },
+      "sendToReceive": {
+        "count": 26,
+        "meanMs": 1.2610192307692194,
+        "p95Ms": 1.1102000000000771,
+        "maxMs": 14.233000000000175
+      },
+      "localQueueAge": {
+        "count": 26,
+        "meanMs": 0.11581923076921787,
+        "p95Ms": 0.06790000000000873,
+        "maxMs": 2.1938999999997577
+      },
+      "noopPipeRoundTrip": {
+        "count": 26,
+        "meanMs": 2.7597423076922496,
+        "p95Ms": 0.4847999999997228,
+        "maxMs": 65.72859999999991
+      },
+      "sampleToNoopAck": {
+        "count": 26,
+        "meanMs": 10.725634615384584,
+        "p95Ms": 19.436999999999898,
+        "maxMs": 80.03139999999985
+      }
+    },
+    {
+      "label": "baseline-65df169-16ms",
+      "kind": "drag",
+      "elapsedMs": 623.6491999999998,
+      "sampled": 92,
+      "emitted": 36,
+      "admitted": 36,
+      "consumed": 34,
+      "rejected": 0,
+      "artificialUpstreamPauseMs": 0,
+      "peakBufferedPacketsAtUnblock": 0,
+      "edgesInOrder": true,
+      "finalTailConsumed": true,
+      "transport": "websocket",
+      "sampleToSend": {
+        "count": 34,
+        "meanMs": 4.086932352941189,
+        "p95Ms": 16.009399999999914,
+        "maxMs": 16.486699999999473
+      },
+      "sendToReceive": {
+        "count": 34,
+        "meanMs": 0.6992882352940742,
+        "p95Ms": 1.1432999999997264,
+        "maxMs": 1.3424999999997453
+      },
+      "localQueueAge": {
+        "count": 34,
+        "meanMs": 0.8338058823528894,
+        "p95Ms": 0.26860000000033324,
+        "maxMs": 26.506199999999808
+      },
+      "noopPipeRoundTrip": {
+        "count": 34,
+        "meanMs": 2.287814705882417,
+        "p95Ms": 0.4279000000005908,
+        "maxMs": 72.15410000000065
+      },
+      "sampleToNoopAck": {
+        "count": 34,
+        "meanMs": 7.90784117647057,
+        "p95Ms": 27.707400000000234,
+        "maxMs": 72.9970000000003
+      }
+    },
+    {
+      "label": "baseline-65df169-16ms",
+      "kind": "blocked",
+      "elapsedMs": 636.8280999999997,
+      "sampled": 87,
+      "emitted": 29,
+      "admitted": 29,
+      "consumed": 18,
+      "rejected": 0,
+      "artificialUpstreamPauseMs": 200,
+      "peakBufferedPacketsAtUnblock": 10,
+      "edgesInOrder": true,
+      "finalTailConsumed": true,
+      "transport": "websocket",
+      "sampleToSend": {
+        "count": 18,
+        "meanMs": 6.906027777777934,
+        "p95Ms": 16.51850000000013,
+        "maxMs": 16.51850000000013
+      },
+      "sendToReceive": {
+        "count": 18,
+        "meanMs": 11.810699999999846,
+        "p95Ms": 202.11789999999928,
+        "maxMs": 202.11789999999928
+      },
+      "localQueueAge": {
+        "count": 18,
+        "meanMs": 0.11101111111116148,
+        "p95Ms": 1.5978000000004613,
+        "maxMs": 1.5978000000004613
+      },
+      "noopPipeRoundTrip": {
+        "count": 18,
+        "meanMs": 3.7039444444445104,
+        "p95Ms": 63.8716000000004,
+        "maxMs": 63.8716000000004
+      },
+      "sampleToNoopAck": {
+        "count": 18,
+        "meanMs": 22.53168333333345,
+        "p95Ms": 266.02620000000024,
+        "maxMs": 266.02620000000024
+      }
+    },
+    {
+      "label": "candidate-8ms",
+      "kind": "still",
+      "elapsedMs": 250.3019000000004,
+      "sampled": 1,
+      "emitted": 1,
+      "admitted": 1,
+      "consumed": 1,
+      "rejected": 0,
+      "artificialUpstreamPauseMs": 0,
+      "peakBufferedPacketsAtUnblock": 0,
+      "edgesInOrder": true,
+      "finalTailConsumed": true,
+      "transport": "websocket",
+      "sampleToSend": {
+        "count": 1,
+        "meanMs": 0.38109999999960564,
+        "p95Ms": 0.38109999999960564,
+        "maxMs": 0.38109999999960564
+      },
+      "sendToReceive": {
+        "count": 1,
+        "meanMs": 0.6327000000001135,
+        "p95Ms": 0.6327000000001135,
+        "maxMs": 0.6327000000001135
+      },
+      "localQueueAge": {
+        "count": 1,
+        "meanMs": 0.027199999999538704,
+        "p95Ms": 0.027199999999538704,
+        "maxMs": 0.027199999999538704
+      },
+      "noopPipeRoundTrip": {
+        "count": 1,
+        "meanMs": 0.24459999999999127,
+        "p95Ms": 0.24459999999999127,
+        "maxMs": 0.24459999999999127
+      },
+      "sampleToNoopAck": {
+        "count": 1,
+        "meanMs": 1.2855999999992491,
+        "p95Ms": 1.2855999999992491,
+        "maxMs": 1.2855999999992491
+      }
+    },
+    {
+      "label": "candidate-8ms",
+      "kind": "slow",
+      "elapsedMs": 621.9854000000005,
+      "sampled": 19,
+      "emitted": 19,
+      "admitted": 19,
+      "consumed": 19,
+      "rejected": 0,
+      "artificialUpstreamPauseMs": 0,
+      "peakBufferedPacketsAtUnblock": 0,
+      "edgesInOrder": true,
+      "finalTailConsumed": true,
+      "transport": "websocket",
+      "sampleToSend": {
+        "count": 19,
+        "meanMs": 0.05892631578937749,
+        "p95Ms": 0.16120000000046275,
+        "maxMs": 0.16120000000046275
+      },
+      "sendToReceive": {
+        "count": 19,
+        "meanMs": 0.8018315789474256,
+        "p95Ms": 1.272399999999834,
+        "maxMs": 1.272399999999834
+      },
+      "localQueueAge": {
+        "count": 19,
+        "meanMs": 0.035605263157872526,
+        "p95Ms": 0.09700000000066211,
+        "maxMs": 0.09700000000066211
+      },
+      "noopPipeRoundTrip": {
+        "count": 19,
+        "meanMs": 0.29396842105258036,
+        "p95Ms": 0.5621999999993932,
+        "maxMs": 0.5621999999993932
+      },
+      "sampleToNoopAck": {
+        "count": 19,
+        "meanMs": 1.190331578947256,
+        "p95Ms": 1.91150000000016,
+        "maxMs": 1.91150000000016
+      }
+    },
+    {
+      "label": "candidate-8ms",
+      "kind": "fast",
+      "elapsedMs": 623.8832999999995,
+      "sampled": 87,
+      "emitted": 40,
+      "admitted": 40,
+      "consumed": 40,
+      "rejected": 0,
+      "artificialUpstreamPauseMs": 0,
+      "peakBufferedPacketsAtUnblock": 0,
+      "edgesInOrder": true,
+      "finalTailConsumed": true,
+      "transport": "websocket",
+      "sampleToSend": {
+        "count": 40,
+        "meanMs": 1.481530000000157,
+        "p95Ms": 14.408300000000054,
+        "maxMs": 14.873200000000907
+      },
+      "sendToReceive": {
+        "count": 40,
+        "meanMs": 0.7974599999997736,
+        "p95Ms": 1.2846000000008644,
+        "maxMs": 2.1513999999997395
+      },
+      "localQueueAge": {
+        "count": 40,
+        "meanMs": 0.029422500000191577,
+        "p95Ms": 0.05370000000038999,
+        "maxMs": 0.08100000000013097
+      },
+      "noopPipeRoundTrip": {
+        "count": 40,
+        "meanMs": 0.2787525000000414,
+        "p95Ms": 0.43150000000059663,
+        "maxMs": 0.5130000000008295
+      },
+      "sampleToNoopAck": {
+        "count": 40,
+        "meanMs": 2.5871650000001636,
+        "p95Ms": 15.272499999999127,
+        "maxMs": 16.879700000000412
+      }
+    },
+    {
+      "label": "candidate-8ms",
+      "kind": "drag",
+      "elapsedMs": 621.9794999999995,
+      "sampled": 92,
+      "emitted": 46,
+      "admitted": 46,
+      "consumed": 46,
+      "rejected": 0,
+      "artificialUpstreamPauseMs": 0,
+      "peakBufferedPacketsAtUnblock": 0,
+      "edgesInOrder": true,
+      "finalTailConsumed": true,
+      "transport": "websocket",
+      "sampleToSend": {
+        "count": 46,
+        "meanMs": 1.0122478260868577,
+        "p95Ms": 14.289700000001176,
+        "maxMs": 15.727499999999054
+      },
+      "sendToReceive": {
+        "count": 46,
+        "meanMs": 0.7718326086955842,
+        "p95Ms": 1.2075999999997293,
+        "maxMs": 2.940099999999802
+      },
+      "localQueueAge": {
+        "count": 46,
+        "meanMs": 0.07136086956518778,
+        "p95Ms": 0.4088000000010652,
+        "maxMs": 0.6503999999986263
+      },
+      "noopPipeRoundTrip": {
+        "count": 46,
+        "meanMs": 0.23186304347848857,
+        "p95Ms": 0.35420000000158325,
+        "maxMs": 0.4768999999996595
+      },
+      "sampleToNoopAck": {
+        "count": 46,
+        "meanMs": 2.087304347826118,
+        "p95Ms": 15.201000000000931,
+        "maxMs": 16.59900000000016
+      }
+    },
+    {
+      "label": "candidate-8ms",
+      "kind": "blocked",
+      "elapsedMs": 630.9908999999989,
+      "sampled": 87,
+      "emitted": 28,
+      "admitted": 28,
+      "consumed": 28,
+      "rejected": 0,
+      "artificialUpstreamPauseMs": 200,
+      "peakBufferedPacketsAtUnblock": 1,
+      "edgesInOrder": true,
+      "finalTailConsumed": true,
+      "transport": "websocket",
+      "sampleToSend": {
+        "count": 28,
+        "meanMs": 2.179271428571415,
+        "p95Ms": 15.478500000001077,
+        "maxMs": 15.79739999999947
+      },
+      "sendToReceive": {
+        "count": 28,
+        "meanMs": 0.7222999999999047,
+        "p95Ms": 1.1929000000000087,
+        "maxMs": 1.5329000000001543
+      },
+      "localQueueAge": {
+        "count": 28,
+        "meanMs": 0.04016428571425682,
+        "p95Ms": 0.04979999999886786,
+        "maxMs": 0.4508000000005268
+      },
+      "noopPipeRoundTrip": {
+        "count": 28,
+        "meanMs": 0.2541642857144585,
+        "p95Ms": 0.4431000000004133,
+        "maxMs": 0.4500000000007276
+      },
+      "sampleToNoopAck": {
+        "count": 28,
+        "meanMs": 3.195900000000035,
+        "p95Ms": 16.268299999999726,
+        "maxMs": 16.997300000000905
+      }
+    }
+  ]
+}

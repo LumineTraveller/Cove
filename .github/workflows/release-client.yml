@@ -44,6 +44,9 @@ jobs:
       - name: Install dependencies
         run: npm ci --registry=https://registry.npmjs.org --replace-registry-host=registry.npmmirror.com && npm run build:packages
 
+      - name: Verify architecture and development startup contracts
+        run: node --test tests/architecture.test.cjs tests/dev-startup.test.cjs
+
       - name: Test desktop client
         run: npm test -w cove-client
 
@@ -51,7 +54,7 @@ jobs:
         run: npm test -w cove-server
 
       - name: Build Windows release
-        run: npm run build:electron -w cove-client -- --publish never
+        run: npm run build:electron -w cove-client -- --publish never --config.electronDist=node_modules/electron/dist
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 

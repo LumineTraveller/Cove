@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   diagnosticPacketLoss,
+  diagnosticVideoCounters,
   intervalLossPercent,
   mediaDiagnosticSessionKey,
   shouldAcceptMediaDiagnosticSample,
@@ -72,4 +73,23 @@ test('late async samples are discarded after sharing or watching stops', () => {
     mediaDiagnosticSessionKey(null, 'peer-1'),
     mediaDiagnosticSessionKey(null, 'peer-2'),
   ), false);
+});
+
+test('raw diagnostic counters retain queue windows while excluding identifiers and absent values', () => {
+  const result = diagnosticVideoCounters({ timestamp: 1000, framesEncoded: 0, framesSent: 0,
+    totalPacketSendDelay: 1.25, jitterBufferDelay: 3.5, jitterBufferEmittedCount: 60,
+    totalEncodeTime: Number.NaN, id: 'private-id', address: 'private-address',
+    password: 'synthetic-secret', }, { timestamp: 999, frames: 10, trackIdentifier: 'private-track' });
+  assert.equal(result.rtp.timestamp, 1000);
+  assert.equal(result.rtp.framesEncoded, 0);
+  assert.equal(result.rtp.totalPacketSendDelay, 1.25);
+  assert.equal(result.rtp.jitterBufferDelay, 3.5);
+  assert.equal(result.rtp.jitterBufferEmittedCount, 60);
+  assert.equal(result.rtp.framesDropped, null);
+  assert.equal(result.rtp.totalEncodeTime, null);
+  assert.equal(result.mediaSource.timestamp, 999);
+  assert.equal(result.mediaSource.frames, 10);
+  assert.equal(JSON.stringify(result).includes('private'), false);
+  assert.equal(JSON.stringify(result).includes('secret'), false);
+  assert.equal(diagnosticVideoCounters().rtp.framesEncoded, null);
 });

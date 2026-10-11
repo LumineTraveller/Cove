@@ -1,6 +1,7 @@
 import { request } from '@cove/client-core';
 import { types as MsTypes } from 'mediasoup-client';
 import { Socket } from 'socket.io-client';
+import type { ScreenFps } from './screen/screenCapture';
 
 export type Transport = MsTypes.Transport;
 
@@ -10,7 +11,7 @@ export type Consumer = MsTypes.Consumer;
 
 export type RtpCapabilities = MsTypes.RtpCapabilities;
 
-export type Fps = 30 | 60;
+export type Fps = ScreenFps;
 
 export interface MediaStats {
   role: 'sender' | 'receiver' | 'idle';

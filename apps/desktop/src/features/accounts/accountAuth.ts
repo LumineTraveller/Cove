@@ -110,7 +110,7 @@ export function readRememberedLogins(): RememberedLogin[] {
     /* Keep the current login usable if history is damaged. */
   }
   const current = legacySession();
-  if (current && !entries.some((entry) => entry.serverUrl === current.serverUrl)) {
+  if (current && !entries.some((entry) => entry.serverUrl === current.serverUrl && entry.accountId === current.accountId)) {
     entries = [current, ...entries].slice(0, 8);
     try {
       localStorage.setItem(HISTORY_KEY, JSON.stringify(entries));
@@ -136,9 +136,9 @@ export function rememberAccountSession(session: AccountSession) {
     allowInvalidServerCertificate: session.allowInvalidServerCertificate === true,
   };
   const history = readRememberedLogins().filter((entry) =>
-    saved.serverKey && entry.serverKey
+    entry.accountId !== saved.accountId || (saved.serverKey && entry.serverKey
       ? entry.serverKey !== saved.serverKey
-      : entry.serverUrl !== serverUrl,
+      : entry.serverUrl !== serverUrl),
   );
   try {
     localStorage.setItem(HISTORY_KEY, JSON.stringify([saved, ...history].slice(0, 8)));
@@ -179,10 +179,10 @@ export function readAccountSession(serverUrl?: string): AccountSession | null {
     : null;
 }
 
-export function clearAccountSession(serverUrl = legacySession()?.serverUrl) {
+export function clearAccountSession(serverUrl = legacySession()?.serverUrl, accountId = readAccountSession(serverUrl)?.accountId) {
   const history = readRememberedLogins();
   const normalized = normalizeLoginServer(serverUrl ?? '');
-  if (!normalized || legacySession()?.serverUrl === normalized)
+  if (!normalized || (legacySession()?.serverUrl === normalized && legacySession()?.accountId === accountId))
     localStorage.removeItem(SESSION_KEY);
   const safeHistory = history.map((entry) =>
     entry.profile ? { ...entry, profile: profileForStorage(entry.profile) } : entry,
@@ -192,7 +192,7 @@ export function clearAccountSession(serverUrl = legacySession()?.serverUrl) {
       HISTORY_KEY,
       JSON.stringify(
         safeHistory.map((entry) =>
-          entry.serverUrl === normalized ? { ...entry, token: undefined } : entry,
+          entry.serverUrl === normalized && (accountId === undefined || entry.accountId === accountId) ? { ...entry, token: undefined } : entry,
         ),
       ),
     );
@@ -201,10 +201,11 @@ export function clearAccountSession(serverUrl = legacySession()?.serverUrl) {
   }
 }
 
-export function forgetRememberedLogin(serverUrl: string) {
+export function forgetRememberedLogin(serverUrl: string, accountId?: string) {
   const normalized = normalizeLoginServer(serverUrl);
-  const history = readRememberedLogins().filter((entry) => entry.serverUrl !== normalized);
-  if (legacySession()?.serverUrl === normalized) localStorage.removeItem(SESSION_KEY);
+  const history = readRememberedLogins().filter((entry) => entry.serverUrl !== normalized || (accountId !== undefined && entry.accountId !== accountId));
+  const active = legacySession();
+  if (active?.serverUrl === normalized && (accountId === undefined || active.accountId === accountId)) localStorage.removeItem(SESSION_KEY);
   const safeHistory = history.map((entry) =>
     entry.profile ? { ...entry, profile: profileForStorage(entry.profile) } : entry,
   );
@@ -236,7 +237,7 @@ export async function enrichRememberedLoginIdentities(): Promise<RememberedLogin
   );
   const seen = new Set<string>();
   const merged = enriched.filter((entry) => {
-    const key = entry.serverKey ?? `url:${entry.serverUrl}`;
+    const key = JSON.stringify([entry.serverKey ?? `url:${entry.serverUrl}`, entry.accountId]);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;

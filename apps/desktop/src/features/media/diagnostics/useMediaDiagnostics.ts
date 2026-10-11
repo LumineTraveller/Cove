@@ -2,6 +2,7 @@ import { useCallback } from 'react';
 import { Socket } from 'socket.io-client';
 
 import {
+  diagnosticVideoCounters,
   intervalLossPercent,
   mediaDiagnosticSessionKey,
   shouldAcceptMediaDiagnosticSample,
@@ -57,7 +58,9 @@ export interface useMediaDiagnosticsDependencies {
     import('@socket.io/component-emitter/lib/cjs').DefaultEventsMap
   >;
   readonly diagnosticHistory: import('react').MutableRefObject<
-    { timestamp: string; stats: MediaStats; trackSettings: MediaTrackSettings | null }[]
+    { timestamp: string; stats: MediaStats; trackSettings: MediaTrackSettings | null;
+      rawVideoCounters: ReturnType<typeof diagnosticVideoCounters>;
+      encodingPlan: ScreenEncodingPlan | null; contentHint: string | null }[]
   >;
   readonly setStatsEnabled: import('react').Dispatch<import('react').SetStateAction<boolean>>;
   readonly statsTimer: import('react').MutableRefObject<number | null>;
@@ -303,6 +306,9 @@ export function useMediaDiagnostics(deps: useMediaDiagnosticsDependencies) {
         timestamp: new Date().toISOString(),
         stats: next,
         trackSettings,
+        rawVideoCounters: diagnosticVideoCounters(rtpStat, mediaSource),
+        encodingPlan: deps.screenEncodingPlan,
+        contentHint: videoTrack?.contentHint ?? null,
       };
       // 仅在内存中保留最近 600 个样本，只有手动点击导出才保存文件。
       deps.diagnosticHistory.current.push(diagnosticEntry);
@@ -348,7 +354,7 @@ export function useMediaDiagnostics(deps: useMediaDiagnosticsDependencies) {
       userAgent: navigator.userAgent,
       screen: {
         preset: deps.screenPreset,
-        requestedFps: deps.screenGameMode ? 60 : deps.fps,
+        requestedFps: deps.fps,
         gameMode: deps.screenGameMode,
         nativeResolution: deps.screenNativeResolution,
         configuredMaxBitrate: SCREEN_MAX_BITRATE_BPS,

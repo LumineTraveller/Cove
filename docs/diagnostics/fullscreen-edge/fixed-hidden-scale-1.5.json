@@ -1,0 +1,1566 @@
+{
+  "observedAt": "2026-10-07T03:29:17.035Z",
+  "hidden": true,
+  "offscreenRendering": true,
+  "nativeFullscreen": false,
+  "bounds": {
+    "x": 213,
+    "y": 109,
+    "width": 1280,
+    "height": 802
+  },
+  "contentBounds": {
+    "x": 213,
+    "y": 109,
+    "width": 1280,
+    "height": 802
+  },
+  "hwnd": "1382018",
+  "nativeHitTest": {
+    "observedAt": "2026-10-07T03:29:14.2394343Z",
+    "hwnd": 1382018,
+    "visible": false,
+    "outer": {
+      "left": 0,
+      "top": 0,
+      "right": 2560,
+      "bottom": 1600
+    },
+    "client": {
+      "left": 0,
+      "top": 0,
+      "right": 2560,
+      "bottom": 1600
+    },
+    "clientOrigin": {
+      "x": 0,
+      "y": 0
+    },
+    "rows": [
+      {
+        "x": 0,
+        "y": 0,
+        "hit": 1
+      },
+      {
+        "x": 1,
+        "y": 0,
+        "hit": 1
+      },
+      {
+        "x": 1280,
+        "y": 0,
+        "hit": 1
+      },
+      {
+        "x": 2558,
+        "y": 0,
+        "hit": 1
+      },
+      {
+        "x": 2559,
+        "y": 0,
+        "hit": 1
+      },
+      {
+        "x": 0,
+        "y": 0,
+        "hit": 1
+      },
+      {
+        "x": 1,
+        "y": 0,
+        "hit": 1
+      },
+      {
+        "x": 1280,
+        "y": 0,
+        "hit": 1
+      },
+      {
+        "x": 2558,
+        "y": 0,
+        "hit": 1
+      },
+      {
+        "x": 2559,
+        "y": 0,
+        "hit": 1
+      },
+      {
+        "x": 0,
+        "y": 1,
+        "hit": 1
+      },
+      {
+        "x": 1,
+        "y": 1,
+        "hit": 1
+      },
+      {
+        "x": 1280,
+        "y": 1,
+        "hit": 1
+      },
+      {
+        "x": 2558,
+        "y": 1,
+        "hit": 1
+      },
+      {
+        "x": 2559,
+        "y": 1,
+        "hit": 1
+      },
+      {
+        "x": 0,
+        "y": 2,
+        "hit": 1
+      },
+      {
+        "x": 1,
+        "y": 2,
+        "hit": 1
+      },
+      {
+        "x": 1280,
+        "y": 2,
+        "hit": 1
+      },
+      {
+        "x": 2558,
+        "y": 2,
+        "hit": 1
+      },
+      {
+        "x": 2559,
+        "y": 2,
+        "hit": 1
+      },
+      {
+        "x": 0,
+        "y": 10,
+        "hit": 1
+      },
+      {
+        "x": 1,
+        "y": 10,
+        "hit": 1
+      },
+      {
+        "x": 1280,
+        "y": 10,
+        "hit": 1
+      },
+      {
+        "x": 2558,
+        "y": 10,
+        "hit": 1
+      },
+      {
+        "x": 2559,
+        "y": 10,
+        "hit": 1
+      }
+    ],
+    "displays": [
+      {
+        "primary": true,
+        "bounds": {
+          "Location": {
+            "IsEmpty": true,
+            "X": 0,
+            "Y": 0
+          },
+          "Size": {
+            "IsEmpty": false,
+            "Width": 2560,
+            "Height": 1600
+          },
+          "X": 0,
+          "Y": 0,
+          "Width": 2560,
+          "Height": 1600,
+          "Left": 0,
+          "Top": 0,
+          "Right": 2560,
+          "Bottom": 1600,
+          "IsEmpty": false
+        },
+        "workingArea": {
+          "Location": {
+            "IsEmpty": true,
+            "X": 0,
+            "Y": 0
+          },
+          "Size": {
+            "IsEmpty": false,
+            "Width": 2560,
+            "Height": 1528
+          },
+          "X": 0,
+          "Y": 0,
+          "Width": 2560,
+          "Height": 1528,
+          "Left": 0,
+          "Top": 0,
+          "Right": 2560,
+          "Bottom": 1528,
+          "IsEmpty": false
+        }
+      }
+    ]
+  },
+  "exited": true,
+  "reentered": true,
+  "escaped": true,
+  "stoppedInputs": 0,
+  "displays": [
+    {
+      "bounds": {
+        "x": 0,
+        "y": 0,
+        "width": 1138,
+        "height": 711
+      },
+      "scaleFactor": 1.5
+    }
+  ],
+  "phases": [
+    {
+      "zoom": 1,
+      "inspect": {
+        "fullscreen": "video-surface",
+        "viewport": {
+          "width": 1707,
+          "height": 1067,
+          "dpr": 1
+        },
+        "rect": {
+          "x": 0,
+          "y": 0,
+          "width": 1707,
+          "height": 1067,
+          "top": 0,
+          "right": 1707,
+          "bottom": 1067,
+          "left": 0
+        },
+        "video": {
+          "width": 2560,
+          "height": 1600
+        },
+        "points": [
+          {
+            "y": 0,
+            "hit": "VIDEO",
+            "mapped": {
+              "x": 0.5,
+              "y": 0
+            }
+          },
+          {
+            "y": 0.1,
+            "hit": "VIDEO",
+            "mapped": {
+              "x": 0.5,
+              "y": 0.00003514938488576451
+            }
+          },
+          {
+            "y": 0.5,
+            "hit": "VIDEO",
+            "mapped": {
+              "x": 0.5,
+              "y": 0.0004100761570005858
+            }
+          },
+          {
+            "y": 1,
+            "hit": "VIDEO",
+            "mapped": {
+              "x": 0.5,
+              "y": 0.0008787346221441124
+            }
+          },
+          {
+            "y": 2,
+            "hit": "VIDEO",
+            "mapped": {
+              "x": 0.5,
+              "y": 0.0018160515524311659
+            }
+          },
+          {
+            "y": 10,
+            "hit": "VIDEO",
+            "mapped": {
+              "x": 0.5,
+              "y": 0.009314586994727592
+            }
+          }
+        ]
+      },
+      "rows": [
+        {
+          "stage": "sent",
+          "at": 1746.300000011921,
+          "type": "pointer",
+          "x": 0,
+          "y": 0
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 1746.300000011921,
+          "x": 0,
+          "y": 0,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 1747.9000000357628,
+          "x": 0,
+          "y": 0,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 1776.4000000357628,
+          "type": "pointer",
+          "x": 0.0005858230814294083,
+          "y": 0
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 1776.4000000357628,
+          "x": 1,
+          "y": 0,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 1783.6000000238419,
+          "x": 1,
+          "y": 0,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 1807.9000000357628,
+          "type": "pointer",
+          "x": 0.4997070884592853,
+          "y": 0
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 1808,
+          "x": 853,
+          "y": 0,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 1808.4000000357628,
+          "x": 853,
+          "y": 0,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 1839.5,
+          "type": "pointer",
+          "x": 0.9994141769185706,
+          "y": 0
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 1839.5,
+          "x": 1706,
+          "y": 0,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 1850.9000000357628,
+          "x": 1706,
+          "y": 0,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 1871,
+          "type": "pointer",
+          "x": 0,
+          "y": 0.0008787346221441124
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 1871.1000000238419,
+          "x": 0,
+          "y": 1,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 1871.6000000238419,
+          "x": 0,
+          "y": 1,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 1902.300000011921,
+          "type": "pointer",
+          "x": 0.0005858230814294083,
+          "y": 0.0008787346221441124
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 1902.300000011921,
+          "x": 1,
+          "y": 1,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 1916.1000000238419,
+          "x": 1,
+          "y": 1,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 1933.4000000357628,
+          "type": "pointer",
+          "x": 0.4997070884592853,
+          "y": 0.0008787346221441124
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 1933.4000000357628,
+          "x": 853,
+          "y": 1,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 1933.800000011921,
+          "x": 853,
+          "y": 1,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 1964.5,
+          "type": "pointer",
+          "x": 0.9994141769185706,
+          "y": 0.0008787346221441124
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 1964.5,
+          "x": 1706,
+          "y": 1,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 1965.1000000238419,
+          "x": 1706,
+          "y": 1,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 1995.4000000357628,
+          "type": "pointer",
+          "x": 0,
+          "y": 0.0018160515524311659
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 1995.5,
+          "x": 0,
+          "y": 2,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 1999.4000000357628,
+          "x": 0,
+          "y": 2,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 2027.800000011921,
+          "type": "pointer",
+          "x": 0.0005858230814294083,
+          "y": 0.0018160515524311659
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 2027.800000011921,
+          "x": 1,
+          "y": 2,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 2028.2000000476837,
+          "x": 1,
+          "y": 2,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 2057.900000035763,
+          "type": "pointer",
+          "x": 0.4997070884592853,
+          "y": 0.0018160515524311659
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 2057.900000035763,
+          "x": 853,
+          "y": 2,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 2067.900000035763,
+          "x": 853,
+          "y": 2,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 2090.100000023842,
+          "type": "pointer",
+          "x": 0.9994141769185706,
+          "y": 0.0018160515524311659
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 2090.100000023842,
+          "x": 1706,
+          "y": 2,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 2090.800000011921,
+          "x": 1706,
+          "y": 2,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 2121.400000035763,
+          "type": "pointer",
+          "x": 0,
+          "y": 0.009314586994727592
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 2121.400000035763,
+          "x": 0,
+          "y": 10,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 2133.400000035763,
+          "x": 0,
+          "y": 10,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 2152.7000000476837,
+          "type": "pointer",
+          "x": 0.0005858230814294083,
+          "y": 0.009314586994727592
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 2152.7000000476837,
+          "x": 1,
+          "y": 10,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 2153.2000000476837,
+          "x": 1,
+          "y": 10,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 2185.100000023842,
+          "type": "pointer",
+          "x": 0.4997070884592853,
+          "y": 0.009314586994727592
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 2185.100000023842,
+          "x": 853,
+          "y": 10,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 2200,
+          "x": 853,
+          "y": 10,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 2215.5,
+          "type": "pointer",
+          "x": 0.9994141769185706,
+          "y": 0.009314586994727592
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 2215.5,
+          "x": 1706,
+          "y": 10,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 2216.100000023842,
+          "x": 1706,
+          "y": 10,
+          "trusted": true,
+          "target": "VIDEO"
+        }
+      ]
+    },
+    {
+      "zoom": 1.25,
+      "inspect": {
+        "fullscreen": "video-surface",
+        "viewport": {
+          "width": 1366,
+          "height": 854,
+          "dpr": 1.25
+        },
+        "rect": {
+          "x": 0,
+          "y": 0,
+          "width": 1365.5999755859375,
+          "height": 853.6000366210938,
+          "top": 0,
+          "right": 1365.5999755859375,
+          "bottom": 853.6000366210938,
+          "left": 0
+        },
+        "video": {
+          "width": 2560,
+          "height": 1600
+        },
+        "points": [
+          {
+            "y": 0,
+            "hit": "VIDEO",
+            "mapped": {
+              "x": 0.5001464647119267,
+              "y": 0
+            }
+          },
+          {
+            "y": 0.1,
+            "hit": "VIDEO",
+            "mapped": {
+              "x": 0.5001464647119267,
+              "y": 0.00005855191675691283
+            }
+          },
+          {
+            "y": 0.5,
+            "hit": "VIDEO",
+            "mapped": {
+              "x": 0.5001464647119267,
+              "y": 0.0005272103902790695
+            }
+          },
+          {
+            "y": 1,
+            "hit": "VIDEO",
+            "mapped": {
+              "x": 0.5001464647119267,
+              "y": 0.0011130334821817655
+            }
+          },
+          {
+            "y": 2,
+            "hit": "VIDEO",
+            "mapped": {
+              "x": 0.5001464647119267,
+              "y": 0.0022846796659871573
+            }
+          },
+          {
+            "y": 10,
+            "hit": "VIDEO",
+            "mapped": {
+              "x": 0.5001464647119267,
+              "y": 0.011657849136430292
+            }
+          }
+        ]
+      },
+      "rows": [
+        {
+          "stage": "sent",
+          "at": 2373,
+          "type": "pointer",
+          "x": 0,
+          "y": 0
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 2373,
+          "x": 0,
+          "y": 0,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 2373.5,
+          "x": 0,
+          "y": 0,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 2403.800000011921,
+          "type": "pointer",
+          "x": 0.0005858231006321403,
+          "y": 0
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 2403.800000011921,
+          "x": 0.800000011920929,
+          "y": 0,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 2416.300000011921,
+          "x": 0.800000011920929,
+          "y": 0,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 2435.2000000476837,
+          "type": "pointer",
+          "x": 0.5002929294238533,
+          "y": 0
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 2435.2000000476837,
+          "x": 683.2000122070312,
+          "y": 0,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 2435.600000023842,
+          "x": 683.2000122070312,
+          "y": 0,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 2465.800000011921,
+          "type": "pointer",
+          "x": 0.9994142305418032,
+          "y": 0
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 2465.900000035763,
+          "x": 1364.800048828125,
+          "y": 0,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 2466.800000011921,
+          "x": 1364.800048828125,
+          "y": 0,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 2496.400000035763,
+          "type": "pointer",
+          "x": 0,
+          "y": 0.000878704259387798
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 2496.400000035763,
+          "x": 0,
+          "y": 0.800000011920929,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 2497.400000035763,
+          "x": 0,
+          "y": 0.800000011920929,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 2528.100000023842,
+          "type": "pointer",
+          "x": 0.0005858231006321403,
+          "y": 0.000878704259387798
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 2528.100000023842,
+          "x": 0.800000011920929,
+          "y": 0.800000011920929,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 2533.300000011921,
+          "x": 0.800000011920929,
+          "y": 0.800000011920929,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 2558.600000023842,
+          "type": "pointer",
+          "x": 0.5002929294238533,
+          "y": 0.000878704259387798
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 2558.600000023842,
+          "x": 683.2000122070312,
+          "y": 0.800000011920929,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 2559.2000000476837,
+          "x": 683.2000122070312,
+          "y": 0.800000011920929,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 2589.100000023842,
+          "type": "pointer",
+          "x": 0.9994142305418032,
+          "y": 0.000878704259387798
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 2589.100000023842,
+          "x": 1364.800048828125,
+          "y": 0.800000011920929,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 2599.600000023842,
+          "x": 1364.800048828125,
+          "y": 0.800000011920929,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 2620.800000011921,
+          "type": "pointer",
+          "x": 0,
+          "y": 0.0027533382512462015
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 2620.900000035763,
+          "x": 0,
+          "y": 2.4000000953674316,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 2621.400000035763,
+          "x": 0,
+          "y": 2.4000000953674316,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 2651.7000000476837,
+          "type": "pointer",
+          "x": 0.0005858231006321403,
+          "y": 0.0027533382512462015
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 2651.7000000476837,
+          "x": 0.800000011920929,
+          "y": 2.4000000953674316,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 2666.5,
+          "x": 0.800000011920929,
+          "y": 2.4000000953674316,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 2684.400000035763,
+          "type": "pointer",
+          "x": 0.5002929294238533,
+          "y": 0.0027533382512462015
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 2684.400000035763,
+          "x": 683.2000122070312,
+          "y": 2.4000000953674316,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 2684.800000011921,
+          "x": 683.2000122070312,
+          "y": 2.4000000953674316,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 2713.900000035763,
+          "type": "pointer",
+          "x": 0.9994142305418032,
+          "y": 0.0027533382512462015
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 2713.900000035763,
+          "x": 1364.800048828125,
+          "y": 2.4000000953674316,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 2714.400000035763,
+          "x": 1364.800048828125,
+          "y": 2.4000000953674316,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 2744.800000011921,
+          "type": "pointer",
+          "x": 0,
+          "y": 0.012126508280373774
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 2744.800000011921,
+          "x": 0,
+          "y": 10.40000057220459,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 2748.7000000476837,
+          "x": 0,
+          "y": 10.40000057220459,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 2776.900000035763,
+          "type": "pointer",
+          "x": 0.0005858231006321403,
+          "y": 0.012126508280373774
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 2776.900000035763,
+          "x": 0.800000011920929,
+          "y": 10.40000057220459,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 2777.300000011921,
+          "x": 0.800000011920929,
+          "y": 10.40000057220459,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 2807.800000011921,
+          "type": "pointer",
+          "x": 0.5002929294238533,
+          "y": 0.012126508280373774
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 2807.800000011921,
+          "x": 683.2000122070312,
+          "y": 10.40000057220459,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 2815.400000035763,
+          "x": 683.2000122070312,
+          "y": 10.40000057220459,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 2838.800000011921,
+          "type": "pointer",
+          "x": 0.9994142305418032,
+          "y": 0.012126508280373774
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 2838.800000011921,
+          "x": 1364.800048828125,
+          "y": 10.40000057220459,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 2839.300000011921,
+          "x": 1364.800048828125,
+          "y": 10.40000057220459,
+          "trusted": true,
+          "target": "VIDEO"
+        }
+      ]
+    },
+    {
+      "zoom": 1.5,
+      "inspect": {
+        "fullscreen": "video-surface",
+        "viewport": {
+          "width": 1138,
+          "height": 711,
+          "dpr": 1.5
+        },
+        "rect": {
+          "x": 0,
+          "y": 0,
+          "width": 1138,
+          "height": 711.3333740234375,
+          "top": 0,
+          "right": 1138,
+          "bottom": 711.3333740234375,
+          "left": 0
+        },
+        "video": {
+          "width": 2560,
+          "height": 1600
+        },
+        "points": [
+          {
+            "y": 0,
+            "hit": "VIDEO",
+            "mapped": {
+              "x": 0.5,
+              "y": 0
+            }
+          },
+          {
+            "y": 0.1,
+            "hit": "VIDEO",
+            "mapped": {
+              "x": 0.5,
+              "y": 0.00008198662675746926
+            }
+          },
+          {
+            "y": 0.5,
+            "hit": "VIDEO",
+            "mapped": {
+              "x": 0.5,
+              "y": 0.0006443767849297012
+            }
+          },
+          {
+            "y": 1,
+            "hit": "VIDEO",
+            "mapped": {
+              "x": 0.5,
+              "y": 0.0013473644826449912
+            }
+          },
+          {
+            "y": 2,
+            "hit": "VIDEO",
+            "mapped": {
+              "x": 0.5,
+              "y": 0.002753339878075571
+            }
+          },
+          {
+            "y": 10,
+            "hit": "VIDEO",
+            "mapped": {
+              "x": 0.5,
+              "y": 0.014001143041520211
+            }
+          }
+        ]
+      },
+      "rows": [
+        {
+          "stage": "sent",
+          "at": 2993.7000000476837,
+          "type": "pointer",
+          "x": 0,
+          "y": 0
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 2993.7000000476837,
+          "x": 0,
+          "y": 0,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 2994.300000011921,
+          "x": 0,
+          "y": 0,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 3024.300000011921,
+          "type": "pointer",
+          "x": 0.0011716461977765932,
+          "y": 0
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 3024.300000011921,
+          "x": 1.3333333730697632,
+          "y": 0,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 3024.800000011921,
+          "x": 1.3333333730697632,
+          "y": 0,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 3055.100000023842,
+          "type": "pointer",
+          "x": 0.500292947296518,
+          "y": 0
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 3055.100000023842,
+          "x": 569.3333740234375,
+          "y": 0,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 3066.100000023842,
+          "x": 569.3333740234375,
+          "y": 0,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 3086.400000035763,
+          "type": "pointer",
+          "x": 0.9994142126743739,
+          "y": 0
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 3086.400000035763,
+          "x": 1137.3333740234375,
+          "y": 0,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 3086.800000011921,
+          "x": 1137.3333740234375,
+          "y": 0,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 3118.2000000476837,
+          "type": "pointer",
+          "x": 0,
+          "y": 0.0018160230036569605
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 3118.2000000476837,
+          "x": 0,
+          "y": 1.3333333730697632,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 3133,
+          "x": 0,
+          "y": 1.3333333730697632,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 3148.600000023842,
+          "type": "pointer",
+          "x": 0.0011716461977765932,
+          "y": 0.0018160230036569605
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 3148.600000023842,
+          "x": 1.3333333730697632,
+          "y": 1.3333333730697632,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 3150.600000023842,
+          "x": 1.3333333730697632,
+          "y": 1.3333333730697632,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 3180.600000023842,
+          "type": "pointer",
+          "x": 0.500292947296518,
+          "y": 0.0018160230036569605
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 3180.600000023842,
+          "x": 569.3333740234375,
+          "y": 1.3333333730697632,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 3181,
+          "x": 569.3333740234375,
+          "y": 1.3333333730697632,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 3211.600000023842,
+          "type": "pointer",
+          "x": 0.9994142126743739,
+          "y": 0.0018160230036569605
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 3211.600000023842,
+          "x": 1137.3333740234375,
+          "y": 1.3333333730697632,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 3215.5,
+          "x": 1137.3333740234375,
+          "y": 1.3333333730697632,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 3243.600000023842,
+          "type": "pointer",
+          "x": 0,
+          "y": 0.002753339878075571
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 3243.600000023842,
+          "x": 0,
+          "y": 2,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 3244,
+          "x": 0,
+          "y": 2,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 3274.5,
+          "type": "pointer",
+          "x": 0.0011716461977765932,
+          "y": 0.002753339878075571
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 3274.5,
+          "x": 1.3333333730697632,
+          "y": 2,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 3282.400000035763,
+          "x": 1.3333333730697632,
+          "y": 2,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 3305,
+          "type": "pointer",
+          "x": 0.500292947296518,
+          "y": 0.002753339878075571
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 3305,
+          "x": 569.3333740234375,
+          "y": 2,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 3305.5,
+          "x": 569.3333740234375,
+          "y": 2,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 3335.900000035763,
+          "type": "pointer",
+          "x": 0.9994142126743739,
+          "y": 0.002753339878075571
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 3335.900000035763,
+          "x": 1137.3333740234375,
+          "y": 2,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 3349.400000035763,
+          "x": 1137.3333740234375,
+          "y": 2,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 3367.900000035763,
+          "type": "pointer",
+          "x": 0,
+          "y": 0.014001143041520211
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 3368,
+          "x": 0,
+          "y": 10,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 3368.400000035763,
+          "x": 0,
+          "y": 10,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 3399.100000023842,
+          "type": "pointer",
+          "x": 0.0011716461977765932,
+          "y": 0.014001143041520211
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 3399.100000023842,
+          "x": 1.3333333730697632,
+          "y": 10,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 3399.7000000476837,
+          "x": 1.3333333730697632,
+          "y": 10,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 3430.800000011921,
+          "type": "pointer",
+          "x": 0.500292947296518,
+          "y": 0.014001143041520211
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 3430.800000011921,
+          "x": 569.3333740234375,
+          "y": 10,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 3431.2000000476837,
+          "x": 569.3333740234375,
+          "y": 10,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "sent",
+          "at": 3462.2000000476837,
+          "type": "pointer",
+          "x": 0.9994142126743739,
+          "y": 0.014001143041520211
+        },
+        {
+          "stage": "pointerrawupdate",
+          "at": 3462.2000000476837,
+          "x": 1137.3333740234375,
+          "y": 10,
+          "trusted": true,
+          "target": "VIDEO"
+        },
+        {
+          "stage": "pointermove",
+          "at": 3465.5,
+          "x": 1137.3333740234375,
+          "y": 10,
+          "trusted": true,
+          "target": "VIDEO"
+        }
+      ]
+    }
+  ]
+}

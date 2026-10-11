@@ -2853,6 +2853,9 @@ select:focus-visible {
 .choice-grid.resolution-grid {
   grid-template-columns: repeat(4, 1fr);
 }
+.choice-grid.fps-grid {
+  grid-template-columns: repeat(3, 1fr);
+}
 .choice-grid button {
   height: 38px;
   border: 1px solid var(--line);
@@ -2865,8 +2868,7 @@ select:focus-visible {
   background: #edf4ff;
   color: var(--blue);
 }
-/* 与 .member-context / .audio-device-actions 等既有约定保持一致：禁用档位既不该
-   给指针反馈，也不该在悬停时亮起。原生分辨率与游戏模式锁定的两行都靠这里。 */
+/* Disabled native-resolution choices retain their layout without hover feedback. */
 .choice-grid button:disabled {
   cursor: not-allowed;
 }
@@ -3032,13 +3034,6 @@ select:focus-visible {
 .remote-video-surface.controlling {
   cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 8 8'%3E%3Ccircle cx='4' cy='4' r='1.6' fill='white' stroke='%23252a30' stroke-width='.45'/%3E%3C/svg%3E") 4 4, default;
 }
-.remote-control-frame {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  border: 1px solid rgba(103, 215, 161, 0.65);
-  box-shadow: inset 0 0 0 2px rgba(103, 215, 161, 0.12);
-}
 .share-view {
   position: relative;
   min-height: 0;
@@ -3078,6 +3073,16 @@ select:focus-visible {
 .share-view.screen-maximized .video-surface,
 .share-view.application-fullscreen-view .video-surface {
   border-radius: 0;
+}
+/* The app fullscreen surface reaches y=0. Its transparent native titlebar
+   otherwise captures the first 38px as a drag region instead of video input.
+   The share status bar and Escape retain fullscreen exit controls. */
+body:has(.share-view.screen-maximized) .cove-window-titlebar {
+  display: none;
+}
+.share-view.screen-maximized,
+.video-surface:fullscreen {
+  -webkit-app-region: no-drag;
 }
 .share-view.application-fullscreen-view .video-surface {
   flex: 1;
@@ -4841,7 +4846,8 @@ body .cove-window-controls button {
 /* 登录页：与频道大厅共用浅色 Cove 视觉语言，避免窄长表单造成的压迫感。 */
 .auth-page {
   width: 100%;
-  min-height: 100%;
+  height: 100%;
+  min-height: 0;
   padding: 28px;
   display: grid;
   /* 登录/注册切换时注册多一行用户名，卡片会变高。垂直居中会让上下边缘同时
@@ -5060,11 +5066,16 @@ body .cove-window-controls button {
   padding-right: 7px;
 }
 .auth-history-button {
-  width: 38px;
+  min-width: 38px;
   height: 38px;
+  padding: 0 8px;
   flex: 0 0 auto;
-  display: grid;
-  place-items: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 11px;
+  white-space: nowrap;
   border-left: 1px solid #e4ebf3;
   border-radius: 10px;
   color: #8193a7;
@@ -7651,6 +7662,15 @@ body .cove-window-controls button {
    clipping, which means these popover-scoped rules would no longer reach it.
    `.soundpack-item-overlay.soundpack-item` re-attaches the same declarations so
    the picked-up card keeps the exact geometry and type of the resting card. */
+/* During a drag, the destination placeholder is the only hover feedback. */
+body.soundpack-dragging .soundpack-management-popover .soundpack-item:not(.playing) {
+  background: #fff;
+  border-color: var(--line);
+}
+:root[data-theme="dark"] body.soundpack-dragging .soundpack-management-popover .soundpack-item:not(.playing) {
+  background: #17212c;
+  border-color: var(--line);
+}
 .soundpack-management-popover .soundpack-item,
 .soundpack-item-overlay.soundpack-item {
   min-height: 68px;

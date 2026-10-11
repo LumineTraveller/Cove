@@ -68,10 +68,12 @@ export function RemoteScreenVideo({
   const { videoRef, ready, failed, retry } = useScreenVideo(stream, true);
   const canControl = controlling && ready;
   const inputSender = useMemo(() => new RemotePointerSender(onInput), [onInput]);
+  const surfaceRef = useRef<HTMLDivElement>(null);
+  const rawMouseActive = useRef(false);
   const pressedKeys = useRef(new Set<string>());
   const pressedButtons = useRef(new Map<'left' | 'right' | 'middle', { x: number; y: number }>());
   const lastPoint = useRef<{ x: number; y: number } | null>(null);
-  const point = (event: { clientX: number; clientY: number }) => {
+  const point = useCallback((event: { clientX: number; clientY: number }) => {
     const video = videoRef.current;
     if (!video) return null;
     return normalizedVideoPoint(
@@ -80,16 +82,37 @@ export function RemoteScreenVideo({
       video.getBoundingClientRect(),
       video.videoWidth,
       video.videoHeight,
+      window.devicePixelRatio,
     );
-  };
-  const rememberPoint = (mapped: { x: number; y: number } | null) => {
+  }, [videoRef]);
+  const rememberPoint = useCallback((mapped: { x: number; y: number } | null) => {
     if (!mapped) return null;
     lastPoint.current = mapped;
     pressedButtons.current.forEach((_, button) => {
       pressedButtons.current.set(button, mapped);
     });
     return mapped;
-  };
+  }, []);
+  useEffect(() => {
+    const surface = surfaceRef.current;
+    if (!canControl || !surface || !window.isSecureContext || !('onpointerrawupdate' in window)) return;
+    // Chromium aligns pointermove to rendering and discards intermediate mouse
+    // samples before our throttle sees them. Use the latest actual raw sample;
+    // the sender still caps traffic and preserves every button/key barrier.
+    const onRawMouse = (raw: Event) => {
+      const event = raw as PointerEvent;
+      if (event.pointerType !== 'mouse') return;
+      const mapped = rememberPoint(point(event));
+      if (mapped) inputSender.send({ type: 'pointer', ...mapped });
+    };
+    rawMouseActive.current = true;
+    surface.addEventListener('pointerrawupdate', onRawMouse, { passive: true });
+    return () => {
+      rawMouseActive.current = false;
+      surface.removeEventListener('pointerrawupdate', onRawMouse);
+      inputSender.cancel();
+    };
+  }, [canControl, inputSender, point, rememberPoint]);
   const release = useCallback(() => {
     inputSender.cancel();
     pressedKeys.current.forEach((code) => inputSender.send({ type: 'key', code, down: false }));
@@ -105,11 +128,13 @@ export function RemoteScreenVideo({
   }, [canControl, release]);
   return (
     <div
+      ref={surfaceRef}
       className={`remote-video-surface ${canControl ? 'controlling' : ''}`}
       aria-busy={!ready}
       tabIndex={canControl ? 0 : -1}
       onPointerMove={(event) => {
         if (!canControl) return;
+        if (event.pointerType === 'mouse' && rawMouseActive.current) return;
         const p = rememberPoint(point(event));
         if (p) inputSender.send({ type: 'pointer', ...p });
       }}
@@ -181,7 +206,6 @@ export function RemoteScreenVideo({
       onContextMenu={(event) => canControl && event.preventDefault()}
     >
       <video ref={videoRef} autoPlay muted playsInline />
-      <span className="remote-control-frame" />
       {!ready && <ScreenVideoLoading failed={failed} onRetry={retry} />}
     </div>
   );

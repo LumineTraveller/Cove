@@ -4,8 +4,11 @@ import {
   createScreenEncodingPlan,
   isScreenEncodingWithinPlan,
   screenEncodingPlanLabel,
+  screenCaptureVideoConstraints,
+  SCREEN_FPS_OPTIONS,
   SCREEN_PRESETS,
   SCREEN_RAMP_GRACE_MS,
+  SCREEN_START_BITRATE_BPS,
   toScreenRtpEncoding,
   withScreenEncodingPlan,
   type ScreenActivity,
@@ -85,15 +88,53 @@ test('a window below the selected preset is never enlarged', () => {
 
 test('every preset, frame-rate and activity overrides the implicit 2.5 Mbps default', () => {
   for (const preset of Object.keys(SCREEN_PRESETS) as ScreenPreset[]) {
-    for (const maxFps of [30, 60] as const) {
+    for (const maxFps of SCREEN_FPS_OPTIONS) {
       for (const activity of ['static', 'active', 'motion'] as ScreenActivity[]) {
         const plan = createScreenEncodingPlan({ preset, maxFps, activity });
         const encoding = toScreenRtpEncoding(plan);
         assert.equal(encoding.maxBitrate, 200_000_000, `${preset}/${maxFps}/${activity}`);
-        assert.equal(encoding.maxFramerate, activity === 'static' ? 15 : activity === 'motion' ? maxFps : 30);
+        assert.equal(encoding.maxFramerate, activity === 'static' ? 15 : maxFps);
         assert.equal(encoding.scaleResolutionDownBy, 1);
       }
     }
+  }
+});
+
+test('120 FPS requests preferred/maximum capture cadence without a hard minimum', () => {
+  assert.deepEqual(screenCaptureVideoConstraints(120), { frameRate: { ideal: 120, max: 120 } });
+  assert.equal(SCREEN_START_BITRATE_BPS, 10_000_000, 'the startup budget stays safe at every cadence');
+});
+
+test('120 FPS changing content and game motion preserve resolution preferences and sender caps', () => {
+  for (const preset of Object.keys(SCREEN_PRESETS) as ScreenPreset[]) {
+    for (const nativeResolution of [false, true]) {
+      for (const activity of ['active', 'motion'] as const) {
+        const options = { preset, nativeResolution, activity, sourceWidth: 3840, sourceHeight: 2160 };
+        const previous = createScreenEncodingPlan({ ...options, maxFps: 60 });
+        const plan = createScreenEncodingPlan({ ...options, maxFps: 120 });
+        assert.equal(plan.fps, 120);
+        assert.equal(plan.outputWidth, previous.outputWidth);
+        assert.equal(plan.outputHeight, previous.outputHeight);
+        assert.equal(plan.degradationPreference, previous.degradationPreference);
+        assert.equal(toScreenRtpEncoding(plan).maxFramerate, 120);
+        assert.equal(toScreenRtpEncoding(plan).maxBitrate, 200_000_000);
+      }
+    }
+  }
+});
+
+test('a selected 120 FPS sender drops to idle 15 and restores 120 without losing sender fields', () => {
+  let parameters: RTCRtpSendParameters = {
+    transactionId: '120-fps-sender', codecs: [], headerExtensions: [], rtcp: {},
+    encodings: [{ rid: 'screen', active: false, maxFramerate: 60 }],
+  };
+  for (const [activity, fps] of [['active', 120], ['static', 15], ['motion', 120]] as const) {
+    const plan = createScreenEncodingPlan({ preset: '1080p', maxFps: 120, activity });
+    parameters = withScreenEncodingPlan(parameters, plan);
+    assert.equal(parameters.encodings[0].maxFramerate, fps);
+    assert.equal(parameters.encodings[0].rid, 'screen');
+    assert.equal(parameters.encodings[0].active, false);
+    assert.equal(parameters.transactionId, '120-fps-sender');
   }
 });
 
@@ -145,7 +186,7 @@ test('native sharing preserves a 4K source regardless of preset and content acti
       assert.equal(plan.outputHeight, 2160);
       assert.equal(plan.scaleResolutionDownBy, 1);
       assert.equal(plan.degradationPreference, 'maintain-resolution');
-      assert.equal(plan.fps, activity === 'static' ? 15 : activity === 'active' ? 30 : 60);
+      assert.equal(plan.fps, activity === 'static' ? 15 : 60);
       assert.equal(toScreenRtpEncoding(plan).scaleResolutionDownBy, 1);
       assert.equal(toScreenRtpEncoding(plan).maxBitrate, 200_000_000);
     }
@@ -187,4 +228,13 @@ test('the startup ramp guard is a no-op for activities that already keep resolut
 test('the startup ramp guard covers a real bitrate climb rather than a single frame', () => {
   assert.ok(SCREEN_RAMP_GRACE_MS >= 3_000);
   assert.ok(SCREEN_RAMP_GRACE_MS <= 10_000);
+});
+
+test('ordinary active content honors selected 60 FPS without changing detail or native preferences', () => {
+  for (const nativeResolution of [false, true]) {
+    const plan = createScreenEncodingPlan({ preset: '1080p', maxFps: 60, activity: 'active', nativeResolution });
+    assert.equal(plan.fps, 60);
+    assert.equal(plan.contentHint, 'detail');
+    assert.equal(plan.degradationPreference, 'maintain-resolution');
+  }
 });

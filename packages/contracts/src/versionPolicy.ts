@@ -1,8 +1,8 @@
 /** Stable release identity and the first supported client version. */
-export const COVE_RELEASE_VERSION = '2.0.0';
+export const COVE_RELEASE_VERSION = '2.0.1';
 export const MINIMUM_CLIENT_VERSION = '2.0.0';
 export const MINIMUM_MOBILE_CLIENT_VERSION = '0.8.0';
-export const CLIENT_RELEASE_VERSIONS = {desktop: '2.0.0', mobile: '0.8.0'} as const;
+export const CLIENT_RELEASE_VERSIONS = {desktop: '2.0.1', mobile: '0.8.1'} as const;
 export const CLIENT_MINIMUM_VERSIONS = {desktop: MINIMUM_CLIENT_VERSION, mobile: MINIMUM_MOBILE_CLIENT_VERSION} as const;
 
 export function minimumClientVersionForPlatform(platform: unknown): string | null {

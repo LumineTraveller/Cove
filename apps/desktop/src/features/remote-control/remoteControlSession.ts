@@ -12,11 +12,18 @@ export interface RemoteControlSession {
 }
 
 type Listener = (...args: any[]) => void;
+interface InputEngine {
+  transport?: { writable: boolean };
+  writeBuffer?: readonly unknown[];
+  on(event: 'drain' | 'upgrade', listener: () => void): unknown;
+  off(event: 'drain' | 'upgrade', listener: () => void): unknown;
+}
 interface SessionSocket {
   connected: boolean;
   on(event: string, listener: Listener): unknown;
   off(event: string, listener: Listener): unknown;
   emit(event: string, ...args: any[]): unknown;
+  io?: { engine?: InputEngine };
 }
 interface InputBridge {
   setActive(sessionId: string | null): Promise<RemoteControlActivation>;
@@ -32,6 +39,8 @@ export class RemoteControlLifecycle {
   private generation = 0;
   private connected: boolean;
   private disposed = false;
+  private pendingMove: { sessionId: string; input: Extract<RemoteControlInput, { type: 'pointer' }> } | null = null;
+  private waitingEngine: InputEngine | null = null;
   private readonly removeEmergencyListener: (() => void) | undefined;
 
   constructor(
@@ -146,13 +155,61 @@ export class RemoteControlLifecycle {
 
   send(input: RemoteControlInput) {
     if (!this.canUseConnection() || this.current?.role !== 'controller') return;
-    this.options.socket.emit('remote-control:input', { sessionId: this.current.sessionId, input });
+    const sessionId = this.current.sessionId;
+    if (input.type === 'pointer') {
+      // Socket.IO's reliable write buffer otherwise retains every old position
+      // during polling, transport upgrades or backpressure. Keep the newest
+      // unsent move here; send its final tail on drain even if motion stops.
+      this.pendingMove = { sessionId, input };
+      this.flushPendingMove();
+      return;
+    }
+    // Edges are reliable ordering barriers, including a preceding final move.
+    this.flushPendingMove(true);
+    if (!this.canUseConnection() || this.current?.sessionId !== sessionId) return;
+    this.options.socket.emit('remote-control:input', { sessionId, input });
+  }
+
+  private readonly onTransportReady = () => {
+    // Engine.IO emits upgrade just before finishing its transport transition.
+    queueMicrotask(() => this.flushPendingMove());
+  };
+
+  private clearTransportWait() {
+    this.waitingEngine?.off('drain', this.onTransportReady);
+    this.waitingEngine?.off('upgrade', this.onTransportReady);
+    this.waitingEngine = null;
+  }
+
+  private flushPendingMove(force = false) {
+    const move = this.pendingMove;
+    if (!move) return;
+    if (!this.canUseConnection() || this.current?.role !== 'controller' || this.current.sessionId !== move.sessionId) {
+      this.pendingMove = null;
+      this.clearTransportWait();
+      return;
+    }
+    const engine = this.options.socket.io?.engine;
+    if (!force && engine && (engine.transport?.writable === false || (engine.writeBuffer?.length ?? 0) > 0)) {
+      if (this.waitingEngine !== engine) {
+        this.clearTransportWait();
+        this.waitingEngine = engine;
+        engine.on('drain', this.onTransportReady);
+        engine.on('upgrade', this.onTransportReady);
+      }
+      return;
+    }
+    this.pendingMove = null;
+    this.clearTransportWait();
+    this.options.socket.emit('remote-control:input', move);
   }
 
   stop(notifyServer = true, reason?: string) {
     const session = this.current ?? this.pending;
     this.generation += 1;
     this.expectedRole = null;
+    this.pendingMove = null;
+    this.clearTransportWait();
     this.current = null;
     this.pending = null;
     if (session?.role === 'sharer') void this.options.bridge?.setActive(null).catch(() => {});

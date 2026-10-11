@@ -188,3 +188,27 @@ export function intervalLossPercent(
   if (total <= 0) return 0;
   return Math.round((lost / total) * 1_000) / 10;
 }
+
+/** Numeric allowlist: preserve raw windows/queue counters without exporting
+ * candidate addresses, identifiers, credentials, or absent values as zero.
+ */
+export function diagnosticVideoCounters(rtp?: RtcStat, source?: RtcStat) {
+  const pick = (stat: RtcStat | undefined, keys: readonly string[]) =>
+    Object.fromEntries(keys.map((key) => {
+      const value = stat?.[key];
+      return [key, typeof value === 'number' && Number.isFinite(value) ? value : null];
+    }));
+  return {
+    rtp: pick(rtp, [
+      'timestamp', 'framesCaptured', 'framesEncoded', 'framesSent', 'framesReceived',
+      'framesDecoded', 'framesDropped', 'packetsSent', 'packetsReceived',
+      'packetsLost', 'bytesSent', 'bytesReceived', 'retransmittedBytesSent',
+      'retransmittedPacketsSent', 'nackCount', 'pliCount', 'firCount', 'qpSum',
+      'targetBitrate', 'totalEncodeTime', 'totalDecodeTime', 'totalPacketSendDelay',
+      'jitterBufferDelay', 'jitterBufferTargetDelay', 'jitterBufferMinimumDelay',
+      'jitterBufferEmittedCount', 'totalProcessingDelay', 'totalInterFrameDelay',
+      'freezeCount', 'totalFreezesDuration',
+    ]),
+    mediaSource: pick(source, ['timestamp', 'frames', 'framesPerSecond', 'width', 'height']),
+  };
+}

@@ -4,7 +4,12 @@ export type RemoteControlInput =
   | { type: 'wheel'; deltaX: number; deltaY: number; x: number; y: number }
   | { type: 'key'; code: string; down: boolean };
 
-/** Leading/trailing 16ms pointer throttle; every non-pointer is an ordering barrier. */
+// 16ms capped native cursor updates near 60Hz even on 120/144Hz controllers.
+// Bound mouse traffic to 125Hz, leaving headroom under the server's 240/s
+// input limit for button, wheel and keyboard edges. No synthetic positions.
+export const REMOTE_POINTER_INTERVAL_MS = 8;
+
+/** Leading/trailing pointer throttle; every non-pointer is an ordering barrier. */
 export class RemotePointerSender {
   private lastSent = -Infinity;
   private pending: Extract<RemoteControlInput, { type: 'pointer' }> | null = null;
@@ -22,7 +27,7 @@ export class RemotePointerSender {
       return;
     }
     this.pending = input;
-    const remaining = 16 - (this.now() - this.lastSent);
+    const remaining = REMOTE_POINTER_INTERVAL_MS - (this.now() - this.lastSent);
     if (remaining <= 0) this.flush();
     else if (this.timer === null) this.timer = setTimeout(() => this.flush(), remaining);
   }
@@ -59,8 +64,11 @@ export function normalizedVideoPoint(
   rect: VideoSurfaceRect,
   videoWidth: number,
   videoHeight: number,
+  devicePixelRatio = 1,
 ): { x: number; y: number } | null {
   if (rect.width <= 0 || rect.height <= 0 || videoWidth <= 0 || videoHeight <= 0) return null;
+  if (clientX < rect.left || clientX > rect.left + rect.width ||
+      clientY < rect.top || clientY > rect.top + rect.height) return null;
   const videoRatio = videoWidth / videoHeight;
   const containerRatio = rect.width / rect.height;
   let width = rect.width;
@@ -74,7 +82,20 @@ export function normalizedVideoPoint(
     height = rect.width / videoRatio;
     top += (rect.height - height) / 2;
   }
-  if (clientX < left || clientX > left + width || clientY < top || clientY > top + height)
+  // A fullscreen viewport rounded to CSS pixels can differ slightly from the
+  // source aspect ratio (e.g. 1707x1067 vs 2560x1600 at 150% Windows scaling).
+  // Its subpixel contain gutter must not discard the entire outer pixel row.
+  // Only extend hit testing for gutters at most one physical pixel wide; keep
+  // the actual contain geometry for mapping and exclude intentional black bars.
+  const ratio = Number.isFinite(devicePixelRatio) ? Math.max(1, devicePixelRatio) : 1;
+  const tolerance = 1 / ratio;
+  const horizontalRounding = left - rect.left <= tolerance;
+  const verticalRounding = top - rect.top <= tolerance;
+  const hitLeft = horizontalRounding ? rect.left : left;
+  const hitRight = horizontalRounding ? rect.left + rect.width : left + width;
+  const hitTop = verticalRounding ? rect.top : top;
+  const hitBottom = verticalRounding ? rect.top + rect.height : top + height;
+  if (clientX < hitLeft || clientX > hitRight || clientY < hitTop || clientY > hitBottom)
     return null;
   return {
     x: Math.max(0, Math.min(1, (clientX - left) / width)),

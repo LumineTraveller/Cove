@@ -1,5 +1,6 @@
 import { X } from '@phosphor-icons/react';
 import { SCREEN_PRESETS, type Fps, type ScreenPreset } from '../useWebRTC';
+import { SCREEN_FPS_OPTIONS } from './screenCapture';
 
 export function ScreenShareSettingsV2({
   preset,
@@ -48,7 +49,7 @@ export function ScreenShareSettingsV2({
           </button>
         </header>
         <p className="screen-settings-note">
-          {gameMode ? '游戏模式以 60 FPS 和稳定动态画面为目标。' : '根据画面变化自动调整帧率。'}{' '}
+          {gameMode ? `游戏模式持续以所选 ${fps} FPS 为目标。` : '画面变化时使用所选帧率，静止后降到 15 FPS。'}{' '}
           视频码率上限为 200 Mbps，实际速率由网络与设备能力决定。
         </p>
         <section className={`media-choice-section ${nativeResolution ? 'disabled' : ''}`}>
@@ -77,31 +78,24 @@ export function ScreenShareSettingsV2({
             onChange={(event) => onNativeResolution(event.target.checked)}
           />
         </label>
-        {/* 游戏模式把帧率锁在 60，与原生分辨率锁定分辨率档位是同一种情况，
-            整行灰化并禁用两个按钮，保持两行的禁用表现一致。 */}
-        <section className={`media-choice-section ${gameMode ? 'disabled' : ''}`}>
+        <section className="media-choice-section">
           <span>帧率</span>
-          <div className="choice-grid">
-            <button
-              className={fps === 30 ? 'active' : ''}
-              disabled={gameMode}
-              onClick={() => onFps(30)}
-            >
-              30 fps
-            </button>
-            <button
-              className={fps === 60 ? 'active' : ''}
-              disabled={gameMode}
-              onClick={() => onFps(60)}
-            >
-              60 fps
-            </button>
+          <div className="choice-grid fps-grid">
+            {SCREEN_FPS_OPTIONS.map((value) => (
+              <button
+                key={value}
+                className={fps === value ? 'active' : ''}
+                onClick={() => onFps(value)}
+              >
+                {value} fps
+              </button>
+            ))}
           </div>
         </section>
         <label className="settings-toggle-card">
           <span>
             <b>游戏模式</b>
-            <small>以 60 FPS 和稳定动态画面为目标</small>
+            <small>持续使用所选帧率，优先稳定动态画面</small>
           </span>
           <input type="checkbox" checked={gameMode} onChange={onGameMode} />
         </label>

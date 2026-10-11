@@ -34,6 +34,11 @@ export interface useScreenAnalysisDependencies {
   readonly screenRampTimer: import('react').MutableRefObject<number | null>;
 }
 
+// React quickly when a static screen starts changing. Hold the static decision
+// for four seconds so brief pauses do not repeatedly change sender parameters.
+const SCREEN_ACTIVITY_SAMPLE_MS = 250;
+const SCREEN_STATIC_SAMPLES = 4_000 / SCREEN_ACTIVITY_SAMPLE_MS;
+
 export function useScreenAnalysis(deps: useScreenAnalysisDependencies) {
   // ── 屏幕共享 ───────────────────────────────────────────────────────────────
 
@@ -125,9 +130,9 @@ export function useScreenAnalysis(deps: useScreenAnalysisDependencies) {
   }, []);
 
   /**
-   * mediasoup 不读取视频像素，因此在发送端把画面缩到 160×90，每秒比较一次
-   * 亮度变化。连续静止后降到 15fps；滚动/普通操作用 30fps；大面积变化时才
-   * 使用用户选择的最高 60fps。采样只有约 1.4 万像素，开销远低于视频编码。
+   * mediasoup 不读取视频像素，因此在发送端把画面缩到 160×90，每 250ms 比较一次
+   * 亮度变化。连续静止后降到 15fps；有画面变化时
+   * 使用用户选择的最高帧率。采样只有约 1.4 万像素，开销远低于视频编码。
    */
   const startScreenAnalysis = useCallback(
     (stream: MediaStream, preset: ScreenPreset, maxFps: Fps, nativeResolution: boolean) => {
@@ -175,8 +180,8 @@ export function useScreenAnalysis(deps: useScreenAnalysisDependencies) {
             deps.activityCandidate.current.count += 1;
           else deps.activityCandidate.current = { value: next, count: 1 };
 
-          // 动态画面立即升档；普通操作需连续2次；静止需连续4秒，防止频繁抖动。
-          const required = next === 'motion' ? 1 : next === 'active' ? 2 : 4;
+          // 有画面变化即退出静态上限；静止持续4秒后才降频。
+          const required = next === 'static' ? SCREEN_STATIC_SAMPLES : 1;
           if (
             deps.activityCandidate.current.count >= required &&
             deps.screenActivityRef.current !== next
@@ -185,7 +190,7 @@ export function useScreenAnalysis(deps: useScreenAnalysisDependencies) {
         } catch {
           /* 采样失败不影响共享本身 */
         }
-      }, 1_000);
+      }, SCREEN_ACTIVITY_SAMPLE_MS);
     },
     [applyScreenActivity, stopScreenAnalysis],
   );

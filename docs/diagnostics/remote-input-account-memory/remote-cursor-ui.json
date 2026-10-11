@@ -1,0 +1,56 @@
+{
+  "passed": true,
+  "checks": [
+    {
+      "label": "normal viewing has no remote dot",
+      "passed": true
+    },
+    {
+      "label": "authorized control uses the dot on actual video",
+      "passed": true
+    },
+    {
+      "label": "leaving the area restores normal CSS cursor",
+      "passed": true
+    },
+    {
+      "label": "Chromium decodes an 8px centered white dot with exact 4,4 hotspot",
+      "passed": true
+    },
+    {
+      "label": "letterbox clicking does not map into the remote source",
+      "passed": true
+    },
+    {
+      "label": "stop removes dot at the component authorization boundary",
+      "passed": true
+    },
+    {
+      "label": "revoke removes dot at the component authorization boundary",
+      "passed": true
+    },
+    {
+      "label": "disconnect removes dot at the component authorization boundary",
+      "passed": true
+    },
+    {
+      "label": "annotation mode removes dot at the component authorization boundary",
+      "passed": true
+    },
+    {
+      "label": "closing viewing leaves no dot outside the removed component",
+      "passed": true
+    }
+  ],
+  "image": {
+    "cursor": "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 8 8'%3E%3Ccircle cx='4' cy='4' r='1.6' fill='white' stroke='%23252a30' stroke-width='.45'/%3E%3C/svg%3E\") 4 4, default",
+    "width": 8,
+    "height": 8,
+    "center": [
+      255,
+      255,
+      255,
+      255
+    ]
+  }
+}

@@ -16,6 +16,7 @@ import {
   Pause,
   Pencil,
   Play,
+  Plus,
   Save,
   Star,
   Trash2,
@@ -26,7 +27,9 @@ import {
 import { applyAudioElementOutput, DEFAULT_AUDIO_DEVICE_ID } from '../../media/audio/audioDevices';
 import { encodeAudioBufferSegment } from '../audioTrim';
 import { soundpackDownloadFileName } from '../soundpackDownload';
-import { useSortableList } from '../../sorting/useSortableList';
+import { readAccountSession } from '../../accounts/accountAuth';
+import { useSoundpackGroups } from '../useSoundpackGroups';
+import { addSoundpackGroup, canAddSoundpackGroup, flattenSoundpackGroups, readSoundpackGroups, reconcileSoundpackGroups, soundpackGroupsStorageKey, type SoundpackGroup } from '../soundpackGroups';
 import { AudioTrimEditor } from './AudioTrimEditor';
 import { authorizedResourceURL, serverFetch } from '../../connection/serverSecurity';
 import { getProfileDisplayName, type ProfileRemarks } from '../../profiles/profileRemarks';
@@ -92,6 +95,11 @@ function loadSoundpackVolume() {
   }
 }
 
+function loadGroups(storageKey: string) {
+  try { return readSoundpackGroups(JSON.parse(localStorage.getItem(storageKey) ?? 'null')); }
+  catch { return readSoundpackGroups(null); }
+}
+
 // Windows 保留名不能作为文件名，加前缀避开。
 
 function applySoundpackOrder(packs: Soundpack[], orderedIds: string[]) {
@@ -124,7 +132,12 @@ export function SoundPackPanel({
   onQuickOpen,
   onQuickClose,
 }: Props) {
+  const accountId = readAccountSession(serverURL)?.accountId ?? localStorage.getItem('cove_client_id') ?? 'local';
+  const groupStorageKey = soundpackGroupsStorageKey(serverURL, accountId);
   const [packs, setPacks] = useState<Soundpack[]>([]);
+  const [groups, setGroups] = useState<SoundpackGroup[]>(() => loadGroups(groupStorageKey));
+  const [loadedGroupScope, setLoadedGroupScope] = useState<string | null>(null);
+  const listReady = loadedGroupScope === groupStorageKey;
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<{
     completed: number;
@@ -166,7 +179,7 @@ export function SoundPackPanel({
   const audioContextRef = useRef<AudioContext | null>(null);
   const uploadQueueRef = useRef<File[]>([]);
   const uploadQueueIndexRef = useRef(0);
-  const uploadSummaryRef = useRef<{ succeeded: number; failed: string[]; skipped: string[] }>({
+  const uploadSummaryRef = useRef<{ succeeded: number; failed: string[]; skipped: string[]; }>({
     succeeded: 0,
     failed: [],
     skipped: [],
@@ -176,6 +189,36 @@ export function SoundPackPanel({
   const quickPopoverRef = useRef<HTMLDivElement>(null);
   const soundpackVolumeRef = useRef(soundpackVolume);
   const packsRef = useRef<Soundpack[]>([]);
+  const groupsRef = useRef(groups);
+  groupsRef.current = groups;
+  const listRevisionRef = useRef(0);
+  const groupScopeRef = useRef(groupStorageKey);
+  groupScopeRef.current = groupStorageKey;
+  const reorderTokenRef = useRef(0);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; reorderTokenRef.current += 1; };
+  }, []);
+  const soundpackScrollRef = useRef<HTMLDivElement>(null);
+  const saveGroups = useCallback((next: SoundpackGroup[]) => {
+    groupsRef.current = next;
+    setGroups(next);
+    try { localStorage.setItem(groupStorageKey, JSON.stringify({ version: 1, groups: next })); }
+    catch { setDownloadNotice('分组暂时无法保存，关闭后可能丢失。'); }
+  }, [groupStorageKey]);
+  useEffect(() => {
+    reorderTokenRef.current += 1;
+    setReordering(false);
+    const stored = loadGroups(groupStorageKey);
+    groupsRef.current = stored;
+    setGroups(stored);
+  }, [groupStorageKey]);
+  useEffect(() => {
+    if (!listReady) return;
+    const next = reconcileSoundpackGroups(groupsRef.current, packs.map((pack) => pack.id));
+    if (JSON.stringify(next) !== JSON.stringify(groupsRef.current)) saveGroups(next);
+  }, [packs, listReady, saveGroups]);
   const open = controlledOpen ?? internalOpen;
   const quickOpen = controlledQuickOpen ?? internalQuickOpen;
   const resolvedAnchorRef = anchorRef ?? ownTriggerRef;
@@ -322,17 +365,32 @@ export function SoundPackPanel({
   };
 
   useEffect(() => {
-    if (disabled || !socket.id) return;
-    serverFetch(
-      serverURL,
-      `/api/soundpacks?socketId=${encodeURIComponent(socket.id)}&roomId=${encodeURIComponent(
-        roomId,
-      )}`,
-    )
-      .then((response) => response.json())
-      .then((list: Soundpack[]) => setPacks(list))
-      .catch(() => undefined);
-  }, [serverURL, socket, roomId, disabled]);
+    setLoadedGroupScope(null);
+    const socketId = socket.id;
+    if (disabled || !socketId) return;
+    let active = true;
+    const load = () => {
+      const revision = listRevisionRef.current;
+      serverFetch(
+        serverURL,
+        `/api/soundpacks?socketId=${encodeURIComponent(socketId)}&roomId=${encodeURIComponent(
+          roomId,
+        )}`,
+      )
+        .then((response) => response.json())
+        .then((list: Soundpack[]) => {
+          if (!active) return;
+          // A request started before an add/delete/reorder must not overwrite it.
+          if (revision !== listRevisionRef.current) { load(); return; }
+          packsRef.current = list;
+          setPacks(list);
+          setLoadedGroupScope(groupStorageKey);
+        })
+        .catch(() => undefined);
+    };
+    load();
+    return () => { active = false; };
+  }, [serverURL, socket, roomId, disabled, groupStorageKey]);
 
   const toggleFavorite = (soundId: string) => {
     setFavoriteIds((current) => {
@@ -390,8 +448,11 @@ export function SoundPackPanel({
   );
 
   useEffect(() => {
-    const onAdded = (sound: Soundpack) => setPacks((previous) => [sound, ...previous]);
-    const onPlay = ({ soundId, filename }: { soundId: string; filename?: string }) => {
+    const onAdded = (sound: Soundpack) => {
+      listRevisionRef.current += 1;
+      setPacks((previous) => [sound, ...previous.filter((pack) => pack.id !== sound.id)]);
+    };
+    const onPlay = ({ soundId, filename }: { soundId: string; filename?: string; }) => {
       if (inVoice) playSound(soundId, filename);
     };
     const onNormalized = ({
@@ -409,7 +470,8 @@ export function SoundPackPanel({
         ),
       );
     };
-    const onDeleted = ({ soundId }: { soundId: string }) => {
+    const onDeleted = ({ soundId }: { soundId: string; }) => {
+      listRevisionRef.current += 1;
       setPacks((previous) => previous.filter((sound) => sound.id !== soundId));
       setFavoriteIds((previous) => previous.filter((id) => id !== soundId));
       setPlayingId((current) => {
@@ -426,14 +488,17 @@ export function SoundPackPanel({
       });
       setPendingRename((current) => (current?.id === soundId ? null : current));
     };
-    const onRenamed = ({ soundId, name }: { soundId: string; name: string }) => {
+    const onRenamed = ({ soundId, name }: { soundId: string; name: string; }) => {
       setPacks((previous) =>
         previous.map((sound) => (sound.id === soundId ? { ...sound, name } : sound)),
       );
       setPendingRename((current) => (current?.id === soundId ? { ...current, name } : current));
     };
-    const onReordered = ({ orderedIds }: { orderedIds: string[] }) => {
+    const onReordered = ({ orderedIds }: { orderedIds: string[]; }) => {
+      listRevisionRef.current += 1;
       setPacks((previous) => applySoundpackOrder(previous, orderedIds));
+      const rank = new Map(orderedIds.map((id, index) => [id, index]));
+      saveGroups(groupsRef.current.map((group) => ({ ...group, soundIds: [...group.soundIds].sort((a, b) => (rank.get(a) ?? Infinity) - (rank.get(b) ?? Infinity)) })));
     };
     socket.on('soundpack:added', onAdded);
     socket.on('soundpack:play', onPlay);
@@ -449,7 +514,7 @@ export function SoundPackPanel({
       socket.off('soundpack:renamed', onRenamed);
       socket.off('soundpack:reordered', onReordered);
     };
-  }, [socket, playSound, inVoice]);
+  }, [socket, playSound, inVoice, saveGroups]);
 
   const handlePlay = (sound: Soundpack) => {
     if (disabled || !inVoice) return;
@@ -458,7 +523,7 @@ export function SoundPackPanel({
       .emit(
         'soundpack:play',
         { soundId: sound.id, roomId },
-        (error: Error | null, result?: { ok: boolean; error?: string }) => {
+        (error: Error | null, result?: { ok: boolean; error?: string; }) => {
           if (error) {
             window.alert('语音包播放请求超时，请重试');
             return;
@@ -487,7 +552,7 @@ export function SoundPackPanel({
     if (response.ok) return;
     let message = '上传失败';
     try {
-      const body = (await response.json()) as { error?: string };
+      const body = (await response.json()) as { error?: string; };
       message = body.error ?? message;
     } catch {
       message = `上传失败（HTTP ${response.status}）`;
@@ -658,13 +723,13 @@ export function SoundPackPanel({
     if (disabled) return;
     setDeletingId(target.id);
     try {
-      const result = await new Promise<{ ok: boolean; error?: string }>((resolve, reject) => {
+      const result = await new Promise<{ ok: boolean; error?: string; }>((resolve, reject) => {
         socket
           .timeout(5_000)
           .emit(
             'soundpack:delete',
             { soundId: target.id, roomId },
-            (error: Error | null, response: { ok: boolean; error?: string }) =>
+            (error: Error | null, response: { ok: boolean; error?: string; }) =>
               error ? reject(error) : resolve(response),
           );
       });
@@ -737,7 +802,7 @@ export function SoundPackPanel({
             roomId,
             name: renameValue.trim(),
           },
-          (error: Error | null, response: { ok: boolean; error?: string; name?: string }) =>
+          (error: Error | null, response: { ok: boolean; error?: string; name?: string; }) =>
             error ? reject(error) : resolve(response),
         );
       });
@@ -754,25 +819,33 @@ export function SoundPackPanel({
     }
   };
 
-  const commitOrder = useCallback(
-    (orderedIds: string[]) => {
+  const commitGroups = useCallback(
+    (nextGroups: SoundpackGroup[]) => {
+      const operationScope = groupStorageKey;
+      const token = ++reorderTokenRef.current;
+      const active = () => mountedRef.current && groupScopeRef.current === operationScope && reorderTokenRef.current === token;
+      const orderedIds = flattenSoundpackGroups(nextGroups);
       const previous = packsRef.current;
+      const previousGroups = groupsRef.current;
       const byId = new Map(previous.map((pack) => [pack.id, pack]));
       const next = orderedIds.flatMap((id) => {
         const pack = byId.get(id);
         return pack ? [pack] : [];
       });
       if (next.length !== previous.length) return;
+      saveGroups(nextGroups);
       if (next.every((pack, index) => pack.id === previous[index]?.id)) return;
+      listRevisionRef.current += 1;
+      packsRef.current = next;
       setPacks(next);
       setReordering(true);
-      void new Promise<{ ok: boolean; error?: string }>((resolve, reject) => {
+      void new Promise<{ ok: boolean; error?: string; }>((resolve, reject) => {
         socket
           .timeout(5_000)
           .emit(
             'soundpack:reorder',
             { roomId, orderedIds: next.map((pack) => pack.id) },
-            (error: Error | null, response: { ok: boolean; error?: string }) =>
+            (error: Error | null, response: { ok: boolean; error?: string; }) =>
               error ? reject(error) : resolve(response),
           );
       })
@@ -780,20 +853,40 @@ export function SoundPackPanel({
           if (!result.ok) throw new Error(result.error ?? '调整顺序失败');
         })
         .catch((cause) => {
-          setPacks(previous);
+          if (!active()) return;
+          // Retain concurrent additions/deletions while restoring the failed order.
+          setPacks((current) => applySoundpackOrder(current, previous.map((pack) => pack.id)));
+          saveGroups(reconcileSoundpackGroups(previousGroups, packsRef.current.map((pack) => pack.id)));
           alert(cause instanceof Error ? cause.message : '调整顺序失败，请检查网络连接');
         })
-        .finally(() => setReordering(false));
+        .finally(() => { if (active()) setReordering(false); });
     },
-    [roomId, socket],
+    [roomId, socket, saveGroups, groupStorageKey],
   );
 
-  const sortable = useSortableList({
-    ids: packs.map((pack) => pack.id),
-    disabled: disabled || reordering || packs.length < 2,
-    layout: 'grid',
-    onCommit: commitOrder,
+  const sortable = useSoundpackGroups({
+    groups,
+    disabled: disabled || reordering || !listReady || !open,
+    onCommit: commitGroups,
+    scrollRef: soundpackScrollRef,
   });
+  const addGroup = () => {
+    if (disabled || reordering || !listReady) return;
+    saveGroups(addSoundpackGroup(groupsRef.current, crypto.randomUUID()));
+  };
+  const addGroupButton = (
+    <button type="button" className="soundpack-add-group" data-soundpack-add-group
+      onClick={addGroup} disabled={disabled || reordering || !listReady || !canAddSoundpackGroup(groups)}
+      title={canAddSoundpackGroup(groups) ? '添加分组' : '先将语音包放入空组'}>
+      <Plus size={14} />添加分组
+    </button>
+  );
+  const groupDivider = (id: string) => (
+    <button type="button" className="soundpack-group-divider" {...sortable.getDividerProps(id)}
+      aria-label="拖动分隔线调整分组顺序" title="拖动分隔线交换分组">
+      <span aria-hidden="true" />
+    </button>
+  );
   const packsById = new Map(packs.map((pack) => [pack.id, pack]));
   const orderedPacks = sortable.orderedIds.flatMap((id) => {
     const pack = packsById.get(id);
@@ -802,18 +895,18 @@ export function SoundPackPanel({
 
   const audioEditorOverlay = audioEditor
     ? createPortal(
-        <AudioTrimEditor
-          fileName={audioEditor.file.name}
-          buffer={audioEditor.buffer}
-          queueLabel={`${audioEditor.index + 1}/${audioEditor.total}`}
-          busy={audioEditor.busy}
-          error={audioEditor.error}
-          onCancel={cancelAudioSelection}
-          onConfirm={(start, end) => void confirmAudioSelection(start, end)}
-          onPreview={previewAudioSelection}
-        />,
-        document.body,
-      )
+      <AudioTrimEditor
+        fileName={audioEditor.file.name}
+        buffer={audioEditor.buffer}
+        queueLabel={`${audioEditor.index + 1}/${audioEditor.total}`}
+        busy={audioEditor.busy}
+        error={audioEditor.error}
+        onCancel={cancelAudioSelection}
+        onConfirm={(start, end) => void confirmAudioSelection(start, end)}
+        onPreview={previewAudioSelection}
+      />,
+      document.body,
+    )
     : null;
 
   const overlayPack = sortable.overlay
@@ -823,74 +916,76 @@ export function SoundPackPanel({
   const sortableOverlay =
     sortable.overlay && overlayPack && sortable.overlayStyle
       ? createPortal(
-          <div
-            ref={sortable.overlayRef}
-            className={
-              compact
-                ? 'soundpack-item soundpack-item-overlay'
-                : 'soundpack-card-overlay soundpack-item-overlay'
-            }
-            style={sortable.overlayStyle}
-            aria-hidden="true"
-          >
-            {compact ? (
-              <>
-                <div className="soundpack-item-copy">
-                  <b>{overlayPack.name}</b>
-                  <small>
-                    {getProfileDisplayName(
-                      overlayPack.uploader,
-                      overlayPack.uploaderUserId,
-                      profileRemarks,
-                    )}
-                  </small>
-                </div>
-                {/* Visual stand-in for the resting card's favorite button: it
+        <div
+          ref={sortable.overlayRef}
+          className={
+            compact
+              ? 'soundpack-item soundpack-item-overlay'
+              : 'soundpack-card-overlay soundpack-item-overlay'
+          }
+          style={sortable.overlayStyle}
+          aria-hidden="true"
+        >
+          {compact ? (
+            <>
+              <div className="soundpack-item-copy">
+                <b>{overlayPack.name}</b>
+                <small>
+                  {getProfileDisplayName(
+                    overlayPack.uploader,
+                    overlayPack.uploaderUserId,
+                    profileRemarks,
+                  )}
+                </small>
+              </div>
+              {/* Visual stand-in for the resting card's favorite button: it
                     occupies the same slot so the centered name does not shift
                     sideways when the card is picked up. Non-interactive by
                     design — the whole overlay is pointer-events: none. */}
-                <span
-                  className={`soundpack-favorite-button ${
-                    overlayFavoriteIndex >= 0 ? 'active' : ''
+              <span
+                className={`soundpack-favorite-button ${overlayFavoriteIndex >= 0 ? 'active' : ''
                   }`}
-                >
-                  <Star size={16} fill={overlayFavoriteIndex >= 0 ? 'currentColor' : 'none'} />
-                  {overlayFavoriteIndex >= 0 && <i>{overlayFavoriteIndex + 1}</i>}
+              >
+                <Star size={16} fill={overlayFavoriteIndex >= 0 ? 'currentColor' : 'none'} />
+                {overlayFavoriteIndex >= 0 && <i>{overlayFavoriteIndex + 1}</i>}
+              </span>
+            </>
+          ) : (
+            <>
+              <span className="soundpack-overlay-play">
+                <Play size={15} fill="currentColor" />
+              </span>
+              <span className="min-w-0">
+                <span className="block truncate text-sm font-semibold">{overlayPack.name}</span>
+                <span className="mt-1 block truncate text-xs text-white/40">
+                  {getProfileDisplayName(
+                    overlayPack.uploader,
+                    overlayPack.uploaderUserId,
+                    profileRemarks,
+                  )}
                 </span>
-              </>
-            ) : (
-              <>
-                <span className="soundpack-overlay-play">
-                  <Play size={15} fill="currentColor" />
-                </span>
-                <span className="min-w-0">
-                  <span className="block truncate text-sm font-semibold">{overlayPack.name}</span>
-                  <span className="mt-1 block truncate text-xs text-white/40">
-                    {getProfileDisplayName(
-                      overlayPack.uploader,
-                      overlayPack.uploaderUserId,
-                      profileRemarks,
-                    )}
-                  </span>
-                </span>
-              </>
-            )}
-          </div>,
-          document.body,
-        )
+              </span>
+            </>
+          )}
+        </div>,
+        document.body,
+      )
       : null;
   const sortableLiveRegion = (
     <div className="sortable-live-region" role="status" aria-live="polite">
       {sortable.announcement}
     </div>
   );
+  const groupDragOverlay = sortable.groupOverlay && sortable.overlayStyle
+    ? createPortal(<div className="soundpack-group-drag-line" style={sortable.overlayStyle} aria-hidden="true"><span /></div>, document.body)
+    : null;
 
   if (compact) {
     const compactPopoverStyle = popoverPosition
       ? {
-          left: `${popoverPosition.left}px`,
-          bottom: `${popoverPosition.bottom}px`,
-        }
+        left: `${popoverPosition.left}px`,
+        bottom: `${popoverPosition.bottom}px`,
+      }
       : undefined;
     return (
       <>
@@ -1026,96 +1121,104 @@ export function SoundPackPanel({
                 <output>{soundpackVolume}%</output>
               </div>
 
-              <div className="soundpack-management-list">
+              <div className="soundpack-management-list" ref={soundpackScrollRef} data-soundpack-scroll>
                 <div className="soundpack-list-heading">
                   <b>全部语音包</b>
                   <span>{packs.length} 个</span>
+                  {addGroupButton}
                 </div>
-                {packs.length > 0 ? (
+                {packs.length > 0 || groups.length > 1 ? (
                   <div
-                    className="soundpack-items"
+                    className="soundpack-groups"
                     data-sortable={orderedPacks.length > 1 ? 'true' : undefined}
                   >
-                    {orderedPacks.map((sound) => {
-                      const playing = playingId === sound.id;
-                      const favoriteIndex = favoriteIds.indexOf(sound.id);
-                      if (sound.id === sortable.draggingId && !sortable.keyboardId) {
-                        return (
-                          <div
-                            key={sound.id}
-                            ref={sortable.placeholderRef}
-                            className="soundpack-item-placeholder"
-                            style={{ height: sortable.overlayHeight }}
-                            aria-hidden="true"
-                          />
-                        );
-                      }
-                      return (
-                        <div
-                          key={sound.id}
-                          ref={sortable.registerRow(sound.id)}
-                          {...sortable.getRowProps(sound.id)}
-                          className={`soundpack-item ${playing ? 'playing' : ''} ${
-                            sortable.keyboardId === sound.id ? 'soundpack-item-lifted' : ''
-                          }`}
-                          role="button"
-                          aria-disabled={disabled || !inVoice}
-                          title={inVoice ? '点击播放，拖动排序，右键更多操作' : '请先加入语音'}
-                          onClick={() => {
-                            if (sortable.consumeClickSuppression()) return;
-                            handlePlay(sound);
-                          }}
-                          onKeyDown={(event) => {
-                            if (sortable.handleKeyDown(event, sound.id)) return;
-                            if (event.key !== 'Enter') return;
-                            event.preventDefault();
-                            handlePlay(sound);
-                          }}
-                          onContextMenu={(event) => openCardMenu(event, sound)}
-                        >
-                          <div className="soundpack-item-copy">
-                            <b>{sound.name}</b>
-                            <small>
-                              {getProfileDisplayName(
-                                sound.uploader,
-                                sound.uploaderUserId,
-                                profileRemarks,
-                              )}
-                            </small>
-                          </div>
-                          <button
-                            type="button"
-                            className={`soundpack-favorite-button ${
-                              favoriteIndex >= 0 ? 'active' : ''
-                            }`}
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              toggleFavorite(sound.id);
-                            }}
-                            onPointerDown={(event) => event.stopPropagation()}
-                            onContextMenu={(event) => {
-                              event.preventDefault();
-                              event.stopPropagation();
-                            }}
-                            disabled={favoriteIndex < 0 && favoriteIds.length >= 6}
-                            aria-label={
-                              favoriteIndex >= 0 ? `取消收藏 ${sound.name}` : `收藏 ${sound.name}`
+                    {sortable.groups.map((group, groupIndex) => (
+                      <div key={group.id} ref={sortable.registerGroup(group.id)} data-soundpack-group={group.id} tabIndex={-1}
+                        data-soundpack-group-preview={sortable.draggingGroupId === group.id ? 'true' : undefined}>
+                        {(groupIndex > 0 || (sortable.keyboardId === group.id && sortable.draggingGroupId === group.id)) && groupDivider(group.id)}
+                        <div className="soundpack-items soundpack-group-items">
+                          {group.soundIds.flatMap((id) => packsById.get(id) ? [packsById.get(id)!] : []).map((sound, index) => {
+                            const playing = playingId === sound.id;
+                            const favoriteIndex = favoriteIds.indexOf(sound.id);
+                            if (sound.id === sortable.draggingId && !sortable.keyboardId) {
+                              return (
+                                <div
+                                  key={sound.id}
+                                  ref={sortable.placeholderRef}
+                                  className="soundpack-item-placeholder"
+                                  data-soundpack-placeholder data-group-id={group.id} data-index={index}
+                                  style={{ height: sortable.overlayHeight }}
+                                  aria-hidden="true"
+                                />
+                              );
                             }
-                            aria-pressed={favoriteIndex >= 0}
-                            title={
-                              favoriteIndex >= 0
-                                ? `取消收藏（快捷位 ${favoriteIndex + 1}）`
-                                : favoriteIds.length >= 6
-                                ? '最多收藏 6 个语音包'
-                                : '收藏语音包'
-                            }
-                          >
-                            <Star size={16} fill={favoriteIndex >= 0 ? 'currentColor' : 'none'} />
-                            {favoriteIndex >= 0 && <i>{favoriteIndex + 1}</i>}
-                          </button>
+                            return (
+                              <div
+                                key={sound.id}
+                                ref={sortable.registerRow(sound.id)}
+                                {...sortable.getRowProps(sound.id)}
+                                className={`soundpack-item ${playing ? 'playing' : ''} ${sortable.keyboardId === sound.id ? 'soundpack-item-lifted' : ''
+                                  }`}
+                                role="button"
+                                aria-disabled={disabled || !inVoice}
+                                title={inVoice ? '点击播放，拖动排序，右键更多操作' : '请先加入语音'}
+                                onClick={() => {
+                                  if (sortable.consumeClickSuppression()) return;
+                                  handlePlay(sound);
+                                }}
+                                onKeyDown={(event) => {
+                                  if (sortable.handleKeyDown(event, sound.id)) return;
+                                  if (event.key !== 'Enter') return;
+                                  event.preventDefault();
+                                  handlePlay(sound);
+                                }}
+                                onContextMenu={(event) => openCardMenu(event, sound)}
+                              >
+                                <div className="soundpack-item-copy">
+                                  <b>{sound.name}</b>
+                                  <small>
+                                    {getProfileDisplayName(
+                                      sound.uploader,
+                                      sound.uploaderUserId,
+                                      profileRemarks,
+                                    )}
+                                  </small>
+                                </div>
+                                <button
+                                  type="button"
+                                  className={`soundpack-favorite-button ${favoriteIndex >= 0 ? 'active' : ''
+                                    }`}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    toggleFavorite(sound.id);
+                                  }}
+                                  onPointerDown={(event) => event.stopPropagation()}
+                                  onContextMenu={(event) => {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                  }}
+                                  disabled={favoriteIndex < 0 && favoriteIds.length >= 6}
+                                  aria-label={
+                                    favoriteIndex >= 0 ? `取消收藏 ${sound.name}` : `收藏 ${sound.name}`
+                                  }
+                                  aria-pressed={favoriteIndex >= 0}
+                                  title={
+                                    favoriteIndex >= 0
+                                      ? `取消收藏（快捷位 ${favoriteIndex + 1}）`
+                                      : favoriteIds.length >= 6
+                                        ? '最多收藏 6 个语音包'
+                                        : '收藏语音包'
+                                  }
+                                >
+                                  <Star size={16} fill={favoriteIndex >= 0 ? 'currentColor' : 'none'} />
+                                  {favoriteIndex >= 0 && <i>{favoriteIndex + 1}</i>}
+                                </button>
+                              </div>
+                            );
+                          })}
                         </div>
-                      );
-                    })}
+                      </div>
+                    ))}
                   </div>
                 ) : (
                   <button
@@ -1263,6 +1366,7 @@ export function SoundPackPanel({
             document.body,
           )}
         {sortableOverlay}
+        {groupDragOverlay}
         {sortableLiveRegion}
         {audioEditorOverlay}
       </>
@@ -1368,8 +1472,9 @@ export function SoundPackPanel({
                 <span className="hidden text-xs text-white/30 sm:inline">仅影响此设备</span>
               </div>
 
-              <div className="overflow-y-auto p-5">
-                {packs.length === 0 ? (
+              <div className="overflow-y-auto p-5" ref={soundpackScrollRef} data-soundpack-scroll>
+                <div className="soundpack-list-heading">{addGroupButton}</div>
+                {packs.length === 0 && groups.length === 1 ? (
                   <button
                     onClick={() => fileInputRef.current?.click()}
                     className="flex min-h-52 w-full flex-col items-center justify-center gap-3 rounded-2xl border border-dashed border-white/15 text-white/35 transition hover:border-cyan-300/35 hover:bg-cyan-300/[0.04] hover:text-white/70"
@@ -1380,117 +1485,123 @@ export function SoundPackPanel({
                   </button>
                 ) : (
                   <div
-                    className="grid grid-cols-2 gap-3 sm:grid-cols-3"
+                    className="soundpack-groups"
                     data-sortable={orderedPacks.length > 1 ? 'true' : undefined}
                   >
-                    {orderedPacks.map((sound) => {
-                      const playing = playingId === sound.id;
-                      if (sound.id === sortable.draggingId && !sortable.keyboardId) {
-                        return (
-                          <div
-                            key={sound.id}
-                            ref={sortable.placeholderRef}
-                            className="soundpack-card-placeholder"
-                            style={{ height: sortable.overlayHeight }}
-                            aria-hidden="true"
-                          />
-                        );
-                      }
-                      return (
-                        <div
-                          key={sound.id}
-                          ref={sortable.registerRow(sound.id)}
-                          {...sortable.getRowProps(sound.id)}
-                          onKeyDown={(event) => {
-                            sortable.handleKeyDown(event, sound.id);
-                          }}
-                          className={`group relative min-h-20 ${
-                            sortable.keyboardId === sound.id ? 'soundpack-card-lifted' : ''
-                          }`}
-                        >
-                          <button
-                            onClick={() => {
-                              if (sortable.consumeClickSuppression()) return;
-                              handlePlay(sound);
-                            }}
-                            disabled={disabled || !inVoice}
-                            className={`relative h-full min-h-20 w-full overflow-hidden rounded-2xl border px-4 py-3 text-left transition-all focus:outline-none focus:ring-2 focus:ring-cyan-300/50 disabled:cursor-not-allowed disabled:opacity-35 ${
-                              sound.canDelete ? 'pr-20' : ''
-                            } ${
-                              playing
-                                ? 'border-cyan-300/50 bg-cyan-300/15 text-cyan-100 shadow-lg shadow-cyan-950/30'
-                                : 'border-white/[0.07] bg-white/[0.055] text-white/75 hover:-translate-y-0.5 hover:border-cyan-300/25 hover:bg-white/10 hover:text-white'
-                            }`}
-                            title={inVoice ? '只对语音中的成员同步播放' : '请先加入语音'}
-                          >
-                            <span className="flex items-start gap-3">
-                              <span
-                                className={`mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-xl ${
-                                  playing
-                                    ? 'bg-cyan-200 text-zinc-900'
-                                    : 'bg-white/10 text-white/45 group-hover:bg-cyan-300/10 group-hover:text-cyan-100'
-                                }`}
+                    {sortable.groups.map((group, groupIndex) => (
+                      <div key={group.id} ref={sortable.registerGroup(group.id)} data-soundpack-group={group.id} tabIndex={-1}
+                        data-soundpack-group-preview={sortable.draggingGroupId === group.id ? 'true' : undefined}>
+                        {(groupIndex > 0 || (sortable.keyboardId === group.id && sortable.draggingGroupId === group.id)) && groupDivider(group.id)}
+                        <div className="soundpack-group-items grid grid-cols-2 gap-3 sm:grid-cols-3">
+                          {group.soundIds.flatMap((id) => packsById.get(id) ? [packsById.get(id)!] : []).map((sound, index) => {
+                            const playing = playingId === sound.id;
+                            if (sound.id === sortable.draggingId && !sortable.keyboardId) {
+                              return (
+                                <div
+                                  key={sound.id}
+                                  ref={sortable.placeholderRef}
+                                  className="soundpack-card-placeholder"
+                                  data-soundpack-placeholder data-group-id={group.id} data-index={index}
+                                  style={{ height: sortable.overlayHeight }}
+                                  aria-hidden="true"
+                                />
+                              );
+                            }
+                            return (
+                              <div
+                                key={sound.id}
+                                ref={sortable.registerRow(sound.id)}
+                                {...sortable.getRowProps(sound.id)}
+                                onKeyDown={(event) => {
+                                  sortable.handleKeyDown(event, sound.id);
+                                }}
+                                className={`group relative min-h-20 ${sortable.keyboardId === sound.id ? 'soundpack-card-lifted' : ''
+                                  }`}
                               >
-                                {playing ? (
-                                  <Pause size={15} />
-                                ) : (
-                                  <Play size={15} fill="currentColor" />
-                                )}
-                              </span>
-                              <span className="min-w-0">
-                                <span className="block truncate text-sm font-semibold">
-                                  {sound.name}
-                                </span>
-                                <span className="mt-1 block truncate text-xs text-white/30">
-                                  {getProfileDisplayName(
-                                    sound.uploader,
-                                    sound.uploaderUserId,
-                                    profileRemarks,
+                                <button
+                                  data-soundpack-play
+                                  onClick={() => {
+                                    if (sortable.consumeClickSuppression()) return;
+                                    handlePlay(sound);
+                                  }}
+                                  disabled={disabled || !inVoice}
+                                  className={`relative h-full min-h-20 w-full overflow-hidden rounded-2xl border px-4 py-3 text-left transition-all focus:outline-none focus:ring-2 focus:ring-cyan-300/50 disabled:cursor-not-allowed disabled:opacity-35 ${sound.canDelete ? 'pr-20' : ''
+                                    } ${playing
+                                      ? 'border-cyan-300/50 bg-cyan-300/15 text-cyan-100 shadow-lg shadow-cyan-950/30'
+                                      : 'border-white/[0.07] bg-white/[0.055] text-white/75 hover:-translate-y-0.5 hover:border-cyan-300/25 hover:bg-white/10 hover:text-white'
+                                    }`}
+                                  title={inVoice ? '只对语音中的成员同步播放' : '请先加入语音'}
+                                >
+                                  <span className="flex items-start gap-3">
+                                    <span
+                                      className={`mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-xl ${playing
+                                          ? 'bg-cyan-200 text-zinc-900'
+                                          : 'bg-white/10 text-white/45 group-hover:bg-cyan-300/10 group-hover:text-cyan-100'
+                                        }`}
+                                    >
+                                      {playing ? (
+                                        <Pause size={15} />
+                                      ) : (
+                                        <Play size={15} fill="currentColor" />
+                                      )}
+                                    </span>
+                                    <span className="min-w-0">
+                                      <span className="block truncate text-sm font-semibold">
+                                        {sound.name}
+                                      </span>
+                                      <span className="mt-1 block truncate text-xs text-white/30">
+                                        {getProfileDisplayName(
+                                          sound.uploader,
+                                          sound.uploaderUserId,
+                                          profileRemarks,
+                                        )}
+                                      </span>
+                                    </span>
+                                  </span>
+                                  {playing && (
+                                    <span className="absolute inset-x-0 bottom-0 h-0.5 animate-pulse bg-cyan-300" />
                                   )}
-                                </span>
-                              </span>
-                            </span>
-                            {playing && (
-                              <span className="absolute inset-x-0 bottom-0 h-0.5 animate-pulse bg-cyan-300" />
-                            )}
-                          </button>
-                          {sound.canDelete && (
-                            <div className="absolute right-2 top-2 z-10 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-                              <button
-                                onClick={() => beginRename(sound)}
-                                disabled={disabled || renamingId === sound.id}
-                                className="rounded-lg bg-zinc-900/80 p-2 text-white/45 backdrop-blur transition hover:bg-cyan-500/20 hover:text-cyan-200 focus:outline-none focus:ring-2 focus:ring-cyan-300/40 disabled:opacity-30"
-                                aria-label={`重命名语音包 ${sound.name}`}
-                                title="重命名"
-                              >
-                                <Pencil size={15} />
-                              </button>
-                              <button
-                                onClick={() => void deleteSoundTarget(sound)}
-                                disabled={disabled || deletingId === sound.id}
-                                className="rounded-lg bg-zinc-900/80 p-2 text-white/45 backdrop-blur transition hover:bg-red-500/20 hover:text-red-300 focus:outline-none focus:ring-2 focus:ring-red-300/40 disabled:opacity-30"
-                                aria-label={`删除语音包 ${sound.name}`}
-                                title="删除"
-                              >
-                                {deletingId === sound.id ? (
-                                  <LoaderCircle size={15} className="animate-spin" />
-                                ) : (
-                                  <Trash2 size={15} />
+                                </button>
+                                {sound.canDelete && (
+                                  <div className="absolute right-2 top-2 z-10 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+                                    <button
+                                      onClick={() => beginRename(sound)}
+                                      disabled={disabled || renamingId === sound.id}
+                                      className="rounded-lg bg-zinc-900/80 p-2 text-white/45 backdrop-blur transition hover:bg-cyan-500/20 hover:text-cyan-200 focus:outline-none focus:ring-2 focus:ring-cyan-300/40 disabled:opacity-30"
+                                      aria-label={`重命名语音包 ${sound.name}`}
+                                      title="重命名"
+                                    >
+                                      <Pencil size={15} />
+                                    </button>
+                                    <button
+                                      onClick={() => void deleteSoundTarget(sound)}
+                                      disabled={disabled || deletingId === sound.id}
+                                      className="rounded-lg bg-zinc-900/80 p-2 text-white/45 backdrop-blur transition hover:bg-red-500/20 hover:text-red-300 focus:outline-none focus:ring-2 focus:ring-red-300/40 disabled:opacity-30"
+                                      aria-label={`删除语音包 ${sound.name}`}
+                                      title="删除"
+                                    >
+                                      {deletingId === sound.id ? (
+                                        <LoaderCircle size={15} className="animate-spin" />
+                                      ) : (
+                                        <Trash2 size={15} />
+                                      )}
+                                    </button>
+                                  </div>
                                 )}
-                              </button>
-                            </div>
-                          )}
-                          {orderedPacks.length > 1 && (
-                            <span
-                              className="pointer-events-none absolute bottom-2 right-2 z-10 rounded-lg bg-zinc-950/65 p-1 text-white/25 opacity-0 backdrop-blur transition-opacity group-hover:opacity-100"
-                              aria-hidden="true"
-                            >
-                              <GripVertical size={14} />
-                            </span>
-                          )}
+                                {orderedPacks.length > 1 && (
+                                  <span
+                                    className="pointer-events-none absolute bottom-2 right-2 z-10 rounded-lg bg-zinc-950/65 p-1 text-white/25 opacity-0 backdrop-blur transition-opacity group-hover:opacity-100"
+                                    aria-hidden="true"
+                                  >
+                                    <GripVertical size={14} />
+                                  </span>
+                                )}
+                              </div>
+                            );
+                          })}
                         </div>
-                      );
-                    })}
+                      </div>
+                    ))}
                     <button
                       onClick={() => fileInputRef.current?.click()}
                       disabled={uploading || disabled}
@@ -1560,6 +1671,7 @@ export function SoundPackPanel({
           document.body,
         )}
       {sortableOverlay}
+      {groupDragOverlay}
       {sortableLiveRegion}
       {audioEditorOverlay}
     </>

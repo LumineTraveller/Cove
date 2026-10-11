@@ -1,0 +1,120 @@
+{
+  "sourceHead": "d0e354095ae89de84483cf804948037905c8a10f",
+  "observedAt": "2026-10-06T20:42:59.274Z",
+  "passed": true,
+  "renderingFps": 30,
+  "scope": "actual React component, trusted Chromium input, original authorized Socket.IO relay, renderer IPC, original controller/queue and production SendInput; same machine, no WAN or video capture latency",
+  "phases": [
+    {
+      "sent": 28,
+      "topInputs": 0,
+      "sendGapMs": {
+        "count": 27,
+        "p50": 33.2998046875,
+        "p95": 34.300048828125,
+        "max": 365.5
+      },
+      "pipe": 28,
+      "ipc": 28,
+      "topHit": {
+        "tag": "DIV",
+        "className": "cove-window-titlebar"
+      },
+      "greenFrames": 1,
+      "baseline": true,
+      "physicalChanges": 28,
+      "physicalGapMs": {
+        "count": 27,
+        "p50": 33.034200000000055,
+        "p95": 44.075000000000045,
+        "max": 412.2810999999999
+      },
+      "maxAxisErrorPixels": 0,
+      "suppressed": 0
+    },
+    {
+      "sent": 133,
+      "topInputs": 3,
+      "sendGapMs": {
+        "count": 132,
+        "p50": 8.10009765625,
+        "p95": 15.5,
+        "max": 16
+      },
+      "pipe": 133,
+      "ipc": 133,
+      "topHit": {
+        "tag": "VIDEO",
+        "className": ""
+      },
+      "greenFrames": 0,
+      "baseline": false,
+      "physicalChanges": 133,
+      "physicalGapMs": {
+        "count": 132,
+        "p50": 8.198699999999917,
+        "p95": 15.677400000000034,
+        "max": 16.567000000000007
+      },
+      "maxAxisErrorPixels": 0,
+      "suppressed": 0
+    }
+  ],
+  "rawWithoutDuplicate": 1,
+  "inactiveSamples": 0,
+  "rejectedAfterStop": false,
+  "realWindowsEmergencyHotkeyFired": true,
+  "finalHeld": "",
+  "keyChanges": [
+    {
+      "ms": 3900.6256,
+      "held": "left"
+    },
+    {
+      "ms": 3920.6911,
+      "held": "left,shift"
+    },
+    {
+      "ms": 3928.9797,
+      "held": "left,shift,control"
+    },
+    {
+      "ms": 3931.1718,
+      "held": "left,shift,control,alt"
+    },
+    {
+      "ms": 3933.4231,
+      "held": "left,shift,control,alt,x"
+    },
+    {
+      "ms": 3935.7823,
+      "held": "left,control,alt,x"
+    },
+    {
+      "ms": 3938.6306,
+      "held": "left,alt,x"
+    },
+    {
+      "ms": 3940.5564,
+      "held": "left,x"
+    },
+    {
+      "ms": 3943.8497,
+      "held": "left"
+    },
+    {
+      "ms": 3945.3219,
+      "held": ""
+    }
+  ],
+  "rawDataRelativePaths": [
+    "runtime/remote-input-live/result-unified-account-memory.json",
+    "runtime/remote-input-live/windows-unified-account-memory.json"
+  ],
+  "limits": [
+    "synthetic trusted Chromium input; no physical controller mouse sampling",
+    "same-host relay; no WAN",
+    "GetCursorPos observation; no DWM presentation or video-feedback timing",
+    "baseline includes startup scheduling pause; do not derive a percentage gain from event-count ratio"
+  ]
+}

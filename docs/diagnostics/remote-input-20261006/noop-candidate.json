@@ -1,0 +1,14 @@
+{
+  "capturedAt": "2026-10-06T18:13:06.538Z",
+  "kind": "same-host native pipe round trip; noop only; excludes SendInput, WAN and video",
+  "samples": 200,
+  "startToReadyMs": 294.6134,
+  "startToFirstAckMs": 295.52900000000005,
+  "firstAckMs": 0.9156000000000404,
+  "first20MaxMs": 0.9156000000000404,
+  "meanMs": 0.09192299999999819,
+  "p50Ms": 0.08640000000002601,
+  "p95Ms": 0.15389999999996462,
+  "p99Ms": 0.20329999999995607,
+  "maxMs": 0.6435999999999922
+}
