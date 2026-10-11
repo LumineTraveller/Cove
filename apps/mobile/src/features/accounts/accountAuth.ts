@@ -7,6 +7,8 @@ export interface AccountAuthRequest {
   username: string;
   email: string;
   password: string;
+  /** Explicit opt-in; account passwords are only saved through secure native storage. */
+  rememberAccountPassword?: boolean;
   serverURL: string;
   /** Server-wide access password; never sent to the account endpoint. */
   serverPassword?: string;

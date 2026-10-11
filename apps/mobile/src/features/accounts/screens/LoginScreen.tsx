@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Image,
   KeyboardAvoidingView,
   Platform,
@@ -23,6 +24,18 @@ import {
 } from 'lucide-react-native';
 import type { AccountAuthRequest, AccountAuthMode } from '../accountAuth';
 import { validAccountEmail } from '../accountAuth';
+import {
+  clearAccountPasswords,
+  invalidateAccountPasswordSave,
+  listAccountPasswords,
+  normalizeAccountPasswordScope,
+  passwordMemoryStatus,
+  readAccountPassword,
+  removeAccountPassword,
+  PASSWORD_MEMORY_FAILED,
+  PASSWORD_MEMORY_UNAVAILABLE,
+  type RememberedAccountPassword,
+} from '../accountPasswordMemory';
 import { colors } from '../../settings/theme';
 import { httpsOrigin } from '../../connection/serverCertificate';
 import { MobileUpdateButton } from '../../updates/components/MobileUpdater';
@@ -46,6 +59,8 @@ interface Props {
   error?: string | null;
   onSubmit: (request: AccountAuthRequest) => void;
   rememberedServers?: RememberedServer[];
+  lastServerURL?: string;
+  onServerURLChange?: (value: string) => void;
   onForget?: (server: RememberedServer) => void;
   onProbeServerSecurity?: (
     serverURL: string,
@@ -53,11 +68,15 @@ interface Props {
   ) => Promise<ServerSecurityStatus>;
 }
 
+const noRememberedServers: RememberedServer[] = [];
+
 export function LoginScreen({
   saving,
   error,
   onSubmit,
-  rememberedServers = [],
+  rememberedServers = noRememberedServers,
+  lastServerURL,
+  onServerURLChange,
   onForget,
   onProbeServerSecurity,
 }: Props) {
@@ -77,27 +96,209 @@ export function LoginScreen({
   );
   const [mode, setMode] = useState<AccountAuthMode>('login');
   const [username, setUsername] = useState('');
-  const [email, setEmail] = useState(rememberedServers[0]?.email ?? '');
+  const initialServerURL =
+    lastServerURL ?? rememberedServers[0]?.serverURL ?? '';
+  const initialAccount = rememberedServers.find(
+    saved =>
+      normalizeServerSecurityURL(saved.serverURL) ===
+      normalizeServerSecurityURL(initialServerURL),
+  );
+  const [email, setEmail] = useState(initialAccount?.email ?? '');
   const [password, setPassword] = useState('');
   const [serverPassword, setServerPassword] = useState('');
   const [bootstrapToken, setBootstrapToken] = useState('');
-  const [serverURL, setServerURL] = useState(
-    rememberedServers[0]?.serverURL ?? '',
-  );
+  const [serverURL, setServerURL] = useState(initialServerURL);
   const [certificateException, setCertificateException] = useState(
-    rememberedServers[0]?.allowInvalidServerCertificate === true,
+    initialAccount?.allowInvalidServerCertificate === true,
   );
+  const [rememberAccountPassword, setRememberAccountPassword] = useState(false);
+  const [passwordMemoryAvailable, setPasswordMemoryAvailable] = useState(false);
+  const [passwordMemoryNotice, setPasswordMemoryNotice] = useState('');
+  const [storedAccounts, setStoredAccounts] = useState<
+    RememberedAccountPassword[]
+  >([]);
+  const mounted = useRef(false);
+  const passwordFillGeneration = useRef(0);
+  const accountListGeneration = useRef(0);
+  const passwordFromMemory = useRef(false);
+  const serverEdited = useRef(false);
+  const emailEdited = useRef(false);
+  const restoredScope = useRef('');
+  const modeRef = useRef(mode);
+  const scopeRef = useRef({ serverURL, email });
+  modeRef.current = mode;
+  scopeRef.current = { serverURL, email };
+  const invalidatePasswordFill = useCallback(() => {
+    passwordFillGeneration.current += 1;
+    invalidateAccountPasswordSave(
+      scopeRef.current.serverURL,
+      scopeRef.current.email,
+    );
+    passwordFromMemory.current = false;
+    setPassword('');
+    setRememberAccountPassword(false);
+  }, []);
+  const fillRememberedPassword = useCallback(
+    (address: string, account: string) => {
+      const generation = ++passwordFillGeneration.current;
+      const scope = normalizeAccountPasswordScope(address, account)?.key;
+      if (!scope) return;
+      void readAccountPassword(address, account).then(result => {
+        if (
+          !mounted.current ||
+          generation !== passwordFillGeneration.current ||
+          modeRef.current !== 'login' ||
+          normalizeAccountPasswordScope(
+            scopeRef.current.serverURL,
+            scopeRef.current.email,
+          )?.key !== scope
+        )
+          return;
+        setPasswordMemoryAvailable(result.available && result.ok);
+        setPasswordMemoryNotice(
+          !result.available
+            ? PASSWORD_MEMORY_UNAVAILABLE
+            : !result.ok
+            ? PASSWORD_MEMORY_FAILED
+            : '',
+        );
+        if (result.ok && result.password) {
+          passwordFromMemory.current = true;
+          setPassword(result.password);
+          setRememberAccountPassword(true);
+        }
+      });
+    },
+    [],
+  );
+  const refreshAccounts = useCallback(() => {
+    const generation = ++accountListGeneration.current;
+    void listAccountPasswords().then(result => {
+      if (
+        mounted.current &&
+        generation === accountListGeneration.current &&
+        result.ok
+      )
+        setStoredAccounts(result.accounts);
+    });
+  }, []);
+  useEffect(() => {
+    mounted.current = true;
+    void passwordMemoryStatus().then(result => {
+      if (!mounted.current) return;
+      setPasswordMemoryAvailable(result.available && result.ok);
+      if (!result.available || !result.ok)
+        setPasswordMemoryNotice(
+          result.available
+            ? PASSWORD_MEMORY_FAILED
+            : PASSWORD_MEMORY_UNAVAILABLE,
+        );
+    });
+    refreshAccounts();
+    return () => {
+      mounted.current = false;
+      passwordFillGeneration.current += 1;
+      accountListGeneration.current += 1;
+      invalidateAccountPasswordSave(
+        scopeRef.current.serverURL,
+        scopeRef.current.email,
+      );
+    };
+  }, [refreshAccounts]);
   const [securityProbe, setSecurityProbe] = useState<ServerSecurityProbe>({
     phase: 'idle',
   });
   useEffect(() => {
-    const saved = rememberedServers[0];
-    if (saved && !serverURL.trim() && !email.trim()) {
-      setServerURL(saved.serverURL);
-      setEmail(saved.email);
-      setCertificateException(saved.allowInvalidServerCertificate === true);
+    if (serverEdited.current || emailEdited.current) return;
+    const address = lastServerURL ?? rememberedServers[0]?.serverURL ?? '';
+    const saved = rememberedServers.find(
+      entry =>
+        normalizeServerSecurityURL(entry.serverURL) ===
+        normalizeServerSecurityURL(address),
+    );
+    const account = saved?.email ?? '';
+    const scope = normalizeAccountPasswordScope(address, account)?.key ?? '';
+    if (
+      scopeRef.current.serverURL !== address ||
+      scopeRef.current.email !== account
+    ) {
+      invalidatePasswordFill();
+      scopeRef.current = { serverURL: address, email: account };
+      setServerURL(address);
+      setEmail(account);
+      setCertificateException(saved?.allowInvalidServerCertificate === true);
     }
-  }, [rememberedServers, serverURL, email]);
+    if (
+      scope &&
+      restoredScope.current !== scope &&
+      modeRef.current === 'login'
+    ) {
+      restoredScope.current = scope;
+      fillRememberedPassword(address, account);
+    }
+  }, [
+    rememberedServers,
+    lastServerURL,
+    fillRememberedPassword,
+    invalidatePasswordFill,
+  ]);
+  const selectAccount = (
+    address: string,
+    account: string,
+    allowInvalidCertificate = false,
+  ) => {
+    invalidatePasswordFill();
+    serverEdited.current = true;
+    emailEdited.current = true;
+    scopeRef.current = { serverURL: address, email: account };
+    setServerURL(address);
+    setEmail(account);
+    setServerPassword('');
+    setBootstrapToken('');
+    setCertificateException(allowInvalidCertificate);
+    setPasswordMemoryNotice('');
+    onServerURLChange?.(address);
+    fillRememberedPassword(address, account);
+  };
+  const forgetPassword = (
+    address: string,
+    account: string,
+    clearInput = true,
+  ) => {
+    const scope = normalizeAccountPasswordScope(address, account)?.key;
+    accountListGeneration.current += 1;
+    setStoredAccounts(entries =>
+      entries.filter(
+        entry =>
+          normalizeAccountPasswordScope(entry.serverURL, entry.email)?.key !==
+          scope,
+      ),
+    );
+    if (
+      normalizeAccountPasswordScope(
+        scopeRef.current.serverURL,
+        scopeRef.current.email,
+      )?.key === scope
+    ) {
+      if (clearInput || passwordFromMemory.current) invalidatePasswordFill();
+      else {
+        passwordFillGeneration.current += 1;
+        setRememberAccountPassword(false);
+      }
+    }
+    const generation = passwordFillGeneration.current;
+    void removeAccountPassword(address, account).then(result => {
+      if (!result.ok)
+        Alert.alert(
+          '未能取消密码记忆',
+          '无法确认取消密码记忆，旧密码可能仍保存在本机，请重试。',
+        );
+      if (!mounted.current) return;
+      if (!result.ok && generation === passwordFillGeneration.current)
+        setPasswordMemoryNotice(PASSWORD_MEMORY_FAILED);
+      refreshAccounts();
+    });
+  };
   const canUseException = Platform.OS === 'android' && !!httpsOrigin(serverURL);
   useEffect(() => {
     const normalized = normalizeServerSecurityURL(serverURL);
@@ -148,6 +349,7 @@ export function LoginScreen({
       username,
       email,
       password,
+      rememberAccountPassword,
       serverURL,
       serverPassword,
       bootstrapToken,
@@ -212,16 +414,13 @@ export function LoginScreen({
                     <TouchableOpacity
                       style={styles.rememberedEntry}
                       disabled={saving}
-                      onPress={() => {
-                        setServerURL(saved.serverURL);
-                        setEmail(saved.email);
-                        setPassword('');
-                        setServerPassword('');
-                        setBootstrapToken('');
-                        setCertificateException(
+                      onPress={() =>
+                        selectAccount(
+                          saved.serverURL,
+                          saved.email,
                           saved.allowInvalidServerCertificate === true,
-                        );
-                      }}
+                        )
+                      }
                       accessibilityLabel={`填写并连接 ${saved.serverURL}`}
                     >
                       <Text style={styles.rememberedTitle} numberOfLines={1}>
@@ -234,7 +433,10 @@ export function LoginScreen({
                     {onForget && (
                       <TouchableOpacity
                         disabled={saving}
-                        onPress={() => onForget(saved)}
+                        onPress={() => {
+                          forgetPassword(saved.serverURL, saved.email);
+                          onForget(saved);
+                        }}
                         accessibilityLabel={`忘记 ${saved.serverURL}`}
                       >
                         <Text style={styles.forget}>忘记</Text>
@@ -244,6 +446,87 @@ export function LoginScreen({
                 ))}
               </View>
             )}
+            {mode === 'login' &&
+              storedAccounts.some(
+                account =>
+                  !rememberedServers.some(
+                    saved =>
+                      normalizeAccountPasswordScope(
+                        saved.serverURL,
+                        saved.email,
+                      )?.key ===
+                      normalizeAccountPasswordScope(
+                        account.serverURL,
+                        account.email,
+                      )?.key,
+                  ),
+              ) && (
+                <View style={styles.rememberedList}>
+                  <Text style={styles.help}>记住的账号密码</Text>
+                  {storedAccounts
+                    .filter(
+                      account =>
+                        !rememberedServers.some(
+                          saved =>
+                            normalizeAccountPasswordScope(
+                              saved.serverURL,
+                              saved.email,
+                            )?.key ===
+                            normalizeAccountPasswordScope(
+                              account.serverURL,
+                              account.email,
+                            )?.key,
+                        ),
+                    )
+                    .map(account => (
+                      <View
+                        key={
+                          normalizeAccountPasswordScope(
+                            account.serverURL,
+                            account.email,
+                          )?.key
+                        }
+                        style={styles.rememberedRow}
+                      >
+                        <TouchableOpacity
+                          style={styles.rememberedEntry}
+                          disabled={saving}
+                          accessibilityLabel={`填写已记住账号 ${account.serverURL} ${account.email}`}
+                          onPress={() =>
+                            selectAccount(
+                              account.serverURL,
+                              account.email,
+                              rememberedServers.find(
+                                saved =>
+                                  normalizeServerSecurityURL(
+                                    saved.serverURL,
+                                  ) === account.serverURL,
+                              )?.allowInvalidServerCertificate === true,
+                            )
+                          }
+                        >
+                          <Text
+                            style={styles.rememberedTitle}
+                            numberOfLines={1}
+                          >
+                            {account.serverURL}
+                          </Text>
+                          <Text style={styles.help} numberOfLines={1}>
+                            {account.email} · 点击继续
+                          </Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          accessibilityLabel={`取消记忆 ${account.serverURL} ${account.email}`}
+                          onPress={() =>
+                            forgetPassword(account.serverURL, account.email)
+                          }
+                        >
+                          <Text style={styles.forget}>取消记忆</Text>
+                        </TouchableOpacity>
+                      </View>
+                    ))}
+                </View>
+              )}
             <View style={styles.modePicker}>
               {(['login', 'register'] as const).map(value => (
                 <TouchableOpacity
@@ -252,7 +535,12 @@ export function LoginScreen({
                     styles.modeButton,
                     mode === value && styles.modeButtonActive,
                   ]}
-                  onPress={() => setMode(value)}
+                  disabled={saving}
+                  onPress={() => {
+                    invalidatePasswordFill();
+                    modeRef.current = value;
+                    setMode(value);
+                  }}
                   accessibilityRole="tab"
                   accessibilityState={{ selected: mode === value }}
                 >
@@ -277,6 +565,7 @@ export function LoginScreen({
                     {...bindInput('username')}
                     style={styles.input}
                     value={username}
+                    editable={!saving}
                     onChangeText={setUsername}
                     placeholder="你的名字"
                     placeholderTextColor={colors.textFaint}
@@ -298,7 +587,13 @@ export function LoginScreen({
                 {...bindInput('email')}
                 style={styles.input}
                 value={email}
-                onChangeText={setEmail}
+                editable={!saving}
+                onChangeText={value => {
+                  emailEdited.current = true;
+                  invalidatePasswordFill();
+                  scopeRef.current = { serverURL, email: value };
+                  setEmail(value);
+                }}
                 placeholder="name@example.com"
                 placeholderTextColor={colors.textFaint}
                 autoCapitalize="none"
@@ -318,7 +613,13 @@ export function LoginScreen({
                 {...bindInput('password')}
                 style={styles.input}
                 value={password}
-                onChangeText={setPassword}
+                editable={!saving}
+                onChangeText={value => {
+                  passwordFillGeneration.current += 1;
+                  invalidateAccountPasswordSave(serverURL, email);
+                  passwordFromMemory.current = false;
+                  setPassword(value);
+                }}
                 placeholder="至少 8 个字符"
                 placeholderTextColor={colors.textFaint}
                 secureTextEntry
@@ -328,6 +629,85 @@ export function LoginScreen({
                 autoCapitalize="none"
               />
             </View>
+
+            <View style={styles.certificateRow}>
+              <TouchableOpacity
+                accessibilityRole="checkbox"
+                accessibilityLabel="记住账号密码"
+                accessibilityState={{
+                  checked: rememberAccountPassword,
+                  disabled:
+                    !rememberAccountPassword &&
+                    (!passwordMemoryAvailable || saving),
+                }}
+                disabled={
+                  !rememberAccountPassword &&
+                  (!passwordMemoryAvailable || saving)
+                }
+                onPress={() => {
+                  passwordFillGeneration.current += 1;
+                  const selected = !rememberAccountPassword;
+                  setRememberAccountPassword(selected);
+                  if (!selected) forgetPassword(serverURL, email, false);
+                }}
+              >
+                <Text style={styles.certificateLabel}>
+                  {rememberAccountPassword ? '☑' : '☐'} 记住账号密码
+                </Text>
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.help}>
+              只记住账号密码；服务器访问密码仍需填写。
+            </Text>
+            <TouchableOpacity
+              accessibilityLabel="清除已记住的账号密码"
+              onPress={() => {
+                invalidatePasswordFill();
+                accountListGeneration.current += 1;
+                setStoredAccounts([]);
+                const generation = passwordFillGeneration.current;
+                void clearAccountPasswords().then(result => {
+                  if (!result.ok)
+                    Alert.alert(
+                      '未能清除账号密码',
+                      '无法确认清除账号密码，旧密码可能仍保存在本机，请重试。',
+                    );
+                  if (
+                    !mounted.current ||
+                    generation !== passwordFillGeneration.current
+                  )
+                    return;
+                  setPasswordMemoryNotice(
+                    result.ok
+                      ? '已清除记住的账号密码，账号记录仍保留。'
+                      : PASSWORD_MEMORY_FAILED,
+                  );
+                  refreshAccounts();
+                  if (result.ok)
+                    void passwordMemoryStatus().then(status => {
+                      if (
+                        !mounted.current ||
+                        generation !== passwordFillGeneration.current
+                      )
+                        return;
+                      setPasswordMemoryAvailable(status.available && status.ok);
+                      if (!status.available || !status.ok)
+                        setPasswordMemoryNotice(
+                          status.available
+                            ? PASSWORD_MEMORY_FAILED
+                            : PASSWORD_MEMORY_UNAVAILABLE,
+                        );
+                    });
+                });
+              }}
+            >
+              <Text style={styles.help}>清除已记住密码</Text>
+            </TouchableOpacity>
+            {passwordMemoryNotice ? (
+              <Text style={styles.help} accessibilityRole="alert">
+                {passwordMemoryNotice}
+              </Text>
+            ) : null}
 
             {securityEnabled && (
               <>
@@ -340,6 +720,7 @@ export function LoginScreen({
                     {...bindInput('serverPassword')}
                     style={styles.input}
                     value={serverPassword}
+                    editable={!saving}
                     onChangeText={setServerPassword}
                     placeholder="至少 8 个字符"
                     placeholderTextColor={colors.textFaint}
@@ -363,6 +744,7 @@ export function LoginScreen({
                         {...bindInput('bootstrapToken')}
                         style={styles.input}
                         value={bootstrapToken}
+                        editable={!saving}
                         onChangeText={setBootstrapToken}
                         placeholder="一次性凭据"
                         placeholderTextColor={colors.textFaint}
@@ -388,10 +770,17 @@ export function LoginScreen({
                 {...bindInput('serverURL')}
                 style={styles.input}
                 value={serverURL}
+                editable={!saving}
                 onChangeText={value => {
+                  serverEdited.current = true;
+                  invalidatePasswordFill();
                   if (httpsOrigin(value) !== httpsOrigin(serverURL))
                     setCertificateException(false);
+                  scopeRef.current = { serverURL: value, email };
                   setServerURL(value);
+                  setServerPassword('');
+                  setBootstrapToken('');
+                  onServerURLChange?.(value);
                 }}
                 placeholder="https://example.com:3001"
                 placeholderTextColor={colors.textFaint}

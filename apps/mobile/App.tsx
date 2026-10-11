@@ -23,7 +23,7 @@ export default function App() {
 }
 
 function CoveSession() {
-  const { loadingConfig, config, savingConfig, authError, handleLogin, rememberedServers, handleForget, probeServerSecurity, socket, selectedRoom, sessionReady, leaveRoom, setSelectedRoom, handleChangeServer, connectionError, insets } = useCoveSession();
+  const { loadingConfig, config, savingConfig, authError, handleLogin, rememberedServers, lastServerURL, handleServerURLChange, handleForget, probeServerSecurity, socket, selectedRoom, sessionReady, leaveRoom, setSelectedRoom, handleChangeServer, connectionError, insets } = useCoveSession();
   const selectUpdateServer = useMobileUpdateServerSelection();
   useEffect(() => {
     if (config?.serverURL) selectUpdateServer(config.serverURL);
@@ -45,7 +45,7 @@ if (loadingConfig) {
 
   if (!config) {
     return <LoginScreen saving={savingConfig} error={authError} onSubmit={handleLogin}
-      rememberedServers={rememberedServers} onForget={handleForget} onProbeServerSecurity={probeSelectedServer} />;
+      rememberedServers={rememberedServers} lastServerURL={lastServerURL} onServerURLChange={handleServerURLChange} onForget={handleForget} onProbeServerSecurity={probeSelectedServer} />;
   }
 
   return (

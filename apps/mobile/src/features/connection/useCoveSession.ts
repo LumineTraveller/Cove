@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Alert } from 'react-native';
 
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { Socket } from 'socket.io-client';
@@ -8,7 +9,9 @@ import {
   clearServerConfig,
   forgetRememberedServer,
   readRememberedServers,
+  readLastServerAddress,
   readSessionConfig,
+  saveLastServerAddress,
   saveSessionConfig,
   type RememberedServer,
 } from '../settings/storage';
@@ -20,6 +23,15 @@ import {
   authenticateAccount,
   type AccountAuthRequest,
 } from '../accounts/accountAuth';
+import {
+  captureAccountPasswordSaveIntent,
+  invalidateAccountPasswordSaves,
+  listAccountPasswords,
+  removeAccountPassword,
+  saveAuthenticatedAccountPassword,
+  PASSWORD_MEMORY_FAILED,
+  PASSWORD_MEMORY_UNAVAILABLE,
+} from '../accounts/accountPasswordMemory';
 import {
   clearServerAccessToken,
   ensureServerAccess,
@@ -49,17 +61,46 @@ export function useCoveSession() {
   const [sessionReady, setSessionReady] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [selectedRoom, setSelectedRoom] = useState<Room | null>(null);
+  const [lastServerURL, setLastServerURL] = useState<string | undefined>();
+  const addressEdited = useRef(false);
+  const mounted = useRef(true);
+  const loginRevision = useRef(0);
+  const busy = useRef(false);
+  const cancelPendingLogin = useCallback(() => {
+    loginRevision.current += 1;
+    invalidateAccountPasswordSaves();
+  }, []);
+  const handleServerURLChange = useCallback((value: string) => {
+    addressEdited.current = true;
+    setLastServerURL(value);
+    saveLastServerAddress(value).catch(() => {
+      if (mounted.current) setAuthError('无法保存上次填写的服务器地址。');
+    });
+  }, []);
   useEffect(() => {
-    readSessionConfig()
-      .then(async saved => {
+    mounted.current = true;
+    Promise.all([readSessionConfig(), readLastServerAddress()])
+      .then(async ([saved, lastAddress]) => {
+        const servers = await readRememberedServers();
+        if (!mounted.current) return;
         // Remembered account data is retained; an enabled server asks for a new
         // process-local access token before resuming the session.
         setConfig(saved);
-        setRememberedServers(await readRememberedServers());
+        setRememberedServers(servers);
+        if (!addressEdited.current && lastAddress !== null)
+          setLastServerURL(lastAddress);
       })
-      .catch(() => setAuthError('无法读取本机登录信息，请重新登录。'))
-      .finally(() => setLoadingConfig(false));
-  }, []);
+      .catch(() => {
+        if (mounted.current) setAuthError('无法读取本机登录信息，请重新登录。');
+      })
+      .finally(() => {
+        if (mounted.current) setLoadingConfig(false);
+      });
+    return () => {
+      mounted.current = false;
+      cancelPendingLogin();
+    };
+  }, [cancelPendingLogin]);
   useEffect(() => {
     if (!config) {
       setSocket(null);
@@ -95,6 +136,7 @@ export function useCoveSession() {
               return;
             }
             if (response?.error?.includes('登录已失效')) {
+              cancelPendingLogin();
               setSavingConfig(true);
               setSelectedRoom(null);
               setConfig(null);
@@ -107,6 +149,7 @@ export function useCoveSession() {
               return;
             }
             if (response?.code === 'SESSION_IN_USE') {
+              cancelPendingLogin();
               setSavingConfig(true);
               setSelectedRoom(null);
               setConfig(null);
@@ -137,6 +180,7 @@ export function useCoveSession() {
     };
     const requireServerUnlock = (message?: string) => {
       if (!active) return;
+      cancelPendingLogin();
       setSessionReady(false);
       clearServerAccessToken(config.serverURL);
       setSelectedRoom(null);
@@ -168,6 +212,7 @@ export function useCoveSession() {
     };
     const sessionReplaced = () => {
       if (!active) return;
+      cancelPendingLogin();
       setSavingConfig(true);
       setSelectedRoom(null);
       setConfig(null);
@@ -196,7 +241,7 @@ export function useCoveSession() {
         // loop. The handshake still enforces the server's minimum version.
         return serverFetch(config.serverURL, '/api/version').catch(() => null);
       })
-      .then(async response => {
+      .then(async (response) => {
         if (!active) return;
         if (response?.ok) {
           const policy = readUpgradePolicy(await response.json());
@@ -207,7 +252,7 @@ export function useCoveSession() {
         }
         if (active) nextSocket.connect();
       })
-      .catch(cause => {
+      .catch((cause) => {
         if (active)
           connectError(
             cause instanceof Error ? cause : new Error(String(cause)),
@@ -223,11 +268,24 @@ export function useCoveSession() {
       nextSocket.off('account:session-replaced', sessionReplaced);
       nextSocket.disconnect();
     };
-  }, [config]);
+  }, [config, cancelPendingLogin]);
   const handleLogin = async (request: AccountAuthRequest) => {
+    if (busy.current) return;
+    busy.current = true;
+    const revision = ++loginRevision.current;
+    const current = () => mounted.current && revision === loginRevision.current;
+    // Capture synchronously: switching scope or cancelling memory during any
+    // subsequent await must revoke this login's permission to save a password.
+    const passwordIntent = captureAccountPasswordSaveIntent(
+      request.serverURL,
+      request.email,
+    );
+    handleServerURLChange(request.serverURL);
     setSavingConfig(true);
     setAuthError(null);
     try {
+      await saveLastServerAddress(request.serverURL);
+      if (!current()) return;
       const serverURL = normalizeServerSecurityURL(request.serverURL);
       if (!serverURL) throw new Error('服务器地址无效');
       const normalizedRequest = { ...request, serverURL };
@@ -235,29 +293,52 @@ export function useCoveSession() {
         serverURL,
         normalizedRequest.allowInvalidServerCertificate,
       );
+      if (!current()) return;
       await ensureServerAccess({
         serverURL,
         password: normalizedRequest.serverPassword ?? '',
         bootstrapToken: normalizedRequest.bootstrapToken,
       });
+      if (!current()) return;
       const result = await authenticateAccount(normalizedRequest);
+      if (!current()) return;
       const identity = await resolveServerIdentity(serverURL);
-      setConfig(
-        await saveSessionConfig({
-          username: result.account.username,
-          serverURL,
-          accountToken: result.token,
-          accountId: result.account.id,
-          email: result.account.email,
-          serverKey: identity.key,
-          allowInvalidServerCertificate:
-            normalizedRequest.allowInvalidServerCertificate,
-        }),
+      if (!current()) return;
+      const passwordMemory = await saveAuthenticatedAccountPassword(
+        serverURL,
+        result.account.email,
+        request.password,
+        request.rememberAccountPassword === true,
+        passwordIntent,
       );
+      if (!current()) return;
+      if (request.rememberAccountPassword && !passwordMemory.ok)
+        Alert.alert(
+          passwordMemory.cancelled ? '密码记忆未取消' : '密码记忆未确认',
+          passwordMemory.cancelled
+            ? '无法确认密码记忆已取消，旧密码可能仍保存在本机，请重新清除。'
+            : passwordMemory.available
+            ? PASSWORD_MEMORY_FAILED
+            : PASSWORD_MEMORY_UNAVAILABLE,
+        );
+      const saved = await saveSessionConfig({
+        username: result.account.username,
+        serverURL,
+        accountToken: result.token,
+        accountId: result.account.id,
+        email: result.account.email,
+        serverKey: identity.key,
+        allowInvalidServerCertificate:
+          normalizedRequest.allowInvalidServerCertificate,
+        lastServerAddress: request.serverURL,
+      });
+      if (current()) setConfig(saved);
     } catch (cause) {
-      setAuthError(cause instanceof Error ? cause.message : String(cause));
+      if (current())
+        setAuthError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      setSavingConfig(false);
+      if (revision === loginRevision.current) busy.current = false;
+      if (current()) setSavingConfig(false);
     }
   };
   const probeServerSecurity = useCallback(
@@ -276,7 +357,9 @@ export function useCoveSession() {
     [],
   );
   const handleChangeServer = async () => {
-    if (savingConfig) return;
+    if (busy.current || savingConfig) return;
+    busy.current = true;
+    cancelPendingLogin();
     setSavingConfig(true);
     try {
       // Switching servers disconnects this session, but keeps its valid login token.
@@ -292,14 +375,32 @@ export function useCoveSession() {
         error instanceof Error ? error.message : '无法保存服务器登录记录',
       );
     } finally {
-      setSavingConfig(false);
+      busy.current = false;
+      if (mounted.current) setSavingConfig(false);
     }
   };
   const handleForget = async (saved: RememberedServer) => {
-    if (savingConfig) return;
+    if (busy.current || savingConfig) return;
+    busy.current = true;
+    cancelPendingLogin();
     setSavingConfig(true);
     setAuthError(null);
     try {
+      const passwords = await listAccountPasswords();
+      if (passwords.available && !passwords.ok)
+        throw new Error('无法安全移除账号密码记忆，请重试。');
+      const serverURL = normalizeServerSecurityURL(saved.serverURL);
+      const emails = new Set([
+        saved.email,
+        ...passwords.accounts
+          .filter((account) => account.serverURL === serverURL)
+          .map((account) => account.email),
+      ]);
+      for (const email of emails) {
+        const removed = await removeAccountPassword(saved.serverURL, email);
+        if (removed.available && !removed.ok)
+          throw new Error('无法安全移除账号密码记忆，请重试。');
+      }
       if (saved.accountToken)
         serverFetch(saved.serverURL, '/api/auth/logout', {
           method: 'POST',
@@ -311,7 +412,8 @@ export function useCoveSession() {
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : '无法移除登录记忆');
     } finally {
-      setSavingConfig(false);
+      busy.current = false;
+      if (mounted.current) setSavingConfig(false);
     }
   };
   const leaveRoom = useCallback(() => setSelectedRoom(null), []);
@@ -322,6 +424,8 @@ export function useCoveSession() {
     authError,
     handleLogin,
     rememberedServers,
+    lastServerURL,
+    handleServerURLChange,
     handleForget,
     probeServerSecurity,
     socket,

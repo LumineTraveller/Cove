@@ -5,6 +5,7 @@ import { resolveServerIdentity } from '../connection/serverIdentity';
 
 const USERNAME_KEY = 'cove_username';
 const SERVER_KEY = 'cove_server_url';
+const LAST_SERVER_ADDRESS_KEY = 'cove_last_server_address';
 const CLIENT_ID_KEY = 'cove_client_id';
 const CERTIFICATE_ORIGIN_KEY = 'cove_certificate_exception_origin';
 const ACCOUNT_TOKEN_KEY = 'cove_account_token';
@@ -137,6 +138,61 @@ export function normalizeServerURL(value: string): string {
   }
 }
 
+function lastServerAddress(value: string | null): string | null {
+  if (value === null) return null;
+  const trimmed = value?.trim() ?? '';
+  if (!trimmed) return '';
+  if (
+    trimmed.length > 4096 ||
+    Array.from(trimmed).some(character => {
+      const code = character.charCodeAt(0);
+      return code < 32 || code === 127;
+    }) ||
+    !normalizeServerURL(trimmed)
+  )
+    return null;
+  // Keep the form text, including an explicit port and trailing path slash.
+  // URL normalization is only used to reject credentials and invalid addresses.
+  return trimmed;
+}
+
+let lastServerAddressWrite: Promise<unknown> = Promise.resolve();
+
+function queueLastServerAddressWrite<T>(write: () => Promise<T>): Promise<T> {
+  const next = lastServerAddressWrite.catch(() => undefined).then(write);
+  lastServerAddressWrite = next;
+  return next;
+}
+
+export async function readLastServerAddress(): Promise<string | null> {
+  await lastServerAddressWrite.catch(() => undefined);
+  const saved = await AsyncStorage.getItem(LAST_SERVER_ADDRESS_KEY);
+  // An explicitly cleared address must not resurrect the old session address.
+  if (saved !== null) return lastServerAddress(saved);
+  // Older versions only kept this field alongside the active account session.
+  return lastServerAddress(await AsyncStorage.getItem(SERVER_KEY));
+}
+
+export async function saveLastServerAddress(
+  value: string,
+): Promise<string | null> {
+  const address = lastServerAddress(value);
+  if (address !== null)
+    await queueLastServerAddressWrite(() =>
+      AsyncStorage.setItem(LAST_SERVER_ADDRESS_KEY, address),
+    );
+  return address;
+}
+
+async function preserveLegacyServerAddress(): Promise<void> {
+  await queueLastServerAddressWrite(async () => {
+    if ((await AsyncStorage.getItem(LAST_SERVER_ADDRESS_KEY)) !== null) return;
+    const legacy = lastServerAddress(await AsyncStorage.getItem(SERVER_KEY));
+    if (legacy !== null)
+      await AsyncStorage.setItem(LAST_SERVER_ADDRESS_KEY, legacy);
+  });
+}
+
 function createClientId(): string {
   const random = Array.from({ length: 4 }, () =>
     Math.random().toString(36).slice(2),
@@ -197,9 +253,15 @@ export async function saveSessionConfig(input: {
   email: string;
   serverKey?: string;
   allowInvalidServerCertificate?: boolean;
+  lastServerAddress?: string;
 }): Promise<SessionConfig> {
-  const clientId =
-    (await AsyncStorage.getItem(CLIENT_ID_KEY)) || createClientId();
+  // Queue the address immediately so a delayed client ID read cannot move an
+  // older submitted address behind a newer form edit.
+  const [storedClientId] = await Promise.all([
+    AsyncStorage.getItem(CLIENT_ID_KEY),
+    saveLastServerAddress(input.lastServerAddress ?? input.serverURL),
+  ]);
+  const clientId = storedClientId || createClientId();
   const config = {
     username: input.username.trim().slice(0, 64),
     serverURL: normalizeServerURL(input.serverURL),
@@ -236,6 +298,8 @@ export async function saveSessionConfig(input: {
 export async function clearServerConfig({
   forgetSession = true,
 }: { forgetSession?: boolean } = {}) {
+  // Preserve the legacy address before clearing an incomplete or expired session.
+  await preserveLegacyServerAddress();
   const active = await readSessionConfig();
   if (forgetSession && active) {
     await forgetRememberedServerToken(active.serverURL);
