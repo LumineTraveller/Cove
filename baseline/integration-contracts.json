@@ -208,7 +208,7 @@
     {
       "from": "mobile/android/app/src/main/java/com/covemobile/CoveNativePackage.kt",
       "path": "apps/mobile/android/app/src/main/java/com/covemobile/CoveNativePackage.kt",
-      "sha256": "54ad1e8ebb3b664fb79b9b5668cb9174bf479d6943735840b4c4ec599ccfeffb"
+      "sha256": "424116df6dd0416fcb6873abe0f68cb897cf8dd3417109d9a5870a362242e1b5"
     },
     {
       "from": "mobile/android/app/src/main/java/com/covemobile/KeyboardFrame.kt",

@@ -9,7 +9,8 @@ import {
 import { Play, Volume2 } from 'lucide-react-native';
 import Video from 'react-native-video';
 import type { Socket } from 'socket.io-client';
-import { colors } from '../../settings/theme';
+import { type CoveColors } from '../../settings/theme';
+import { useCoveTheme, useThemedStyles } from '../../settings/ThemeProvider';
 import type { Soundpack } from '../../../types';
 import {
   authorizedResourceURL,
@@ -56,8 +57,12 @@ export function Soundboard({
   profileRemarks,
   showHeading = true,
 }: Props) {
+  const { colors } = useCoveTheme();
+  const styles = useThemedStyles(createStyles);
   const [packs, setPacks] = useState<Soundpack[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [retry, setRetry] = useState(0);
   const [playback, setPlayback] = useState<Playback | null>(null);
   const [playError, setPlayError] = useState(false);
   const packsRef = useRef<Soundpack[]>([]);
@@ -71,6 +76,7 @@ export function Soundboard({
     if (!ready || !socket.id) return;
     let active = true;
     setLoading(true);
+    setLoadError(false);
     serverFetch(
       serverURL,
       `/api/soundpacks?socketId=${encodeURIComponent(
@@ -82,12 +88,12 @@ export function Soundboard({
         return response.json() as Promise<Soundpack[]>;
       })
       .then(list => active && setPacks(list))
-      .catch(() => undefined)
+      .catch(() => active && setLoadError(true))
       .finally(() => active && setLoading(false));
     return () => {
       active = false;
     };
-  }, [ready, roomId, serverURL, socket]);
+  }, [ready, roomId, serverURL, socket, retry]);
 
   const playSound = useCallback(
     (soundId: string, filename?: string) => {
@@ -165,7 +171,7 @@ export function Soundboard({
       {showHeading && (
         <View style={styles.heading}>
           <View style={styles.headingIcon}>
-            <Volume2 size={18} color={colors.cyan} />
+            <Volume2 size={18} color={colors.blue} />
           </View>
           <View>
             <Text style={styles.title}>语音包</Text>
@@ -201,9 +207,18 @@ export function Soundboard({
       )}
       {loading ? (
         <View style={styles.empty}>
-          <ActivityIndicator color={colors.cyan} />
+          <ActivityIndicator color={colors.blue} />
           <Text style={styles.emptyText}>正在加载语音包</Text>
         </View>
+      ) : loadError ? (
+        <TouchableOpacity
+          style={styles.empty}
+          accessibilityRole="button"
+          accessibilityLabel="重新加载语音包"
+          onPress={() => setRetry(value => value + 1)}
+        >
+          <Text style={styles.playError}>语音包加载失败，点按重试</Text>
+        </TouchableOpacity>
       ) : packs.length === 0 ? (
         <View style={styles.empty}>
           <Text style={styles.emptyText}>当前还没有语音包</Text>
@@ -219,6 +234,9 @@ export function Soundboard({
               >
                 <TouchableOpacity
                   style={styles.tileMain}
+                  accessibilityRole="button"
+                  accessibilityLabel={`播放语音包：${sound.name}`}
+                  accessibilityState={{ disabled: !ready || !inVoice }}
                   disabled={!ready || !inVoice}
                   onPress={() => triggerSound(sound)}
                   activeOpacity={0.75}
@@ -228,8 +246,8 @@ export function Soundboard({
                   >
                     <Play
                       size={13}
-                      color={playing ? '#083344' : colors.textMuted}
-                      fill={playing ? '#083344' : 'transparent'}
+                      color={playing ? colors.onPrimary : colors.textMuted}
+                      fill={playing ? colors.onPrimary : 'transparent'}
                     />
                   </View>
                   <View style={styles.copy}>
@@ -255,91 +273,92 @@ export function Soundboard({
   );
 }
 
-const styles = StyleSheet.create({
-  card: {
-    marginHorizontal: 14,
-    marginBottom: 12,
-    padding: 15,
-    borderRadius: 19,
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.surface,
-  },
-  heading: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 11,
-    marginBottom: 13,
-  },
-  headingIcon: {
-    width: 38,
-    height: 38,
-    borderRadius: 13,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: colors.cyanSoft,
-  },
-  title: { color: colors.text, fontSize: 15, fontWeight: '700' },
-  subtitle: { color: colors.textFaint, fontSize: 10, marginTop: 4 },
-  hiddenPlayer: { position: 'absolute', width: 1, height: 1, opacity: 0 },
-  playError: { color: colors.red, fontSize: 10, marginBottom: 10 },
-  empty: {
-    minHeight: 70,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-  },
-  emptyText: { color: colors.textFaint, fontSize: 11 },
-  grid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  tile: {
-    position: 'relative',
-    width: '48.7%',
-    minHeight: 65,
-    flexDirection: 'row',
-    alignItems: 'center',
-    padding: 6,
-    overflow: 'hidden',
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: 'rgba(255,255,255,0.04)',
-  },
-  tilePlaying: {
-    borderColor: 'rgba(103,232,249,0.38)',
-    backgroundColor: colors.cyanSoft,
-  },
-  tileMain: {
-    flex: 1,
-    minWidth: 0,
-    minHeight: 51,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    padding: 4,
-  },
-  playIcon: {
-    width: 29,
-    height: 29,
-    borderRadius: 10,
-    flexShrink: 0,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(255,255,255,0.07)',
-  },
-  playIconActive: { backgroundColor: '#a5f3fc' },
-  copy: { flex: 1, minWidth: 0 },
-  soundName: {
-    color: 'rgba(244,244,245,0.82)',
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  uploader: { color: colors.textFaint, fontSize: 9, marginTop: 4 },
-  playingLine: {
-    position: 'absolute',
-    right: 0,
-    bottom: 0,
-    left: 0,
-    height: 2,
-    backgroundColor: colors.cyan,
-  },
-});
+const createStyles = (colors: CoveColors) =>
+  StyleSheet.create({
+    card: {
+      marginHorizontal: 14,
+      marginBottom: 12,
+      padding: 15,
+      borderRadius: 19,
+      borderWidth: 1,
+      borderColor: colors.border,
+      backgroundColor: colors.surface,
+    },
+    heading: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 11,
+      marginBottom: 13,
+    },
+    headingIcon: {
+      width: 38,
+      height: 38,
+      borderRadius: 13,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: colors.blueSoft,
+    },
+    title: { color: colors.text, fontSize: 15, fontWeight: '700' },
+    subtitle: { color: colors.textFaint, fontSize: 12, marginTop: 4 },
+    hiddenPlayer: { position: 'absolute', width: 1, height: 1, opacity: 0 },
+    playError: { color: colors.red, fontSize: 10, marginBottom: 10 },
+    empty: {
+      minHeight: 70,
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 8,
+    },
+    emptyText: { color: colors.textFaint, fontSize: 14 },
+    grid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+    tile: {
+      position: 'relative',
+      width: '100%',
+      minHeight: 65,
+      flexDirection: 'row',
+      alignItems: 'center',
+      padding: 6,
+      overflow: 'hidden',
+      borderRadius: 14,
+      borderWidth: 1,
+      borderColor: colors.border,
+      backgroundColor: colors.surfaceRaised,
+    },
+    tilePlaying: {
+      borderColor: colors.borderStrong,
+      backgroundColor: colors.blueSoft,
+    },
+    tileMain: {
+      flex: 1,
+      minWidth: 0,
+      minHeight: 51,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      padding: 4,
+    },
+    playIcon: {
+      width: 29,
+      height: 29,
+      borderRadius: 10,
+      flexShrink: 0,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: colors.surfaceRaised,
+    },
+    playIconActive: { backgroundColor: colors.blue },
+    copy: { flex: 1, minWidth: 0 },
+    soundName: {
+      color: colors.text,
+      fontSize: 11,
+      fontWeight: '700',
+    },
+    uploader: { color: colors.textFaint, fontSize: 12, marginTop: 4 },
+    playingLine: {
+      position: 'absolute',
+      right: 0,
+      bottom: 0,
+      left: 0,
+      height: 2,
+      backgroundColor: colors.blue,
+    },
+  });

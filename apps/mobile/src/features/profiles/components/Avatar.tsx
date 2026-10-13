@@ -7,7 +7,8 @@ import {
   type ViewStyle,
 } from 'react-native';
 import { avatarCropPresentation } from '../avatarCrop';
-import { colors } from '../../settings/theme';
+import { type CoveColors } from '../../settings/theme';
+import { useThemedStyles } from '../../settings/ThemeProvider';
 
 interface Props {
   username: string;
@@ -33,6 +34,7 @@ export function Avatar({
   style,
   accessibilityLabel,
 }: Props) {
+  const styles = useThemedStyles(createStyles);
   const crop = avatarUrl ? avatarCropPresentation(avatarUrl) : null;
   const source = crop?.source ?? avatarUrl ?? null;
   const radius = borderRadius ?? Math.round(size * 0.32);
@@ -78,13 +80,14 @@ export function Avatar({
   );
 }
 
-const styles = StyleSheet.create({
-  frame: {
-    overflow: 'hidden',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: colors.cyanSoft,
-  },
-  image: { width: '100%', height: '100%' },
-  fallback: { color: colors.cyan, fontWeight: '800' },
-});
+const createStyles = (colors: CoveColors) =>
+  StyleSheet.create({
+    frame: {
+      overflow: 'hidden',
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: colors.blueSoft,
+    },
+    image: { width: '100%', height: '100%' },
+    fallback: { color: colors.blue, fontWeight: '800' },
+  });

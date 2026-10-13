@@ -40,7 +40,8 @@ import {
   MOBILE_RELEASE_VERSION,
   MOBILE_MINIMUM_VERSION,
 } from '../../connection/clientVersion';
-import { colors } from '../../settings/theme';
+import { type CoveColors } from '../../settings/theme';
+import { useCoveTheme, useThemedStyles } from '../../settings/ThemeProvider';
 import { UPDATE_DOWNLOAD_BASE_URL } from '../updateConfig';
 import { safeUpgradeURL, subscribeClientUpgrade } from '../versionPolicy';
 
@@ -74,6 +75,7 @@ const bridgeFor = () => {
 };
 
 export function MobileUpdateButton() {
+  const styles = useThemedStyles(createStyles);
   const updater = useContext(UpdateContext);
   if (!updater || Platform.OS !== 'android') return null;
   return (
@@ -91,6 +93,8 @@ export function MobileUpdateButton() {
 }
 
 export function MobileUpdateProvider({ children }: { children: ReactNode }) {
+  const { colors } = useCoveTheme();
+  const styles = useThemedStyles(createStyles);
   const [version, setVersion] = useState('');
   const [visible, setVisible] = useState(false);
   const [checking, setChecking] = useState(false);
@@ -423,7 +427,10 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
         onRequestClose={close}
       >
         <View style={styles.overlay}>
-          <View style={styles.card}>
+          <ScrollView
+            style={styles.card}
+            contentContainerStyle={styles.cardContent}
+          >
             <Text style={styles.title}>
               {required
                 ? '必须更新 Cove'
@@ -438,7 +445,7 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
               {required ? ` · 最低要求：${minimum.current}` : ''}
             </Text>
             {checking ? (
-              <ActivityIndicator color={colors.cyan} style={styles.spinner} />
+              <ActivityIndicator color={colors.blue} style={styles.spinner} />
             ) : candidate ? (
               <>
                 <ScrollView style={styles.notes}>
@@ -471,7 +478,7 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
                 {downloading ? (
                   <>
                     <ActivityIndicator
-                      color={colors.cyan}
+                      color={colors.blue}
                       style={styles.spinner}
                     />
                     <TouchableOpacity
@@ -618,62 +625,84 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
                 </TouchableOpacity>
               )}
             </View>
-          </View>
+          </ScrollView>
         </View>
       </Modal>
     </UpdateContext.Provider>
   );
 }
 
-const styles = StyleSheet.create({
-  versionButton: { alignSelf: 'center', padding: 10 },
-  version: { color: colors.textFaint, fontSize: 11 },
-  overlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.65)',
-    justifyContent: 'center',
-    padding: 24,
-  },
-  card: {
-    backgroundColor: colors.surface,
-    borderColor: colors.border,
-    borderWidth: 1,
-    borderRadius: 22,
-    padding: 22,
-    maxHeight: '85%',
-  },
-  title: {
-    color: colors.text,
-    fontSize: 20,
-    fontWeight: '700',
-    marginBottom: 10,
-  },
-  body: { color: colors.text, fontSize: 14, lineHeight: 21 },
-  hint: {
-    color: colors.textMuted,
-    fontSize: 12,
-    lineHeight: 18,
-    marginVertical: 7,
-  },
-  notes: { maxHeight: 220, marginVertical: 10 },
-  spinner: { margin: 24 },
-  sources: { flexDirection: 'row', gap: 10, marginVertical: 6 },
-  source: {
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: 10,
-    paddingVertical: 8,
-    paddingHorizontal: 14,
-  },
-  selected: { borderColor: colors.cyan, backgroundColor: colors.cyanSoft },
-  primary: {
-    backgroundColor: colors.cyan,
-    borderRadius: 12,
-    alignItems: 'center',
-    padding: 13,
-    marginTop: 12,
-  },
-  primaryText: { color: '#0f172a', fontSize: 14, fontWeight: '700' },
-  secondary: { padding: 10, alignItems: 'center' },
-  actions: { flexDirection: 'row', justifyContent: 'flex-end', marginTop: 8 },
-});
+const createStyles = (colors: CoveColors) =>
+  StyleSheet.create({
+    versionButton: {
+      minHeight: 44,
+      justifyContent: 'center',
+      alignSelf: 'center',
+      padding: 10,
+    },
+    version: { color: colors.textFaint, fontSize: 11 },
+    overlay: {
+      flex: 1,
+      backgroundColor: colors.overlay,
+      justifyContent: 'center',
+      padding: 20,
+      alignItems: 'center',
+    },
+    card: {
+      width: '100%',
+      maxWidth: 560,
+      backgroundColor: colors.surface,
+      borderColor: colors.border,
+      borderWidth: 1,
+      borderRadius: 22,
+
+      maxHeight: '85%',
+    },
+    cardContent: { padding: 22 },
+    title: {
+      color: colors.text,
+      fontSize: 20,
+      fontWeight: '700',
+      marginBottom: 10,
+    },
+    body: { color: colors.text, fontSize: 14, lineHeight: 21 },
+    hint: {
+      color: colors.textMuted,
+      fontSize: 12,
+      lineHeight: 18,
+      marginVertical: 7,
+    },
+    notes: { maxHeight: 220, marginVertical: 10 },
+    spinner: { margin: 24 },
+    sources: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 10,
+      marginVertical: 6,
+    },
+    source: {
+      minHeight: 44,
+      justifyContent: 'center',
+      borderWidth: 1,
+      borderColor: colors.border,
+      borderRadius: 10,
+      paddingVertical: 8,
+      paddingHorizontal: 14,
+    },
+    selected: { borderColor: colors.blue, backgroundColor: colors.blueSoft },
+    primary: {
+      backgroundColor: colors.blue,
+      borderRadius: 12,
+      alignItems: 'center',
+      padding: 13,
+      marginTop: 12,
+    },
+    primaryText: { color: colors.onPrimary, fontSize: 14, fontWeight: '700' },
+    secondary: {
+      minHeight: 44,
+      justifyContent: 'center',
+      padding: 10,
+      alignItems: 'center',
+    },
+    actions: { flexDirection: 'row', justifyContent: 'flex-end', marginTop: 8 },
+  });

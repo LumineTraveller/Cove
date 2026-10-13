@@ -226,10 +226,12 @@ const styles = StyleSheet.create({
   },
   zoomControls: { position: 'absolute', bottom: 10, left: 10 },
   reset: {
+    minHeight: 44,
+    justifyContent: 'center',
     paddingHorizontal: 10,
     paddingVertical: 7,
     borderRadius: 10,
     backgroundColor: 'rgba(0,0,0,0.65)',
   },
-  hint: { color: 'rgba(255,255,255,0.7)', fontSize: 11 },
+  hint: { color: 'rgba(255,255,255,0.7)', fontSize: 12 },
 });

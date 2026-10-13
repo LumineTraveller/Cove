@@ -22,6 +22,8 @@ jest.mock('lucide-react-native', () => ({
   Mail: 'Mail',
   Server: 'Server',
   UserRound: 'UserRound',
+  Moon: 'Moon',
+  Sun: 'Sun',
 }));
 
 const enabledSecurity = {
@@ -846,5 +848,55 @@ test('clearing a broken password entry rechecks secure storage and restores opt-
   expect(passwordNative.clear).toHaveBeenCalledTimes(1);
   expect(passwordNative.status).toHaveBeenCalledTimes(2);
   expect(memoryToggle(renderer).props.disabled).toBe(false);
+  await act(async () => renderer.unmount());
+});
+
+test('a failed server probe can recover without editing the restored address or account', async () => {
+  const saved = savedAccount();
+  const probe = jest
+    .fn()
+    .mockRejectedValueOnce(new Error('Synthetic offline'))
+    .mockResolvedValue(disabledSecurity);
+  let renderer!: TestRenderer.ReactTestRenderer;
+  await act(async () => {
+    renderer = TestRenderer.create(
+      <LoginScreen
+        saving={false}
+        onSubmit={jest.fn()}
+        rememberedServers={[saved]}
+        lastServerURL={saved.serverURL}
+        onProbeServerSecurity={probe}
+      />,
+    );
+  });
+  await finishProbe();
+  await act(async () =>
+    accountPassword(renderer).props.onChangeText('synthetic-manual-password'),
+  );
+  const submitButton = () =>
+    renderer.root.findByProps({ accessibilityLabel: '登录 Cove' });
+  expect(submitButton().props.disabled).toBe(true);
+  const retry = renderer.root.findByProps({
+    accessibilityLabel: '重试连接服务器',
+  });
+  await act(async () => {
+    retry.props.onPress();
+    retry.props.onPress();
+  });
+  expect(submitButton().props.disabled).toBe(true);
+  await finishProbe();
+  expect(probe).toHaveBeenCalledTimes(2);
+  expect(probe).toHaveBeenLastCalledWith(saved.serverURL, false);
+  expect(addressInput(renderer).props.value).toBe(saved.serverURL);
+  expect(emailInput(renderer).props.value).toBe(saved.email);
+  expect(accountPassword(renderer).props.value).toBe(
+    'synthetic-manual-password',
+  );
+  expect(submitButton().props.disabled).toBe(false);
+  expect(
+    renderer.root.findAllByProps({
+      accessibilityLabel: '重试连接服务器',
+    }),
+  ).toHaveLength(0);
   await act(async () => renderer.unmount());
 });
