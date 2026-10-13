@@ -54,6 +54,26 @@ export interface RegisterAccountsSocketHandlersDependencies {
 }
 
 export function registerAccountsSocketHandlers(deps: RegisterAccountsSocketHandlersDependencies) {
+  // Connection recovery must renegotiate controller-only capability. Receiver
+  // membership remains the existing desktop-only set.
+  deps.socket.data.remoteControlControllerSupported = false;
+  deps.socket.on('disconnect', () => {
+    deps.socket.data.remoteControlControllerSupported = false;
+  });
+  const updateRemoteCapabilities = (registration: {platform?: unknown; remoteControlSupported?: unknown; remoteControlControllerSupported?: unknown}) => {
+    const platform = sanitizeClientPlatform(registration.platform);
+    const previousReceiver = deps.remoteControlCapabilities.has(deps.socket.id);
+    const previousPlatform = deps.userPlatforms.get(deps.socket.id);
+    const receiver = platform === 'desktop' && registration.remoteControlSupported === true;
+    if (receiver) deps.remoteControlCapabilities.add(deps.socket.id);
+    else deps.remoteControlCapabilities.delete(deps.socket.id);
+    if (platform) deps.userPlatforms.set(deps.socket.id, platform);
+    else deps.userPlatforms.delete(deps.socket.id);
+    deps.socket.data.remoteControlControllerSupported =
+      (platform === 'desktop' || platform === 'mobile') &&
+      registration.remoteControlControllerSupported === true;
+    return previousReceiver !== receiver || previousPlatform !== platform;
+  };
   deps.socket.on(
     'user:register',
     (
@@ -66,6 +86,7 @@ export function registerAccountsSocketHandlers(deps: RegisterAccountsSocketHandl
             avatarUrl?: unknown;
             platform?: unknown;
             remoteControlSupported?: unknown;
+            remoteControlControllerSupported?: unknown;
           },
       cb?: (result: {
         ok: boolean;
@@ -104,6 +125,7 @@ export function registerAccountsSocketHandlers(deps: RegisterAccountsSocketHandl
         deps.socket.data.authToken === registration.authToken &&
         deps.userNames.has(deps.socket.id)
       ) {
+        if (updateRemoteCapabilities(registration)) deps.refreshProfileViews();
         cb?.(
           deps.socketAvatarPayload(deps.socket, {
             ok: true,
@@ -192,18 +214,7 @@ export function registerAccountsSocketHandlers(deps: RegisterAccountsSocketHandl
       deps.socket.data.authToken =
         account && typeof registration !== 'string' ? registration.authToken : undefined;
       deps.socket.data.accountId = account?.id;
-      const platform = sanitizeClientPlatform(
-        typeof registration === 'string' ? null : registration.platform,
-      );
-      if (platform) deps.userPlatforms.set(deps.socket.id, platform);
-      else deps.userPlatforms.delete(deps.socket.id);
-      if (
-        platform === 'desktop' &&
-        typeof registration !== 'string' &&
-        registration.remoteControlSupported === true
-      )
-        deps.remoteControlCapabilities.add(deps.socket.id);
-      else deps.remoteControlCapabilities.delete(deps.socket.id);
+      updateRemoteCapabilities(registration);
 
       // 同一设备更改用户名后，同步更新它所拥有房间的公开房主名。
       const updated = deps.stmtUpdateOwnerName.run(

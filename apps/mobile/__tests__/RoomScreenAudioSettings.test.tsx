@@ -4,6 +4,14 @@ import type { Socket } from 'socket.io-client';
 import { RoomScreen } from '../src/features/rooms/screens/RoomScreen';
 import { useMobileMedia } from '../src/features/media/useMobileMedia';
 import type { Room, SessionConfig } from '../src/types';
+let mockAnnotations: any;
+let mockRemote: any;
+jest.mock('../src/features/media/annotation/useScreenAnnotations', () => ({
+  useScreenAnnotations: () => mockAnnotations,
+}));
+jest.mock('../src/features/remote-control/useMobileRemoteControl', () => ({
+  useMobileRemoteControl: () => mockRemote,
+}));
 
 jest.mock('lucide-react-native', () => {
   const React = require('react');
@@ -67,6 +75,48 @@ describe('room audio settings', () => {
   // Cold React Native/icon initialization can exceed 5s on a Windows CI host.
   // Only fixture setup gets extra time; all behavior assertions keep 5s.
   beforeEach(async () => {
+    mockAnnotations = {
+      ready: true,
+      localActive: false,
+      canDraw: false,
+      remoteControlAllowed: true,
+      state: { enabled: true, strokes: [], requests: [] },
+      optimisticStrokes: [],
+      laserPoints: {},
+      pendingAction: null,
+      error: null,
+      isRequestPending: false,
+      annotationsAllowed: true,
+      start: jest.fn(async () => {
+        mockAnnotations.localActive = true;
+        mockAnnotations.canDraw = true;
+      }),
+      exit: jest.fn(() => {
+        mockAnnotations.localActive = false;
+        mockAnnotations.canDraw = false;
+      }),
+      sendStroke: jest.fn((_tool, _color, _width, _points, id) => id),
+      sendLaser: jest.fn(),
+      finishStroke: jest.fn(),
+      clear: jest.fn(),
+      setAnnotationsAllowed: jest.fn(),
+      respond: jest.fn(),
+    };
+    mockRemote = {
+      session: null,
+      pending: null,
+      error: null,
+      setInputEnabled: jest.fn(),
+      request: jest.fn(),
+      cancel: jest.fn(),
+      stop: jest.fn(),
+      button: jest.fn(),
+      pointer: jest.fn(),
+      click: jest.fn(),
+      wheel: jest.fn(),
+      shortcut: jest.fn(),
+      typeText: jest.fn(),
+    };
     media = {
       inVoice: true,
       joining: false,
@@ -141,7 +191,7 @@ describe('room audio settings', () => {
   const button = (label: string) =>
     renderer.root
       .findAllByType(TouchableOpacity)
-      .find((node) => node.props.accessibilityLabel === label)!;
+      .find(node => node.props.accessibilityLabel === label)!;
   async function openAudio() {
     await act(async () => button('音频设置').props.onPress());
   }
@@ -159,17 +209,17 @@ describe('room audio settings', () => {
     );
   }
   const audioModal = () =>
-    renderer.root.findAllByType(Modal).find((node) => node.props.visible)!;
+    renderer.root.findAllByType(Modal).find(node => node.props.visible)!;
 
   test('labelled toolbar opens audio settings and footer only keeps call controls', async () => {
     const topActions = renderer.root
       .findAllByType(TouchableOpacity)
-      .filter((node) =>
+      .filter(node =>
         ['打开聊天', '打开语音包', '音频设置'].includes(
           node.props.accessibilityLabel,
         ),
       );
-    expect(topActions.map((node) => node.props.accessibilityLabel)).toEqual([
+    expect(topActions.map(node => node.props.accessibilityLabel)).toEqual([
       '打开聊天',
       '打开语音包',
       '音频设置',
@@ -178,19 +228,19 @@ describe('room audio settings', () => {
       renderer.root
         .findByProps({ testID: 'room-header' })
         .findAllByType(TouchableOpacity)
-        .map((node) => node.props.accessibilityLabel),
+        .map(node => node.props.accessibilityLabel),
     ).toEqual(['离开房间']);
     expect(
       renderer.root
         .findByProps({ testID: 'room-toolbar' })
         .findAllByType(TouchableOpacity)
-        .map((node) => node.props.accessibilityLabel),
+        .map(node => node.props.accessibilityLabel),
     ).toEqual(['打开聊天', '打开语音包', '音频设置']);
     const footer = renderer.root.findByProps({ testID: 'voice-controls' });
     expect(
       footer
         .findAllByType(TouchableOpacity)
-        .map((node) => node.props.accessibilityLabel),
+        .map(node => node.props.accessibilityLabel),
     ).toEqual(['关闭麦克风', '退出语音']);
     expect(StyleSheet.flatten(footer.props.style).position).toBeUndefined();
     await openAudio();
@@ -230,7 +280,7 @@ describe('room audio settings', () => {
     expect(media.leaveVoice).not.toHaveBeenCalled();
     await act(async () => button('关闭音频设置').props.onPress());
     expect(
-      renderer.root.findAllByType(Modal).some((node) => node.props.visible),
+      renderer.root.findAllByType(Modal).some(node => node.props.visible),
     ).toBe(false);
     expect(media.leaveVoice).not.toHaveBeenCalled();
   });
@@ -258,12 +308,12 @@ describe('room audio settings', () => {
     );
     const topActions = renderer.root
       .findAllByType(TouchableOpacity)
-      .filter((node) =>
+      .filter(node =>
         ['房间设置', '打开聊天', '打开语音包', '音频设置'].includes(
           node.props.accessibilityLabel,
         ),
       );
-    expect(topActions.map((node) => node.props.accessibilityLabel)).toEqual([
+    expect(topActions.map(node => node.props.accessibilityLabel)).toEqual([
       '房间设置',
       '打开聊天',
       '打开语音包',
@@ -273,14 +323,14 @@ describe('room audio settings', () => {
       renderer.root
         .findByProps({ testID: 'room-header' })
         .findAllByType(TouchableOpacity)
-        .map((node) => node.props.accessibilityLabel),
+        .map(node => node.props.accessibilityLabel),
     ).toEqual(['离开房间', '房间设置']);
     expect(JSON.stringify(renderer.toJSON())).not.toContain('等待屏幕共享');
   });
 
   test.each(['joining', 'noiseSwitching', 'audioDeviceSwitching'])(
     '%s disables settings choices but keeps close available',
-    async (busy) => {
+    async busy => {
       media[busy] = true;
       await rerender();
       await openAudio();
@@ -305,7 +355,7 @@ describe('room audio settings', () => {
     expect(content).toContain(media.audioDeviceError);
     await act(async () => audioModal().props.onRequestClose());
     expect(
-      renderer.root.findAllByType(Modal).some((node) => node.props.visible),
+      renderer.root.findAllByType(Modal).some(node => node.props.visible),
     ).toBe(false);
   });
 
@@ -324,7 +374,7 @@ describe('room audio settings', () => {
     expect(media.joinVoice).toHaveBeenCalledTimes(1);
   });
 
-  test('screen sharing is separate from the header/footer and only offers optional audio', async () => {
+  test('screen sharing keeps optional audio and honestly describes the fixed native capture rate', async () => {
     const card = renderer.root.findByProps({ testID: 'own-screen-sharing' });
     expect(StyleSheet.flatten(card.props.style).position).toBeUndefined();
     expect(StyleSheet.flatten(card.props.style).flexDirection).toBe('row');
@@ -332,11 +382,22 @@ describe('room audio settings', () => {
     const content = JSON.stringify(renderer.toJSON());
     expect(content).toContain('同时共享音频');
     expect(content).not.toContain('分辨率');
-    expect(content).not.toContain('帧率');
+    expect(content).toContain('30 FPS');
+    expect(content).toContain('观看帧率由共享源与设备决定');
+    expect(content).not.toContain('120 FPS');
+    expect(
+      renderer.root.findAllByProps({ accessibilityRole: 'radio' }),
+    ).not.toContainEqual(
+      expect.objectContaining({
+        props: expect.objectContaining({
+          accessibilityLabel: expect.stringContaining('FPS'),
+        }),
+      }),
+    );
     await act(async () => button('开始共享手机屏幕').props.onPress());
     expect(media.startScreenShare).toHaveBeenCalledWith(false);
     expect(
-      renderer.root.findAllByType(Modal).some((node) => node.props.visible),
+      renderer.root.findAllByType(Modal).some(node => node.props.visible),
     ).toBe(false);
     media.sharingScreen = true;
     media.sharingScreenAudio = true;
@@ -350,6 +411,65 @@ describe('room audio settings', () => {
         .findByProps({ testID: 'voice-controls' })
         .findAllByType(TouchableOpacity),
     ).toHaveLength(2);
+  });
+
+  test('starting annotation during a remote session paints locally instead of sending remote input', async () => {
+    media.remoteScreen = {
+      socketId: 'desktop',
+      consumerId: 'video',
+      stream: { toURL: () => 'synthetic-screen' },
+    };
+    media.availableScreens = [
+      { socketId: 'desktop', videoProducerId: 'producer' },
+    ];
+    media.watchingScreenPeerId = 'desktop';
+    mockRemote.session = {
+      sessionId: 'remote-session',
+      role: 'controller',
+      sharerSocketId: 'desktop',
+    };
+    await rerender();
+    const surface = () =>
+      renderer.root.findAllByType('ZoomableScreenVideo' as any)[0];
+    await act(async () => {
+      surface().props.interaction.onStart({ x: 0.5, y: 0.5 });
+      surface().props.interaction.onMove({ x: 0.6, y: 0.6 });
+    });
+    expect(mockRemote.button).toHaveBeenCalledWith('left', true, {
+      x: 0.5,
+      y: 0.5,
+    });
+    expect(mockRemote.pointer).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      button('批注').props.onPress();
+    });
+    await rerender();
+    expect(mockRemote.setInputEnabled).toHaveBeenLastCalledWith(false);
+    expect(button('键盘输入').props.disabled).toBe(true);
+    expect(
+      renderer.root.findAllByProps({ testID: 'screen-interaction-mode' })[0]
+        .props.children,
+    ).toContain('批注模式');
+    const remoteButtons = mockRemote.button.mock.calls.length;
+    await act(async () => {
+      surface().props.interaction.onStart({ x: 0.2, y: 0.2 });
+      surface().props.interaction.onMove({ x: 0.3, y: 0.3 });
+    });
+    expect(mockAnnotations.sendStroke).toHaveBeenCalledTimes(2);
+    expect(mockRemote.button).toHaveBeenCalledTimes(remoteButtons);
+    expect(mockRemote.pointer).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      button('结束批注').props.onPress();
+    });
+    await rerender();
+    expect(mockRemote.setInputEnabled).toHaveBeenLastCalledWith(true);
+    await act(async () => {
+      surface().props.interaction.onStart({ x: 0.4, y: 0.4 });
+    });
+    expect(mockRemote.button).toHaveBeenLastCalledWith('left', true, {
+      x: 0.4,
+      y: 0.4,
+    });
   });
 
   test('sharing authorization can be canceled without locking other call controls', async () => {
@@ -368,10 +488,16 @@ describe('room audio settings', () => {
     expect(button('打开屏幕共享设置').props.disabled).not.toBe(true);
     await act(async () => button('打开屏幕共享设置').props.onPress());
     expect(button('开始共享手机屏幕').props.disabled).toBe(true);
-    expect(renderer.root.findAllByType(Text).some(node => node.props.children === '加入语音后才能开始共享屏幕。')).toBe(true);
+    expect(
+      renderer.root
+        .findAllByType(Text)
+        .some(node => node.props.children === '加入语音后才能开始共享屏幕。'),
+    ).toBe(true);
     expect(media.startScreenShare).not.toHaveBeenCalled();
     await act(async () => button('关闭屏幕共享设置').props.onPress());
-    expect(renderer.root.findAllByType(Modal).some(node => node.props.visible)).toBe(false);
+    expect(
+      renderer.root.findAllByType(Modal).some(node => node.props.visible),
+    ).toBe(false);
   });
 
   test('room settings preserve existing payloads, prevent double saves, and can close while pending', async () => {
@@ -401,10 +527,10 @@ describe('room audio settings', () => {
     (socket.timeout as jest.Mock).mockReturnValue({ emit: timeoutEmit });
     const saveAction = renderer.root
       .findAllByType(TouchableOpacity)
-      .find((node) =>
+      .find(node =>
         node
           .findAllByType(Text)
-          .some((text) => text.props.children === '保存设置'),
+          .some(text => text.props.children === '保存设置'),
       )!;
     await act(async () => {
       saveAction.props.onPress();
@@ -417,7 +543,7 @@ describe('room audio settings', () => {
     );
     await act(async () => button('关闭房间设置').props.onPress());
     expect(
-      renderer.root.findAllByType(Modal).some((node) => node.props.visible),
+      renderer.root.findAllByType(Modal).some(node => node.props.visible),
     ).toBe(false);
   });
 });

@@ -11,6 +11,7 @@ import {
 
 import type { Room, RoomMember, RoomState, SessionConfig } from '../../types';
 import { useMobileMedia } from '../media/useMobileMedia';
+import { useScreenSharingPreferences } from '../media/screen/useScreenSharingPreferences';
 
 export interface MobileRoomProps {
   socket: Socket;
@@ -46,7 +47,8 @@ export function useRoomController({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [audioSettingsOpen, setAudioSettingsOpen] = useState(false);
   const [screenShareSettingsOpen, setScreenShareSettingsOpen] = useState(false);
-  const [includeScreenAudio, setIncludeScreenAudio] = useState(false);
+  const { includeScreenAudio, setIncludeScreenAudio } =
+    useScreenSharingPreferences();
   const [settingsLimit, setSettingsLimit] = useState(
     room.maxMembers ? String(room.maxMembers) : '',
   );
@@ -66,7 +68,7 @@ export function useRoomController({
     room.ownerUserId ?? null,
   );
   const screenVolumeBeforeMute = useRef(1);
-  const media = useMobileMedia(socket, room.id);
+  const media = useMobileMedia(socket, room.id, roomReady);
   const audioSettingsBusy =
     media.joining || media.noiseSwitching || media.audioDeviceSwitching;
   const setScreenVolume = (volume: number) => {
@@ -144,39 +146,37 @@ export function useRoomController({
     joinPendingRef.current = true;
     setJoinPending(true);
     if (password !== undefined) joinPasswordRef.current = password;
-    socket
-      .timeout(6_000)
-      .emit(
-        'room:join',
-        {
-          roomId: room.id,
-          ...(joinPasswordRef.current
-            ? { password: joinPasswordRef.current }
-            : {}),
-        },
-        (
-          timeoutError: Error | null,
-          response?: { ok: boolean; error?: string; code?: string },
-        ) => {
-          if (generation !== joinGeneration.current || joinBlockedRef.current)
-            return;
-          joinPendingRef.current = false;
-          setJoinPending(false);
-          if (timeoutError || !response?.ok) {
-            setJoinError(response?.error ?? '加入房间超时');
-            setRoomReady(false);
-            if (
-              response?.code === 'PASSWORD_REQUIRED' ||
-              response?.code === 'INVALID_PASSWORD'
-            )
-              setPasswordPrompt(true);
-            return;
-          }
-          setJoinError(null);
-          setPasswordPrompt(false);
-          setRoomReady(true);
-        },
-      );
+    socket.timeout(6_000).emit(
+      'room:join',
+      {
+        roomId: room.id,
+        ...(joinPasswordRef.current
+          ? { password: joinPasswordRef.current }
+          : {}),
+      },
+      (
+        timeoutError: Error | null,
+        response?: { ok: boolean; error?: string; code?: string },
+      ) => {
+        if (generation !== joinGeneration.current || joinBlockedRef.current)
+          return;
+        joinPendingRef.current = false;
+        setJoinPending(false);
+        if (timeoutError || !response?.ok) {
+          setJoinError(response?.error ?? '加入房间超时');
+          setRoomReady(false);
+          if (
+            response?.code === 'PASSWORD_REQUIRED' ||
+            response?.code === 'INVALID_PASSWORD'
+          )
+            setPasswordPrompt(true);
+          return;
+        }
+        setJoinError(null);
+        setPasswordPrompt(false);
+        setRoomReady(true);
+      },
+    );
   };
   useEffect(() => {
     joinPendingRef.current = false;

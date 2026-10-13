@@ -122,6 +122,8 @@ export function useCoveSession() {
           clientId: config.clientId,
           authToken: config.accountToken,
           platform: 'mobile',
+          remoteControlSupported: false,
+          remoteControlControllerSupported: true,
           clientVersion: MOBILE_RELEASE_VERSION,
         },
         (

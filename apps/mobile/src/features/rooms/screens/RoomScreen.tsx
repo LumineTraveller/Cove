@@ -2,7 +2,15 @@ import { useRoomStyles } from './roomStyles';
 import { InlineVolumeSlider } from '../../media/components/InlineVolumeSlider';
 export { InlineVolumeSlider } from '../../media/components/InlineVolumeSlider';
 import { useRoomController, type MobileRoomProps } from '../useRoomController';
-import { createContext, useContext, useRef, type ReactNode } from 'react';
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 
 import {
   ActivityIndicator,
@@ -16,6 +24,7 @@ import {
   TouchableOpacity,
   View,
   TextInput,
+  useWindowDimensions,
   type StyleProp,
   type TextInputProps,
   type ViewStyle,
@@ -48,10 +57,21 @@ import {
   Square,
 } from 'lucide-react-native';
 import { ZoomableScreenVideo } from '../../media/screen/components/ZoomableScreenVideo';
+import { useScreenAnnotations } from '../../media/annotation/useScreenAnnotations';
+import { ScreenAnnotationLayer } from '../../media/annotation/ScreenAnnotationLayer';
+import {
+  AnnotationTools,
+  type MobileAnnotationTool,
+} from '../../media/annotation/AnnotationTools';
+import type { AnnotationPoint } from '@cove/contracts';
+import { useMobileRemoteControl } from '../../remote-control/useMobileRemoteControl';
+import { MobileDiagnostics } from '../../media/diagnostics/MobileDiagnosticsModal';
 import { Avatar } from '../../profiles/components/Avatar';
 import { ROOM_LIMIT_PRESETS } from '../roomSettings';
 
 import { Soundboard } from '../../soundpacks/components/Soundboard';
+import { useSoundboard } from '../../soundpacks/useSoundboard';
+import { SoundpackPlayer } from '../../soundpacks/components/SoundpackPlayer';
 import { ChatPanel } from '../../chat/components/ChatPanel';
 import { UserProfileModal } from '../../profiles/components/UserProfileModal';
 import {
@@ -176,8 +196,284 @@ export function RoomScreen({
     setProfileRemarks,
   } = useRoomController({ socket, config, room, sessionReady, onBack });
 
+  const soundboard = useSoundboard({
+    socket,
+    roomId: room.id,
+    serverURL: config.serverURL,
+    accountId: config.accountId ?? config.clientId,
+    ready: roomReady,
+    inVoice: media.inVoice,
+    outputDeviceId: media.selectedAudioOutputId,
+  });
+  const watching = media.availableScreens.find(
+    screen => screen.socketId === media.watchingScreenPeerId,
+  );
+  const annotations = useScreenAnnotations({
+    socket,
+    roomId: room.id,
+    sharerSocketId: watching?.socketId ?? '',
+    sessionId: watching?.videoProducerId ?? null,
+    self: false,
+    active: roomReady && Boolean(screenURL),
+  });
+  const ownAnnotations = useScreenAnnotations({
+    socket,
+    roomId: room.id,
+    sharerSocketId: socket.id ?? '',
+    sessionId: media.screenProducerId ?? null,
+    self: true,
+    active: roomReady && media.sharingScreen,
+  });
+  const remote = useMobileRemoteControl({
+    socket,
+    roomId: room.id,
+    targetSocketId: watching?.socketId ?? null,
+    allowed:
+      roomReady && Boolean(screenURL) && annotations.remoteControlAllowed,
+  });
+  const [annotationTool, setAnnotationTool] =
+    useState<MobileAnnotationTool>('pen');
+  const [annotationColor, setAnnotationColor] = useState('#FF5A5F');
+  const [annotationWidth, setAnnotationWidth] = useState(0.006);
+  const [ownAnnotationsOpen, setOwnAnnotationsOpen] = useState(false);
+  const [remoteKeyboardOpen, setRemoteKeyboardOpen] = useState(false);
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const [remoteText, setRemoteText] = useState('');
+  const remoteTextRef = useRef(remoteText);
+  remoteTextRef.current = remoteText;
+  const sendRemoteText = async () => {
+    const value = remoteTextRef.current;
+    if (await remote.typeText(value)) {
+      if (remoteTextRef.current === value) setRemoteText('');
+    }
+  };
+  const windowSize = useWindowDimensions();
+  const [ownCanvasSize, setOwnCanvasSize] = useState({ width: 1, height: 1 });
+  const touchState = useRef<{
+    strokeId?: string;
+    point: AnnotationPoint;
+    pressed: boolean;
+  }>({ point: { x: 0.5, y: 0.5 }, pressed: false });
+  const actions = useRef({
+    annotations,
+    remote,
+    annotationTool,
+    annotationColor,
+    annotationWidth,
+  });
+  actions.current = {
+    annotations,
+    remote,
+    annotationTool,
+    annotationColor,
+    annotationWidth,
+  };
+  const controlling = Boolean(remote.session) && !annotations.localActive;
+  const setRemoteInputEnabled = remote.setInputEnabled;
+  useEffect(() => {
+    setRemoteInputEnabled(controlling);
+    if (!controlling) setRemoteKeyboardOpen(false);
+  }, [controlling, setRemoteInputEnabled]);
+  const interaction = useMemo(() => {
+    if (!annotations.canDraw && !controlling) return undefined;
+    const end = () => {
+      const current = actions.current;
+      if (touchState.current.pressed)
+        current.remote.button('left', false, touchState.current.point);
+      touchState.current.pressed = false;
+      if (touchState.current.strokeId)
+        current.annotations.finishStroke(touchState.current.strokeId);
+      touchState.current.strokeId = undefined;
+      current.annotations.sendLaser(null);
+    };
+    const start = (point: AnnotationPoint) => {
+      const current = actions.current;
+      touchState.current.point = point;
+      if (current.remote.session && !current.annotations.localActive) {
+        current.remote.button('left', true, point);
+        touchState.current.pressed = true;
+      } else if (current.annotationTool === 'laser')
+        current.annotations.sendLaser(point);
+      else {
+        const id = `mobile-${Date.now().toString(36)}-${Math.random()
+          .toString(36)
+          .slice(2)}`;
+        touchState.current.strokeId =
+          current.annotations.sendStroke(
+            current.annotationTool,
+            current.annotationColor,
+            current.annotationWidth,
+            [point],
+            id,
+            false,
+          ) ?? undefined;
+      }
+    };
+    return {
+      onStart: start,
+      onMove: (point: AnnotationPoint | null) => {
+        if (!point) return end();
+        const current = actions.current;
+        touchState.current.point = point;
+        if (current.remote.session && !current.annotations.localActive)
+          current.remote.pointer(point);
+        else if (current.annotationTool === 'laser')
+          current.annotations.sendLaser(point);
+        else if (touchState.current.strokeId)
+          current.annotations.sendStroke(
+            current.annotationTool,
+            current.annotationColor,
+            current.annotationWidth,
+            [point],
+            touchState.current.strokeId,
+            false,
+          );
+        else start(point);
+      },
+      onEnd: end,
+    };
+  }, [annotations.canDraw, controlling]);
+  const annotationOverlay = (
+    viewport: { width: number; height: number },
+    video?: { width: number; height: number },
+  ) => (
+    <ScreenAnnotationLayer
+      viewport={viewport}
+      video={video}
+      strokes={[
+        ...(annotations.state?.strokes ?? []),
+        ...annotations.optimisticStrokes,
+      ]}
+      lasers={annotations.laserPoints}
+    />
+  );
+  const remoteTargetSupported =
+    members.find(member => member.socketId === watching?.socketId)
+      ?.canReceiveRemoteControl === true;
+  const remoteAction = (
+    label: string,
+    action: () => void,
+    disabled = false,
+  ) => (
+    <TouchableOpacity
+      key={label}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      accessibilityState={{
+        disabled:
+          disabled ||
+          (Boolean(remote.session) && !controlling && label !== '结束远控'),
+      }}
+      disabled={
+        disabled ||
+        (Boolean(remote.session) && !controlling && label !== '结束远控')
+      }
+      onPress={action}
+      style={[
+        styles.toolbarAction,
+        {
+          minHeight: 44,
+          paddingHorizontal: 12,
+          opacity:
+            disabled ||
+            (Boolean(remote.session) && !controlling && label !== '结束远控')
+              ? 0.5
+              : 1,
+        },
+      ]}
+    >
+      <Text style={styles.toolbarText}>{label}</Text>
+    </TouchableOpacity>
+  );
+  const screenTools = (
+    <View style={{ backgroundColor: colors.background, paddingHorizontal: 8 }}>
+      {(annotations.localActive || remote.session) && (
+        <Text
+          testID="screen-interaction-mode"
+          accessibilityLiveRegion="polite"
+          style={styles.sectionSubtitle}
+        >
+          {annotations.localActive
+            ? remote.session ? '批注模式 · 远控输入已暂停' : '批注模式 · 单指绘制，双指缩放'
+            : '远控模式 · 单指操作桌面，双指缩放'}
+        </Text>
+      )}
+      <AnnotationTools
+        annotations={annotations}
+        tool={annotationTool}
+        setTool={value => {interaction?.onEnd(); setAnnotationTool(value);}}
+        color={annotationColor}
+        setColor={value => {interaction?.onEnd(); setAnnotationColor(value);}}
+        width={annotationWidth}
+        setWidth={value => {interaction?.onEnd(); setAnnotationWidth(value);}}
+      />
+      <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+        {remote.session ? (
+          <>
+            {remoteAction('结束远控', remote.stop)}
+            {remoteAction('键盘输入', () => setRemoteKeyboardOpen(true))}
+            {remoteAction('右键', () =>
+              remote.click(touchState.current.point, 'right'),
+            )}
+            {remoteAction('向上滚动', () =>
+              remote.wheel(touchState.current.point, 0, -120),
+            )}
+            {remoteAction('向下滚动', () =>
+              remote.wheel(touchState.current.point, 0, 120),
+            )}
+            {[
+              'Enter',
+              'Escape',
+              'Tab',
+              'Backspace',
+              'ArrowUp',
+              'ArrowDown',
+              'ArrowLeft',
+              'ArrowRight',
+            ].map(code => remoteAction(code, () => remote.shortcut([code])))}
+            {remoteAction('复制', () =>
+              remote.shortcut(['ControlLeft', 'KeyC']),
+            )}
+            {remoteAction('粘贴', () =>
+              remote.shortcut(['ControlLeft', 'KeyV']),
+            )}
+          </>
+        ) : remote.pending ? (
+          remoteAction('取消远控请求', remote.cancel)
+        ) : (
+          remoteAction(
+            '申请远控',
+            () => {
+              annotations.exit();
+              remote.request();
+            },
+            !remoteTargetSupported || !annotations.remoteControlAllowed,
+          )
+        )}
+      </ScrollView>
+      {remote.error && (
+        <Text
+          accessibilityLiveRegion="polite"
+          style={[styles.formError, { paddingBottom: 6 }]}
+        >
+          {remote.error}
+        </Text>
+      )}
+      {!remoteTargetSupported && (
+        <Text style={styles.sectionSubtitle}>
+          此共享端不支持系统被控；手机可控制支持的 Windows 共享端。
+        </Text>
+      )}
+    </View>
+  );
+
   const screenContent = screenURL ? (
-    <ZoomableScreenVideo key={screenURL} streamURL={screenURL} />
+    <ZoomableScreenVideo
+      key={screenURL}
+      streamURL={screenURL}
+      interaction={interaction}
+      overlay={annotationOverlay}
+    />
   ) : media.availableScreens.length > 0 ? (
     <View style={styles.shareAvailable}>
       <View style={styles.shareAvailableIcon}>
@@ -194,13 +490,14 @@ export function RoomScreen({
         showsHorizontalScrollIndicator={false}
         contentContainerStyle={styles.shareChoices}
       >
-        {media.availableScreens.map((screen) => {
+        {media.availableScreens.map(screen => {
           const name = displayScreenSharer(screen.socketId);
           return (
             <TouchableOpacity
               key={screen.videoProducerId}
               style={styles.watchButton}
               onPress={() => media.watchScreen(screen.socketId)}
+              disabled={media.screenWatchingBusy}
               activeOpacity={0.8}
               accessibilityRole="button"
               accessibilityLabel={`观看${name}的共享屏幕`}
@@ -254,7 +551,7 @@ export function RoomScreen({
         </View>
         <View style={styles.headerActions}>
           {members.some(
-            (member) => member.socketId === socket.id && member.isOwner,
+            member => member.socketId === socket.id && member.isOwner,
           ) && (
             <TouchableOpacity
               style={styles.headerAction}
@@ -328,6 +625,15 @@ export function RoomScreen({
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
       >
+        {roomReady && (
+          <TouchableOpacity
+            style={styles.toolbarAction}
+            accessibilityLabel="媒体状态"
+            onPress={() => setDiagnosticsOpen(true)}
+          >
+            <Text style={styles.toolbarText}>媒体状态</Text>
+          </TouchableOpacity>
+        )}
         {!roomReady && !passwordPrompt && !joinError && (
           <View style={styles.statusBanner} accessibilityLiveRegion="polite">
             <ActivityIndicator color={colors.blue} />
@@ -390,6 +696,19 @@ export function RoomScreen({
               </View>
             )}
           </View>
+        )}
+
+        {screenURL && !fullscreen && screenTools}
+        {media.sharingScreen && (
+          <TouchableOpacity
+            style={styles.toolbarAction}
+            accessibilityLabel="管理我的共享批注"
+            onPress={() => setOwnAnnotationsOpen(true)}
+          >
+            <Text style={styles.toolbarText}>
+              共享批注 · {ownAnnotations.state?.strokes.length ?? 0} 笔
+            </Text>
+          </TouchableOpacity>
         )}
 
         {media.canShareScreen !== false && (
@@ -459,7 +778,7 @@ export function RoomScreen({
             showsHorizontalScrollIndicator={false}
             contentContainerStyle={styles.shareSwitcher}
           >
-            {media.availableScreens.map((screen) => {
+            {media.availableScreens.map(screen => {
               const selected = media.watchingScreenPeerId === screen.socketId;
               const name = displayScreenSharer(screen.socketId);
               return (
@@ -522,9 +841,9 @@ export function RoomScreen({
         )}
 
         {media.inVoice &&
-          media.applicationAudioShares.map((share) => {
+          media.applicationAudioShares.map(share => {
             const owner = members.find(
-              (member) => member.socketId === share.socketId,
+              member => member.socketId === share.socketId,
             );
             const name = owner
               ? profileRemarks[owner.userId] || owner.username
@@ -562,7 +881,7 @@ export function RoomScreen({
                   <InlineVolumeSlider
                     value={share.volume}
                     label={`${name}的应用音频音量`}
-                    onChange={(volume) =>
+                    onChange={volume =>
                       media.setApplicationAudioVolume(share.producerId, volume)
                     }
                   />
@@ -595,9 +914,9 @@ export function RoomScreen({
                 {roomReady ? '正在同步成员…' : '连接后显示房间成员'}
               </Text>
             )}
-            {members.map((member) => {
+            {members.map(member => {
               const voiceMember = media.voiceMembers.find(
-                (voice) => voice.socketId === member.socketId,
+                voice => voice.socketId === member.socketId,
               );
               const showVoiceState = !!voiceMember;
               const displayName = getProfileDisplayName(
@@ -756,6 +1075,10 @@ export function RoomScreen({
               <View style={styles.ownScreenText}>
                 <Text style={styles.sectionTitle}>同时共享音频</Text>
                 <Text style={styles.sectionSubtitle}>
+                  当前 Android 采集通道以 30 FPS
+                  运行。观看帧率由共享源与设备决定；系统会提示屏幕录制授权。
+                </Text>
+                <Text style={styles.sectionSubtitle}>
                   共享视频、游戏等应用播放的声音，不改变麦克风设置。
                 </Text>
               </View>
@@ -854,7 +1177,7 @@ export function RoomScreen({
               {media.noiseSwitching && (
                 <Text style={styles.noiseHint}>正在切换降噪…</Text>
               )}
-              {NOISE_MODES.map((option) => {
+              {NOISE_MODES.map(option => {
                 const selected = media.noiseMode === option.value;
                 return (
                   <TouchableOpacity
@@ -908,7 +1231,7 @@ export function RoomScreen({
               {media.audioOutputs.length === 0 ? (
                 <Text style={styles.noiseHint}>暂无可切换输出设备</Text>
               ) : (
-                media.audioOutputs.map((device) => {
+                media.audioOutputs.map(device => {
                   const selected = media.selectedAudioOutputId === device.id;
                   return (
                     <TouchableOpacity
@@ -953,7 +1276,7 @@ export function RoomScreen({
               {media.audioInputs.length === 0 ? (
                 <Text style={styles.noiseHint}>暂无可切换输入设备</Text>
               ) : (
-                media.audioInputs.map((device) => {
+                media.audioInputs.map(device => {
                   const selected = media.selectedAudioInputId === device.id;
                   return (
                     <TouchableOpacity
@@ -1010,9 +1333,24 @@ export function RoomScreen({
       >
         <View style={styles.fullscreen}>
           <StatusBar hidden />
-          {screenURL ? (
-            <ZoomableScreenVideo key={screenURL} streamURL={screenURL} />
-          ) : null}
+          <KeyboardAvoidingView
+            style={{ flex: 1 }}
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          >
+            <View style={{ flex: 1 }}>
+              {screenURL ? (
+                <ZoomableScreenVideo
+                  key={screenURL}
+                  streamURL={screenURL}
+                  interaction={interaction}
+                  overlay={annotationOverlay}
+                />
+              ) : null}
+            </View>
+            <SafeAreaView edges={['bottom', 'left', 'right']}>
+              {screenURL && screenTools}
+            </SafeAreaView>
+          </KeyboardAvoidingView>
           <SafeAreaView style={styles.fullscreenSafe} edges={['top', 'right']}>
             <TouchableOpacity
               style={styles.closeFullscreen}
@@ -1023,6 +1361,147 @@ export function RoomScreen({
             </TouchableOpacity>
           </SafeAreaView>
         </View>
+      </Modal>
+
+      <Modal
+        visible={ownAnnotationsOpen && media.sharingScreen}
+        supportedOrientations={['portrait', 'landscape']}
+        onRequestClose={() => setOwnAnnotationsOpen(false)}
+      >
+        <SafeAreaView
+          style={styles.toolModal}
+          edges={['top', 'right', 'bottom', 'left']}
+        >
+          <View style={styles.toolHeader}>
+            <View style={styles.headerCopy}>
+              <Text style={styles.toolTitle}>我的共享批注</Text>
+              <Text style={styles.toolSubtitle}>
+                只在 Cove 内显示，不覆盖其他应用
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={styles.iconButton}
+              accessibilityLabel="关闭我的共享批注"
+              onPress={() => setOwnAnnotationsOpen(false)}
+            >
+              <X size={20} color={colors.textMuted} />
+            </TouchableOpacity>
+          </View>
+          <View
+            style={[styles.audioSettingsSection, { paddingHorizontal: 16 }]}
+          >
+            <View style={styles.ownScreenCard}>
+              <Text style={styles.sectionTitle}>允许所有观看者直接批注</Text>
+              <Switch
+                value={ownAnnotations.annotationsAllowed}
+                disabled={
+                  !ownAnnotations.ready || Boolean(ownAnnotations.pendingAction)
+                }
+                onValueChange={value => {
+                  void ownAnnotations.setAnnotationsAllowed(value);
+                }}
+              />
+            </View>
+            <Text style={styles.sectionSubtitle}>
+              画布显示共享视频的归一化位置；Android 无法显示 Windows
+              的系统全屏覆盖层。
+            </Text>
+            {ownAnnotations.error && (
+              <Text style={styles.formError}>{ownAnnotations.error}</Text>
+            )}
+            {ownAnnotations.state?.requests.map(request => (
+              <View key={request.socketId} style={styles.ownScreenCard}>
+                <Text style={styles.sectionTitle}>
+                  {request.username}申请批注
+                </Text>
+                <TouchableOpacity
+                  style={styles.toolbarAction}
+                  onPress={() => {
+                    void ownAnnotations.respond(request.socketId, true);
+                  }}
+                >
+                  <Text style={styles.toolbarText}>允许</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.toolbarAction}
+                  onPress={() => {
+                    void ownAnnotations.respond(request.socketId, false);
+                  }}
+                >
+                  <Text style={styles.toolbarText}>拒绝</Text>
+                </TouchableOpacity>
+              </View>
+            ))}
+          </View>
+          <View
+            style={{ flex: 1, backgroundColor: '#111827', margin: 16 }}
+            onLayout={event => setOwnCanvasSize(event.nativeEvent.layout)}
+          >
+            <ScreenAnnotationLayer
+              viewport={ownCanvasSize}
+              video={media.sharedScreenSize ?? windowSize}
+              strokes={ownAnnotations.state?.strokes ?? []}
+              lasers={ownAnnotations.laserPoints}
+            />
+          </View>
+        </SafeAreaView>
+      </Modal>
+
+      <Modal
+        visible={remoteKeyboardOpen && controlling}
+        supportedOrientations={['portrait', 'landscape']}
+        onRequestClose={() => setRemoteKeyboardOpen(false)}
+      >
+        <SafeAreaView
+          style={styles.toolModal}
+          edges={['top', 'right', 'bottom', 'left']}
+        >
+          <View style={styles.toolHeader}>
+            <View style={styles.headerCopy}>
+              <Text style={styles.toolTitle}>远控键盘</Text>
+              <Text style={styles.toolSubtitle}>
+                输入英文、数字与符号，中文输入法需要共享端完成。
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={styles.iconButton}
+              accessibilityLabel="关闭远控键盘"
+              onPress={() => setRemoteKeyboardOpen(false)}
+            >
+              <X size={20} color={colors.textMuted} />
+            </TouchableOpacity>
+          </View>
+          <RoomFormScroll contentStyle={styles.toolContent}>
+            <Text style={styles.formLabel}>发送到共享端的按键</Text>
+            <RoomFormInput
+              value={remoteText}
+              onChangeText={setRemoteText}
+              maxLength={256}
+              autoCapitalize="none"
+              autoCorrect={false}
+              placeholder="英文、数字和符号"
+              placeholderTextColor={colors.textFaint}
+              style={styles.input}
+              accessibilityLabel="远控键盘输入"
+              onSubmitEditing={() => {
+                void sendRemoteText();
+              }}
+            />
+            <TouchableOpacity
+              style={styles.submit}
+              disabled={!remoteText || !remote.session}
+              onPress={() => {
+                void sendRemoteText();
+              }}
+              accessibilityLabel="发送远控键盘输入"
+            >
+              <Text style={styles.submitText}>发送按键</Text>
+            </TouchableOpacity>
+            {remote.error && (
+              <Text style={styles.formError}>{remote.error}</Text>
+            )}
+          </RoomFormScroll>
+        </SafeAreaView>
       </Modal>
 
       <Modal
@@ -1102,7 +1581,7 @@ export function RoomScreen({
           <RoomFormScroll contentStyle={styles.toolContent}>
             <Text style={styles.formLabel}>人数上限（含房主）</Text>
             <View style={styles.limitPresets}>
-              {ROOM_LIMIT_PRESETS.map((value) => (
+              {ROOM_LIMIT_PRESETS.map(value => (
                 <TouchableOpacity
                   key={value || 'unlimited'}
                   style={[
@@ -1225,17 +1704,20 @@ export function RoomScreen({
             keyboardShouldPersistTaps="handled"
           >
             <Soundboard
-              socket={socket}
-              roomId={room.id}
-              serverURL={config.serverURL}
-              ready={roomReady}
-              inVoice={media.inVoice}
+              controller={soundboard}
+              visible={soundboardOpen}
               profileRemarks={profileRemarks}
               showHeading={false}
             />
           </ScrollView>
         </SafeAreaView>
       </Modal>
+      <SoundpackPlayer controller={soundboard} />
+      <MobileDiagnostics
+        visible={diagnosticsOpen}
+        collect={media.collectDiagnostics}
+        onClose={() => setDiagnosticsOpen(false)}
+      />
 
       {viewingProfile && (
         <UserProfileModal
@@ -1245,18 +1727,18 @@ export function RoomScreen({
           avatarUrl={viewingProfile.avatarUrl}
           remark={profileRemarks[viewingProfile.userId]}
           inVoice={media.voiceMembers.some(
-            (member) => member.socketId === viewingProfile.socketId,
+            member => member.socketId === viewingProfile.socketId,
           )}
           isMicOn={
             !media.voiceMembers.find(
-              (member) => member.socketId === viewingProfile.socketId,
+              member => member.socketId === viewingProfile.socketId,
             )?.isMuted
           }
           volume={media.memberVolumes[viewingProfile.socketId] ?? 1}
-          onVolumeChange={(volume) =>
+          onVolumeChange={volume =>
             media.setMemberVolume(viewingProfile.socketId, volume)
           }
-          onSaveRemark={(remark) => {
+          onSaveRemark={remark => {
             saveProfileRemark(profileRemarks, viewingProfile.userId, remark)
               .then(setProfileRemarks)
               .catch(() => {});

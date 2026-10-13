@@ -43,6 +43,8 @@ export function createCleanupService(deps: CreateCleanupServiceDependencies) {
     deps.userClientIds.delete(socketId);
     deps.userPlatforms.delete(socketId);
     deps.remoteControlCapabilities.delete(socketId);
+    const socket = deps.io.sockets.sockets.get(socketId);
+    if (socket) socket.data.remoteControlControllerSupported = false;
     for (const [accountId, accountSocketId] of deps.accountSockets) {
       if (accountSocketId === socketId) deps.accountSockets.delete(accountId);
     }

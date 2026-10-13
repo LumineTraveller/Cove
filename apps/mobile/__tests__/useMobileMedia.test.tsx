@@ -90,6 +90,32 @@ test('does not receive application audio before joining voice', async () => {
   expect(media.applicationAudioShares).toEqual([]);
 });
 
+test('watches screen video and audio as a receiver without requesting a microphone', async () => {
+  await act(async () => {await handlers.get('ms:new-producer')!({producerId: 'screen-video', peerId: 'desktop', kind: 'video', appData: {type: 'screen'}});});
+  await act(async () => {await handlers.get('ms:new-producer')!({producerId: 'screen-audio', peerId: 'desktop', kind: 'audio', appData: {type: 'screen-audio'}});});
+  await act(async () => {await media.watchScreen('desktop');});
+  expect(media.isWatchingScreen).toBe(true);
+  expect(media.remoteScreen?.socketId).toBe('desktop');
+  expect(mockConsumers.has('screen-video')).toBe(true);
+  expect(mockConsumers.has('screen-audio')).toBe(true);
+  expect(PermissionsAndroid.request).not.toHaveBeenCalled();
+  expect(mockGetUserMedia).not.toHaveBeenCalled();
+  expect(mockTransport.produce).not.toHaveBeenCalled();
+  expect(media.inVoice).toBe(false);
+});
+
+test('duplicate watch operations share one device setup and cancellation does not publish audio', async () => {
+  await act(async () => {await handlers.get('ms:new-producer')!({producerId: 'screen-video', peerId: 'desktop', kind: 'video', appData: {type: 'screen'}});});
+  holdConsume = true;
+  let pending!: Promise<void>;
+  await act(async () => {pending = media.watchScreen('desktop');});
+  await act(async () => {await media.watchScreen('desktop'); media.stopWatchingScreen(); delayedConsume?.(); await pending;});
+  expect(media.isWatchingScreen).toBe(false);
+  expect(media.remoteScreen).toBeNull();
+  expect(mockTransport.produce).not.toHaveBeenCalled();
+  expect(PermissionsAndroid.request).not.toHaveBeenCalled();
+});
+
 test('publishes the microphone without a fixed bitrate cap while preserving Opus options', async () => {
   await act(async () => media.joinVoice());
   expect(mockTransport.produce).toHaveBeenCalledTimes(1);

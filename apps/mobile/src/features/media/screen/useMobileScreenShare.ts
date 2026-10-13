@@ -64,6 +64,10 @@ export function useMobileScreenShare(
   const [sharingScreenAudio, setSharingAudio] = useState(false);
   const [screenSharingError, setError] = useState<string | null>(null);
   const [screenViewerCount, setViewerCount] = useState(0);
+  const [screenProducerId, setScreenProducerId] = useState<string | null>(null);
+  const [sharedScreenSize, setSharedScreenSize] = useState<
+    { width: number; height: number } | undefined
+  >();
   const operation = useRef(0);
   const busy = useRef(false);
   const capture = useRef<MediaStream | null>(null);
@@ -85,6 +89,8 @@ export function useMobileScreenShare(
       producer.close();
     }
     video.current = null;
+    setScreenProducerId(null);
+    setSharedScreenSize(undefined);
     audio.current = null;
     const outgoing = transport.current;
     transport.current = null;
@@ -237,6 +243,13 @@ export function useMobileScreenShare(
           ensureCurrent();
         }
         video.current = producer;
+        setScreenProducerId(producer.id);
+        const dimensions = screenTrack.getSettings?.() ?? {};
+        if (dimensions.width && dimensions.height)
+          setSharedScreenSize({
+            width: dimensions.width,
+            height: dimensions.height,
+          });
         producer.on('trackended', stopScreenShare);
         if (!demand.current.get(producer.id)) producer.pause();
         const audioTrack = playback.current?.stream.getAudioTracks()[0];
@@ -326,12 +339,19 @@ export function useMobileScreenShare(
     };
   }, [socket, stopScreenShare]);
 
+  const collectScreenStats = useCallback(
+    async () => transport.current?.getStats() ?? new Map(),
+    [],
+  );
   return {
     sharingScreen,
     sharingScreenAudio,
     screenSharingBusy,
     screenSharingError,
     screenViewerCount,
+    screenProducerId,
+    sharedScreenSize,
+    collectScreenStats,
     canShareScreenAudio,
     canShareScreen: canShareMobileScreen,
     startScreenShare,

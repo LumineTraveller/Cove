@@ -35,6 +35,10 @@ export interface RegisterRemoteControlSocketHandlersDependencies {
 export function registerRemoteControlSocketHandlers(
   deps: RegisterRemoteControlSocketHandlersDependencies,
 ) {
+  const canControl = (socketId: string) =>
+    deps.remoteControlCapabilities.has(socketId) ||
+    deps.io.sockets.sockets.get(socketId)?.data.remoteControlControllerSupported === true;
+  const canReceive = (socketId: string) => deps.remoteControlCapabilities.has(socketId);
   // ── Remote control ────────────────────────────────────────────────────────
 
   deps.socket.on(
@@ -59,8 +63,8 @@ export function registerRemoteControlSocketHandlers(
         return;
       }
       if (
-        !deps.remoteControlCapabilities.has(deps.socket.id) ||
-        !deps.remoteControlCapabilities.has(sharerSocketId)
+        !canControl(deps.socket.id) ||
+        !canReceive(sharerSocketId)
       ) {
         cb?.({ ok: false, error: '双方都需要使用支持远程控制的 Windows 客户端' });
         return;
@@ -139,6 +143,8 @@ export function registerRemoteControlSocketHandlers(
         return;
       }
       if (
+        !canControl(pending.controllerSocketId) ||
+        !canReceive(pending.sharerSocketId) ||
         !members?.has(pending.controllerSocketId) ||
         !members.has(pending.sharerSocketId) ||
         !deps.isSharingScreen(pending.sharerSocketId, pending.roomId)
@@ -168,6 +174,7 @@ export function registerRemoteControlSocketHandlers(
         sessionId: session.sessionId,
         roomId: session.roomId,
         role: 'controller',
+        requestId,
         sharerSocketId: session.sharerSocketId,
         sharerName: deps.userNames.get(session.sharerSocketId) ?? '共享者',
         sharerUserId: deps.publicUserId(session.sharerSocketId),
@@ -176,6 +183,7 @@ export function registerRemoteControlSocketHandlers(
         sessionId: session.sessionId,
         roomId: session.roomId,
         role: 'sharer',
+        requestId,
         controllerSocketId: session.controllerSocketId,
         controllerName: deps.userNames.get(session.controllerSocketId) ?? '成员',
         controllerUserId: deps.publicUserId(session.controllerSocketId),
@@ -204,6 +212,8 @@ export function registerRemoteControlSocketHandlers(
       }
       const members = deps.roomMembers.get(session.roomId);
       if (
+        !canControl(session.controllerSocketId) ||
+        !canReceive(session.sharerSocketId) ||
         !members?.has(session.controllerSocketId) ||
         !members.has(session.sharerSocketId) ||
         !deps.isSharingScreen(session.sharerSocketId, session.roomId)
