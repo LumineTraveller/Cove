@@ -57,6 +57,7 @@ import {
   Square,
 } from 'lucide-react-native';
 import { ZoomableScreenVideo } from '../../media/screen/components/ZoomableScreenVideo';
+import { SCREEN_CAPTURE_SCALES } from '../../media/screen/screenCaptureSettings';
 import { useScreenAnnotations } from '../../media/annotation/useScreenAnnotations';
 import { ScreenAnnotationLayer } from '../../media/annotation/ScreenAnnotationLayer';
 import {
@@ -179,6 +180,8 @@ export function RoomScreen({
     screenShareSettingsOpen,
     includeScreenAudio,
     setIncludeScreenAudio,
+    screenCaptureScale,
+    setScreenCaptureScale,
     audioSettingsOpen,
     audioSettingsBusy,
     fullscreen,
@@ -1071,20 +1074,54 @@ export function RoomScreen({
             </TouchableOpacity>
           </View>
           <ScrollView contentContainerStyle={styles.audioSettingsContent}>
+            <View style={styles.audioSettingsSection}>
+              <Text style={styles.sectionTitle}>画面采集比例</Text>
+              <Text style={styles.sectionSubtitle}>
+                按屏幕宽高比例采集，降低比例可减少传输的画面尺寸。共享开始后保持不变，下次开始时应用所选比例。
+              </Text>
+              <View style={styles.limitPresets}>
+                {SCREEN_CAPTURE_SCALES.map(option => {
+                  const selected = screenCaptureScale === option.value;
+                  const disabled =
+                    media.screenSharingBusy || media.sharingScreen;
+                  return (
+                    <TouchableOpacity
+                      key={option.value}
+                      style={[
+                        styles.limitPreset,
+                        selected && styles.screenScaleActive,
+                        disabled && styles.screenScaleDisabled,
+                      ]}
+                      accessibilityRole="radio"
+                      accessibilityLabel={`画面采集比例：${option.label}`}
+                      accessibilityState={{ checked: selected, disabled }}
+                      disabled={disabled}
+                      onPress={() => setScreenCaptureScale(option.value)}
+                    >
+                      <Text style={styles.limitPresetText}>{option.label}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+              <Text style={styles.sectionSubtitle}>
+                当前 Android 采集通道以 30 FPS
+                运行。观看帧率由共享源与设备决定；系统会提示屏幕录制授权。
+              </Text>
+            </View>
             <View style={styles.screenShareOption}>
               <View style={styles.ownScreenText}>
                 <Text style={styles.sectionTitle}>同时共享音频</Text>
-                <Text style={styles.sectionSubtitle}>
-                  当前 Android 采集通道以 30 FPS
-                  运行。观看帧率由共享源与设备决定；系统会提示屏幕录制授权。
-                </Text>
                 <Text style={styles.sectionSubtitle}>
                   共享视频、游戏等应用播放的声音，不改变麦克风设置。
                 </Text>
               </View>
               <Switch
                 value={includeScreenAudio && !!media.canShareScreenAudio}
-                disabled={media.screenSharingBusy || !media.canShareScreenAudio}
+                disabled={
+                  media.screenSharingBusy ||
+                  media.sharingScreen ||
+                  !media.canShareScreenAudio
+                }
                 onValueChange={setIncludeScreenAudio}
                 accessibilityLabel="同时共享音频"
                 trackColor={{ false: colors.borderStrong, true: colors.screen }}
@@ -1122,6 +1159,7 @@ export function RoomScreen({
                 if (
                   await media.startScreenShare(
                     includeScreenAudio && !!media.canShareScreenAudio,
+                    screenCaptureScale,
                   )
                 )
                   setScreenShareSettingsOpen(false);

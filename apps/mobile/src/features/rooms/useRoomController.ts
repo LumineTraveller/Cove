@@ -47,8 +47,12 @@ export function useRoomController({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [audioSettingsOpen, setAudioSettingsOpen] = useState(false);
   const [screenShareSettingsOpen, setScreenShareSettingsOpen] = useState(false);
-  const { includeScreenAudio, setIncludeScreenAudio } =
-    useScreenSharingPreferences();
+  const {
+    includeScreenAudio,
+    setIncludeScreenAudio,
+    screenCaptureScale,
+    setScreenCaptureScale,
+  } = useScreenSharingPreferences();
   const [settingsLimit, setSettingsLimit] = useState(
     room.maxMembers ? String(room.maxMembers) : '',
   );
@@ -304,6 +308,8 @@ export function useRoomController({
     screenShareSettingsOpen,
     includeScreenAudio,
     setIncludeScreenAudio,
+    screenCaptureScale,
+    setScreenCaptureScale,
     audioSettingsOpen,
     audioSettingsBusy,
     fullscreen,

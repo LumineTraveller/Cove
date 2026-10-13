@@ -15,6 +15,10 @@ import {
   releasePlaybackAudio,
   onScreenAudioError,
 } from './screenSharing';
+import {
+  normalizeScreenCaptureScale,
+  type ScreenCaptureScale,
+} from './screenCaptureSettings';
 
 function request<T>(
   socket: Socket,
@@ -117,7 +121,10 @@ export function useMobileScreenShare(
   }, [socket]);
 
   const startScreenShare = useCallback(
-    async (includeAudio: boolean): Promise<boolean> => {
+    async (
+      includeAudio: boolean,
+      resolutionScale: ScreenCaptureScale = 1,
+    ): Promise<boolean> => {
       if (busy.current || video.current) return false;
       if (!inVoice.current || !device.current || !canShareMobileScreen) {
         setError('请先加入语音，再共享手机屏幕');
@@ -127,6 +134,7 @@ export function useMobileScreenShare(
       setBusy(true);
       setError(null);
       const generation = ++operation.current;
+      const captureScale = normalizeScreenCaptureScale(resolutionScale);
       const current = () =>
         generation === operation.current && inVoice.current && socket.connected;
       const ensureCurrent = () => {
@@ -154,7 +162,9 @@ export function useMobileScreenShare(
           item => item.mimeType.toLowerCase() === 'video/av1',
         );
         if (!av1Codec) throw new Error('手机或服务器不支持 AV1 屏幕共享');
-        const stream = await mediaDevices.getDisplayMedia({});
+        const stream = await mediaDevices.getDisplayMedia({
+          android: { resolutionScale: captureScale },
+        });
         if (!current()) {
           stream.release(true);
           return false;

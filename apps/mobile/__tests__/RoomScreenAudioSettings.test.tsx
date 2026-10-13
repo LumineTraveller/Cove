@@ -1,5 +1,11 @@
 import TestRenderer, { act } from 'react-test-renderer';
-import { Modal, StyleSheet, Text, TouchableOpacity } from 'react-native';
+import {
+  Modal,
+  StyleSheet,
+  Switch,
+  Text,
+  TouchableOpacity,
+} from 'react-native';
 import type { Socket } from 'socket.io-client';
 import { RoomScreen } from '../src/features/rooms/screens/RoomScreen';
 import { useMobileMedia } from '../src/features/media/useMobileMedia';
@@ -381,7 +387,9 @@ describe('room audio settings', () => {
     await act(async () => button('打开屏幕共享设置').props.onPress());
     const content = JSON.stringify(renderer.toJSON());
     expect(content).toContain('同时共享音频');
-    expect(content).not.toContain('分辨率');
+    expect(content).toContain('画面采集比例');
+    expect(content).not.toContain('720p');
+    expect(content).not.toContain('1080p');
     expect(content).toContain('30 FPS');
     expect(content).toContain('观看帧率由共享源与设备决定');
     expect(content).not.toContain('120 FPS');
@@ -395,7 +403,7 @@ describe('room audio settings', () => {
       }),
     );
     await act(async () => button('开始共享手机屏幕').props.onPress());
-    expect(media.startScreenShare).toHaveBeenCalledWith(false);
+    expect(media.startScreenShare).toHaveBeenCalledWith(false, 1);
     expect(
       renderer.root.findAllByType(Modal).some(node => node.props.visible),
     ).toBe(false);
@@ -412,6 +420,49 @@ describe('room audio settings', () => {
         .findAllByType(TouchableOpacity),
     ).toHaveLength(2);
   });
+
+  test('capture ratio selection is independent of audio and is passed to the next sharing start', async () => {
+    await act(async () => button('打开屏幕共享设置').props.onPress());
+    expect(
+      button('画面采集比例：原始 (100%)').props.accessibilityState.checked,
+    ).toBe(true);
+    await act(async () => button('画面采集比例：75%').props.onPress());
+    expect(button('画面采集比例：75%').props.accessibilityState.checked).toBe(
+      true,
+    );
+    const audio = () =>
+      renderer.root
+        .findAllByType(Switch)
+        .find(node => node.props.accessibilityLabel === '同时共享音频')!;
+    expect(audio().props.value).toBe(false);
+    await act(async () => audio().props.onValueChange(true));
+    expect(button('画面采集比例：75%').props.accessibilityState.checked).toBe(
+      true,
+    );
+    await act(async () => button('开始共享手机屏幕').props.onPress());
+    expect(media.startScreenShare).toHaveBeenCalledWith(true, 0.75);
+  });
+
+  test.each(['screenSharingBusy', 'sharingScreen'])(
+    '%s disables capture and audio choices while preserving close',
+    async state => {
+      await act(async () => button('打开屏幕共享设置').props.onPress());
+      media[state] = true;
+      await rerender();
+      for (const label of ['原始 (100%)', '75%', '50%']) {
+        const option = button(`画面采集比例：${label}`);
+        expect(option.props.disabled).toBe(true);
+        expect(option.props.accessibilityState.disabled).toBe(true);
+      }
+      expect(
+        renderer.root
+          .findAllByType(Switch)
+          .find(node => node.props.accessibilityLabel === '同时共享音频')!.props
+          .disabled,
+      ).toBe(true);
+      expect(button('关闭屏幕共享设置').props.disabled).not.toBe(true);
+    },
+  );
 
   test('starting annotation during a remote session paints locally instead of sending remote input', async () => {
     media.remoteScreen = {

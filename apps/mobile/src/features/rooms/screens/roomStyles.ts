@@ -588,6 +588,11 @@ export const createRoomStyles = (colors: CoveColors) =>
       backgroundColor: colors.blueSoft,
     },
     limitPresetText: { color: colors.text, fontSize: 14 },
+    screenScaleActive: {
+      borderColor: colors.screen,
+      backgroundColor: colors.amberSoft,
+    },
+    screenScaleDisabled: { opacity: 0.55 },
     audioSettingsContent: {
       width: '100%',
       maxWidth: metrics.sheetWidth,
