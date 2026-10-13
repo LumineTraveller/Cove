@@ -86,8 +86,8 @@ const createStyles = (colors: CoveColors) =>
       overflow: 'hidden',
       alignItems: 'center',
       justifyContent: 'center',
-      backgroundColor: colors.blueSoft,
+    backgroundColor: colors.surfaceRaised,
     },
     image: { width: '100%', height: '100%' },
-    fallback: { color: colors.blue, fontWeight: '800' },
+  fallback: { color: colors.textMuted, fontWeight: '700' },
   });
