@@ -8,7 +8,7 @@ import com.oney.WebRTCModule.CoveScreenModule
 
 class CoveNativePackage : ReactPackage {
   override fun createNativeModules(reactContext: ReactApplicationContext): List<NativeModule> =
-    listOf(CoveNativeModule(reactContext), MobileUpdateModule(reactContext), KeyboardViewportModule(reactContext), CoveScreenModule(reactContext), AccountPasswordsModule(reactContext))
+    listOf(CoveNativeModule(reactContext), MobileUpdateModule(reactContext), KeyboardViewportModule(reactContext), CoveScreenModule(reactContext), AccountPasswordsModule(reactContext), CoveSoundpacksModule(reactContext))
 
   override fun createViewManagers(reactContext: ReactApplicationContext): List<ViewManager<*, *>> =
     emptyList()
