@@ -7,6 +7,7 @@ import {
   StyleSheet,
   Text,
   View,
+  Pressable,
 } from 'react-native';
 import { WifiOff } from 'lucide-react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
@@ -51,6 +52,9 @@ function CoveSession() {
     handleLogin,
     rememberedServers,
     lastServerURL,
+    resumeError,
+    retryAutoLogin,
+    cancelAutoLogin,
     handleServerURLChange,
     handleForget,
     probeServerSecurity,
@@ -68,9 +72,17 @@ function CoveSession() {
     if (config?.serverURL) selectUpdateServer(config.serverURL);
   }, [config?.serverURL, selectUpdateServer]);
   const probeSelectedServer = useCallback(
-    (serverURL: string, allowInvalidServerCertificate: boolean) => {
+    (
+      serverURL: string,
+      allowInvalidServerCertificate: boolean,
+      email?: string,
+    ) => {
       selectUpdateServer(serverURL);
-      return probeServerSecurity(serverURL, allowInvalidServerCertificate);
+      return probeServerSecurity(
+        serverURL,
+        allowInvalidServerCertificate,
+        email,
+      );
     },
     [probeServerSecurity, selectUpdateServer],
   );
@@ -89,12 +101,36 @@ function CoveSession() {
   }
 
   if (!config) {
+    if (resumeError)
+      return (
+        <View style={styles.splash}>
+          <BrandMark size={64} />
+          <Text style={[styles.resumeText, { color: colors.text }]}>
+            {resumeError}
+          </Text>
+          <Pressable
+            accessibilityRole="button"
+            onPress={retryAutoLogin}
+            style={styles.resumeButton}
+          >
+            <Text style={{ color: colors.blue }}>重试连接</Text>
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            onPress={cancelAutoLogin}
+            style={styles.resumeButton}
+          >
+            <Text style={{ color: colors.text }}>返回登录</Text>
+          </Pressable>
+        </View>
+      );
     return (
       <LoginScreen
         saving={savingConfig}
         error={authError}
         onSubmit={handleLogin}
         rememberedServers={rememberedServers}
+        useRememberedSession
         lastServerURL={lastServerURL}
         onServerURLChange={handleServerURLChange}
         onForget={handleForget}
@@ -151,6 +187,17 @@ const createStyles = (colors: CoveColors) =>
       backgroundColor: colors.background,
     },
     splashSpinner: { marginTop: 20 },
+    resumeText: {
+      marginTop: 24,
+      marginHorizontal: 24,
+      textAlign: 'center',
+      lineHeight: 22,
+    },
+    resumeButton: {
+      minHeight: 48,
+      justifyContent: 'center',
+      paddingHorizontal: 24,
+    },
     connectionBanner: {
       position: 'absolute',
       right: 16,

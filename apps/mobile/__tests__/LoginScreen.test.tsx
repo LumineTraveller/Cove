@@ -252,6 +252,7 @@ test('disabled server keeps the legacy login form and does not require a server 
       .find(input => input.props.secureTextEntry)!
       .props.onChangeText('password-123'),
   );
+  await finishProbe();
   expect(inputs().filter(input => input.props.secureTextEntry)).toHaveLength(1);
   const submitButton = renderer.root.findAllByType(TouchableOpacity).at(-1)!;
   expect(submitButton.props.disabled).toBe(false);
@@ -886,7 +887,7 @@ test('a failed server probe can recover without editing the restored address or 
   expect(submitButton().props.disabled).toBe(true);
   await finishProbe();
   expect(probe).toHaveBeenCalledTimes(2);
-  expect(probe).toHaveBeenLastCalledWith(saved.serverURL, false);
+  expect(probe).toHaveBeenLastCalledWith(saved.serverURL, false, saved.email);
   expect(addressInput(renderer).props.value).toBe(saved.serverURL);
   expect(emailInput(renderer).props.value).toBe(saved.email);
   expect(accountPassword(renderer).props.value).toBe(
@@ -898,5 +899,40 @@ test('a failed server probe can recover without editing the restored address or 
       accessibilityLabel: '重试连接服务器',
     }),
   ).toHaveLength(0);
+  await act(async () => renderer.unmount());
+});
+
+test('valid remembered server access hides its password and a revoked probe restores the field', async () => {
+  const probe = jest.fn(async () => ({ ...enabledSecurity, authorized: true }));
+  let renderer!: TestRenderer.ReactTestRenderer;
+  const props = { saving: false, onSubmit: jest.fn(), lastServerURL: 'https://grant.test', onProbeServerSecurity: probe };
+  await act(async () => { renderer = TestRenderer.create(<LoginScreen {...props} />); });
+  await finishProbe();
+  expect(renderer.root.findAllByType(TextInput).filter(input => input.props.secureTextEntry)).toHaveLength(1);
+  probe.mockResolvedValue({ ...enabledSecurity, authorized: false });
+  await act(async () => renderer.update(<LoginScreen {...props} error="Server access revoked" />));
+  await finishProbe();
+  expect(renderer.root.findAllByType(TextInput).filter(input => input.props.secureTextEntry)).toHaveLength(2);
+  await act(async () => renderer.unmount());
+});
+
+test('a remembered account needs only the expired server password, then account invalidation requires its password again', async () => {
+  const saved = { username: 'Alice', serverURL: 'https://grant.test', clientId: 'synthetic-mobile',
+    accountId: 'synthetic-account', email: 'alice@example.test', accountToken: 'synthetic-account-token' };
+  const submit = jest.fn();
+  const props = { saving: false, onSubmit: submit, useRememberedSession: true,
+    rememberedServers: [saved], lastServerURL: saved.serverURL,
+    onProbeServerSecurity: async () => enabledSecurity };
+  let renderer!: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<LoginScreen {...props} />); });
+  await finishProbe();
+  await act(async () => renderer.root.findByProps({ accessibilityLabel: '服务器访问密码' }).props.onChangeText('synthetic-server-password'));
+  const button = () => renderer.root.findByProps({ accessibilityLabel: '登录 Cove' });
+  expect(button().props.disabled).toBe(false);
+  await act(async () => button().props.onPress());
+  expect(submit).toHaveBeenCalledWith(expect.objectContaining({ email: saved.email, password: '', serverPassword: 'synthetic-server-password' }));
+  await act(async () => renderer.update(<LoginScreen {...props} rememberedServers={[{ ...saved, accountToken: undefined }]} error="Account session invalid" />));
+  await finishProbe();
+  expect(button().props.disabled).toBe(true);
   await act(async () => renderer.unmount());
 });

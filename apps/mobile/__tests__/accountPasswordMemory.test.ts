@@ -1,4 +1,5 @@
 import { NativeModules, Platform } from 'react-native';
+jest.mock('@react-native-async-storage/async-storage', () => ({ getItem: async () => null, setItem: async () => undefined, removeItem: async () => undefined }));
 import {
   captureAccountPasswordSaveIntent,
   clearAccountPasswords,

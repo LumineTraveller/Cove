@@ -10,6 +10,7 @@ import { removeAccountPassword } from '../src/features/accounts/accountPasswordM
 
 const mockValues = new Map<string, string>();
 const mockPasswordValues = new Map<string, string>();
+const mockGrantValues = new Map<string, string>();
 let mockDelayedAddressRead: Promise<string | null> | undefined;
 const mockListeners = new Map<string, (...args: any[]) => void>();
 const mockSocket: { connected: boolean; on: jest.Mock; off: jest.Mock; connect: jest.Mock;
@@ -61,6 +62,13 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockValues.clear();
   mockPasswordValues.clear();
+  mockGrantValues.clear();
+  NativeModules.CoveServerAccessGrants = {
+    get: jest.fn(async (server: string, email: string) => ({ available: true, ok: true, value: mockGrantValues.get(JSON.stringify([server, email])) ?? null })),
+    save: jest.fn(async (server: string, email: string, value: string) => { mockGrantValues.set(JSON.stringify([server, email]), value); return { available: true, ok: true }; }),
+    remove: jest.fn(async (server: string, email: string) => { mockGrantValues.delete(JSON.stringify([server, email])); return { available: true, ok: true }; }),
+    clear: jest.fn(async () => { mockGrantValues.clear(); return { available: true, ok: true }; }),
+  };
   mockDelayedAddressRead = undefined;
   mockListeners.clear();
   mockSocket.connected = false;
@@ -89,7 +97,7 @@ beforeEach(() => {
   globalThis.fetch = jest.fn(async (input, init) => {
     const url = String(input);
     if (url.endsWith('/api/security/status')) return response(200, {
-      enabled: true, configured: true, authorized: false, tokenEpoch: 1,
+      enabled: true, configured: true, authorized: new Headers(init?.headers).get('Authorization') === 'Bearer synthetic-access-grant', tokenEpoch: 1,
       bootstrapAvailable: false, secureTransportRequired: false,
     });
     if (url.endsWith('/api/security/access')) {
@@ -165,6 +173,7 @@ test('IP login bypasses native DNS', async () => {
 });
 
 test('saved domain account survives an access-token recovery and reconnects after unlock', async () => {
+  seedGrant();
   const saved = await saveSessionConfig({
     username: account.username, email: account.email, accountId: account.id,
     accountToken: 'synthetic-account-token', serverURL: base,
@@ -229,7 +238,8 @@ test('cancelling memory while authentication is pending prevents a late successf
     release(response(200, { token: 'synthetic-account-token', account }));
     await pending;
   });
-  expect(session.config?.accountId).toBe(account.id);
+  expect(session.config).toBeNull();
+  expect(await readSessionConfig()).toBeNull();
   expect(NativeModules.CoveAccountPasswords.save).not.toHaveBeenCalled();
 });
 
@@ -275,8 +285,8 @@ test('failed deletion after cancelling an in-flight native save remains visible 
     await pending;
     await removing;
   });
-  expect(session.config?.accountId).toBe(account.id);
-  expect(alert).toHaveBeenCalledWith('密码记忆未取消', expect.stringContaining('可能仍保存在本机'));
+  expect(session.config).toBeNull();
+  expect(await readSessionConfig()).toBeNull();
   alert.mockRestore();
 });
 
@@ -315,4 +325,150 @@ test('forgetting a server removes all its remembered account passwords while pre
   expect(mockPasswordValues.size).toBe(1);
   expect(mockPasswordValues.has(JSON.stringify(['https://another.example.test', account.email]))).toBe(true);
   expect(session.rememberedServers).toEqual([]);
+});
+
+function seedGrant(overrides: object = {}) {
+  const now = Date.now();
+  mockGrantValues.set(JSON.stringify([base, account.email]), JSON.stringify({
+    accessToken: 'synthetic-access-grant', verifiedAt: now, lastObservedAt: now,
+    expiresAt: now + 14 * 24 * 60 * 60 * 1000, ...overrides,
+  }));
+}
+async function seedActive() {
+  seedGrant();
+  return saveSessionConfig({ username: account.username, email: account.email, accountId: account.id,
+    accountToken: 'synthetic-account-token', serverURL: base, serverKey: 'host:mobileqa.example.test:443' });
+}
+test('startup resumes the active token after one server check without another password login or renewal', async () => {
+  await seedActive();
+  const original = JSON.parse(mockGrantValues.values().next().value!);
+  await mount();
+  expect(session.sessionReady).toBe(true);
+  expect(session.config?.email).toBe(account.email);
+  expect(jest.mocked(fetch).mock.calls.filter(([url]) => String(url).endsWith('/api/security/status'))).toHaveLength(1);
+  expect(jest.mocked(fetch).mock.calls.some(([url]) => /\/api\/(auth|security)\/(login|access)$/.test(String(url)))).toBe(false);
+  expect(JSON.parse(mockGrantValues.values().next().value!).expiresAt).toBe(original.expiresAt);
+});
+test('revoked grant returns to server login and clears only the grant and active resume intent', async () => {
+  await seedActive();
+  globalThis.fetch = jest.fn(async () => response(200, { enabled: true, configured: true, authorized: false }));
+  await mount();
+  expect(session.config).toBeNull();
+  expect(session.authError).toContain('服务器认证');
+  expect(await readSessionConfig()).toBeNull();
+  expect(mockGrantValues.size).toBe(0);
+  expect(session.rememberedServers[0]?.accountToken).toBe('synthetic-account-token');
+  expect(mockSocket.connect).not.toHaveBeenCalled();
+});
+test('offline startup makes one attempt, preserves credentials, and resumes only after manual retry', async () => {
+  await seedActive();
+  const online = fetch;
+  globalThis.fetch = jest.fn(async () => { throw new TypeError('synthetic offline'); });
+  await mount();
+  expect(session.resumeError).toBeTruthy();
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(mockGrantValues.size).toBe(1);
+  expect((await readSessionConfig())?.accountToken).toBe('synthetic-account-token');
+  expect(mockSocket.connect).not.toHaveBeenCalled();
+  globalThis.fetch = online;
+  await act(async () => session.retryAutoLogin());
+  expect(session.sessionReady).toBe(true);
+});
+test.each(['ACCOUNT_SESSION_INVALID', 'ACCOUNT_AUTH_REQUIRED', 'ACCOUNT_SWITCH_FORBIDDEN', 'AUTH_REQUIRED'])('account invalidation %s returns to account login while retaining server authorization', async code => {
+  await seedActive();
+  mockSocket.emit.mockImplementationOnce((_event, _payload, callback) => callback(null, { ok: false, code, error: 'Synthetic account authorization ended' }));
+  await mount();
+  expect(session.config).toBeNull();
+  expect(await readSessionConfig()).toBeNull();
+  expect(mockGrantValues.size).toBe(1);
+  expect(mockSocket.connect).toHaveBeenCalledTimes(1);
+});
+test('logout removes active resume intent and scoped server grant without picking a historical account', async () => {
+  await seedActive();
+  await mount();
+  await act(async () => session.handleChangeServer());
+  expect(mockGrantValues.size).toBe(0);
+  expect(await readSessionConfig()).toBeNull();
+  await act(async () => renderer.unmount());
+  mockSocket.connect.mockClear();
+  await mount();
+  expect(session.config).toBeNull();
+  expect(mockSocket.connect).not.toHaveBeenCalled();
+});
+test('cancelling a pending startup prevents a late status response from restoring the session', async () => {
+  await seedActive();
+  const online = fetch;
+  let release!: (value: Response) => void;
+  globalThis.fetch = jest.fn((input, init) => String(input).endsWith('/api/security/status')
+    ? new Promise<Response>(resolve => { release = resolve; }) : online(input, init));
+  await mount();
+  await act(async () => session.cancelAutoLogin());
+  await act(async () => release(response(200, { enabled: true, configured: true, authorized: true })));
+  expect(session.config).toBeNull();
+  expect(await readSessionConfig()).toBeNull();
+  expect(mockSocket.connect).not.toHaveBeenCalled();
+});
+
+test.each([true, false])('a hanging startup times out once and ignores late revoked/disabled status after retry (%s)', async enabled => {
+  jest.useFakeTimers();
+  try {
+    await seedActive();
+    const online = fetch;
+    let release!: (value: Response) => void;
+    globalThis.fetch = jest.fn((input, init) => String(input).endsWith('/api/security/status')
+      ? new Promise<Response>(resolve => { release = resolve; }) : online(input, init));
+    await mount();
+    await act(async () => { jest.advanceTimersByTime(12_000); });
+    expect(session.resumeError).toContain('超时');
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(mockGrantValues.size).toBe(1);
+    globalThis.fetch = online;
+    await act(async () => session.retryAutoLogin());
+    expect(session.sessionReady).toBe(true);
+    await act(async () => release(response(200, { enabled, configured: true, authorized: false })));
+    expect(session.sessionReady).toBe(true);
+    expect(mockGrantValues.size).toBe(1);
+    expect((await readSessionConfig())?.accountToken).toBe('synthetic-account-token');
+  } finally { jest.useRealTimers(); }
+});
+
+test('expired server authorization asks only for server password and reuses the remembered account token', async () => {
+  await seedActive();
+  seedGrant({ expiresAt: Date.now() - 1 });
+  await mount();
+  expect(session.config).toBeNull();
+  await submit({ password: '' });
+  expect(session.sessionReady).toBe(true);
+  expect(mockSocket.emit).toHaveBeenCalledWith('user:register', expect.objectContaining({ authToken: 'synthetic-account-token' }), expect.any(Function));
+  expect(jest.mocked(fetch).mock.calls.some(([url]) => String(url).endsWith('/api/auth/login'))).toBe(false);
+  expect(NativeModules.CoveAccountPasswords.save).not.toHaveBeenCalled();
+});
+
+test('one remembered account cannot authorize a different account with an incorrect server password', async () => {
+  seedGrant();
+  await mount();
+  await act(async () => { await session.probeServerSecurity(base, false, account.email); });
+  await submit({ email: 'bob@example.test', serverPassword: 'synthetic-wrong-server-password' });
+  expect(session.config).toBeNull();
+  expect(session.authError).toBe('服务器访问密码错误');
+  expect(jest.mocked(fetch).mock.calls.some(([url]) => String(url).endsWith('/api/auth/login'))).toBe(false);
+});
+
+test('a timed-out native revocation cleanup cannot clear active state or cancel a later manual retry', async () => {
+  jest.useFakeTimers();
+  try {
+    await seedActive();
+    globalThis.fetch = jest.fn(async () => response(200, { enabled: true, configured: true, authorized: false }));
+    let release!: (value: object) => void;
+    NativeModules.CoveServerAccessGrants.remove.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    await mount();
+    await act(async () => { jest.advanceTimersByTime(12_000); });
+    expect(session.resumeError).toContain('超时');
+    expect((await readSessionConfig())?.accountToken).toBe('synthetic-account-token');
+    await act(async () => release({ available: true, ok: true }));
+    expect((await readSessionConfig())?.accountToken).toBe('synthetic-account-token');
+    await act(async () => session.retryAutoLogin());
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(session.authError).toContain('服务器认证');
+  } finally { jest.useRealTimers(); }
 });

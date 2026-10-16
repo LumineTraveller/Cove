@@ -17,18 +17,17 @@ import java.util.concurrent.Executors
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 
-private class AndroidAccountPasswordKey {
+internal class AndroidAccountPasswordKey(private val alias: String = "cove.account.passwords.v1") {
   companion object {
-    private const val ALIAS = "cove.account.passwords.v1"
     private val lock = Any()
   }
 
   fun key(create: Boolean): SecretKey = synchronized(lock) {
     val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-    (store.getKey(ALIAS, null) as? SecretKey)?.let { return@synchronized it }
+    (store.getKey(alias, null) as? SecretKey)?.let { return@synchronized it }
     if (!create) throw AccountPasswordKeyLostException()
     KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").apply {
-      init(KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+      init(KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
         .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
         .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
         .setKeySize(256)
@@ -38,8 +37,11 @@ private class AndroidAccountPasswordKey {
   }
 }
 
-private class AndroidAccountPasswordStorage(private val directory: File) : AccountPasswordStorage {
-  private val file = AtomicFile(File(directory, "cove-account-passwords-v2.bin"))
+internal class AndroidAccountPasswordStorage(
+  private val directory: File,
+  filename: String = "cove-account-passwords-v2.bin",
+) : AccountPasswordStorage {
+  private val file = AtomicFile(File(directory, filename))
 
   override fun read(): ByteArray? = try {
     file.openRead().use { input ->

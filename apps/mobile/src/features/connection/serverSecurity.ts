@@ -35,6 +35,9 @@ export interface ServerSecurityStatus extends Partial<ClientUpgradePolicy> {
 export interface ServerAccessGrant {
   accessToken: string;
   expiresAt: number;
+  /** Local receipt of an actual successful password check, never refreshed by status. */
+  verifiedAt?: number;
+  lastObservedAt?: number;
 }
 
 export class ServerSecurityClientError extends Error {
@@ -62,9 +65,40 @@ export function requiresServerAccessRecovery(code: unknown): boolean {
   );
 }
 
-// Keep the bearer token only for the current process. Account credentials and
-// server addresses can be remembered; the server-wide unlock token cannot.
+// Active grants remain process-local. Opted-in account-scoped persistence is
+// handled separately by serverAccessMemory through Android Keystore.
 const accessTokens = new Map<string, ServerAccessGrant>();
+const exchangeRevisions = new Map<string, number>();
+let exchangeRevision = 0;
+export function clearAllServerAccessTokens() {
+  accessTokens.clear();
+  invalidateServerAccessExchanges();
+}
+export function invalidateServerAccessExchanges() {
+  exchangeRevision += 1;
+}
+function beginExchange(serverURL: string) {
+  const key = keyFor(serverURL);
+  const revision = (exchangeRevisions.get(key) ?? 0) + 1;
+  exchangeRevisions.set(key, revision);
+  const globalRevision = exchangeRevision;
+  return () =>
+    globalRevision === exchangeRevision &&
+    exchangeRevisions.get(key) === revision;
+}
+function commitExchange(
+  serverURL: string,
+  grant: ServerAccessGrant,
+  current: () => boolean,
+) {
+  if (!current())
+    throw new ServerSecurityClientError(
+      '服务器认证请求已取消',
+      499,
+      'REQUEST_CANCELLED',
+    );
+  setServerAccessToken(serverURL, grant);
+}
 
 export function normalizeServerSecurityURL(value: string): string {
   try {
@@ -100,7 +134,12 @@ export function getServerAccessGrant(
   const key = keyFor(serverURL);
   if (!key) return null;
   const grant = accessTokens.get(key);
-  if (!grant || grant.expiresAt <= Date.now()) {
+  const now = Date.now();
+  if (
+    !grant ||
+    grant.expiresAt <= now ||
+    (grant.lastObservedAt !== undefined && now < grant.lastObservedAt)
+  ) {
     accessTokens.delete(key);
     return null;
   }
@@ -122,7 +161,10 @@ export function setServerAccessToken(
 
 export function clearServerAccessToken(serverURL: string): void {
   const key = keyFor(serverURL);
-  if (key) accessTokens.delete(key);
+  if (key) {
+    accessTokens.delete(key);
+    exchangeRevisions.set(key, (exchangeRevisions.get(key) ?? 0) + 1);
+  }
 }
 
 function requestURL(serverURL: string, target: string): string {
@@ -210,9 +252,15 @@ async function assertResponse(
 export async function readServerSecurityStatus(
   serverURL: string,
 ): Promise<ServerSecurityStatus> {
+  const key = keyFor(serverURL);
+  const globalRevision = exchangeRevision;
+  const scopeRevision = exchangeRevisions.get(key);
+  const current = () =>
+    globalRevision === exchangeRevision &&
+    scopeRevision === exchangeRevisions.get(key);
   const response = await serverFetch(serverURL, '/api/security/status');
   if (response.status === 404) {
-    clearServerAccessToken(serverURL);
+    if (current()) clearServerAccessToken(serverURL);
     return {
       enabled: false,
       configured: false,
@@ -230,7 +278,7 @@ export async function readServerSecurityStatus(
     (payload.enabled !== false &&
       typeof payload.configured === 'boolean' &&
       typeof payload.tokenEpoch === 'number');
-  if (!enabled) clearServerAccessToken(serverURL);
+  if (!enabled && current()) clearServerAccessToken(serverURL);
   return {
     enabled,
     configured: payload.configured === true,
@@ -253,13 +301,23 @@ function grantFromPayload(payload: Record<string, unknown>): ServerAccessGrant {
       'SECURITY_UNAVAILABLE',
     );
   }
-  return { accessToken: payload.accessToken, expiresAt: payload.expiresAt };
+  const verifiedAt = Date.now();
+  return {
+    accessToken: payload.accessToken,
+    expiresAt: Math.min(
+      payload.expiresAt,
+      verifiedAt + 14 * 24 * 60 * 60 * 1000,
+    ),
+    verifiedAt,
+    lastObservedAt: verifiedAt,
+  };
 }
 
 export async function unlockServer(
   serverURL: string,
   password: string,
 ): Promise<ServerAccessGrant> {
+  const current = beginExchange(serverURL);
   const payload = await assertResponse(
     await serverFetch(serverURL, '/api/security/access', {
       method: 'POST',
@@ -268,7 +326,7 @@ export async function unlockServer(
     }),
   );
   const grant = grantFromPayload(payload);
-  setServerAccessToken(serverURL, grant);
+  commitExchange(serverURL, grant, current);
   return grant;
 }
 
@@ -277,6 +335,7 @@ export async function bootstrapServer(
   bootstrapToken: string,
   password: string,
 ): Promise<ServerAccessGrant> {
+  const current = beginExchange(serverURL);
   const payload = await assertResponse(
     await serverFetch(serverURL, '/api/security/bootstrap', {
       method: 'POST',
@@ -285,7 +344,7 @@ export async function bootstrapServer(
     }),
   );
   const grant = grantFromPayload(payload);
-  setServerAccessToken(serverURL, grant);
+  commitExchange(serverURL, grant, current);
   return grant;
 }
 
@@ -300,8 +359,14 @@ export async function ensureServerAccess(options: {
       const status = await readServerSecurityStatus(options.serverURL);
       if (!status.enabled) return null;
       if (status.authorized) return existing;
-    } catch {
-      /* Fall through to password verification. */
+    } catch (cause) {
+      // Transport failures do not prove revocation and must not erase memory or
+      // turn an automatic resume into another password request.
+      if (
+        !(cause instanceof ServerSecurityClientError) ||
+        !requiresServerAccessRecovery(cause.code)
+      )
+        throw cause;
     }
     clearServerAccessToken(options.serverURL);
   }

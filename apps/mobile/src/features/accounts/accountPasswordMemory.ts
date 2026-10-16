@@ -1,6 +1,15 @@
 import { NativeModules, Platform } from 'react-native';
 import { normalizeServerSecurityURL } from '../connection/serverSecurity';
 import { validAccountEmail } from './accountAuth';
+import {
+  forgetAllServerAccess,
+  forgetServerAccess,
+} from '../connection/serverAccessMemory';
+import {
+  clearServerConfig,
+  invalidateSessionConfigSaves,
+  readSessionConfig,
+} from '../settings/storage';
 
 export interface PasswordMemoryResult {
   available: boolean;
@@ -220,9 +229,24 @@ export function removeAccountPassword(
   email: string,
 ): Promise<PasswordMemoryResult> {
   invalidateAccountPasswordSave(serverURL, email);
+  invalidateSessionConfigSaves();
+  const revoked = forgetServerAccess(serverURL, email);
   const scope = normalizeAccountPasswordScope(serverURL, email);
   return queueMutation(async () => {
     const module = native();
+    if (!(await revoked)) return { available: !!module, ok: false };
+    try {
+      const active = await readSessionConfig();
+      if (
+        scope &&
+        active &&
+        normalizeAccountPasswordScope(active.serverURL, active.email)?.key ===
+          scope.key
+      )
+        await clearServerConfig({ forgetSession: false });
+    } catch {
+      return { available: !!module, ok: false };
+    }
     if (!module || !scope)
       return { available: !!module, ok: true, remembered: false };
     try {
@@ -236,8 +260,19 @@ export function removeAccountPassword(
 }
 export function clearAccountPasswords(): Promise<PasswordMemoryResult> {
   invalidateAccountPasswordSaves();
+  const revoked = forgetAllServerAccess();
+  const cancelled = clearServerConfig({ forgetSession: false }).then(
+    () => true,
+    () => false,
+  );
   return queueMutation(async () => {
     const module = native();
+    try {
+      if (!(await cancelled)) return { available: !!module, ok: false };
+      if (!(await revoked)) return { available: !!module, ok: false };
+    } catch {
+      return { available: !!module, ok: false };
+    }
     if (!module) return { available: false, ok: true, remembered: false };
     try {
       return resultWithoutPassword(await module.clear());

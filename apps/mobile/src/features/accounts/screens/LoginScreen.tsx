@@ -63,11 +63,13 @@ interface Props {
   onSubmit: (request: AccountAuthRequest) => void;
   rememberedServers?: RememberedServer[];
   lastServerURL?: string;
+  useRememberedSession?: boolean;
   onServerURLChange?: (value: string) => void;
   onForget?: (server: RememberedServer) => void;
   onProbeServerSecurity?: (
     serverURL: string,
     allowInvalidServerCertificate: boolean,
+    email?: string,
   ) => Promise<ServerSecurityStatus>;
 }
 
@@ -82,6 +84,7 @@ export function LoginScreen({
   onServerURLChange,
   onForget,
   onProbeServerSecurity,
+  useRememberedSession = false,
 }: Props) {
   const { theme, colors } = useCoveTheme();
   const styles = useThemedStyles(createStyles);
@@ -315,6 +318,7 @@ export function LoginScreen({
   };
   const canUseException = Platform.OS === 'android' && !!httpsOrigin(serverURL);
   useEffect(() => {
+    if (saving) return;
     const normalized = normalizeServerSecurityURL(serverURL);
     if (!serverURL.trim()) {
       setSecurityProbe({ phase: 'idle' });
@@ -331,6 +335,7 @@ export function LoginScreen({
         ? onProbeServerSecurity(
             normalized,
             canUseException && certificateException,
+            email,
           )
         : readServerSecurityStatus(normalized);
       void probe
@@ -354,15 +359,30 @@ export function LoginScreen({
     canUseException,
     onProbeServerSecurity,
     securityProbeRevision,
+    email,
+    error,
+    saving,
   ]);
   const securityStatus =
     securityProbe.phase === 'ready' ? securityProbe.status : null;
   const securityEnabled = securityStatus?.enabled === true;
+  const serverPasswordRequired =
+    securityEnabled && securityStatus?.authorized !== true;
   const bootstrapRequired =
     securityEnabled && securityStatus.configured === false;
   const bootstrapAvailable =
     bootstrapRequired && securityStatus.bootstrapAvailable;
   const securityReady = securityProbe.phase === 'ready';
+  const rememberedSession =
+    useRememberedSession &&
+    mode === 'login' &&
+    rememberedServers.find(
+      saved =>
+        !!saved.accountToken &&
+        normalizeServerSecurityURL(saved.serverURL) ===
+          normalizeServerSecurityURL(serverURL) &&
+        saved.email.toLowerCase() === email.trim().toLowerCase(),
+    );
   const submit = () =>
     onSubmit({
       mode,
@@ -377,9 +397,9 @@ export function LoginScreen({
     });
   const canSubmit =
     validAccountEmail(email) &&
-    password.length >= 8 &&
+    (!!rememberedSession || password.length >= 8) &&
     securityReady &&
-    (!securityEnabled || serverPassword.length >= 8) &&
+    (!serverPasswordRequired || serverPassword.length >= 8) &&
     (!bootstrapRequired || (bootstrapAvailable && !!bootstrapToken.trim())) &&
     !!serverURL.trim() &&
     (mode === 'login' || !!username.trim()) &&
@@ -608,6 +628,13 @@ export function LoginScreen({
                 )}
               <View style={styles.connectionPanel}>
                 <Text style={styles.sectionLabel}>服务器连接</Text>
+                {!!rememberedSession && (
+                  <Text style={styles.help}>
+                    {serverPasswordRequired
+                      ? '账号已记住，只需验证服务器密码；账号密码可留空。'
+                      : '账号已记住，可直接继续登录；账号密码可留空。'}
+                  </Text>
+                )}
                 <Text style={[styles.label, styles.secondLabel]}>
                   服务器地址
                 </Text>
@@ -888,7 +915,7 @@ export function LoginScreen({
                   <Text style={styles.clearMemoryText}>清除已记住密码</Text>
                 </TouchableOpacity>
               </View>
-              {securityEnabled && (
+              {serverPasswordRequired && (
                 <Text style={styles.help}>
                   只记住账号密码；服务器访问密码仍需填写。
                 </Text>
@@ -899,7 +926,7 @@ export function LoginScreen({
                 </Text>
               ) : null}
 
-              {securityEnabled && (
+              {serverPasswordRequired && (
                 <View style={styles.securityPanel}>
                   <Text style={styles.sectionLabel}>服务器访问保护</Text>
                   <Text style={[styles.label, styles.secondLabel]}>
