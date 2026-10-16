@@ -10,6 +10,7 @@ import {
   isSecureHttpRequest,
   isSecureSocket,
   readBearerToken,
+  SERVER_ACCESS_TOKEN_LIFETIME_MS,
   ServerSecurityError,
 } from '../src/features/security/serverSecurity';
 
@@ -155,4 +156,143 @@ test('server password enforcement defaults on and only explicit opt-out disables
     assert.equal(isServerSecurityEnabled(value), true, String(value));
   for (const value of ['false', '0', 'no', 'OFF', ' false '])
     assert.equal(isServerSecurityEnabled(value), false, value);
+});
+
+test('server access lasts fourteen days from explicit authentication and validation never renews it', async () => {
+  let now = 1_700_000_000_000;
+  const authenticatedAt = now;
+  const fourteenDays = 14 * 24 * 60 * 60 * 1000;
+  const { database, db } = securityDatabase();
+  const security = createServerSecurityStore(db, {
+    bootstrapToken: 'bootstrap-credential-for-tests',
+    now: () => now,
+  });
+  const first = await security.bootstrap('bootstrap-credential-for-tests', 'server-password-123');
+  assert.equal(SERVER_ACCESS_TOKEN_LIFETIME_MS, fourteenDays);
+  assert.equal(first.expiresAt, authenticatedAt + fourteenDays);
+
+  now += 7 * 24 * 60 * 60 * 1000;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    assert.equal(security.accessForToken(first.accessToken)?.expiresAt, first.expiresAt);
+    security.status();
+  }
+  const restarted = createServerSecurityStore(db, { now: () => now });
+  assert.equal(restarted.accessForToken(first.accessToken)?.expiresAt, first.expiresAt);
+  const stored = database.prepare('SELECT createdAt, expiresAt FROM server_access_sessions').get() as { createdAt: number; expiresAt: number };
+  assert.deepEqual({ ...stored }, { createdAt: authenticatedAt, expiresAt: first.expiresAt });
+  now = first.expiresAt - 1;
+  assert.ok(restarted.accessForToken(first.accessToken));
+  now = first.expiresAt;
+  assert.equal(restarted.accessForToken(first.accessToken), null);
+  database.close();
+});
+
+test('persisted clock rollback revokes old grants once and permits fresh password authentication', async () => {
+  let now = 1_700_000_000_000;
+  const { database, db } = securityDatabase();
+  const original = createServerSecurityStore(db, {
+    bootstrapToken: 'bootstrap-credential-for-tests',
+    now: () => now,
+  });
+  const first = await original.bootstrap('bootstrap-credential-for-tests', 'server-password-123');
+  now += 10_000;
+  assert.ok(original.accessForToken(first.accessToken));
+  let revoked = 0;
+  const restarted = createServerSecurityStore(db, {
+    now: () => now,
+    onAccessTokensRevoked: () => { revoked += 1; },
+  });
+
+  // The clock is still after createdAt: the persisted observation must catch
+  // rollback even when merely checking for future-created sessions cannot.
+  now -= 5_000;
+  assert.equal(restarted.accessForToken(first.accessToken), null);
+  assert.equal(restarted.status().tokenEpoch, 2);
+  assert.equal(revoked, 1);
+  assert.equal(restarted.accessForToken(first.accessToken), null);
+  assert.equal(restarted.status().tokenEpoch, 2);
+  assert.equal(revoked, 1);
+  assert.equal(database.prepare('SELECT COUNT(*) AS count FROM server_access_sessions').get().count, 0);
+
+  const fresh = await restarted.unlock('server-password-123');
+  assert.ok(restarted.accessForToken(fresh.accessToken));
+  assert.equal(fresh.expiresAt, now + SERVER_ACCESS_TOKEN_LIFETIME_MS);
+  now += 5_000;
+  assert.equal(restarted.accessForToken(first.accessToken), null);
+  assert.ok(restarted.accessForToken(fresh.accessToken));
+  assert.equal(revoked, 1);
+  database.close();
+});
+
+test('legacy access sessions created in the future fail closed on clock migration', async () => {
+  let now = 1_700_000_000_000;
+  const { database, db } = securityDatabase();
+  const original = createServerSecurityStore(db, {
+    bootstrapToken: 'bootstrap-credential-for-tests',
+    now: () => now,
+  });
+  const first = await original.bootstrap('bootstrap-credential-for-tests', 'server-password-123');
+  database.exec('DROP TABLE server_security_clock');
+  now -= 1;
+  let revoked = 0;
+  const migrated = createServerSecurityStore(db, {
+    now: () => now,
+    onAccessTokensRevoked: () => { revoked += 1; },
+  });
+  assert.equal(migrated.accessForToken(first.accessToken), null);
+  assert.equal(revoked, 1);
+  assert.ok(await migrated.unlock('server-password-123'));
+  database.close();
+});
+
+test('revocation during password verification cannot issue a grant in the new epoch', async () => {
+  const { database, db } = securityDatabase();
+  const security = createServerSecurityStore(db, { bootstrapToken: 'bootstrap-credential-for-tests' });
+  const first = await security.bootstrap('bootstrap-credential-for-tests', 'server-password-123');
+  const pending = security.unlock('server-password-123');
+  security.revokeAll();
+  await assert.rejects(pending, (error: unknown) =>
+    error instanceof ServerSecurityError && error.code === 'SERVER_ACCESS_INVALID');
+  assert.equal(security.accessForToken(first.accessToken), null);
+  assert.equal(database.prepare('SELECT COUNT(*) AS count FROM server_access_sessions').get().count, 0);
+  assert.ok(await security.unlock('server-password-123'));
+  database.close();
+});
+
+test('revocation during password rotation cannot overwrite the current password', async () => {
+  const { database, db } = securityDatabase();
+  const security = createServerSecurityStore(db, { bootstrapToken: 'bootstrap-credential-for-tests' });
+  await security.bootstrap('bootstrap-credential-for-tests', 'server-password-123');
+  const pending = security.rotate('server-password-123', 'rotated-password-123');
+  security.revokeAll();
+  await assert.rejects(pending, (error: unknown) =>
+    error instanceof ServerSecurityError && error.code === 'SERVER_ACCESS_INVALID');
+  assert.ok(await security.unlock('server-password-123'));
+  await assert.rejects(() => security.unlock('rotated-password-123'), (error: unknown) =>
+    error instanceof ServerSecurityError && error.code === 'INVALID_PASSWORD');
+  database.close();
+});
+
+test('concurrent explicit authentications observe time at issuance without revoking one another', async () => {
+  let now = 1_700_000_000_000;
+  let revoked = 0;
+  const { database, db } = securityDatabase();
+  const security = createServerSecurityStore(db, {
+    bootstrapToken: 'bootstrap-credential-for-tests',
+    now: () => now,
+    onAccessTokensRevoked: () => { revoked += 1; },
+  });
+  await security.bootstrap('bootstrap-credential-for-tests', 'server-password-123');
+  const first = security.unlock('server-password-123');
+  now += 100;
+  const second = security.unlock('server-password-123');
+  now += 100;
+  const results = await Promise.all([first, second]);
+  for (const result of results) {
+    assert.equal(result.expiresAt, now + SERVER_ACCESS_TOKEN_LIFETIME_MS);
+    assert.ok(security.accessForToken(result.accessToken));
+  }
+  assert.equal(security.status().tokenEpoch, 1);
+  assert.equal(revoked, 0);
+  database.close();
 });
