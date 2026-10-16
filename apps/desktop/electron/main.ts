@@ -14,6 +14,8 @@ import {
 import path from "path";
 import { AccountPasswordStore } from './account-password-store';
 import { registerAccountPasswordIpc } from './account-password-ipc';
+import { ServerAccessStore } from './server-access-store';
+import { registerServerAccessIpc } from './server-access-ipc';
 import { readFileSync, mkdirSync } from "node:fs";
 import { promises as dns } from "node:dns";
 import { openUpdaterLog, startAutoUpdater } from "./updater";
@@ -291,6 +293,8 @@ function createWindow() {
 
 app.whenReady().then(() => {
   registerAccountPasswordIpc(ipcMain, new AccountPasswordStore(path.join(app.getPath('userData'), 'account-passwords.v1.json'), safeStorage),
+    event => event.sender === mainWindow?.webContents && event.senderFrame === mainWindow?.webContents.mainFrame);
+  registerServerAccessIpc(ipcMain, new ServerAccessStore(path.join(app.getPath('userData'), 'server-access.v1.json'), safeStorage),
     event => event.sender === mainWindow?.webContents && event.senderFrame === mainWindow?.webContents.mainFrame);
   const annotationSender = (event: Electron.IpcMainInvokeEvent) =>
     event.sender === mainWindow?.webContents && event.senderFrame === mainWindow?.webContents.mainFrame;

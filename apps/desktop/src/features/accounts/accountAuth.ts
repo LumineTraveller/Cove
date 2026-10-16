@@ -235,8 +235,18 @@ export async function enrichRememberedLoginIdentities(): Promise<RememberedLogin
       return { ...entry, serverKey: identity.key };
     }),
   );
+  // DNS can finish after logout, forgetting, or another login. Only copy the
+  // resolved identity onto records that still exist, preserving their latest
+  // tokens, profiles, and order rather than restoring the captured snapshot.
+  const identityKeys = new Map(enriched.map((entry) => [
+    JSON.stringify([entry.serverUrl, entry.accountId]), entry.serverKey,
+  ]));
+  const latest = readRememberedLogins().map((entry) => {
+    const serverKey = identityKeys.get(JSON.stringify([entry.serverUrl, entry.accountId]));
+    return !entry.serverKey && serverKey ? { ...entry, serverKey } : entry;
+  });
   const seen = new Set<string>();
-  const merged = enriched.filter((entry) => {
+  const merged = latest.filter((entry) => {
     const key = JSON.stringify([entry.serverKey ?? `url:${entry.serverUrl}`, entry.accountId]);
     if (seen.has(key)) return false;
     seen.add(key);
@@ -246,7 +256,9 @@ export async function enrichRememberedLoginIdentities(): Promise<RememberedLogin
     localStorage.setItem(HISTORY_KEY, JSON.stringify(merged));
     const current = legacySession();
     if (current && !current.serverKey) {
-      const matching = merged.find((entry) => entry.serverUrl === current.serverUrl);
+      const matching = merged.find((entry) =>
+        entry.serverUrl === current.serverUrl && entry.accountId === current.accountId,
+      );
       if (matching?.serverKey)
         localStorage.setItem(
           SESSION_KEY,
@@ -259,9 +271,11 @@ export async function enrichRememberedLoginIdentities(): Promise<RememberedLogin
   return merged;
 }
 
-export async function rememberAccountSessionResolved(session: AccountSession): Promise<void> {
+export async function rememberAccountSessionResolved(session: AccountSession, isCurrent: () => boolean = () => true): Promise<void> {
   await enrichRememberedLoginIdentities();
+  if (!isCurrent()) return;
   const identity = await resolveServerIdentity(session.serverUrl);
+  if (!isCurrent()) return;
   rememberAccountSession({ ...session, serverKey: identity.key });
 }
 

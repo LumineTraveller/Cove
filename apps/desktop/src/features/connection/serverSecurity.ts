@@ -64,20 +64,19 @@ export function requiresServerAccessRecovery(code: unknown): boolean {
   );
 }
 
-// Account sessions may be remembered for convenience, but a bearer token that
-// unlocks every REST and Socket.IO operation is never written to localStorage.
-// A sessionStorage copy lets the renderer reload after the first login without
-// asking for the server password again; it disappears with the browser/window
-// session and is not used by the mobile app. It is only ever put in a URL for
-// the short-lived static media helper below.
+// Durable grants are OS-encrypted through the main process, bound to an exact
+// URL and account. The session copy only bridges the post-login renderer reload.
 const accessTokens = new Map<string, ServerAccessGrant>();
+const grantOwners = new Map<string, string>();
+const grantObservedAt = new Map<string, number>();
+const CLOCK_ROLLBACK_TOLERANCE = 5 * 60 * 1000;
 const SESSION_ACCESS_KEY = 'cove_server_access_session';
 
 function readSessionAccessTokens(): void {
   try {
     const parsed = JSON.parse(sessionStorage.getItem(SESSION_ACCESS_KEY) ?? '{}') as Record<
       string,
-      ServerAccessGrant
+      ServerAccessGrant & { email?: string; lastObservedAt?: number }
     >;
     Object.entries(parsed).forEach(([key, grant]) => {
       if (
@@ -85,8 +84,11 @@ function readSessionAccessTokens(): void {
         typeof grant.accessToken === 'string' &&
         typeof grant.expiresAt === 'number' &&
         grant.expiresAt > Date.now()
-      )
-        accessTokens.set(key, grant);
+      ) {
+        accessTokens.set(key, { accessToken: grant.accessToken, expiresAt: grant.expiresAt });
+        if (typeof grant.email === 'string' && grant.email.trim()) grantOwners.set(key, grant.email.trim().toLowerCase());
+        grantObservedAt.set(key, Number.isFinite(grant.lastObservedAt) ? grant.lastObservedAt! : Date.now());
+      }
     });
   } catch {
     /* sessionStorage may be unavailable in tests or privacy mode. */
@@ -95,7 +97,8 @@ function readSessionAccessTokens(): void {
 
 function writeSessionAccessTokens(): void {
   try {
-    sessionStorage.setItem(SESSION_ACCESS_KEY, JSON.stringify(Object.fromEntries(accessTokens)));
+    sessionStorage.setItem(SESSION_ACCESS_KEY, JSON.stringify(Object.fromEntries([...accessTokens].map(([key, grant]) =>
+      [key, { ...grant, email: grantOwners.get(key), lastObservedAt: grantObservedAt.get(key) }]))));
   } catch {
     /* The current in-memory token remains usable. */
   }
@@ -131,11 +134,19 @@ export function getServerAccessGrant(serverURL: string): ServerAccessGrant | nul
   const key = serverKey(serverURL);
   if (!key) return null;
   const grant = accessTokens.get(key);
-  if (!grant || grant.expiresAt <= Date.now()) {
+  const now = Date.now();
+  const clockRolledBack = now + CLOCK_ROLLBACK_TOLERANCE < (grantObservedAt.get(key) ?? now);
+  if (!grant || grant.expiresAt <= now || clockRolledBack) {
+    const owner = grantOwners.get(key);
     accessTokens.delete(key);
+    grantOwners.delete(key);
+    grantObservedAt.delete(key);
     writeSessionAccessTokens();
+    if (clockRolledBack) void forgetServerAccess(key, owner).catch(() => undefined);
     return null;
   }
+  grantObservedAt.set(key, Math.max(now, grantObservedAt.get(key) ?? now));
+  writeSessionAccessTokens();
   return grant;
 }
 
@@ -146,21 +157,139 @@ export function getServerAccessToken(serverURL: string): string | null {
 export function setServerAccessToken(serverURL: string, grant: ServerAccessGrant): void {
   const key = serverKey(serverURL);
   if (!key || !grant.accessToken || !Number.isFinite(grant.expiresAt)) return;
+  invalidateServerOperations(key);
   accessTokens.set(key, grant);
+  grantOwners.delete(key);
+  grantObservedAt.set(key, Date.now());
   writeSessionAccessTokens();
 }
 
 export function clearServerAccessToken(serverURL: string): void {
   const key = serverKey(serverURL);
   if (key) {
+    invalidateServerOperations(key);
     accessTokens.delete(key);
+    grantOwners.delete(key);
+    grantObservedAt.delete(key);
     writeSessionAccessTokens();
   }
 }
 
 export function clearAllServerAccessTokens(): void {
+  operationGeneration += 1;
   accessTokens.clear();
+  grantOwners.clear();
+  grantObservedAt.clear();
   writeSessionAccessTokens();
+}
+
+// Serialize IPC mutations: a forget/clear queued during a save always executes
+// after it. Generations prevent pending reads and delayed saves from restoring it.
+let operationGeneration = 0;
+const serverGenerations = new Map<string, number>();
+const accountGenerations = new Map<string, number>();
+const restores = new Map<string, Promise<boolean>>();
+const exchanges = new Map<string, number>();
+let storageOperations: Promise<unknown> = Promise.resolve();
+function scopeFor(serverURL: string, email: string): string {
+  return JSON.stringify([serverKey(serverURL), email.trim().toLowerCase()]);
+}
+function invalidateServerOperations(serverURL: string): void {
+  serverGenerations.set(serverURL, (serverGenerations.get(serverURL) ?? 0) + 1);
+}
+function operationIsCurrent(server: string, scope: string): () => boolean {
+  const all = operationGeneration, serverVersion = serverGenerations.get(server), account = accountGenerations.get(scope);
+  return () => all === operationGeneration && serverVersion === serverGenerations.get(server) && account === accountGenerations.get(scope);
+}
+function storageOperation<T>(run: () => Promise<T>): Promise<T> {
+  const next = storageOperations.then(run, run);
+  storageOperations = next.catch(() => undefined);
+  return next;
+}
+function assertCurrent(current: () => boolean): void {
+  if (!current()) throw new DOMException('认证操作已取消', 'AbortError');
+}
+function exchangeIsCurrent(serverURL: string): () => boolean {
+  const server = serverKey(serverURL), current = operationIsCurrent(server, '');
+  const revision = (exchanges.get(server) ?? 0) + 1;
+  exchanges.set(server, revision);
+  return () => current() && exchanges.get(server) === revision;
+}
+
+/** Restores locally only. The caller must still verify authorization with the server. */
+export function restoreServerAccess(serverURL: string, email: string): Promise<boolean> {
+  const server = serverKey(serverURL), account = email.trim().toLowerCase();
+  if (!server || !account) return Promise.resolve(false);
+  const scope = scopeFor(server, account);
+  const pending = restores.get(scope);
+  if (pending) return pending;
+  const existing = getServerAccessGrant(server);
+  const bridge = existing && grantOwners.get(server) === account ? existing : null;
+  // Legacy/unbound and other-account session copies may not authorize this
+  // account. Clearing memory never deletes another account's durable record.
+  if (!bridge) clearServerAccessToken(server);
+  if (typeof window === 'undefined' || !window.coveServerAccess) return Promise.resolve(Boolean(bridge));
+  const current = operationIsCurrent(server, scope);
+  const operation = storageOperation(async () => {
+    if (!current()) return false;
+    const result = await window.coveServerAccess!.get(server, account).catch(() => null);
+    if (!current()) return false;
+    if (!result?.ok || !result.available || !result.grant || result.grant.expiresAt <= Date.now())
+      return Boolean(bridge && getServerAccessGrant(server)?.accessToken === bridge.accessToken && grantOwners.get(server) === account);
+    setServerAccessToken(server, result.grant);
+    grantOwners.set(server, account);
+    writeSessionAccessTokens();
+    return true;
+  });
+  restores.set(scope, operation);
+  void operation.finally(() => { if (restores.get(scope) === operation) restores.delete(scope); });
+  return operation;
+}
+
+/** Call only after the matching account successfully authenticated. Never changes expiresAt. */
+export function rememberServerAccess(serverURL: string, email: string): Promise<boolean> {
+  const server = serverKey(serverURL), account = email.trim().toLowerCase(), grant = getServerAccessGrant(serverURL);
+  if (!server || !account || !grant || (grantOwners.has(server) && grantOwners.get(server) !== account)) return Promise.resolve(false);
+  // Bind the reload bridge after account success even if durable OS storage is
+  // unavailable, so manual login can enter the app without an auth/reload loop.
+  grantOwners.set(server, account);
+  writeSessionAccessTokens();
+  if (typeof window === 'undefined' || !window.coveServerAccess) return Promise.resolve(false);
+  const scope = scopeFor(server, account), current = operationIsCurrent(server, scope);
+  return storageOperation(async () => {
+    if (!current() || getServerAccessGrant(server)?.accessToken !== grant.accessToken) return false;
+    const result = await window.coveServerAccess!.set(server, account, grant).catch(() => null);
+    return current() && result?.available === true && result.ok;
+  });
+}
+
+/** Invalidation is synchronous even though deleting the encrypted record is asynchronous. */
+export function forgetServerAccess(serverURL: string, email?: string): Promise<void> {
+  const server = serverKey(serverURL);
+  if (!server) return Promise.resolve();
+  const account = email?.trim().toLowerCase();
+  if (account === undefined) clearServerAccessToken(server);
+  else {
+    const scope = scopeFor(server, account);
+    accountGenerations.set(scope, (accountGenerations.get(scope) ?? 0) + 1);
+    if (!grantOwners.has(server) || grantOwners.get(server) === account) clearServerAccessToken(server);
+  }
+  return storageOperation(async () => {
+    if (typeof window !== 'undefined' && window.coveServerAccess) {
+      const result = await window.coveServerAccess.remove(server, account);
+      if (!result.ok) throw new Error('无法清除已记住的服务器认证，请重试');
+    }
+  });
+}
+
+export function clearRememberedServerAccess(): Promise<void> {
+  clearAllServerAccessTokens();
+  return storageOperation(async () => {
+    if (typeof window !== 'undefined' && window.coveServerAccess) {
+      const result = await window.coveServerAccess.clear();
+      if (!result.ok) throw new Error('无法清除已记住的服务器认证，请重试');
+    }
+  });
 }
 
 function requestURL(serverURL: string, target: string): string {
@@ -236,8 +365,11 @@ async function assertResponse(response: Response): Promise<Record<string, unknow
   return payload;
 }
 
-export async function readServerSecurityStatus(serverURL: string): Promise<ServerSecurityStatus> {
-  const response = await serverFetch(serverURL, '/api/security/status');
+export async function readServerSecurityStatus(serverURL: string, signal?: AbortSignal): Promise<ServerSecurityStatus> {
+  const current = operationIsCurrent(serverKey(serverURL), '');
+  const response = await serverFetch(serverURL, '/api/security/status', { signal });
+  signal?.throwIfAborted();
+  assertCurrent(current);
   // Servers released before the dormant security capability do not expose a
   // status endpoint. Treat their 404 as the legacy, password-free mode so the
   // compatible client can be rolled out first.
@@ -253,6 +385,8 @@ export async function readServerSecurityStatus(serverURL: string): Promise<Serve
     };
   }
   const payload = await assertResponse(response);
+  signal?.throwIfAborted();
+  assertCurrent(current);
   const versionPolicy = readClientVersionPolicy(payload);
   notifyClientUpgrade(serverURL, payload);
   // The first development build of protocol 2 did not include `enabled` but
@@ -290,6 +424,7 @@ export async function unlockServer(
   serverURL: string,
   password: string,
 ): Promise<ServerAccessGrant> {
+  const current = exchangeIsCurrent(serverURL);
   const payload = await assertResponse(
     await serverFetch(serverURL, '/api/security/access', {
       method: 'POST',
@@ -297,6 +432,7 @@ export async function unlockServer(
       body: JSON.stringify({ password }),
     }),
   );
+  assertCurrent(current);
   const grant = grantFromPayload(payload);
   setServerAccessToken(serverURL, grant);
   return grant;
@@ -307,6 +443,7 @@ export async function bootstrapServer(
   bootstrapToken: string,
   password: string,
 ): Promise<ServerAccessGrant> {
+  const current = exchangeIsCurrent(serverURL);
   const payload = await assertResponse(
     await serverFetch(serverURL, '/api/security/bootstrap', {
       method: 'POST',
@@ -314,6 +451,7 @@ export async function bootstrapServer(
       body: JSON.stringify({ bootstrapToken, password }),
     }),
   );
+  assertCurrent(current);
   const grant = grantFromPayload(payload);
   setServerAccessToken(serverURL, grant);
   return grant;
@@ -325,22 +463,22 @@ export async function ensureServerAccess(options: {
   bootstrapToken?: string;
 }): Promise<ServerAccessGrant | null> {
   const currentGrant = getServerAccessGrant(options.serverURL);
-  if (currentGrant) {
-    try {
-      const status = await readServerSecurityStatus(options.serverURL);
-      if (!status.enabled) return null;
-      if (status.authorized) {
-        return currentGrant;
-      }
-    } catch {
-      // Re-verify through the password flow below so a rotated/expired token
-      // cannot leave the login screen stuck on a stale session.
-    }
-    clearServerAccessToken(options.serverURL);
-  }
-
+  const current = operationIsCurrent(serverKey(options.serverURL), '');
+  // A transport/server failure is not an authorization denial. Preserve the
+  // grant and propagate it once, without an automatic second password request.
   const status = await readServerSecurityStatus(options.serverURL);
+  // Disabled status clears the old grant itself, so its successful return is
+  // authoritative. For enabled servers cancellation must stop the exchange.
   if (!status.enabled) return null;
+  assertCurrent(current);
+  if (currentGrant && status.authorized) return currentGrant;
+  if (currentGrant) {
+    const removal = forgetServerAccess(options.serverURL);
+    const afterRemoval = operationIsCurrent(serverKey(options.serverURL), '');
+    await removal;
+    assertCurrent(afterRemoval);
+  }
+  if (!options.password) throw new ServerSecurityClientError('请重新输入服务器密码', 401, 'SERVER_ACCESS_REQUIRED');
   if (!status.configured) {
     if (!options.bootstrapToken?.trim()) {
       throw new ServerSecurityClientError(
@@ -359,6 +497,7 @@ export async function rotateServerPassword(
   currentPassword: string,
   newPassword: string,
 ): Promise<ServerAccessGrant> {
+  const current = exchangeIsCurrent(serverURL);
   const payload = await assertResponse(
     await serverFetch(serverURL, '/api/security/rotate', {
       method: 'POST',
@@ -366,6 +505,7 @@ export async function rotateServerPassword(
       body: JSON.stringify({ currentPassword, newPassword }),
     }),
   );
+  assertCurrent(current);
   const grant = grantFromPayload(payload);
   setServerAccessToken(serverURL, grant);
   return grant;

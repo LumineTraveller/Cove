@@ -24,7 +24,7 @@
     "test:media-diagnostics": "tsx --test tests/mediaDiagnostics.test.ts",
     "test:screen-capture": "tsx --test tests/screenCapture.test.ts tests/screenPreferences.test.ts tests/screenPublishing.test.ts tests/screenVideoPresentation.test.ts",
     "test:member-ordering": "tsx --test tests/memberOrdering.test.ts",
-    "test:account-auth": "tsx --test tests/accountAuth.test.ts tests/serverIdentity.test.ts tests/serverSecurity.test.ts tests/accountPasswordStore.test.ts tests/accountPasswordMemory.test.ts",
+    "test:account-auth": "tsx --test tests/accountAuth.test.ts tests/serverIdentity.test.ts tests/serverSecurity.test.ts tests/accountPasswordStore.test.ts tests/accountPasswordMemory.test.ts tests/startupLogin.test.ts tests/serverAccessStore.test.ts tests/serverAccessMemory.test.ts",
     "test:remote-control": "tsx --test tests/remoteControl.test.ts tests/remoteInputQueue.test.ts tests/remoteInputController.test.ts tests/remoteControlSession.test.ts tests/remoteInputHelper.test.ts",
     "test:annotations": "tsx --test tests/annotationGeometryModel.test.ts tests/annotationCursor.test.ts tests/annotationOverlayState.test.ts tests/annotationOverlayInput.test.ts && node --test tests/annotationOverlayController.test.cjs",
     "test:rooms": "tsx --test tests/roomSettings.test.ts tests/sharedChatLayout.test.ts tests/controlBallResponsivePolicy.test.ts && node --test tests/roomNavigation.test.cjs",

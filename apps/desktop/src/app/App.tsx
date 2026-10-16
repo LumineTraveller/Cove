@@ -22,6 +22,7 @@ import { flushSync } from 'react-dom';
 import { HashRouter, Navigate, Route, Routes } from 'react-router-dom';
 import {
   clearAccountSession,
+  disconnectAccountSession,
   enrichRememberedLoginIdentities,
   forgetRememberedLogin,
   loginAccount,
@@ -42,10 +43,14 @@ import {
 } from '../features/connection/serverCertificate';
 import {
   clearServerAccessToken,
+  clearRememberedServerAccess,
   ensureServerAccess,
+  forgetServerAccess,
   normalizeServerSecurityURL,
   readServerSecurityStatus,
+  rememberServerAccess,
   requiresServerAccessRecovery,
+  restoreServerAccess,
   serverFetch,
   type ServerSecurityStatus,
 } from '../features/connection/serverSecurity';
@@ -81,6 +86,13 @@ import type { UserProfile } from '../types';
 import { clearAccountPasswords, passwordMemoryStatus, readAccountPassword, removeAccountPassword,
   saveAuthenticatedAccountPassword, PASSWORD_MEMORY_UNAVAILABLE, PASSWORD_MEMORY_FAILED } from '../features/accounts/accountPasswordMemory';
 import '../features/accounts/accountPasswordMemory.css';
+import { createStartupLoginCheck } from '../features/accounts/startupLogin';
+
+const checkStartupLogin = createStartupLoginCheck({
+  restore: restoreServerAccess,
+  status: (server, signal) => readServerSecurityStatus(server, signal),
+  reject: forgetServerAccess,
+});
 
 const DEFAULT_SERVER =
   import.meta.env.VITE_COVE_DEFAULT_SERVER || import.meta.env.VITE_SERVER_URL || 'http://localhost:3001';
@@ -178,6 +190,10 @@ export default function App() {
   );
   const serverUrl = localStorage.getItem('cove_server_url') ?? '';
   const [connected, setConnected] = useState<boolean | null>(null);
+  const [startupState, setStartupState] = useState<'checking' | 'ready' | 'login' | 'offline'>('checking');
+  const [startupRetry, setStartupRetry] = useState(0);
+  const startupGeneration = useRef(0);
+  const authAttempt = useRef(0);
   const [draftName, setDraftName] = useState('');
   const [draftEmail, setDraftEmail] = useState(
     () =>
@@ -205,6 +221,12 @@ export default function App() {
     return () => { active = false; passwordFillGeneration.current += 1; };
   }, []);
   const invalidatePasswordFill = () => {
+    authAttempt.current += 1;
+    setAuthPending(false);
+    clearServerAccessToken(draftUrl);
+    setServerSecurityProbe(current => current.phase === 'ready'
+      ? { phase: 'ready', status: { ...current.status, authorized: false } } : current);
+    setSecurityProbeRetry(value => value + 1);
     passwordFillGeneration.current += 1;
     setRememberPassword(false);
     setDraftPassword('');
@@ -215,6 +237,7 @@ export default function App() {
     phase: 'idle',
   });
   const [serverUnlockRequired, setServerUnlockRequired] = useState(false);
+  const [securityProbeRetry, setSecurityProbeRetry] = useState(0);
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
   const [showServerHistory, setShowServerHistory] = useState(false);
   const [authPending, setAuthPending] = useState(false);
@@ -247,7 +270,40 @@ export default function App() {
   }
   const serverURL = getServerURL();
   const accountSession = readAccountSession(serverURL);
-  const needLogin = !profile.username || !serverUrl || !accountSession || serverUnlockRequired;
+  const needLogin = startupState === 'login' || !profile.username || !serverUrl || !accountSession || serverUnlockRequired;
+  const activeAccount = readAccountSession();
+  const resumeAccount = authMode === 'login' && activeAccount &&
+    normalizeLoginServer(activeAccount.serverUrl) === normalizeLoginServer(draftUrl) &&
+    activeAccount.email.toLowerCase() === draftEmail.trim().toLowerCase()
+      ? activeAccount : null;
+  useEffect(() => {
+    const generation = ++startupGeneration.current;
+    let active = true;
+    setStartupState('checking');
+    // Only the explicitly active account qualifies. History is never an
+    // instruction to sign in after logout, forgetting, or switching accounts.
+    const saved = readAccountSession();
+    const candidate = saved?.serverUrl === normalizeLoginServer(getServerURL()) ? saved : null;
+    void (async () => {
+      if (candidate) {
+        try {
+          await window.coveSecurity?.setServerCertificateException(
+            candidate.serverUrl, candidate.allowInvalidServerCertificate === true,
+          );
+        } catch { /* The normal request will report a certificate failure. */ }
+      }
+      const result = await checkStartupLogin(candidate);
+      if (!active || generation !== startupGeneration.current) return;
+      if (result === 'server-required') {
+        setServerUnlockRequired(true);
+        setServerSecurityProbe(current => current.phase === 'ready'
+          ? { phase: 'ready', status: { ...current.status, authorized: false } } : current);
+        setAuthError('服务器认证已过期或被撤销，请重新验证服务器密码。');
+        setStartupState('login');
+      } else setStartupState(result);
+    })();
+    return () => { active = false; };
+  }, [startupRetry]);
   useEffect(() => {
     const server = normalizeLoginServer(draftUrl);
     if (!needLogin || authMode !== 'login' || !server || !validAccountEmail(draftEmail)) return;
@@ -309,6 +365,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (startupState !== 'login') return;
     setDraftServerPassword('');
     setDraftBootstrapToken('');
     const normalizedServerUrl = normalizeServerSecurityURL(draftUrl);
@@ -324,9 +381,13 @@ export default function App() {
     let active = true;
     setServerSecurityProbe({ phase: 'checking' });
     const timer = window.setTimeout(() => {
-      void readServerSecurityStatus(normalizedServerUrl)
+      void (async () => {
+        await restoreServerAccess(normalizedServerUrl, draftEmail);
+        if (!active) return null;
+        return readServerSecurityStatus(normalizedServerUrl);
+      })()
         .then((status) => {
-          if (!active) return;
+          if (!active || !status) return;
           setServerSecurityProbe({ phase: 'ready', status });
           versionGateRef.current?.observe(normalizedServerUrl, status.versionPolicy);
           if (!status.enabled || status.configured) setDraftBootstrapToken('');
@@ -339,7 +400,7 @@ export default function App() {
       active = false;
       window.clearTimeout(timer);
     };
-  }, [draftUrl]);
+  }, [draftUrl, draftEmail, startupState, securityProbeRetry]);
 
   const handleThemeChange = useCallback((next: AppTheme) => {
     // Capture the old surface BEFORE React changes theme-dependent gradients
@@ -353,7 +414,7 @@ export default function App() {
       setInitialConnectionPending(false);
       return;
     }
-    if (needLogin || editingServer) return;
+    if (startupState !== 'ready' || needLogin || editingServer) return;
     let active = true;
     let sessionRetryTimer: ReturnType<typeof setTimeout> | null = null;
     let sessionRetryAttempt = 0;
@@ -460,10 +521,13 @@ export default function App() {
             response.error ?? '未提供原因'
           }`,
         );
-        if (response.error?.includes('登录已失效')) {
+        if (response.code === 'ACCOUNT_SESSION_INVALID' || response.code === 'ACCOUNT_AUTH_REQUIRED' ||
+            response.code === 'ACCOUNT_SWITCH_FORBIDDEN' || response.error?.includes('登录已失效')) {
           clearAccountSession(serverURL);
           clearProfile();
-          window.location.reload();
+          setProfile({ username: '', avatarUrl: null });
+          setAuthError(response.error || '账号认证已失效，请重新登录账号。');
+          setStartupState('login');
           return;
         }
         if (response.code === 'SESSION_IN_USE') {
@@ -523,6 +587,9 @@ export default function App() {
       setConnected(false);
       setInitialConnectionPending(false);
       setServerUnlockRequired(true);
+      setStartupState('login');
+      setServerSecurityProbe(current => current.phase === 'ready'
+        ? { phase: 'ready', status: { ...current.status, authorized: false } } : current);
       socket.disconnect();
       setConnectionDiagnostic(`服务器访问验证失败：${message || '访问令牌无效或已过期'}`);
     };
@@ -552,6 +619,7 @@ export default function App() {
       socket.disconnect();
       setProfile({ username: '', avatarUrl: null });
       setConnected(false);
+      setStartupState('login');
       setAuthError(
         '服务器发来 account:session-replaced 通知，表示当前账号会话被新登录替换。若你没有在其他设备登录，请检查是否有第二个 Cove 实例或不同服务器地址实际指向同一服务。',
       );
@@ -595,10 +663,11 @@ export default function App() {
       socket.off('account:session-replaced', sessionReplaced);
       socket.disconnect();
     };
-  }, [connectionRetryVersion, editingServer, needLogin, serverURL, upgradeBlocked]);
+  }, [connectionRetryVersion, editingServer, needLogin, serverURL, startupState, upgradeBlocked]);
 
   const handleLogin = async () => {
-    if (activeUpgrade) return;
+    if (activeUpgrade || authPending) return;
+    const attempt = ++authAttempt.current;
     const username = draftName.trim();
     const securityEnabled =
       serverSecurityProbe.phase === 'ready' && serverSecurityProbe.status.enabled;
@@ -606,8 +675,8 @@ export default function App() {
     if (
       serverSecurityProbe.phase !== 'ready' ||
       !validAccountEmail(draftEmail) ||
-      draftPassword.length < 8 ||
-      (securityEnabled && draftServerPassword.length < 8) ||
+      (!resumeAccount && draftPassword.length < 8) ||
+      (securityEnabled && (serverUnlockRequired || !serverSecurityProbe.status.authorized) && draftServerPassword.length < 8) ||
       (bootstrapRequired &&
         (!serverSecurityProbe.status.bootstrapAvailable || !draftBootstrapToken.trim())) ||
       !draftUrl.trim() ||
@@ -629,7 +698,9 @@ export default function App() {
         nextServerUrl,
         allowUntrustedCertificate,
       );
+      if (attempt !== authAttempt.current) return;
       const versionCheck = await versionGateRef.current!.check(nextServerUrl);
+      if (attempt !== authAttempt.current) return;
       if (versionCheck.status === 'required') {
         setAuthPending(false);
         return;
@@ -639,27 +710,44 @@ export default function App() {
         password: draftServerPassword,
         bootstrapToken: draftBootstrapToken,
       });
-      const result =
+      if (attempt !== authAttempt.current) return;
+      setServerUnlockRequired(false);
+      setServerSecurityProbe(current => current.phase === 'ready'
+        ? { phase: 'ready', status: { ...current.status, authorized: securityEnabled } } : current);
+      const result = resumeAccount ? {
+        session: resumeAccount,
+        profile: resumeAccount.profile ?? readProfile(),
+      } :
         authMode === 'register'
           ? await registerAccount(nextServerUrl, draftEmail, draftPassword, username)
           : await loginAccount(nextServerUrl, draftEmail, draftPassword);
-      persistProfile(result.profile);
+      if (attempt !== authAttempt.current) return;
       await rememberAccountSessionResolved({
         ...result.session,
         allowInvalidServerCertificate: allowUntrustedCertificate,
-      });
+      }, () => attempt === authAttempt.current);
+      if (attempt !== authAttempt.current) return;
+      persistProfile(result.profile);
       localStorage.setItem('cove_server_url', result.session.serverUrl);
       saveServerCertificateException(nextServerUrl, allowUntrustedCertificate);
-      const memory = await saveAuthenticatedAccountPassword(nextServerUrl, result.session.email, draftPassword, rememberPassword);
+      const memory = resumeAccount ? { ok: true } : await saveAuthenticatedAccountPassword(nextServerUrl, result.session.email, draftPassword, rememberPassword);
+      if (attempt !== authAttempt.current) return;
       if (!memory.ok) window.alert('无法安全记住账号密码，已继续登录；下次请手动填写。');
+      const serverAccessRemembered = await rememberServerAccess(nextServerUrl, result.session.email);
+      if (attempt !== authAttempt.current) return;
+      if (securityEnabled && !serverAccessRemembered)
+        window.alert('无法安全记住服务器认证，本次登录可继续；下次启动需重新验证服务器密码。');
       window.location.reload();
     } catch (error) {
+      if (attempt !== authAttempt.current) return;
       setAuthError(error instanceof Error ? error.message : '账号请求失败');
       setAuthPending(false);
     }
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    authAttempt.current += 1;
+    startupGeneration.current += 1;
     const session = readAccountSession(serverURL);
     if (session)
       void serverFetch(serverURL, '/api/auth/logout', {
@@ -672,6 +760,10 @@ export default function App() {
     clearServerAccessToken(serverURL);
     clearProfile();
     clearAccountSession(serverURL);
+    setProfile({ username: '', avatarUrl: null });
+    setStartupState('login');
+    try { await forgetServerAccess(serverURL, session?.email); }
+    catch { setAuthError('未能清除安全存储中的服务器认证，请重试退出登录。'); return; }
     window.location.reload();
   };
 
@@ -757,6 +849,10 @@ export default function App() {
   const forgetLogin = async (entry: RememberedLogin) => {
     if (authPending) return;
     const selected = normalizeLoginServer(draftUrl) === normalizeLoginServer(entry.serverUrl) && draftEmail.trim().toLowerCase() === entry.email.trim().toLowerCase();
+    authAttempt.current += 1;
+    startupGeneration.current += 1;
+    try { await forgetServerAccess(entry.serverUrl, entry.email); }
+    catch { setPasswordMemoryNotice(PASSWORD_MEMORY_FAILED); return; }
     if (selected) invalidatePasswordFill();
     const generation = passwordFillGeneration.current;
     const removal = await removeAccountPassword(entry.serverUrl, entry.email);
@@ -821,6 +917,20 @@ export default function App() {
       : serverBootstrapAvailable
       ? '检测到新服务器，请设置服务器访问密码'
       : '服务器尚未提供一次性初始化凭据，请联系管理员';
+
+  if (startupState === 'checking' || startupState === 'offline') {
+    return <main className="auth-page">
+      <WindowTitleBar />
+      <UpdateCenter allowDetails={false} serverURL={updateServerURL} requiredUpgrade={activeUpgrade} onRetryVersion={retryVersionPolicy} />
+      <div className="cove-connection-scrim"><div className="cove-connection-modal" role="status">
+        {startupState === 'checking' ? <LoaderCircle size={24} className="animate-spin" /> : <WifiOff size={24} />}
+        <h2>{startupState === 'checking' ? '正在恢复登录…' : '暂时无法连接服务器'}</h2>
+        {startupState === 'offline' && <><p>登录凭证已保留，请检查网络后重试。</p>
+          <button onClick={() => setStartupRetry(value => value + 1)}>重试连接</button></>}
+        <button onClick={() => { startupGeneration.current += 1; authAttempt.current += 1; setStartupState('login'); }}>使用登录页面</button>
+      </div></div>
+    </main>;
+  }
 
   if (needLogin) {
     return (
@@ -926,12 +1036,19 @@ export default function App() {
                     const selected = event.target.checked;
                     setRememberPassword(selected);
                     if (!selected) {
+                      disconnectAccountSession();
+                      try { await forgetServerAccess(draftUrl, draftEmail); }
+                      catch { setPasswordMemoryNotice(PASSWORD_MEMORY_FAILED); return; }
                       const result = await removeAccountPassword(draftUrl, draftEmail);
                       if (generation === passwordFillGeneration.current && !result.ok) setPasswordMemoryNotice(PASSWORD_MEMORY_FAILED);
                     }
                   }} /><span>记住账号密码（系统加密）</span></label>
                 <button type="button" disabled={authPending} onClick={async () => {
                   invalidatePasswordFill();
+                  startupGeneration.current += 1;
+                  disconnectAccountSession();
+                  try { await clearRememberedServerAccess(); }
+                  catch { setPasswordMemoryNotice(PASSWORD_MEMORY_FAILED); return; }
                   const generation = passwordFillGeneration.current;
                   const result = await clearAccountPasswords();
                   if (generation === passwordFillGeneration.current) setPasswordMemoryNotice(result.ok ? '已清除记住的账号密码，账号记录仍保留。' : PASSWORD_MEMORY_FAILED);
@@ -1052,7 +1169,8 @@ export default function App() {
                     onChange={setAllowUntrustedCertificate}
                   />
                 </div>
-                {serverSecurityEnabled && (
+                {serverSecurityProbe.phase === 'unavailable' && <button type="button" onClick={() => setSecurityProbeRetry(value => value + 1)}>重试服务器状态</button>}
+                {serverSecurityEnabled && (serverUnlockRequired || !serverSecurityStatus?.authorized) && (
                   <section
                     className="auth-server-security"
                     aria-labelledby="login-server-security-title"
@@ -1127,7 +1245,7 @@ export default function App() {
                   </div>
                   <small>邮箱仅用于登录身份识别，不会发送验证邮件。</small>
                 </label>
-                <label className="auth-field" htmlFor="login-password">
+                {resumeAccount ? <p role="status">已记住此账号，验证服务器后继续登录。</p> : <label className="auth-field" htmlFor="login-password">
                   <span>密码</span>
                   <div className="auth-input-wrap">
                     <LockKeyhole size={19} />
@@ -1140,7 +1258,7 @@ export default function App() {
                       onChange={(event) => { passwordFillGeneration.current += 1; setDraftPassword(event.target.value); }}
                     />
                   </div>
-                </label>
+                </label>}
 
                 {authError && (
                   <p className="auth-error" role="alert">
@@ -1154,8 +1272,8 @@ export default function App() {
                     authPending ||
                     !serverSecurityReady ||
                     !validAccountEmail(draftEmail) ||
-                    draftPassword.length < 8 ||
-                    (serverSecurityEnabled && draftServerPassword.length < 8) ||
+                    (!resumeAccount && draftPassword.length < 8) ||
+                    (serverSecurityEnabled && (serverUnlockRequired || !serverSecurityStatus?.authorized) && draftServerPassword.length < 8) ||
                     (serverSecurityUnconfigured &&
                       (!serverBootstrapAvailable || !draftBootstrapToken.trim())) ||
                     !draftUrl.trim() ||

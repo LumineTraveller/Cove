@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { clearAccountSession, disconnectAccountSession, forgetRememberedLogin, normalizeLoginServer, readAccountSession, readRememberedLogins, rememberAccountSession, validAccountEmail } from '../src/features/accounts/accountAuth';
+import { clearAccountSession, disconnectAccountSession, enrichRememberedLoginIdentities, forgetRememberedLogin, normalizeLoginServer, readAccountSession, readRememberedLogins, rememberAccountSession, validAccountEmail } from '../src/features/accounts/accountAuth';
 
 class MemoryStorage {
   private values = new Map<string, string>();
@@ -75,4 +75,76 @@ test('multiple accounts on one server retain distinct history and logout/forget 
   assert.equal(readRememberedLogins().find(entry => entry.accountId === 'b')?.token, undefined);
   forgetRememberedLogin(a.serverUrl, 'b');
   assert.deepEqual(readRememberedLogins().map(entry => entry.accountId), ['a']);
+});
+
+test('a late identity lookup cannot restore a cleared account token', async () => {
+  Object.defineProperty(globalThis, 'localStorage', { value: new MemoryStorage(), configurable: true });
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  let finishLookup!: (addresses: string[]) => void;
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: {
+    coveSecurity: { resolveServerAddresses: () => new Promise<string[]>(resolve => { finishLookup = resolve; }) },
+  } });
+  try {
+    rememberAccountSession({ serverUrl: 'https://late.test', token: 'synthetic-old-token', accountId: 'a', email: 'a@example.test' });
+    const pending = enrichRememberedLoginIdentities();
+    clearAccountSession('https://late.test');
+    finishLookup(['192.0.2.10']);
+    await pending;
+    assert.equal(readAccountSession(), null);
+    assert.equal(readAccountSession('https://late.test'), null);
+    const [entry] = readRememberedLogins();
+    assert.equal(entry?.token, undefined);
+    assert.equal(entry?.serverKey, 'ip:192.0.2.10|443');
+  } finally {
+    if (previousWindow) Object.defineProperty(globalThis, 'window', previousWindow);
+    else Reflect.deleteProperty(globalThis, 'window');
+  }
+});
+
+test('a late identity lookup preserves forgetting and the latest account order, token and profile', async () => {
+  Object.defineProperty(globalThis, 'localStorage', { value: new MemoryStorage(), configurable: true });
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  let finishLookup!: (addresses: string[]) => void;
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: {
+    coveSecurity: { resolveServerAddresses: () => new Promise<string[]>(resolve => { finishLookup = resolve; }) },
+  } });
+  try {
+    const surviving = { serverUrl: 'https://current.test', serverKey: 'current-key', token: 'synthetic-old-token', accountId: 'b', email: 'b@example.test', profile: { username: 'Old', avatarUrl: null } };
+    rememberAccountSession(surviving);
+    rememberAccountSession({ serverUrl: 'https://forgotten.test', token: 'synthetic-forgotten-token', accountId: 'a', email: 'a@example.test' });
+    const pending = enrichRememberedLoginIdentities();
+    forgetRememberedLogin('https://forgotten.test', 'a');
+    rememberAccountSession({ ...surviving, token: 'synthetic-new-token', profile: { username: 'Current', avatarUrl: null } });
+    rememberAccountSession({ serverUrl: 'https://new.test', serverKey: 'new-key', token: 'synthetic-new-account-token', accountId: 'c', email: 'c@example.test' });
+    finishLookup(['192.0.2.11']);
+    await pending;
+    const entries = readRememberedLogins();
+    assert.deepEqual(entries.map(entry => entry.accountId), ['c', 'b']);
+    assert.equal(entries[1]?.token, 'synthetic-new-token');
+    assert.equal(entries[1]?.profile?.username, 'Current');
+    assert.equal(readAccountSession()?.accountId, 'c');
+    assert.equal(readAccountSession('https://forgotten.test'), null);
+  } finally {
+    if (previousWindow) Object.defineProperty(globalThis, 'window', previousWindow);
+    else Reflect.deleteProperty(globalThis, 'window');
+  }
+});
+
+test('identity enrichment still deduplicates DNS aliases in their latest history order', async () => {
+  Object.defineProperty(globalThis, 'localStorage', { value: new MemoryStorage(), configurable: true });
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: {
+    coveSecurity: { resolveServerAddresses: async () => ['192.0.2.12'] },
+  } });
+  try {
+    rememberAccountSession({ serverUrl: 'https://alias-one.test', token: 'synthetic-first-token', accountId: 'a', email: 'a@example.test' });
+    rememberAccountSession({ serverUrl: 'https://alias-two.test', token: 'synthetic-second-token', accountId: 'a', email: 'a@example.test' });
+    const entries = await enrichRememberedLoginIdentities();
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0]?.serverUrl, 'https://alias-two.test');
+    assert.equal(entries[0]?.token, 'synthetic-second-token');
+  } finally {
+    if (previousWindow) Object.defineProperty(globalThis, 'window', previousWindow);
+    else Reflect.deleteProperty(globalThis, 'window');
+  }
 });

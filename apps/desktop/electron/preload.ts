@@ -3,6 +3,13 @@ import type { UpdateState } from "./updater-core";
 import type { RemoteControlActivation } from "./remote-control-activation";
 import type { RemoteControlInput } from "./remote-control";
 
+contextBridge.exposeInMainWorld('coveServerAccess', {
+  get: (server: string, email: string) => ipcRenderer.invoke('cove:server-access:get', server, email),
+  set: (server: string, email: string, grant: { accessToken: string; expiresAt: number }) => ipcRenderer.invoke('cove:server-access:set', server, email, grant),
+  remove: (server: string, email?: string) => ipcRenderer.invoke('cove:server-access:remove', server, email),
+  clear: () => ipcRenderer.invoke('cove:server-access:clear'),
+});
+
 contextBridge.exposeInMainWorld('coveAccountPasswords', {
   status: () => ipcRenderer.invoke('cove:account-password:status'),
   get: (server: string, email: string) => ipcRenderer.invoke('cove:account-password:get', server, email),
