@@ -978,8 +978,9 @@ export function createServerRuntime() {
         disconnectForInvalidServerAccess(socket);
       });
       const accessExpiryTimer = setTimeout(() => {
-        if (!serverSecurity.accessForToken(socket.data.serverAccessToken))
-          disconnectForInvalidServerAccess(socket);
+        // The elapsed-time deadline still ends an idle connection if the wall
+        // clock moved backwards after this fixed expiry timer was scheduled.
+        disconnectForInvalidServerAccess(socket);
       }, Math.max(1, Number(socket.data.serverAccessExpiresAt ?? Date.now()) - Date.now() + 1));
       accessExpiryTimer.unref();
       socket.once('disconnect', () => clearTimeout(accessExpiryTimer));

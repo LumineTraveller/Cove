@@ -3,7 +3,7 @@ import type Database from 'better-sqlite3';
 import type { Request } from 'express';
 import { derivePassword, passwordMatches } from '../accounts/accountAuth';
 
-export const SERVER_ACCESS_TOKEN_LIFETIME_MS = 12 * 60 * 60 * 1000;
+export const SERVER_ACCESS_TOKEN_LIFETIME_MS = 14 * 24 * 60 * 60 * 1000;
 const MIN_SERVER_PASSWORD_LENGTH = 8;
 const MAX_SERVER_PASSWORD_LENGTH = 128;
 const MAX_ACCESS_TOKEN_LENGTH = 256;
@@ -207,6 +207,15 @@ export function createServerSecurityStore(
       epoch INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS server_access_sessions_expiry ON server_access_sessions(expiresAt);
+    CREATE TABLE IF NOT EXISTS server_security_clock (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      highWaterAt INTEGER NOT NULL
+    );
+    INSERT OR IGNORE INTO server_security_clock (id, highWaterAt)
+      SELECT 1, MAX(
+        COALESCE((SELECT MAX(createdAt) FROM server_access_sessions), 0),
+        COALESCE((SELECT updatedAt FROM server_security WHERE id = 1), 0)
+      );
   `);
 
   const getSecurity = db.prepare('SELECT * FROM server_security WHERE id = 1');
@@ -218,16 +227,57 @@ export function createServerSecurityStore(
   const updatePassword = db.prepare(`
     UPDATE server_security
     SET passwordHash = ?, passwordSalt = ?, tokenEpoch = tokenEpoch + 1, updatedAt = ?
-    WHERE id = 1 AND passwordHash = ? AND passwordSalt = ?
+    WHERE id = 1 AND passwordHash = ? AND passwordSalt = ? AND tokenEpoch = ?
   `);
   const insertSession = db.prepare(
     'INSERT INTO server_access_sessions (tokenHash, expiresAt, createdAt, epoch) VALUES (?, ?, ?, ?)',
   );
   const getSession = db.prepare(
-    'SELECT expiresAt, epoch FROM server_access_sessions WHERE tokenHash = ?',
+    'SELECT expiresAt, createdAt, epoch FROM server_access_sessions WHERE tokenHash = ?',
   );
   const removeExpired = db.prepare('DELETE FROM server_access_sessions WHERE expiresAt <= ?');
   const removeSessions = db.prepare('DELETE FROM server_access_sessions');
+  const getClock = db.prepare('SELECT highWaterAt FROM server_security_clock WHERE id = 1');
+  const setClock = db.prepare('UPDATE server_security_clock SET highWaterAt = ? WHERE id = 1');
+  const advanceEpoch = db.prepare(
+    'UPDATE server_security SET tokenEpoch = tokenEpoch + 1, updatedAt = ? WHERE id = 1',
+  );
+
+  const clockChanged = (): never => {
+    throw new ServerSecurityError(
+      401,
+      'SERVER_ACCESS_INVALID',
+      '服务器时间已变更，请重新验证服务器访问密码',
+    );
+  };
+
+  // Observe time inside the synchronous transaction, never before password
+  // hashing or another await. Concurrent logins must not write an old time
+  // after a newer observation and mistakenly revoke one another's grants.
+  const withSecurityClock = <T>(
+    operation: (currentTime: number) => T,
+    onRollback: () => T = clockChanged,
+  ): T => {
+    const observed = db.transaction(() => {
+      const currentTime = now();
+      const previous = getClock.get() as { highWaterAt: number };
+      if (currentTime < previous.highWaterAt) {
+        advanceEpoch.run(currentTime);
+        removeSessions.run();
+        // Old grants cannot return, but a new password authentication must be
+        // possible even while the corrected wall clock is behind the old one.
+        setClock.run(currentTime);
+        return { rolledBack: true as const };
+      }
+      if (currentTime > previous.highWaterAt) setClock.run(currentTime);
+      return { rolledBack: false as const, value: operation(currentTime) };
+    })();
+    if (observed.rolledBack) {
+      options.onAccessTokensRevoked?.();
+      return onRollback();
+    }
+    return observed.value;
+  };
 
   const status = (): ServerSecurityStatus => {
     const record = getSecurity.get() as ServerSecurityRecord;
@@ -254,15 +304,16 @@ export function createServerSecurityStore(
     attempts.delete(key);
   };
 
-  const issueAccessToken = db.transaction(() => {
+  // Only call from withSecurityClock, after a successful explicit password
+  // authentication. Token validation and automatic reconnect never renew it.
+  const issueAccessToken = (currentTime: number) => {
     const record = getSecurity.get() as ServerSecurityRecord;
-    const currentTime = now();
     removeExpired.run(currentTime);
     const accessToken = randomBytes(32).toString('base64url');
     const expiresAt = currentTime + tokenLifetimeMs;
     insertSession.run(hashToken(accessToken), expiresAt, currentTime, record.tokenEpoch);
     return { accessToken, expiresAt, epoch: record.tokenEpoch };
-  });
+  };
 
   const configuredRecord = () => {
     const record = getSecurity.get() as ServerSecurityRecord;
@@ -311,28 +362,40 @@ export function createServerSecurityStore(
 
       const salt = randomBytes(16).toString('hex');
       const passwordHash = (await derivePassword(password, salt)).toString('hex');
-      const configuredAt = now();
-      const changed = db.transaction(() =>
-        setInitialPassword.run(passwordHash, salt, configuredAt, configuredAt, configuredAt),
-      )();
-      if (changed.changes !== 1)
-        throw new ServerSecurityError(409, 'SERVER_ALREADY_INITIALIZED', '服务器已经完成初始化');
+      const issued = withSecurityClock((configuredAt) => {
+        const changed = setInitialPassword.run(
+          passwordHash, salt, configuredAt, configuredAt, configuredAt,
+        );
+        if (changed.changes !== 1)
+          throw new ServerSecurityError(409, 'SERVER_ALREADY_INITIALIZED', '服务器已经完成初始化');
+        return issueAccessToken(configuredAt);
+      });
       clearAttempts(attemptKey);
       options.onBootstrapConsumed?.();
-      const issued = issueAccessToken();
       return { accessToken: issued.accessToken, expiresAt: issued.expiresAt };
     },
 
     async unlock(password: unknown, attemptKey = 'access') {
       if (typeof password !== 'string' || password.length > MAX_SERVER_PASSWORD_LENGTH)
         throw new ServerSecurityError(401, 'INVALID_PASSWORD', '服务器访问密码错误');
-      const record = configuredRecord();
+      const record = withSecurityClock(() => configuredRecord());
       if (!(await checkPassword(password, record))) {
         recordFailedAttempt(attemptKey);
         throw new ServerSecurityError(401, 'INVALID_PASSWORD', '服务器访问密码错误');
       }
+      const issued = withSecurityClock((currentTime) => {
+        const current = configuredRecord();
+        if (
+          current.tokenEpoch !== record.tokenEpoch ||
+          current.passwordHash !== record.passwordHash ||
+          current.passwordSalt !== record.passwordSalt
+        )
+          throw new ServerSecurityError(
+            409, 'SERVER_ACCESS_INVALID', '服务器访问凭据已变更，请重新验证',
+          );
+        return issueAccessToken(currentTime);
+      });
       clearAttempts(attemptKey);
-      const issued = issueAccessToken();
       return { accessToken: issued.accessToken, expiresAt: issued.expiresAt };
     },
 
@@ -345,58 +408,68 @@ export function createServerSecurityStore(
         );
       if (typeof currentPassword !== 'string')
         throw new ServerSecurityError(401, 'INVALID_PASSWORD', '服务器访问密码错误');
-      const current = configuredRecord();
+      const current = withSecurityClock(() => configuredRecord());
       if (!(await checkPassword(currentPassword, current))) {
         recordFailedAttempt(attemptKey);
         throw new ServerSecurityError(401, 'INVALID_PASSWORD', '服务器访问密码错误');
       }
       const salt = randomBytes(16).toString('hex');
       const passwordHash = (await derivePassword(nextPassword, salt)).toString('hex');
-      const changedAt = now();
-      const changed = db.transaction(() => {
+      const issued = withSecurityClock((changedAt) => {
         const result = updatePassword.run(
           passwordHash,
           salt,
           changedAt,
           current.passwordHash,
           current.passwordSalt,
+          current.tokenEpoch,
         );
-        if (result.changes === 1) removeSessions.run();
-        return result;
-      })();
-      if (changed.changes !== 1)
-        throw new ServerSecurityError(
-          409,
-          'SERVER_ACCESS_INVALID',
-          '服务器访问密码已变更，请重新验证',
-        );
+        if (result.changes !== 1)
+          throw new ServerSecurityError(
+            409,
+            'SERVER_ACCESS_INVALID',
+            '服务器访问密码已变更，请重新验证',
+          );
+        removeSessions.run();
+        return issueAccessToken(changedAt);
+      });
       clearAttempts(attemptKey);
       options.onAccessTokensRevoked?.();
-      const issued = issueAccessToken();
       return { accessToken: issued.accessToken, expiresAt: issued.expiresAt };
     },
 
     accessForToken(token: unknown): ServerAccessPrincipal | null {
       if (!validToken(token)) return null;
-      const record = getSecurity.get() as ServerSecurityRecord;
-      if (!record.passwordHash || !record.passwordSalt) return null;
-      const currentTime = now();
-      const session = getSession.get(hashToken(token)) as
-        | { expiresAt: number; epoch: number }
-        | undefined;
-      if (!session || session.expiresAt <= currentTime || session.epoch !== record.tokenEpoch)
-        return null;
-      return { epoch: session.epoch, expiresAt: session.expiresAt };
+      return withSecurityClock(
+        (currentTime) => {
+          const record = getSecurity.get() as ServerSecurityRecord;
+          if (!record.passwordHash || !record.passwordSalt) return null;
+          const session = getSession.get(hashToken(token)) as
+            | { expiresAt: number; createdAt: number; epoch: number }
+            | undefined;
+          if (
+            !session ||
+            session.createdAt > currentTime ||
+            session.expiresAt <= currentTime ||
+            session.epoch !== record.tokenEpoch
+          )
+            return null;
+          return { epoch: session.epoch, expiresAt: session.expiresAt };
+        },
+        () => null,
+      );
     },
 
     revokeAll() {
-      db.transaction(() => {
-        db.prepare(
-          'UPDATE server_security SET tokenEpoch = tokenEpoch + 1, updatedAt = ? WHERE id = 1',
-        ).run(now());
-        removeSessions.run();
-      })();
-      options.onAccessTokensRevoked?.();
+      const explicitlyRevoked = withSecurityClock(
+        (currentTime) => {
+          advanceEpoch.run(currentTime);
+          removeSessions.run();
+          return true;
+        },
+        () => false,
+      );
+      if (explicitlyRevoked) options.onAccessTokensRevoked?.();
     },
   };
 }
