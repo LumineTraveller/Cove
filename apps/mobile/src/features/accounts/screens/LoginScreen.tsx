@@ -70,7 +70,9 @@ interface Props {
     serverURL: string,
     allowInvalidServerCertificate: boolean,
     email?: string,
+    isAccountScopeCurrent?: () => boolean,
   ) => Promise<ServerSecurityStatus>;
+  onInvalidateServerSecurityScope?: (serverURL: string) => void;
 }
 
 const noRememberedServers: RememberedServer[] = [];
@@ -84,6 +86,7 @@ export function LoginScreen({
   onServerURLChange,
   onForget,
   onProbeServerSecurity,
+  onInvalidateServerSecurityScope,
   useRememberedSession = false,
 }: Props) {
   const { theme, colors } = useCoveTheme();
@@ -140,6 +143,9 @@ export function LoginScreen({
   const serverEdited = useRef(false);
   const emailEdited = useRef(false);
   const restoredScope = useRef('');
+  // Draft email text never selects another account's remembered server grant.
+  const probeAccount = useRef(initialAccount?.email ?? '');
+  const securityScopeGeneration = useRef(0);
   const modeRef = useRef(mode);
   const scopeRef = useRef({ serverURL, email });
   modeRef.current = mode;
@@ -225,6 +231,16 @@ export function LoginScreen({
     phase: 'idle',
   });
   const [securityProbeRevision, setSecurityProbeRevision] = useState(0);
+  const invalidateSecurityScope = useCallback(() => {
+    securityScopeGeneration.current += 1;
+    probeAccount.current = '';
+    onInvalidateServerSecurityScope?.(scopeRef.current.serverURL);
+    setSecurityProbe(previous =>
+      previous.phase === 'ready'
+        ? { ...previous, status: { ...previous.status, authorized: false } }
+        : previous,
+    );
+  }, [onInvalidateServerSecurityScope]);
   useEffect(() => {
     if (serverEdited.current || emailEdited.current) return;
     const address = lastServerURL ?? rememberedServers[0]?.serverURL ?? '';
@@ -236,14 +252,25 @@ export function LoginScreen({
     const account = saved?.email ?? '';
     const scope = normalizeAccountPasswordScope(address, account)?.key ?? '';
     if (
-      scopeRef.current.serverURL !== address ||
+      normalizeServerSecurityURL(scopeRef.current.serverURL) !==
+        normalizeServerSecurityURL(address) ||
       scopeRef.current.email !== account
     ) {
+      if (
+        normalizeServerSecurityURL(scopeRef.current.serverURL) !==
+        normalizeServerSecurityURL(address)
+      ) {
+        setServerPassword('');
+        setBootstrapToken('');
+      }
       invalidatePasswordFill();
+      invalidateSecurityScope();
+      probeAccount.current = account;
       scopeRef.current = { serverURL: address, email: account };
       setServerURL(address);
       setEmail(account);
       setCertificateException(saved?.allowInvalidServerCertificate === true);
+      setSecurityProbeRevision(value => value + 1);
     }
     if (
       scope &&
@@ -258,20 +285,38 @@ export function LoginScreen({
     lastServerURL,
     fillRememberedPassword,
     invalidatePasswordFill,
+    invalidateSecurityScope,
   ]);
   const selectAccount = (
     address: string,
     account: string,
     allowInvalidCertificate = false,
   ) => {
+    const sameScope =
+      normalizeServerSecurityURL(scopeRef.current.serverURL) ===
+        normalizeServerSecurityURL(address) &&
+      scopeRef.current.email.trim().toLowerCase() === account.trim().toLowerCase() &&
+      probeAccount.current.trim().toLowerCase() === account.trim().toLowerCase() &&
+      certificateException === allowInvalidCertificate &&
+      (securityProbe.phase === 'ready' || securityProbe.phase === 'checking');
+    if (
+      normalizeServerSecurityURL(scopeRef.current.serverURL) !==
+      normalizeServerSecurityURL(address)
+    ) {
+      setServerPassword('');
+      setBootstrapToken('');
+    }
     invalidatePasswordFill();
+    if (!sameScope) {
+      invalidateSecurityScope();
+      probeAccount.current = account;
+      setSecurityProbeRevision(value => value + 1);
+    }
     serverEdited.current = true;
     emailEdited.current = true;
     scopeRef.current = { serverURL: address, email: account };
     setServerURL(address);
     setEmail(account);
-    setServerPassword('');
-    setBootstrapToken('');
     setCertificateException(allowInvalidCertificate);
     setPasswordMemoryNotice('');
     onServerURLChange?.(address);
@@ -297,6 +342,7 @@ export function LoginScreen({
         scopeRef.current.email,
       )?.key === scope
     ) {
+      invalidateSecurityScope();
       if (clearInput || passwordFromMemory.current) invalidatePasswordFill();
       else {
         passwordFillGeneration.current += 1;
@@ -316,34 +362,46 @@ export function LoginScreen({
       refreshAccounts();
     });
   };
-  const canUseException = Platform.OS === 'android' && !!httpsOrigin(serverURL);
+  const normalizedServerURL = normalizeServerSecurityURL(serverURL);
+  const hasServerURL = !!serverURL.trim();
+  const canUseException =
+    Platform.OS === 'android' && !!httpsOrigin(normalizedServerURL);
   useEffect(() => {
     if (saving) return;
-    const normalized = normalizeServerSecurityURL(serverURL);
-    if (!serverURL.trim()) {
+    if (!hasServerURL) {
       setSecurityProbe({ phase: 'idle' });
       return;
     }
-    if (!normalized) {
+    if (!normalizedServerURL) {
       setSecurityProbe({ phase: 'invalid' });
       return;
     }
     let active = true;
+    const account = probeAccount.current;
+    const generation = securityScopeGeneration.current;
+    const isAccountScopeCurrent = () =>
+      active && generation === securityScopeGeneration.current;
     setSecurityProbe({ phase: 'checking' });
     const timer = setTimeout(() => {
       const probe = onProbeServerSecurity
         ? onProbeServerSecurity(
-            normalized,
+            normalizedServerURL,
             canUseException && certificateException,
-            email,
+            account,
+            isAccountScopeCurrent,
           )
-        : readServerSecurityStatus(normalized);
+        : readServerSecurityStatus(normalizedServerURL);
       void probe
         .then(status => {
           if (!active) return;
-          setSecurityProbe({ phase: 'ready', status });
+          setSecurityProbe({
+            phase: 'ready',
+            status: {
+              ...status,
+              authorized: status.authorized && isAccountScopeCurrent(),
+            },
+          });
           if (!status.enabled || status.configured) setBootstrapToken('');
-          if (!status.enabled) setServerPassword('');
         })
         .catch(() => {
           if (active) setSecurityProbe({ phase: 'unavailable' });
@@ -354,12 +412,12 @@ export function LoginScreen({
       clearTimeout(timer);
     };
   }, [
-    serverURL,
+    normalizedServerURL,
+    hasServerURL,
     certificateException,
     canUseException,
     onProbeServerSecurity,
     securityProbeRevision,
-    email,
     error,
     saving,
   ]);
@@ -391,8 +449,8 @@ export function LoginScreen({
       password,
       rememberAccountPassword,
       serverURL,
-      serverPassword,
-      bootstrapToken,
+      serverPassword: serverPasswordRequired ? serverPassword : '',
+      bootstrapToken: bootstrapRequired ? bootstrapToken : '',
       allowInvalidServerCertificate: canUseException && certificateException,
     });
   const canSubmit =
@@ -653,13 +711,19 @@ export function LoginScreen({
                     editable={!saving}
                     onChangeText={value => {
                       serverEdited.current = true;
-                      invalidatePasswordFill();
-                      if (httpsOrigin(value) !== httpsOrigin(serverURL))
-                        setCertificateException(false);
+                      if (
+                        normalizeServerSecurityURL(value) !==
+                        normalizedServerURL
+                      ) {
+                        invalidatePasswordFill();
+                        invalidateSecurityScope();
+                        if (httpsOrigin(value) !== httpsOrigin(serverURL))
+                          setCertificateException(false);
+                        setServerPassword('');
+                        setBootstrapToken('');
+                      }
                       scopeRef.current = { serverURL: value, email };
                       setServerURL(value);
-                      setServerPassword('');
-                      setBootstrapToken('');
                       onServerURLChange?.(value);
                     }}
                     placeholder="https://example.com:3001"
@@ -728,7 +792,12 @@ export function LoginScreen({
                           true: colors.blue,
                         }}
                         thumbColor={colors.background}
-                        onValueChange={setCertificateException}
+                        onValueChange={value => {
+                          const account = probeAccount.current;
+                          invalidateSecurityScope();
+                          probeAccount.current = account;
+                          setCertificateException(value);
+                        }}
                       />
                     </View>
                     <Text style={styles.help}>
@@ -788,6 +857,12 @@ export function LoginScreen({
                   onChangeText={value => {
                     emailEdited.current = true;
                     invalidatePasswordFill();
+                    if (
+                      probeAccount.current &&
+                      probeAccount.current.trim().toLowerCase() !==
+                        value.trim().toLowerCase()
+                    )
+                      invalidateSecurityScope();
                     scopeRef.current = { serverURL, email: value };
                     setEmail(value);
                   }}
@@ -872,6 +947,7 @@ export function LoginScreen({
                   accessibilityLabel="清除已记住的账号密码"
                   onPress={() => {
                     invalidatePasswordFill();
+                    invalidateSecurityScope();
                     accountListGeneration.current += 1;
                     setStoredAccounts([]);
                     const generation = passwordFillGeneration.current;

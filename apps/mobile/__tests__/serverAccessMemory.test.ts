@@ -93,3 +93,34 @@ test('forgetting another account keeps the current account grant while clearing 
   await forgetAllServerAccess();
   expect(getServerAccessToken('https://unbound.example.test')).toBeNull();
 });
+
+test('leaving the selected account cancels a pending secure-store restore before bearer installation', async () => {
+  await remember();
+  let selected = true;
+  let release!: (value: object) => void;
+  NativeModules.CoveServerAccessGrants.get.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+  const pending = restoreServerAccess(server, email, () => selected);
+  await Promise.resolve();
+  await Promise.resolve();
+  selected = false;
+  release({ available: true, ok: true, value: records.get(key()) });
+  expect(await pending).toBeNull();
+  expect(getServerAccessToken(server)).toBeNull();
+  expect(records.has(key())).toBe(true);
+});
+
+test('a stale expired-record removal cannot clear the replacement account grant', async () => {
+  const expired = { ...receipt(), expiresAt: Date.now() - 1 };
+  records.set(key(), JSON.stringify(expired));
+  let selected = true;
+  let release!: (value: object) => void;
+  NativeModules.CoveServerAccessGrants.remove.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+  const pending = restoreServerAccess(server, email, () => selected);
+  for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
+  expect(NativeModules.CoveServerAccessGrants.remove).toHaveBeenCalledTimes(1);
+  selected = false;
+  setServerAccessToken(server, { ...receipt(), accessToken: 'synthetic-replacement-grant' });
+  release({ available: true, ok: true });
+  expect(await pending).toBeNull();
+  expect(getServerAccessToken(server)).toBe('synthetic-replacement-grant');
+});

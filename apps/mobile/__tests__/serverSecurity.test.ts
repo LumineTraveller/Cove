@@ -5,6 +5,7 @@ import {
   clearServerAccessToken,
   ensureServerAccess,
   getServerAccessToken,
+  readServerSecurityStatus,
   serverRequestInit,
   setServerAccessToken,
   unlockServer,
@@ -21,6 +22,16 @@ const response = (payload: unknown, status = 200) =>
 beforeEach(() => {
   clearServerAccessToken(server);
   globalThis.fetch = jest.fn();
+});
+
+test.each([200, 404])('late disabled status %s cannot clear a grant installed after the request began', async status => {
+  let release!: (value: Response) => void;
+  jest.mocked(fetch).mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+  const pending = readServerSecurityStatus(server);
+  setServerAccessToken(server, { ...grant, accessToken: 'synthetic-new-grant' });
+  release(response({ enabled: false }, status));
+  expect((await pending).enabled).toBe(false);
+  expect(getServerAccessToken(server)).toBe('synthetic-new-grant');
 });
 
 test('HTTP and Socket requests announce release, platform and unlocked access', () => {

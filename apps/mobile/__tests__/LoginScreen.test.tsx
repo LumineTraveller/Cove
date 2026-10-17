@@ -335,6 +335,115 @@ const modeTabs = (renderer: TestRenderer.ReactTestRenderer) =>
     .findAllByType(TouchableOpacity)
     .filter(item => item.props.accessibilityRole === 'tab');
 
+const serverPasswordInput = (renderer: TestRenderer.ReactTestRenderer) =>
+  renderer.root.findAllByType(TextInput).filter(input => input.props.secureTextEntry)[1]!;
+
+test('typing an email or equivalent server address preserves the server password without another probe', async () => {
+  const probe = jest.fn(async () => enabledSecurity);
+  const invalidate = jest.fn();
+  let renderer!: TestRenderer.ReactTestRenderer;
+  await act(async () => {
+    renderer = TestRenderer.create(<LoginScreen saving={false} onSubmit={jest.fn()}
+      lastServerURL="https://manual.test" onProbeServerSecurity={probe}
+      onInvalidateServerSecurityScope={invalidate} />);
+  });
+  await finishProbe();
+  await act(async () => serverPasswordInput(renderer).props.onChangeText('synthetic-server-password'));
+  for (const draft of ['a', 'alice', 'alice@', 'alice@example.test']) {
+    await act(async () => emailInput(renderer).props.onChangeText(draft));
+    await finishProbe();
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(serverPasswordInput(renderer).props.value).toBe('synthetic-server-password');
+  }
+  await act(async () => addressInput(renderer).props.onChangeText(' HTTPS://MANUAL.TEST:443/// '));
+  await finishProbe();
+  expect(probe).toHaveBeenCalledTimes(1);
+  expect(invalidate).not.toHaveBeenCalled();
+  expect(serverPasswordInput(renderer).props.value).toBe('synthetic-server-password');
+  await act(async () => addressInput(renderer).props.onChangeText('https://other.test/cove'));
+  await finishProbe();
+  expect(probe).toHaveBeenCalledTimes(2);
+  expect(invalidate).toHaveBeenCalledTimes(1);
+  expect(serverPasswordInput(renderer).props.value).toBe('');
+  await act(async () => renderer.unmount());
+});
+
+test('explicit same-server account selection restores only that account while preserving a server password draft', async () => {
+  const first = savedAccount();
+  const second = { serverURL: first.serverURL, email: 'bob@example.test' };
+  passwordNative.list.mockResolvedValue({ available: true, ok: true, accounts: [first, second] });
+  passwordNative.get.mockImplementation(async (_server, account) => ({
+    available: true, ok: true, remembered: true, password: `synthetic-${account}`,
+  }));
+  const probe = jest.fn(async () => enabledSecurity);
+  const invalidate = jest.fn();
+  let renderer!: TestRenderer.ReactTestRenderer;
+  await act(async () => {
+    renderer = TestRenderer.create(<LoginScreen saving={false} onSubmit={jest.fn()}
+      rememberedServers={[first]} onProbeServerSecurity={probe}
+      onInvalidateServerSecurityScope={invalidate} />);
+  });
+  await finishProbe();
+  const firstScope = probe.mock.calls[0] as unknown as [string, boolean, string, () => boolean];
+  await act(async () => serverPasswordInput(renderer).props.onChangeText('synthetic-server-password'));
+  const selectSecond = renderer.root.findAllByType(TouchableOpacity).find(button =>
+    String(button.props.accessibilityLabel).includes(second.email))!;
+  await act(async () => selectSecond.props.onPress());
+  await finishProbe();
+  expect(firstScope[3]()).toBe(false);
+  expect(probe).toHaveBeenLastCalledWith(first.serverURL, false, second.email, expect.any(Function));
+  expect(accountPassword(renderer).props.value).toBe(`synthetic-${second.email}`);
+  expect(serverPasswordInput(renderer).props.value).toBe('synthetic-server-password');
+  for (const draft of ['b', 'bo', 'bob@other.test']) {
+    await act(async () => emailInput(renderer).props.onChangeText(draft));
+    await finishProbe();
+  }
+  expect(probe).toHaveBeenCalledTimes(2);
+  expect(invalidate).toHaveBeenCalledTimes(2);
+  expect(accountPassword(renderer).props.value).toBe('');
+  expect(serverPasswordInput(renderer).props.value).toBe('synthetic-server-password');
+  await act(async () => renderer.unmount());
+});
+
+test('editing an account during its pending probe keeps public server status usable without accepting its authorization', async () => {
+  let release!: (status: typeof enabledSecurity) => void;
+  const probe = jest.fn(() => new Promise<typeof enabledSecurity>(resolve => { release = resolve; }));
+  let renderer!: TestRenderer.ReactTestRenderer;
+  await act(async () => {
+    renderer = TestRenderer.create(<LoginScreen saving={false} onSubmit={jest.fn()}
+      rememberedServers={[savedAccount()]} onProbeServerSecurity={probe} />);
+  });
+  await finishProbe();
+  await act(async () => emailInput(renderer).props.onChangeText('bob@example.test'));
+  await act(async () => release({ ...enabledSecurity, authorized: true }));
+  expect(probe).toHaveBeenCalledTimes(1);
+  await act(async () => serverPasswordInput(renderer).props.onChangeText('synthetic-server-password'));
+  await act(async () => accountPassword(renderer).props.onChangeText('synthetic-account-password'));
+  expect(renderer.root.findAllByType(TouchableOpacity).at(-1)!.props.disabled).toBe(false);
+  await finishProbe();
+  expect(probe).toHaveBeenCalledTimes(1);
+  await act(async () => renderer.unmount());
+});
+
+test('a late disabled response from another server cannot clear the new server password', async () => {
+  let release!: (status: typeof disabledSecurity) => void;
+  const probe = jest.fn().mockImplementationOnce(() => new Promise(resolve => { release = resolve; }))
+    .mockResolvedValue(enabledSecurity);
+  let renderer!: TestRenderer.ReactTestRenderer;
+  await act(async () => {
+    renderer = TestRenderer.create(<LoginScreen saving={false} onSubmit={jest.fn()}
+      lastServerURL="https://old.test" onProbeServerSecurity={probe} />);
+  });
+  await finishProbe();
+  await act(async () => addressInput(renderer).props.onChangeText('https://new.test'));
+  await finishProbe();
+  await act(async () => serverPasswordInput(renderer).props.onChangeText('synthetic-new-password'));
+  await act(async () => release(disabledSecurity));
+  expect(serverPasswordInput(renderer).props.value).toBe('synthetic-new-password');
+  expect(probe).toHaveBeenCalledTimes(2);
+  await act(async () => renderer.unmount());
+});
+
 test('a remembered account safely fills its account password, while server access remains manual', async () => {
   const saved = savedAccount();
   const submit = jest.fn();
@@ -887,7 +996,9 @@ test('a failed server probe can recover without editing the restored address or 
   expect(submitButton().props.disabled).toBe(true);
   await finishProbe();
   expect(probe).toHaveBeenCalledTimes(2);
-  expect(probe).toHaveBeenLastCalledWith(saved.serverURL, false, saved.email);
+  expect(probe).toHaveBeenLastCalledWith(
+    saved.serverURL, false, saved.email, expect.any(Function),
+  );
   expect(addressInput(renderer).props.value).toBe(saved.serverURL);
   expect(emailInput(renderer).props.value).toBe(saved.email);
   expect(accountPassword(renderer).props.value).toBe(

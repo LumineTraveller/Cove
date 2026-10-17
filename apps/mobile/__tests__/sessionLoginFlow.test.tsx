@@ -2,7 +2,7 @@ import React from 'react';
 import TestRenderer, { act } from 'react-test-renderer';
 import { Alert, NativeModules, Platform } from 'react-native';
 import { useCoveSession } from '../src/features/connection/useCoveSession';
-import { clearServerAccessToken } from '../src/features/connection/serverSecurity';
+import { clearServerAccessToken, getServerAccessToken } from '../src/features/connection/serverSecurity';
 import { readSessionConfig, saveSessionConfig } from '../src/features/settings/storage';
 import type { AccountAuthRequest } from '../src/features/accounts/accountAuth';
 import { version as clientVersion } from '../package.json';
@@ -471,4 +471,78 @@ test('a timed-out native revocation cleanup cannot clear active state or cancel 
     expect(fetch).toHaveBeenCalledTimes(2);
     expect(session.authError).toContain('服务器认证');
   } finally { jest.useRealTimers(); }
+});
+
+test('a replaced probe cannot begin the old account restore after certificate configuration resolves', async () => {
+  seedGrant();
+  const secondEmail = 'second@example.test';
+  mockGrantValues.set(JSON.stringify([base, secondEmail]), mockGrantValues.values().next().value!);
+  await mount();
+  let release!: () => void;
+  NativeModules.CoveNative.configureServerCertificate.mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }));
+  let first!: Promise<unknown>;
+  await act(async () => { first = session.probeServerSecurity(base, false, account.email).catch(error => error); });
+  await act(async () => { await session.probeServerSecurity(base, false, secondEmail); });
+  await act(async () => release());
+  expect(await first).toMatchObject({ code: 'REQUEST_CANCELLED' });
+  expect(NativeModules.CoveServerAccessGrants.get).not.toHaveBeenCalledWith(base, account.email);
+  expect(getServerAccessToken(base)).toBe('synthetic-access-grant');
+  expect(mockGrantValues.size).toBe(2);
+});
+
+test('an old unauthorized probe cannot forget a new same-server grant after account selection changes', async () => {
+  seedGrant();
+  await mount();
+  const online = fetch;
+  let release!: (value: Response) => void;
+  globalThis.fetch = jest.fn((input, init) => String(input).endsWith('/api/security/status')
+    ? new Promise<Response>(resolve => { release = resolve; }) : online(input, init));
+  let first!: Promise<unknown>;
+  await act(async () => { first = session.probeServerSecurity(base, false, account.email).catch(error => error); });
+  globalThis.fetch = online;
+  await act(async () => { await session.probeServerSecurity(base, false, account.email); });
+  await act(async () => release(response(200, { enabled: true, configured: true, authorized: false })));
+  expect(await first).toMatchObject({ code: 'REQUEST_CANCELLED' });
+  expect(NativeModules.CoveServerAccessGrants.remove).not.toHaveBeenCalled();
+  expect(mockGrantValues.size).toBe(1);
+  expect(getServerAccessToken(base)).toBe('synthetic-access-grant');
+});
+
+test('editing email during an active probe cancels grant restoration but still returns public server status once', async () => {
+  seedGrant();
+  await mount();
+  let selected = true;
+  let release!: (value: object) => void;
+  const record = mockGrantValues.values().next().value!;
+  NativeModules.CoveServerAccessGrants.get.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+  let pending!: Promise<unknown>;
+  await act(async () => { pending = session.probeServerSecurity(base, false, account.email, () => selected); });
+  await act(async () => {
+    selected = false;
+    session.invalidateServerSecurityScope(base);
+    release({ available: true, ok: true, value: record });
+  });
+  await expect(pending).resolves.toMatchObject({ enabled: true, configured: true, authorized: false });
+  expect(getServerAccessToken(base)).toBeNull();
+  expect(NativeModules.CoveServerAccessGrants.remove).not.toHaveBeenCalled();
+  expect(mockGrantValues.size).toBe(1);
+  expect(fetch).toHaveBeenCalledTimes(1);
+});
+
+test('a finishing public probe cannot invalidate an ongoing manual login', async () => {
+  await mount();
+  const online = fetch;
+  let releaseProbe!: (value: Response) => void;
+  globalThis.fetch = jest.fn((input, init) => String(input).endsWith('/api/security/status')
+    ? new Promise<Response>(resolve => { releaseProbe = resolve; }) : online(input, init));
+  let pending!: Promise<unknown>;
+  await act(async () => { pending = session.probeServerSecurity(base, false, account.email).catch(error => error); });
+  globalThis.fetch = online;
+  await submit();
+  expect(session.sessionReady).toBe(true);
+  await act(async () => releaseProbe(response(200, { enabled: false, authorized: false })));
+  expect(await pending).toMatchObject({ code: 'REQUEST_CANCELLED' });
+  expect(session.sessionReady).toBe(true);
+  expect(getServerAccessToken(base)).toBe('synthetic-access-grant');
+  expect(mockGrantValues.size).toBe(1);
 });

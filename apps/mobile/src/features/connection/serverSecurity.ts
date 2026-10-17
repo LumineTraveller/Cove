@@ -155,8 +155,11 @@ export function setServerAccessToken(
   grant: ServerAccessGrant,
 ): void {
   const key = keyFor(serverURL);
-  if (key && grant.accessToken && Number.isFinite(grant.expiresAt))
+  if (key && grant.accessToken && Number.isFinite(grant.expiresAt)) {
+    // A status request predating this grant cannot clear its replacement.
+    exchangeRevisions.set(key, (exchangeRevisions.get(key) ?? 0) + 1);
     accessTokens.set(key, grant);
+  }
 }
 
 export function clearServerAccessToken(serverURL: string): void {

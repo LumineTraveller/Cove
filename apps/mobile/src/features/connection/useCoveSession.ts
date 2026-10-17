@@ -78,6 +78,7 @@ export function useCoveSession() {
   const addressEdited = useRef(false);
   const mounted = useRef(true);
   const loginRevision = useRef(0);
+  const securityProbeRevision = useRef(0);
   const busy = useRef(false);
   const cancelPendingLogin = useCallback(() => {
     loginRevision.current += 1;
@@ -543,26 +544,62 @@ export function useCoveSession() {
         setSavingConfig(false);
     }
   };
+  const invalidateServerSecurityScope = useCallback((serverURL: string) => {
+    // Saving disables scope edits; a finishing probe cannot revoke that login.
+    if (busy.current) return;
+    invalidateServerAccessOperations();
+    clearServerAccessToken(serverURL);
+  }, []);
   const probeServerSecurity = useCallback(
     async (
       serverURLValue: string,
       allowInvalidServerCertificate: boolean,
       email?: string,
+      isAccountScopeCurrent: () => boolean = () => true,
     ): Promise<ServerSecurityStatus> => {
       if (busy.current) throw new Error('正在认证');
       const serverURL = normalizeServerSecurityURL(serverURLValue);
+      const probeRevision = ++securityProbeRevision.current;
+      const revision = loginRevision.current;
+      invalidateServerAccessOperations();
+      const accessIntent = captureServerAccessIntent(serverURL, email ?? '');
+      const current = () =>
+        mounted.current &&
+        !busy.current &&
+        revision === loginRevision.current &&
+        probeRevision === securityProbeRevision.current;
+      const mayRestore = () =>
+        current() &&
+        isAccountScopeCurrent() &&
+        isServerAccessIntentCurrent(accessIntent);
+      const requireCurrent = () => {
+        if (!current())
+          throw new ServerSecurityClientError(
+            'Request cancelled',
+            499,
+            'REQUEST_CANCELLED',
+          );
+      };
       if (!serverURL) throw new Error('服务器地址无效');
       await configureServerCertificate(
         serverURL,
         allowInvalidServerCertificate,
       );
       if (busy.current) throw new Error('正在认证');
-      if (email) await restoreServerAccess(serverURL, email);
+      requireCurrent();
+      if (email && mayRestore())
+        await restoreServerAccess(serverURL, email, mayRestore);
+      else if (!email) clearServerAccessToken(serverURL);
+      requireCurrent();
       if (busy.current) throw new Error('正在认证');
       const status = await readServerSecurityStatus(serverURL);
-      if (!busy.current && email && status.enabled && !status.authorized)
+      requireCurrent();
+      if (email && mayRestore() && status.enabled && !status.authorized)
         await forgetServerAccess(serverURL, email);
-      return status;
+      requireCurrent();
+      return isAccountScopeCurrent()
+        ? status
+        : { ...status, authorized: false };
     },
     [],
   );
@@ -644,6 +681,7 @@ export function useCoveSession() {
     handleServerURLChange,
     handleForget,
     probeServerSecurity,
+    invalidateServerSecurityScope,
     socket,
     selectedRoom,
     sessionReady,

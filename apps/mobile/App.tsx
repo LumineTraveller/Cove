@@ -58,6 +58,7 @@ function CoveSession() {
     handleServerURLChange,
     handleForget,
     probeServerSecurity,
+    invalidateServerSecurityScope,
     socket,
     selectedRoom,
     sessionReady,
@@ -76,12 +77,14 @@ function CoveSession() {
       serverURL: string,
       allowInvalidServerCertificate: boolean,
       email?: string,
+      isAccountScopeCurrent?: () => boolean,
     ) => {
       selectUpdateServer(serverURL);
       return probeServerSecurity(
         serverURL,
         allowInvalidServerCertificate,
         email,
+        isAccountScopeCurrent,
       );
     },
     [probeServerSecurity, selectUpdateServer],
@@ -135,6 +138,7 @@ function CoveSession() {
         onServerURLChange={handleServerURLChange}
         onForget={handleForget}
         onProbeServerSecurity={probeSelectedServer}
+        onInvalidateServerSecurityScope={invalidateServerSecurityScope}
       />
     );
   }

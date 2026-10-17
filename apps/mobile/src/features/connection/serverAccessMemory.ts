@@ -128,21 +128,24 @@ export function rememberServerAccess(
 export function restoreServerAccess(
   server: string,
   email: string,
+  isScopeCurrent: () => boolean = () => true,
 ): Promise<RememberedServerAccess | null> {
   const scope = scopeFor(server, email);
-  if (!scope) return Promise.resolve(null);
+  if (!scope || !isScopeCurrent()) return Promise.resolve(null);
   const intent = captureServerAccessIntent(server, email);
+  const mayRestore = () => current(intent) && isScopeCurrent();
   if (activeScopes.get(scope.serverURL) !== scope.key)
     clearServerAccessToken(scope.serverURL);
   return queue(async () => {
     const store = native();
-    if (!store || !current(intent)) return null;
+    if (!store || !mayRestore()) return null;
     try {
       const result = await store.get(scope.serverURL, scope.email);
-      if (!result.ok || !current(intent)) return null;
+      if (!result.ok || !mayRestore()) return null;
       const grant: unknown = result.value ? JSON.parse(result.value) : null;
       if (!validRememberedServerAccess(grant)) {
         if (result.value) await store.remove(scope.serverURL, scope.email);
+        if (!mayRestore()) return null;
         clearServerAccessToken(scope.serverURL);
         return null;
       }
@@ -152,7 +155,7 @@ export function restoreServerAccess(
         scope.email,
         JSON.stringify(observed),
       );
-      if (!saved.ok || !current(intent)) return null;
+      if (!saved.ok || !mayRestore()) return null;
       activeScopes.set(scope.serverURL, scope.key);
       setServerAccessToken(scope.serverURL, observed);
       return observed;
