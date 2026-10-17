@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   clearAllServerAccessTokens, clearRememberedServerAccess, clearServerAccessToken,
-  ensureServerAccess, forgetServerAccess, getServerAccessGrant, readServerSecurityStatus,
+  ensureServerAccess, forgetServerAccess, getServerAccessGrant, hasServerAccessForAccount, readServerSecurityStatus,
   rememberServerAccess, restoreServerAccess, setServerAccessToken, unlockServer,
 } from '../src/features/connection/serverSecurity';
 
@@ -55,6 +55,42 @@ test('forget during pending restore cancels the read before it can repopulate me
     await removal;
     assert.equal(getServerAccessGrant(server), null);
     assert.deepEqual(removals, [[server, email]]);
+  });
+});
+
+test('aborted account restore releases the queue and cannot overwrite a newer exact owner', async () => {
+  const oldRead = deferred<any>(), oldStarted = deferred<void>();
+  const newerAccount = 'newer@example.test', newerGrant = { ...grant(), accessToken: 'fictional-newer-grant' };
+  const controller = new AbortController();
+  await withApi({ get: (_server: string, account: string) => {
+    if (account === email) { oldStarted.resolve(); return oldRead.promise; }
+    return Promise.resolve({ available: true, ok: true, grant: newerGrant });
+  } }, async () => {
+    const oldRestore = restoreServerAccess(server, email, controller.signal);
+    await oldStarted.promise;
+    controller.abort();
+    assert.equal(await oldRestore, false);
+    assert.equal(await restoreServerAccess(server, newerAccount), true, 'new scope does not wait for the cancelled IPC response');
+    assert.equal(hasServerAccessForAccount(server, newerAccount.toUpperCase()), true);
+    assert.equal(hasServerAccessForAccount(server, email), false);
+    assert.equal(hasServerAccessForAccount(server + '/other', newerAccount), false);
+    oldRead.resolve({ available: true, ok: true, grant: grant() });
+    await Promise.resolve();
+    assert.deepEqual(getServerAccessGrant(server), newerGrant, 'late old IPC cannot replace token or expiry');
+    assert.equal(hasServerAccessForAccount(server, newerAccount), true);
+  });
+});
+
+test('an already aborted restore cannot clear the current account grant', async () => {
+  let reads = 0;
+  await withApi({ get: async () => { reads++; return { available: true, ok: true, grant: grant() }; } }, async () => {
+    assert.equal(await restoreServerAccess(server, email), true);
+    const saved = getServerAccessGrant(server), controller = new AbortController();
+    controller.abort();
+    assert.equal(await restoreServerAccess(server, 'other@example.test', controller.signal), false);
+    assert.equal(reads, 1);
+    assert.deepEqual(getServerAccessGrant(server), saved);
+    assert.equal(hasServerAccessForAccount(server, email), true);
   });
 });
 

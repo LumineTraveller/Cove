@@ -46,6 +46,7 @@ import {
   clearRememberedServerAccess,
   ensureServerAccess,
   forgetServerAccess,
+  hasServerAccessForAccount,
   normalizeServerSecurityURL,
   readServerSecurityStatus,
   rememberServerAccess,
@@ -208,6 +209,8 @@ export default function App() {
   const [passwordMemoryNotice, setPasswordMemoryNotice] = useState('');
   const passwordFillGeneration = useRef(0);
   const passwordMemoryResultRevision = useRef(0);
+  const serverRestoreAbort = useRef<AbortController | null>(null);
+  const securityProbeAbort = useRef<AbortController | null>(null);
   const [passwordRestoreVersion, setPasswordRestoreVersion] = useState(0);
   useEffect(() => {
     let active = true;
@@ -222,11 +225,15 @@ export default function App() {
   }, []);
   const invalidatePasswordFill = () => {
     authAttempt.current += 1;
+    serverRestoreAbort.current?.abort();
+    // An edit during submission must also cancel a pending password exchange.
+    // Ordinary email edits leave the server probe and manual server fields alone.
+    if (authPending) {
+      securityProbeAbort.current?.abort();
+      clearServerAccessToken(draftUrl);
+      setSecurityProbeRetry(value => value + 1);
+    }
     setAuthPending(false);
-    clearServerAccessToken(draftUrl);
-    setServerSecurityProbe(current => current.phase === 'ready'
-      ? { phase: 'ready', status: { ...current.status, authorized: false } } : current);
-    setSecurityProbeRetry(value => value + 1);
     passwordFillGeneration.current += 1;
     setRememberPassword(false);
     setDraftPassword('');
@@ -246,6 +253,18 @@ export default function App() {
     () =>
       localStorage.getItem('cove_server_url') ?? rememberedLogins[0]?.serverUrl ?? DEFAULT_SERVER,
   );
+  const normalizedDraftServer = normalizeServerSecurityURL(draftUrl);
+  const previousDraftServer = useRef(normalizedDraftServer);
+  const draftEmailRef = useRef(draftEmail);
+  draftEmailRef.current = draftEmail;
+  const changeDraftServerURL = (value: string) => {
+    if (normalizeServerSecurityURL(value) !== normalizedDraftServer) {
+      invalidatePasswordFill();
+      securityProbeAbort.current?.abort();
+      clearServerAccessToken(draftUrl);
+    }
+    setDraftUrl(value);
+  };
   const [allowUntrustedCertificate, setAllowUntrustedCertificate] = useState(() =>
     hasServerCertificateException(localStorage.getItem('cove_server_url') ?? DEFAULT_SERVER),
   );
@@ -305,7 +324,7 @@ export default function App() {
     return () => { active = false; };
   }, [startupRetry]);
   useEffect(() => {
-    const server = normalizeLoginServer(draftUrl);
+    const server = normalizedDraftServer;
     if (!needLogin || authMode !== 'login' || !server || !validAccountEmail(draftEmail)) return;
     let active = true;
     const generation = ++passwordFillGeneration.current;
@@ -320,11 +339,14 @@ export default function App() {
         if (result.ok && result.password) {
           setDraftPassword(result.password);
           setRememberPassword(true);
+          // Only a successfully restored account (or explicit history selection)
+          // asks to restore its server grant. Typing an email never probes it.
+          setSecurityProbeRetry(value => value + 1);
         }
       });
     }, 150);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [draftUrl, draftEmail, authMode, needLogin, passwordRestoreVersion]);
+  }, [normalizedDraftServer, draftEmail, authMode, needLogin, passwordRestoreVersion]);
   const updateServerURL =
     needLogin || editingServer ? normalizeServerSecurityURL(draftUrl) : serverURL;
   const activeUpgrade = requiredUpgrades[normalizeServerSecurityURL(updateServerURL)];
@@ -365,11 +387,16 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (startupState !== 'login') return;
+    if (previousDraftServer.current === normalizedDraftServer) return;
+    previousDraftServer.current = normalizedDraftServer;
     setDraftServerPassword('');
     setDraftBootstrapToken('');
-    const normalizedServerUrl = normalizeServerSecurityURL(draftUrl);
-    if (!draftUrl.trim()) {
+  }, [normalizedDraftServer]);
+
+  useEffect(() => {
+    if (startupState !== 'login') return;
+    const normalizedServerUrl = normalizedDraftServer;
+    if (!normalizedServerUrl && !draftUrl.trim()) {
       setServerSecurityProbe({ phase: 'idle' });
       return;
     }
@@ -379,18 +406,21 @@ export default function App() {
     }
 
     let active = true;
+    const restoreController = new AbortController();
+    const probeController = new AbortController();
+    serverRestoreAbort.current = restoreController;
+    securityProbeAbort.current = probeController;
     setServerSecurityProbe({ phase: 'checking' });
     const timer = window.setTimeout(() => {
       void (async () => {
-        await restoreServerAccess(normalizedServerUrl, draftEmail);
+        await restoreServerAccess(normalizedServerUrl, draftEmailRef.current, restoreController.signal);
         if (!active) return null;
-        return readServerSecurityStatus(normalizedServerUrl);
+        return readServerSecurityStatus(normalizedServerUrl, probeController.signal);
       })()
         .then((status) => {
           if (!active || !status) return;
           setServerSecurityProbe({ phase: 'ready', status });
           versionGateRef.current?.observe(normalizedServerUrl, status.versionPolicy);
-          if (!status.enabled || status.configured) setDraftBootstrapToken('');
         })
         .catch(() => {
           if (active) setServerSecurityProbe({ phase: 'unavailable' });
@@ -398,9 +428,11 @@ export default function App() {
     }, 300);
     return () => {
       active = false;
+      restoreController.abort();
+      probeController.abort();
       window.clearTimeout(timer);
     };
-  }, [draftUrl, draftEmail, startupState, securityProbeRetry]);
+  }, [normalizedDraftServer, Boolean(draftUrl.trim()), startupState, securityProbeRetry]);
 
   const handleThemeChange = useCallback((next: AppTheme) => {
     // Capture the old surface BEFORE React changes theme-dependent gradients
@@ -583,6 +615,8 @@ export default function App() {
     const requireServerUnlock = (message?: string) => {
       if (!active) return;
       clearServerAccessToken(serverURL);
+      setDraftServerPassword('');
+      setDraftBootstrapToken('');
       setAuthError(message || '服务器访问令牌已失效，请重新验证服务器密码。');
       setConnected(false);
       setInitialConnectionPending(false);
@@ -676,7 +710,7 @@ export default function App() {
       serverSecurityProbe.phase !== 'ready' ||
       !validAccountEmail(draftEmail) ||
       (!resumeAccount && draftPassword.length < 8) ||
-      (securityEnabled && (serverUnlockRequired || !serverSecurityProbe.status.authorized) && draftServerPassword.length < 8) ||
+      (securityEnabled && (serverUnlockRequired || !serverSecurityProbe.status.authorized || !hasServerAccessForAccount(draftUrl, draftEmail)) && draftServerPassword.length < 8) ||
       (bootstrapRequired &&
         (!serverSecurityProbe.status.bootstrapAvailable || !draftBootstrapToken.trim())) ||
       !draftUrl.trim() ||
@@ -693,6 +727,9 @@ export default function App() {
     }
     setAuthPending(true);
     setAuthError('');
+    serverRestoreAbort.current?.abort();
+    securityProbeAbort.current?.abort();
+    if (!hasServerAccessForAccount(nextServerUrl, draftEmail)) clearServerAccessToken(nextServerUrl);
     try {
       await window.coveSecurity?.setServerCertificateException(
         nextServerUrl,
@@ -748,6 +785,10 @@ export default function App() {
   const handleLogout = async () => {
     authAttempt.current += 1;
     startupGeneration.current += 1;
+    serverRestoreAbort.current?.abort();
+    securityProbeAbort.current?.abort();
+    setDraftServerPassword('');
+    setDraftBootstrapToken('');
     const session = readAccountSession(serverURL);
     if (session)
       void serverFetch(serverURL, '/api/auth/logout', {
@@ -839,8 +880,7 @@ export default function App() {
     setDraftEmail(entry.email);
     invalidatePasswordFill();
     setPasswordRestoreVersion(version => version + 1);
-    setDraftServerPassword('');
-    setDraftBootstrapToken('');
+    setSecurityProbeRetry(value => value + 1);
     setAllowUntrustedCertificate(entry.allowInvalidServerCertificate === true);
     setAuthError('');
     setShowServerHistory(false);
@@ -851,9 +891,17 @@ export default function App() {
     const selected = normalizeLoginServer(draftUrl) === normalizeLoginServer(entry.serverUrl) && draftEmail.trim().toLowerCase() === entry.email.trim().toLowerCase();
     authAttempt.current += 1;
     startupGeneration.current += 1;
+    if (selected) {
+      invalidatePasswordFill();
+      securityProbeAbort.current?.abort();
+      setDraftServerPassword('');
+      setDraftBootstrapToken('');
+      setServerSecurityProbe(current => current.phase === 'ready'
+        ? { phase: 'ready', status: { ...current.status, authorized: false } }
+        : { phase: 'unavailable' });
+    }
     try { await forgetServerAccess(entry.serverUrl, entry.email); }
     catch { setPasswordMemoryNotice(PASSWORD_MEMORY_FAILED); return; }
-    if (selected) invalidatePasswordFill();
     const generation = passwordFillGeneration.current;
     const removal = await removeAccountPassword(entry.serverUrl, entry.email);
     if (!removal.ok) {
@@ -897,6 +945,8 @@ export default function App() {
 
   const serverSecurityStatus =
     serverSecurityProbe.phase === 'ready' ? serverSecurityProbe.status : null;
+  const serverAccessAuthorized = serverSecurityStatus?.authorized === true &&
+    hasServerAccessForAccount(normalizedDraftServer, draftEmail);
   const serverSecurityEnabled = serverSecurityStatus?.enabled === true;
   const serverSecurityConfigured = serverSecurityEnabled && serverSecurityStatus.configured;
   const serverSecurityUnconfigured = serverSecurityEnabled && !serverSecurityStatus.configured;
@@ -1045,6 +1095,12 @@ export default function App() {
                   }} /><span>记住账号密码（系统加密）</span></label>
                 <button type="button" disabled={authPending} onClick={async () => {
                   invalidatePasswordFill();
+                  securityProbeAbort.current?.abort();
+                  setDraftServerPassword('');
+                  setDraftBootstrapToken('');
+                  setServerSecurityProbe(current => current.phase === 'ready'
+                    ? { phase: 'ready', status: { ...current.status, authorized: false } }
+                    : { phase: 'unavailable' });
                   startupGeneration.current += 1;
                   disconnectAccountSession();
                   try { await clearRememberedServerAccess(); }
@@ -1091,7 +1147,7 @@ export default function App() {
                         inputMode="url"
                         placeholder="https://example.com:3001"
                         value={draftUrl}
-                        onChange={(event) => { invalidatePasswordFill(); setDraftUrl(event.target.value); }}
+                        onChange={(event) => changeDraftServerURL(event.target.value)}
                       />
                       {authMode === 'login' && (
                         <button
@@ -1170,7 +1226,7 @@ export default function App() {
                   />
                 </div>
                 {serverSecurityProbe.phase === 'unavailable' && <button type="button" onClick={() => setSecurityProbeRetry(value => value + 1)}>重试服务器状态</button>}
-                {serverSecurityEnabled && (serverUnlockRequired || !serverSecurityStatus?.authorized) && (
+                {serverSecurityEnabled && (serverUnlockRequired || !serverAccessAuthorized) && (
                   <section
                     className="auth-server-security"
                     aria-labelledby="login-server-security-title"
@@ -1273,7 +1329,7 @@ export default function App() {
                     !serverSecurityReady ||
                     !validAccountEmail(draftEmail) ||
                     (!resumeAccount && draftPassword.length < 8) ||
-                    (serverSecurityEnabled && (serverUnlockRequired || !serverSecurityStatus?.authorized) && draftServerPassword.length < 8) ||
+                    (serverSecurityEnabled && (serverUnlockRequired || !serverAccessAuthorized) && draftServerPassword.length < 8) ||
                     (serverSecurityUnconfigured &&
                       (!serverBootstrapAvailable || !draftBootstrapToken.trim())) ||
                     !draftUrl.trim() ||
@@ -1380,7 +1436,7 @@ export default function App() {
                   <input
                     id="reconnect-server"
                     value={draftUrl}
-                    onChange={(event) => { invalidatePasswordFill(); setDraftUrl(event.target.value); }}
+                    onChange={(event) => changeDraftServerURL(event.target.value)}
                     onKeyDown={(event) => event.key === 'Enter' && saveServerAndReconnect()}
                     autoFocus
                   />

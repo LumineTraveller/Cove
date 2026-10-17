@@ -154,6 +154,12 @@ export function getServerAccessToken(serverURL: string): string | null {
   return getServerAccessGrant(serverURL)?.accessToken ?? null;
 }
 
+/** A restored grant may authorize only its exact server and account. */
+export function hasServerAccessForAccount(serverURL: string, email: string): boolean {
+  const server = serverKey(serverURL), account = email.trim().toLowerCase();
+  return Boolean(server && account && getServerAccessGrant(server) && grantOwners.get(server) === account);
+}
+
 export function setServerAccessToken(serverURL: string, grant: ServerAccessGrant): void {
   const key = serverKey(serverURL);
   if (!key || !grant.accessToken || !Number.isFinite(grant.expiresAt)) return;
@@ -188,7 +194,7 @@ export function clearAllServerAccessTokens(): void {
 let operationGeneration = 0;
 const serverGenerations = new Map<string, number>();
 const accountGenerations = new Map<string, number>();
-const restores = new Map<string, Promise<boolean>>();
+const restores = new Map<string, { promise: Promise<boolean>; signal?: AbortSignal }>();
 const exchanges = new Map<string, number>();
 let storageOperations: Promise<unknown> = Promise.resolve();
 function scopeFor(serverURL: string, email: string): string {
@@ -217,12 +223,12 @@ function exchangeIsCurrent(serverURL: string): () => boolean {
 }
 
 /** Restores locally only. The caller must still verify authorization with the server. */
-export function restoreServerAccess(serverURL: string, email: string): Promise<boolean> {
+export function restoreServerAccess(serverURL: string, email: string, signal?: AbortSignal): Promise<boolean> {
   const server = serverKey(serverURL), account = email.trim().toLowerCase();
-  if (!server || !account) return Promise.resolve(false);
+  if (!server || !account || signal?.aborted) return Promise.resolve(false);
   const scope = scopeFor(server, account);
   const pending = restores.get(scope);
-  if (pending) return pending;
+  if (pending && pending.signal === signal && !pending.signal?.aborted) return pending.promise;
   const existing = getServerAccessGrant(server);
   const bridge = existing && grantOwners.get(server) === account ? existing : null;
   // Legacy/unbound and other-account session copies may not authorize this
@@ -231,9 +237,19 @@ export function restoreServerAccess(serverURL: string, email: string): Promise<b
   if (typeof window === 'undefined' || !window.coveServerAccess) return Promise.resolve(Boolean(bridge));
   const current = operationIsCurrent(server, scope);
   const operation = storageOperation(async () => {
-    if (!current()) return false;
-    const result = await window.coveServerAccess!.get(server, account).catch(() => null);
-    if (!current()) return false;
+    if (!current() || signal?.aborted) return false;
+    // IPC itself cannot be aborted. Release the queue on cancellation and ignore
+    // its eventual result, so an old account cannot restore over a newer scope.
+    const result = await new Promise<Awaited<ReturnType<NonNullable<Window['coveServerAccess']>['get']>> | null>(resolve => {
+      const finish = (value: Awaited<ReturnType<NonNullable<Window['coveServerAccess']>['get']>> | null) => {
+        signal?.removeEventListener('abort', abort);
+        resolve(value);
+      };
+      const abort = () => finish(null);
+      signal?.addEventListener('abort', abort, { once: true });
+      void window.coveServerAccess!.get(server, account).then(finish, () => finish(null));
+    });
+    if (!current() || signal?.aborted) return false;
     if (!result?.ok || !result.available || !result.grant || result.grant.expiresAt <= Date.now())
       return Boolean(bridge && getServerAccessGrant(server)?.accessToken === bridge.accessToken && grantOwners.get(server) === account);
     setServerAccessToken(server, result.grant);
@@ -241,8 +257,8 @@ export function restoreServerAccess(serverURL: string, email: string): Promise<b
     writeSessionAccessTokens();
     return true;
   });
-  restores.set(scope, operation);
-  void operation.finally(() => { if (restores.get(scope) === operation) restores.delete(scope); });
+  restores.set(scope, { promise: operation, signal });
+  void operation.finally(() => { if (restores.get(scope)?.promise === operation) restores.delete(scope); });
   return operation;
 }
 
