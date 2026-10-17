@@ -1,56 +1,43 @@
-import { Server } from 'socket.io';
-
-import { peers } from '../media/ms';
-
+import type { Server } from 'socket.io';
 import { SoundpackRecord, PublicSoundpack } from '../../models';
+import { SoundpackAccessError, type SoundpackAccess } from './soundpackAccess';
 
 export interface CreateSoundpackServiceDependencies {
   readonly userClientIds: Map<string, string>;
-  readonly userNames: Map<string, string>;
   readonly isRoomOwner: (roomId: string | undefined, socketId: string | undefined) => boolean;
   readonly publicUserIdForStableId: (stableId: string) => string;
-  readonly io: Server<
-    import('socket.io/dist/typed-events').DefaultEventsMap,
-    import('socket.io/dist/typed-events').DefaultEventsMap,
-    import('socket.io/dist/typed-events').DefaultEventsMap,
-    any
-  >;
+  readonly roomMembers: Map<string, Set<string>>;
+  readonly access: SoundpackAccess;
+  readonly io: Server;
 }
 
 export function createSoundpackService(deps: CreateSoundpackServiceDependencies) {
-  function toPublicSoundpack(
-    pack: SoundpackRecord,
-    requesterSocketId?: string,
-    roomId?: string,
-  ): PublicSoundpack {
-    const requesterClientId = requesterSocketId
-      ? deps.userClientIds.get(requesterSocketId)
-      : undefined;
-    const requesterName = requesterSocketId ? deps.userNames.get(requesterSocketId) : undefined;
-    const ownsPack =
-      !!requesterClientId &&
-      (pack.uploaderId ? pack.uploaderId === requesterClientId : pack.uploader === requesterName);
-    const canDelete = ownsPack || deps.isRoomOwner(roomId, requesterSocketId);
+  function toPublicSoundpack(pack: SoundpackRecord, requesterSocketId: string, roomId: string): PublicSoundpack {
+    if (!pack.roomId || pack.roomId !== roomId)
+      throw new SoundpackAccessError(404, 'SOUNDPACK_NOT_FOUND', '语音包不存在');
+    const requesterClientId = deps.userClientIds.get(requesterSocketId);
     return {
-      id: pack.id,
-      name: pack.name,
-      filename: pack.filename,
-      originalFilename: pack.originalFilename ?? pack.filename,
-      uploader: pack.uploader,
+      id: pack.id, roomId: pack.roomId, name: pack.name, filename: pack.filename,
+      originalFilename: pack.originalFilename ?? pack.filename, uploader: pack.uploader,
       uploaderUserId: pack.uploaderId ? deps.publicUserIdForStableId(pack.uploaderId) : null,
-      createdAt: pack.createdAt,
-      sortOrder: pack.sortOrder,
-      canDelete,
+      createdAt: pack.createdAt, sortOrder: pack.sortOrder,
+      canDelete: (!!requesterClientId && pack.uploaderId === requesterClientId) || deps.isRoomOwner(pack.roomId, requesterSocketId),
     };
   }
 
-  function broadcastSoundpackAdded(pack: SoundpackRecord) {
-    for (const targetSocket of deps.io.sockets.sockets.values()) {
-      targetSocket.emit(
-        'soundpack:added',
-        toPublicSoundpack(pack, targetSocket.id, peers.get(targetSocket.id)?.roomId ?? undefined),
-      );
+  function broadcastSoundpackEvent(roomId: string, event: string, payload: unknown | ((socketId: string) => unknown)) {
+    for (const socketId of deps.roomMembers.get(roomId) ?? []) {
+      const socket = deps.io.sockets.sockets.get(socketId);
+      if (!socket) continue;
+      try { deps.access.socketRoomActor(socket, roomId); }
+      catch { continue; }
+      socket.emit(event, typeof payload === 'function' ? payload(socketId) : payload);
     }
   }
-  return { toPublicSoundpack, broadcastSoundpackAdded };
+
+  function broadcastSoundpackAdded(pack: SoundpackRecord) {
+    if (pack.roomId) broadcastSoundpackEvent(pack.roomId, 'soundpack:added',
+      (socketId: string) => toPublicSoundpack(pack, socketId, pack.roomId!));
+  }
+  return { toPublicSoundpack, broadcastSoundpackAdded, broadcastSoundpackEvent };
 }

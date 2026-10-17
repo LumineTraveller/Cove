@@ -265,29 +265,26 @@ test('server access gates sensitive REST and Socket.IO operations', { timeout: 1
   denied.disconnect();
 });
 
-test('old and newly uploaded soundpacks play normalized copies while keeping original downloads', { timeout: 15_000 }, async () => {
+test('unassigned legacy soundpacks stay private while room uploads keep original downloads', { timeout: 15_000 }, async () => {
   const legacyOriginal = await readFile(path.join(dataDir, 'sounds', 'legacy-tone.wav'));
-  let legacy: any;
-  for (let attempt = 0; attempt < 100; attempt++) {
-    const response = await fetch(`${base}/api/soundpacks`, { headers: serverHeaders() });
-    assert.equal(response.status, 200);
-    legacy = (await response.json() as any[]).find(pack => pack.id === 'legacy-tone');
-    if (legacy?.filename === 'legacy-tone.normalized.mp3') break;
-    await new Promise(resolve => setTimeout(resolve, 50));
-  }
-  assert.equal(legacy?.filename, 'legacy-tone.normalized.mp3');
-  assert.equal(legacy.originalFilename, 'legacy-tone.wav');
   assert.deepEqual(await readFile(path.join(dataDir, 'sounds', 'legacy-tone.wav')), legacyOriginal);
-  assert.ok((await readFile(path.join(dataDir, 'sounds', legacy.filename))).length > 0);
+  assert.equal(existsSync(path.join(dataDir, 'sounds', 'legacy-tone.normalized.mp3')), false);
 
   const account = await register('soundpack@example.com', 'Soundpack Uploader');
   const connected = socketFor(account); sockets.push(connected.socket);
   assert.equal((await connected.register).ok, true);
+  const { room } = await emit<any>(connected.socket, 'room:create', { name: 'Soundpack Room' });
+  const roomId = room.id;
+  assert.equal((await emit<any>(connected.socket, 'room:join', { roomId })).ok, true);
+  const headers = { ...serverHeaders(), 'x-cove-account-token': account.token };
+  const listed = await fetch(`${base}/api/soundpacks?roomId=${roomId}`, { headers });
+  assert.equal(listed.status, 200);
+  assert.deepEqual(await listed.json(), { roomId, soundpacks: [] });
   const upload = await fetch(`${base}/api/soundpacks`, {
     method: 'POST',
-    headers: { ...serverHeaders(), 'content-type': 'application/json' },
+    headers: { ...headers, 'content-type': 'application/json' },
     body: JSON.stringify({
-      name: 'Fresh Tone', mimeType: 'audio/wav', socketId: connected.socket.id,
+      name: 'Fresh Tone', mimeType: 'audio/wav', roomId,
       data: legacyOriginal.toString('base64'),
     }),
   });
@@ -295,13 +292,13 @@ test('old and newly uploaded soundpacks play normalized copies while keeping ori
   const fresh = await upload.json() as { id: string; filename: string; originalFilename: string };
   assert.match(fresh.filename, /\.normalized\.mp3$/);
   assert.match(fresh.originalFilename, /\.wav$/);
-  const originalDownload = await fetch(`${base}/sounds/${fresh.originalFilename}`, { headers: serverHeaders() });
+  const originalDownload = await fetch(`${base}/api/soundpacks/${fresh.id}/file?roomId=${roomId}&variant=original`, { headers });
   assert.equal(originalDownload.status, 200);
   assert.deepEqual(Buffer.from(await originalDownload.arrayBuffer()), legacyOriginal);
-  const playbackDownload = await fetch(`${base}/sounds/${fresh.filename}`, { headers: serverHeaders() });
+  const playbackDownload = await fetch(`${base}/api/soundpacks/${fresh.id}/file?roomId=${roomId}&variant=playback`, { headers });
   assert.equal(playbackDownload.status, 200);
   assert.ok((await playbackDownload.arrayBuffer()).byteLength > 0);
-  assert.equal((await emit<any>(connected.socket, 'soundpack:delete', { soundId: fresh.id })).ok, true);
+  assert.equal((await emit<any>(connected.socket, 'soundpack:delete', { soundId: fresh.id, roomId })).ok, true);
   assert.equal(existsSync(path.join(dataDir, 'sounds', fresh.originalFilename)), false);
   assert.equal(existsSync(path.join(dataDir, 'sounds', fresh.filename)), false);
 });

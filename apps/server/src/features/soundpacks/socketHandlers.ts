@@ -1,200 +1,124 @@
 import type * as BetterSqlite3 from 'better-sqlite3';
-
-import { Server, type Socket } from 'socket.io';
-
+import type { Server, Socket } from 'socket.io';
 import path from 'path';
-
 import fs from 'fs';
-
+import { randomUUID } from 'crypto';
 import { soundpackVoiceAudience } from './soundpackAudience';
-
 import { Message, SoundpackRecord } from '../../models';
+import { SoundpackAccessError, type SoundpackAccess, type SoundpackActor } from './soundpackAccess';
 
 export interface RegisterSoundpacksSocketHandlersDependencies {
-  readonly socket: Socket<
-    import('socket.io/dist/typed-events').DefaultEventsMap,
-    import('socket.io/dist/typed-events').DefaultEventsMap,
-    import('socket.io/dist/typed-events').DefaultEventsMap,
-    any
-  >;
+  readonly socket: Socket;
   readonly stmtGetSoundpack: BetterSqlite3.Statement<unknown[], unknown>;
   readonly roomMembers: Map<string, Set<string>>;
   readonly voiceRooms: Map<string, Set<string>>;
-  readonly userNames: Map<string, string>;
-  readonly io: Server<
-    import('socket.io/dist/typed-events').DefaultEventsMap,
-    import('socket.io/dist/typed-events').DefaultEventsMap,
-    import('socket.io/dist/typed-events').DefaultEventsMap,
-    any
-  >;
+  readonly io: Server;
   readonly publicUserId: (socketId: string) => string;
-  readonly userClientIds: Map<string, string>;
   readonly isRoomOwner: (roomId: string | undefined, socketId: string | undefined) => boolean;
   readonly stmtDeleteSoundpack: BetterSqlite3.Statement<unknown[], unknown>;
   readonly SOUNDS_DIR: string;
   readonly stmtRenameSoundpack: BetterSqlite3.Statement<unknown[], unknown>;
   readonly stmtGetSoundpacks: BetterSqlite3.Statement<unknown[], unknown>;
-  readonly reorderSoundpacks: BetterSqlite3.Transaction<(orderedIds: string[]) => void>;
+  readonly reorderSoundpacks: BetterSqlite3.Transaction<(roomId: string, orderedIds: string[]) => void>;
+  readonly access: SoundpackAccess;
+  readonly broadcastSoundpackEvent: (roomId: string, event: string, payload: unknown) => void;
 }
 
-export function registerSoundpacksSocketHandlers(
-  deps: RegisterSoundpacksSocketHandlersDependencies,
-) {
-  // ── 语音包 ────────────────────────────────────────────────────────────────
+interface SoundpackRequest { roomId?: unknown; soundId?: unknown; name?: unknown; orderedIds?: unknown }
+type Acknowledge = (result: { ok: boolean; error?: string; code?: string; name?: string }) => void;
 
-  deps.socket.on(
-    'soundpack:play',
-    (
-      { soundId, roomId }: { soundId: string; roomId: string },
-      cb?: (result: { ok: boolean; error?: string }) => void,
-    ) => {
-      const pack = deps.stmtGetSoundpack.get(soundId) as SoundpackRecord | undefined;
-      if (!pack) {
-        cb?.({ ok: false, error: '语音包不存在' });
-        return;
+export function registerSoundpacksSocketHandlers(deps: RegisterSoundpacksSocketHandlersDependencies) {
+  const onRoomEvent = (event: string, handle: (actor: SoundpackActor, request: SoundpackRequest, cb?: Acknowledge) => void) => {
+    deps.socket.on(event, (value: unknown, cb?: Acknowledge) => {
+      try {
+        const request = value && typeof value === 'object' ? value as SoundpackRequest : {};
+        const actor = deps.access.socketRoomActor(deps.socket, request.roomId);
+        handle(actor, request, typeof cb === 'function' ? cb : undefined);
+      } catch (error) {
+        if (typeof cb === 'function') cb(error instanceof SoundpackAccessError
+          ? { ok: false, error: error.message, code: error.code }
+          : { ok: false, error: '语音包操作失败', code: 'SOUNDPACK_UNAVAILABLE' });
       }
-      const audience = soundpackVoiceAudience(
-        deps.roomMembers.get(roomId),
-        deps.voiceRooms.get(roomId),
-        deps.socket.id,
-      );
-      if (!audience) {
-        cb?.({ ok: false, error: '请先加入语音再播放语音包' });
-        return;
-      }
-      const playedBy = deps.userNames.get(deps.socket.id) ?? deps.socket.id;
-      // 包括发送者在内，只有当前仍在语音中的成员会收到音频播放事件。
-      // 发送者也等待此权威事件再播放，避免频道成员通过篡改客户端绕过限制。
-      for (const targetSocketId of audience)
-        deps.io.to(targetSocketId).emit('soundpack:play', {
-          soundId,
-          filename: pack.filename,
-          playedBy,
-          playedByUserId: deps.publicUserId(deps.socket.id),
-          soundName: pack.name,
-        });
+    });
+  };
+  const roomPack = (actor: SoundpackActor, soundId: unknown): SoundpackRecord => {
+    const pack = typeof soundId === 'string' && soundId.length <= 128
+      ? deps.stmtGetSoundpack.get(soundId, actor.roomId) as SoundpackRecord | undefined : undefined;
+    if (!pack || pack.roomId !== actor.roomId)
+      throw new SoundpackAccessError(404, 'SOUNDPACK_NOT_FOUND', '语音包不存在');
+    return pack;
+  };
+  const requireManagement = (actor: SoundpackActor, pack: SoundpackRecord) => {
+    if (pack.uploaderId !== actor.clientId && !deps.isRoomOwner(actor.roomId, actor.socketId))
+      throw new SoundpackAccessError(403, 'FORBIDDEN', '只能由上传者或当前房主管理语音包');
+  };
 
-      const msg: Message = {
-        id: Math.random().toString(36).slice(2, 9),
-        roomId,
-        author: playedBy,
-        authorUserId: deps.publicUserId(deps.socket.id),
-        contentUserId: deps.publicUserId(deps.socket.id),
-        contentUsername: playedBy,
-        content: `${playedBy} 播放了「${pack.name}」`,
-        type: 'soundpack',
-        timestamp: Date.now(),
-      };
-      // 语音包播放记录只对当前在线成员可见，离开频道后不再恢复。
-      deps.io.to(roomId).emit('message:new', msg);
-      cb?.({ ok: true });
-    },
-  );
+  onRoomEvent('soundpack:play', (actor, request, cb) => {
+    const pack = roomPack(actor, request.soundId);
+    const audience = soundpackVoiceAudience(
+      deps.roomMembers.get(actor.roomId), deps.voiceRooms.get(actor.roomId), actor.socketId,
+    );
+    if (!audience)
+      throw new SoundpackAccessError(403, 'VOICE_REQUIRED', '请先加入语音再播放语音包');
+    const playedBy = actor.username;
+    for (const socketId of audience) {
+      const target = deps.io.sockets.sockets.get(socketId);
+      if (!target) continue;
+      try { deps.access.socketRoomActor(target, actor.roomId); }
+      catch { continue; }
+      target.emit('soundpack:play', {
+        roomId: actor.roomId, soundId: pack.id, filename: pack.filename, playedBy,
+        playedByUserId: deps.publicUserId(actor.socketId), soundName: pack.name,
+      });
+    }
+    const msg: Message = {
+      id: randomUUID(), roomId: actor.roomId, author: playedBy,
+      authorUserId: deps.publicUserId(actor.socketId), contentUserId: deps.publicUserId(actor.socketId),
+      contentUsername: playedBy, content: `${playedBy} 播放了「${pack.name}」`,
+      type: 'soundpack', timestamp: Date.now(),
+    };
+    deps.broadcastSoundpackEvent(actor.roomId, 'message:new', msg);
+    cb?.({ ok: true });
+  });
 
-  deps.socket.on(
-    'soundpack:delete',
-    (
-      { soundId, roomId }: { soundId?: string; roomId?: string },
-      cb?: (result: { ok: boolean; error?: string }) => void,
-    ) => {
-      const pack = soundId
-        ? (deps.stmtGetSoundpack.get(soundId) as SoundpackRecord | undefined)
-        : undefined;
-      const actorClientId = deps.userClientIds.get(deps.socket.id);
-      const actorName = deps.userNames.get(deps.socket.id);
-      if (!pack) {
-        cb?.({ ok: false, error: '语音包不存在或已被删除' });
-        return;
-      }
-      const ownsPack =
-        !!actorClientId &&
-        (pack.uploaderId ? pack.uploaderId === actorClientId : pack.uploader === actorName);
-      if (!ownsPack && !deps.isRoomOwner(roomId, deps.socket.id)) {
-        cb?.({ ok: false, error: '只能由上传者或当前房主删除语音包' });
-        return;
-      }
+  onRoomEvent('soundpack:delete', (actor, request, cb) => {
+    const pack = roomPack(actor, request.soundId);
+    requireManagement(actor, pack);
+    const result = deps.stmtDeleteSoundpack.run(pack.id, actor.roomId);
+    if (result.changes !== 1)
+      throw new SoundpackAccessError(404, 'SOUNDPACK_NOT_FOUND', '语音包不存在');
+    for (const filename of new Set([pack.filename, pack.originalFilename])) {
+      if (!filename || path.basename(filename) !== filename || /[\\/]/.test(filename)) continue;
+      try { fs.rmSync(path.join(deps.SOUNDS_DIR, filename), { force: true }); }
+      catch { console.warn('[soundpack] 无法清理已删除语音包文件'); }
+    }
+    deps.broadcastSoundpackEvent(actor.roomId, 'soundpack:deleted', { roomId: actor.roomId, soundId: pack.id });
+    cb?.({ ok: true });
+  });
 
-      deps.stmtDeleteSoundpack.run(pack.id);
-      for (const safeFilename of new Set(
-        [pack.filename, pack.originalFilename]
-          .filter((name): name is string => !!name)
-          .map((name) => path.basename(name)),
-      )) {
-        try {
-          fs.rmSync(path.join(deps.SOUNDS_DIR, safeFilename), { force: true });
-        } catch (error) {
-          console.warn(`[soundpack] 删除文件失败 ${safeFilename}:`, error);
-        }
-      }
-      deps.io.emit('soundpack:deleted', { soundId: pack.id });
-      cb?.({ ok: true });
-    },
-  );
+  onRoomEvent('soundpack:rename', (actor, request, cb) => {
+    const pack = roomPack(actor, request.soundId);
+    requireManagement(actor, pack);
+    const name = typeof request.name === 'string' ? request.name.trim() : '';
+    if (!name || name.length > 64)
+      throw new SoundpackAccessError(400, 'INVALID_REQUEST', '名称应为 1–64 个字符');
+    const result = deps.stmtRenameSoundpack.run(name, pack.id, actor.roomId);
+    if (result.changes !== 1)
+      throw new SoundpackAccessError(404, 'SOUNDPACK_NOT_FOUND', '语音包不存在');
+    deps.broadcastSoundpackEvent(actor.roomId, 'soundpack:renamed', { roomId: actor.roomId, soundId: pack.id, name });
+    cb?.({ ok: true, name });
+  });
 
-  deps.socket.on(
-    'soundpack:rename',
-    (
-      { soundId, roomId, name }: { soundId?: string; roomId?: string; name?: string },
-      cb?: (result: { ok: boolean; error?: string; name?: string }) => void,
-    ) => {
-      const pack = soundId
-        ? (deps.stmtGetSoundpack.get(soundId) as SoundpackRecord | undefined)
-        : undefined;
-      const nextName = name?.trim().slice(0, 64);
-      const actorClientId = deps.userClientIds.get(deps.socket.id);
-      const actorName = deps.userNames.get(deps.socket.id);
-      if (!pack) {
-        cb?.({ ok: false, error: '语音包不存在或已被删除' });
-        return;
-      }
-      if (!nextName) {
-        cb?.({ ok: false, error: '名称不能为空' });
-        return;
-      }
-      const ownsPack =
-        !!actorClientId &&
-        (pack.uploaderId ? pack.uploaderId === actorClientId : pack.uploader === actorName);
-      if (!ownsPack && !deps.isRoomOwner(roomId, deps.socket.id)) {
-        cb?.({ ok: false, error: '只能由上传者或当前房主修改名称' });
-        return;
-      }
-
-      deps.stmtRenameSoundpack.run(nextName, pack.id);
-      deps.io.emit('soundpack:renamed', { soundId: pack.id, name: nextName });
-      cb?.({ ok: true, name: nextName });
-    },
-  );
-
-  deps.socket.on(
-    'soundpack:reorder',
-    (
-      { orderedIds, roomId }: { orderedIds?: string[]; roomId?: string },
-      cb?: (result: { ok: boolean; error?: string }) => void,
-    ) => {
-      if (!roomId || !deps.roomMembers.get(roomId)?.has(deps.socket.id)) {
-        cb?.({ ok: false, error: '请先进入房间' });
-        return;
-      }
-      if (!Array.isArray(orderedIds) || orderedIds.length > 500) {
-        cb?.({ ok: false, error: '无效的语音包顺序' });
-        return;
-      }
-
-      const currentIds = (deps.stmtGetSoundpacks.all() as SoundpackRecord[]).map((pack) => pack.id);
-      const uniqueIds = new Set(orderedIds);
-      if (
-        orderedIds.length !== currentIds.length ||
-        uniqueIds.size !== currentIds.length ||
-        currentIds.some((id) => !uniqueIds.has(id))
-      ) {
-        cb?.({ ok: false, error: '语音包列表已变化，请刷新后重试' });
-        return;
-      }
-
-      deps.reorderSoundpacks(orderedIds);
-      deps.io.emit('soundpack:reordered', { orderedIds });
-      cb?.({ ok: true });
-    },
-  );
-  return {};
+  onRoomEvent('soundpack:reorder', (actor, request, cb) => {
+    const orderedIds = request.orderedIds;
+    if (!Array.isArray(orderedIds) || orderedIds.length > 500 || !orderedIds.every((id) => typeof id === 'string'))
+      throw new SoundpackAccessError(400, 'INVALID_REQUEST', '无效的语音包顺序');
+    const currentIds = (deps.stmtGetSoundpacks.all(actor.roomId) as SoundpackRecord[]).map((pack) => pack.id);
+    const uniqueIds = new Set(orderedIds);
+    if (orderedIds.length !== currentIds.length || uniqueIds.size !== currentIds.length || currentIds.some((id) => !uniqueIds.has(id)))
+      throw new SoundpackAccessError(409, 'SOUNDPACK_LIST_CHANGED', '语音包列表已变化，请刷新后重试');
+    deps.reorderSoundpacks(actor.roomId, orderedIds);
+    deps.broadcastSoundpackEvent(actor.roomId, 'soundpack:reordered', { roomId: actor.roomId, orderedIds });
+    cb?.({ ok: true });
+  });
 }

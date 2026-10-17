@@ -6,6 +6,7 @@ import { createSessionState } from '../features/sessions/sessionState';
 import { createIdentityService } from '../features/sessions/identity';
 import { createRoomService } from '../features/rooms/roomService';
 import { createSoundpackService } from '../features/soundpacks/soundpackService';
+import { createSoundpackAccess } from '../features/soundpacks/soundpackAccess';
 import { createHttpSecurity } from '../features/security/httpSecurity';
 import {clientUpgradePolicy, clientUpgradeError, isClientIdentitySupported, requestClientIdentity, requireClientVersion} from '../features/security/clientVersion';
 import { createMediaService } from '../features/media/mediaService';
@@ -243,6 +244,7 @@ export function createServerRuntime() {
   async function normalizeLegacySoundpacks(): Promise<void> {
     for (const pack of stmtGetLegacySoundpacks.all() as SoundpackRecord[]) {
       if (legacyNormalizationStopped) break;
+      if (!pack.roomId) continue;
       const originalFilename = path.basename(pack.filename);
       const source = path.join(SOUNDS_DIR, originalFilename);
       const filename = `${pack.id}.normalized.mp3`;
@@ -256,11 +258,14 @@ export function createServerRuntime() {
         await normalizeSoundpack(source, temporary);
         // Deletion may happen while FFmpeg is running. Leave the old file in
         // place and only switch the database after the new file is complete.
-        const current = stmtGetSoundpack.get(pack.id) as SoundpackRecord | undefined;
-        if (legacyNormalizationStopped || !current || current.filename !== pack.filename) continue;
+        const current = stmtGetSoundpack.get(pack.id, pack.roomId) as SoundpackRecord | undefined;
+        if (legacyNormalizationStopped || !current || current.roomId !== pack.roomId ||
+          !stmtGetRoomPrivate.get(pack.roomId) || current.filename !== pack.filename) continue;
         fs.renameSync(temporary, destination);
-        stmtMarkSoundpackNormalized.run(filename, originalFilename, pack.id, pack.filename);
-        io.emit('soundpack:normalized', { soundId: pack.id, filename, originalFilename });
+        stmtMarkSoundpackNormalized.run(filename, originalFilename, pack.id, pack.filename, pack.roomId);
+        broadcastSoundpackEvent(pack.roomId, 'soundpack:normalized', {
+          roomId: pack.roomId, soundId: pack.id, filename, originalFilename,
+        });
       } catch (error) {
         console.warn(`[soundpack] 旧语音包 ${pack.id} 标准化失败，继续使用原文件`, error);
       } finally {
@@ -337,13 +342,17 @@ export function createServerRuntime() {
       return stmtGetRooms;
     },
   });
-  const { toPublicSoundpack, broadcastSoundpackAdded } = createSoundpackService({
+  const soundpackAccess = createSoundpackAccess({
+    accounts, accountSockets, userClientIds, roomMembers, io,
+    roomExists: (roomId) => !!stmtGetRoomPrivate.get(roomId),
+    hasServerAccess: (socket) => !serverSecurityEnabled || !!serverSecurity.accessForToken(socket.data.serverAccessToken),
+  });
+  const { toPublicSoundpack, broadcastSoundpackAdded, broadcastSoundpackEvent } = createSoundpackService({
     get userClientIds() {
       return userClientIds;
     },
-    get userNames() {
-      return userNames;
-    },
+    access: soundpackAccess,
+    roomMembers,
     get isRoomOwner() {
       return isRoomOwner;
     },
@@ -407,11 +416,12 @@ export function createServerRuntime() {
     requireServerAccess(req, res, next, true);
   };
 
-  app.use(
-    '/sounds',
-    requirePrivateStaticAccess,
-    express.static(SOUNDS_DIR, { cacheControl: false }),
-  );
+  // A server password alone must never expose room audio by bare filename.
+  // Both playback and original downloads use the account-scoped API route.
+  app.use('/sounds', (_req, res) => {
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.status(404).json({ error: '请使用房间语音包文件接口', code: 'SOUNDPACK_NOT_FOUND' });
+  });
 
   app.use(
     '/chat-images',
@@ -542,12 +552,8 @@ export function createServerRuntime() {
     get toPublicSoundpack() {
       return toPublicSoundpack;
     },
-    get userClientIds() {
-      return userClientIds;
-    },
-    get userNames() {
-      return userNames;
-    },
+    access: soundpackAccess,
+    stmtGetSoundpack,
     get SOUNDS_DIR() {
       return SOUNDS_DIR;
     },
@@ -1381,17 +1387,13 @@ export function createServerRuntime() {
       get voiceRooms() {
         return voiceRooms;
       },
-      get userNames() {
-        return userNames;
-      },
+      access: soundpackAccess,
+      broadcastSoundpackEvent,
       get io() {
         return io;
       },
       get publicUserId() {
         return publicUserId;
-      },
-      get userClientIds() {
-        return userClientIds;
       },
       get isRoomOwner() {
         return isRoomOwner;
