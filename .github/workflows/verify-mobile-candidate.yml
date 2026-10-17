@@ -1,0 +1,160 @@
+name: Verify Cove Mobile Candidate
+run-name: "verify: Cove Mobile ${{ github.ref_name }}"
+
+# Build an inspectable APK before creating any formal release tag (AGENTS.md).
+# The existing tag release workflow remains unchanged and reruns its full gates.
+on:
+  push:
+    branches:
+      - 'release/mobile-*-desktop-*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-candidate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify-android-candidate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/mobile/package-lock.json
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install Android build components
+        shell: bash
+        run: |
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;27.1.12297006"
+
+      - name: Derive candidate tag without creating it
+        shell: bash
+        run: |
+          version=$(node -p "require('./apps/mobile/package.json').version")
+          echo "RELEASE_TAG=mobile-v$version" >> "$GITHUB_ENV"
+
+      - name: Verify tag matches mobile version
+        shell: bash
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^mobile-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid mobile release tag: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          version="${RELEASE_TAG#mobile-v}"
+          package_version=$(node -p "require('./apps/mobile/package.json').version")
+          gradle_version=$(grep -oE 'versionName "[0-9]+\.[0-9]+\.[0-9]+"' apps/mobile/android/app/build.gradle | head -1 | sed -E 's/.*"([^"]+)"/\1/')
+          if [[ "$package_version" != "$version" || "$gradle_version" != "$version" ]]; then
+            echo "Tag $RELEASE_TAG does not match mobile versions: package=$package_version gradle=$gradle_version" >&2
+            exit 1
+          fi
+
+      # AGENTS.md 第 4 条：Android versionCode 必须严格大于线上清单，只改显示版本号必须停止。
+      - name: Verify Android versionCode increments
+        working-directory: apps/mobile
+        run: node scripts/verify-release.cjs --preflight "$RELEASE_TAG"
+
+      - name: Install mobile dependencies
+        working-directory: apps/mobile
+        run: npm ci --registry=https://registry.npmjs.org --replace-registry-host=registry.npmmirror.com
+
+      - name: Build shared runtime packages
+        run: |
+          npm ci --registry=https://registry.npmjs.org --replace-registry-host=registry.npmmirror.com
+          npm run build:packages
+
+      - name: Test mobile client
+        working-directory: apps/mobile
+        run: |
+          npm test -- --runInBand
+          npm run typecheck
+          npm run lint
+
+      - name: Build ARM release APK
+        working-directory: apps/mobile/android
+        run: |
+          chmod +x gradlew
+          ./gradlew testReleaseUnitTest assembleRelease -PreactNativeArchitectures=armeabi-v7a,arm64-v8a
+
+      - name: Prepare release metadata
+        working-directory: apps/mobile
+        run: npm run update:prepare -- RELEASE_NOTES.md "$RELEASE_TAG"
+
+      # AGENTS.md 第 5、6 条：用最终 APK 复核元数据与清单，并确认更新说明与 RELEASE_NOTES.md 同源。
+      - name: Verify staged update feed against the built APK
+        working-directory: apps/mobile
+        run: node scripts/verify-release.cjs --feed "$RELEASE_TAG"
+
+      - name: Inspect APK manifest and packaged ABIs
+        working-directory: apps/mobile
+        shell: bash
+        run: |
+          version="${RELEASE_TAG#mobile-v}"
+          apk="build/updates/$RELEASE_TAG/Cove-Mobile-$version.apk"
+          analyzer="$(command -v apkanalyzer || true)"
+          metadata="android/app/build/outputs/apk/release/output-metadata.json"
+          if [[ -z "$analyzer" || ! -x "$analyzer" ]]; then
+            echo "Missing apkanalyzer on PATH" >&2
+            exit 1
+          fi
+          app_id=$("$analyzer" manifest application-id "$apk")
+          apk_version=$("$analyzer" manifest version-name "$apk")
+          apk_code=$("$analyzer" manifest version-code "$apk")
+          apk_min_api=$("$analyzer" manifest min-sdk "$apk")
+          metadata_code=$(node -p "require('./$metadata').elements[0].versionCode")
+          metadata_min_api=$(node -p "require('./$metadata').minSdkVersionForDexing")
+          [[ "$app_id" == "com.cove.mobile" ]]
+          [[ "$apk_version" == "$version" ]]
+          [[ "$apk_code" == "$metadata_code" ]]
+          [[ "$apk_min_api" == "$metadata_min_api" ]]
+          unzip -Z1 "$apk" | grep -q '^lib/arm64-v8a/'
+          unzip -Z1 "$apk" | grep -q '^lib/armeabi-v7a/'
+          if unzip -Z1 "$apk" | grep -Eq '^lib/(x86|x86_64)/'; then
+            echo "Unexpected x86 ABI in the mobile release APK" >&2
+            exit 1
+          fi
+
+      - name: Verify packaged DNS bridge fix and existing signing identity
+        working-directory: apps/mobile
+        shell: bash
+        run: |
+          version="${RELEASE_TAG#mobile-v}"
+          apk="build/updates/$RELEASE_TAG/Cove-Mobile-$version.apk"
+          node scripts/verify-native-release.cjs "$apk"
+          sdk_root="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          apksigner="$sdk_root/build-tools/36.0.0/apksigner"
+          signature_info=$("$apksigner" verify --verbose --print-certs "$apk")
+          printf '%s\n' "$signature_info"
+          signer_sha=$(printf '%s\n' "$signature_info" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
+          signer_count=$(printf '%s\n' "$signature_info" | sed -n 's/^Number of signers: //p')
+          [[ "$signer_count" == "1" ]]
+          [[ "$signer_sha" == "fac61745dc0903786fb9ede62a962b399f7348f0bb6f899b8332667591033b9c" ]]
+
+      - name: Upload verified candidate for inspection
+        uses: actions/upload-artifact@v7
+        with:
+          name: cove-mobile-candidate-${{ github.sha }}
+          path: |
+            apps/mobile/build/updates/mobile-v*/Cove-Mobile-*.apk
+            apps/mobile/build/updates/mobile-v*/update.json
+            apps/mobile/android/app/build/outputs/apk/release/output-metadata.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
