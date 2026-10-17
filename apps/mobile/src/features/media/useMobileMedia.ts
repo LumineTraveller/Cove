@@ -17,6 +17,7 @@ import {
   ConnectionState,
 } from './mobileMediaSupport';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { request } from '@cove/client-core';
 
 import type { Socket } from 'socket.io-client';
 import { Device } from 'mediasoup-client';
@@ -36,7 +37,11 @@ import {
   type AudioDeviceOption,
 } from './audio/audioDevices';
 
-export function useMobileMedia(socket: Socket, roomId: string) {
+export function useMobileMedia(
+  socket: Socket,
+  roomId: string,
+  roomReady = true,
+) {
   const [inVoice, setInVoice] = useState(false);
   const [joining, setJoining] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
@@ -168,7 +173,11 @@ export function useMobileMedia(socket: Socket, roomId: string) {
     memberVolumesRef,
     setError,
   });
-  const { stopWatchingScreen, watchScreen, captureWatchGuard } = useScreenViewing({
+  const {
+    stopWatchingScreen,
+    watchScreen: consumeScreen,
+    captureWatchGuard,
+  } = useScreenViewing({
     watchingScreenPeerRef,
     consumers,
     removeConsumer,
@@ -177,6 +186,70 @@ export function useMobileMedia(socket: Socket, roomId: string) {
     availableScreensRef,
     consumeProducer,
   });
+  const watchingBusy = useRef(false);
+  const [screenWatchingBusy, setScreenWatchingBusy] = useState(false);
+  const watchScreen = useCallback(
+    async (socketId?: string) => {
+      if (!roomReady || !socket.connected || watchingBusy.current) return;
+      const generation = mediaGeneration.current;
+      watchingBusy.current = true;
+      setScreenWatchingBusy(true);
+      try {
+        // Creating RTP transports does not open a microphone or screen capture.
+        await setupDevice();
+        if (generation !== mediaGeneration.current || !socket.connected) return;
+        await consumeScreen(socketId);
+      } catch (cause) {
+        if (generation === mediaGeneration.current)
+          setError(cause instanceof Error ? cause.message : '无法观看共享屏幕');
+      } finally {
+        watchingBusy.current = false;
+        setScreenWatchingBusy(false);
+      }
+    },
+    [consumeScreen, roomReady, setupDevice, socket],
+  );
+
+  useEffect(() => {
+    if (!roomReady || !socket.connected) return;
+    let current = true;
+    const generation = mediaGeneration.current;
+    socket.emit(
+      'ms:get-producers',
+      (
+        existing?: {
+          producerId: string;
+          peerId: string;
+          kind: string;
+          appData?: Record<string, unknown>;
+        }[],
+      ) => {
+        if (
+          !current ||
+          generation !== mediaGeneration.current ||
+          !Array.isArray(existing)
+        )
+          return;
+        for (const item of existing) {
+          if (item.appData?.type === 'screen-audio')
+            pendingScreenAudioByPeer.current.set(item.peerId, item.producerId);
+        }
+        for (const item of existing) {
+          if (item.appData?.type === 'screen')
+            storeAvailableScreen({
+              socketId: item.peerId,
+              videoProducerId: item.producerId,
+              audioProducerId: pendingScreenAudioByPeer.current.get(
+                item.peerId,
+              ),
+            });
+        }
+      },
+    );
+    return () => {
+      current = false;
+    };
+  }, [roomReady, socket, storeAvailableScreen]);
   const { setScreenReceiveVolume, setApplicationAudioVolume, setMemberVolume } =
     useVolumeControls({
       screenReceiveVolumeRef,
@@ -202,7 +275,6 @@ export function useMobileMedia(socket: Socket, roomId: string) {
       kind: string;
       appData: Record<string, unknown>;
     }) => {
-      if (!inVoiceRef.current) return;
       if (appData?.type === 'screen') {
         storeAvailableScreen({
           socketId: peerId,
@@ -217,10 +289,17 @@ export function useMobileMedia(socket: Socket, roomId: string) {
         if (current)
           storeAvailableScreen({ ...current, audioProducerId: producerId });
         if (watchingScreenPeerRef.current === peerId) {
-          await consumeProducer(producerId, peerId, kind, appData, captureWatchGuard(peerId));
+          await consumeProducer(
+            producerId,
+            peerId,
+            kind,
+            appData,
+            captureWatchGuard(peerId),
+          );
         }
         return;
       }
+      if (!inVoiceRef.current) return;
       await consumeProducer(producerId, peerId, kind, appData);
     };
     const onConsumerClosed = ({ consumerId }: { consumerId: string }) =>
@@ -286,7 +365,8 @@ export function useMobileMedia(socket: Socket, roomId: string) {
         teardown(false);
         return;
       }
-      if (!inVoiceRef.current && !joiningRef.current) return;
+      if (!inVoiceRef.current && !joiningRef.current && !recvTransport.current)
+        return;
       setConnectionState('connecting');
       connectionGrace.current.fail('signal', () => {
         teardown(false);
@@ -296,7 +376,8 @@ export function useMobileMedia(socket: Socket, roomId: string) {
     const onConnect = () => {
       connectionGrace.current.recover('signal');
       if (voiceSocketId.current !== socket.id || !socket.recovered) {
-        if (inVoiceRef.current || joiningRef.current) teardown(false);
+        if (inVoiceRef.current || joiningRef.current || recvTransport.current)
+          teardown(false);
       } else if (!inVoiceRef.current && !joiningRef.current) {
         socket.emit('voice:leave', roomId);
       } else if (inVoiceRef.current) {
@@ -439,7 +520,49 @@ export function useMobileMedia(socket: Socket, roomId: string) {
     socket.emit('voice:mute-state', { roomId, muted: selfMutedRef.current });
   }, [roomId, socket]);
 
+  const collectScreenStats = screenShare.collectScreenStats;
+  const isSharingScreen = screenShare.sharingScreen;
+  const collectDiagnostics = useCallback(async () => {
+    const getStats = async (transport: Transport | null) => {
+      try {
+        return (await transport?.getStats()) ?? new Map();
+      } catch {
+        return new Map();
+      }
+    };
+    const [send, receive, screenSend, server] = await Promise.all([
+      getStats(sendTransport.current),
+      getStats(recvTransport.current),
+      collectScreenStats().catch(() => new Map()),
+      socket.connected
+        ? request(
+            socket,
+            'ms:media-diagnostics',
+            {},
+            { timeoutMs: 4000 },
+          ).catch(() => ({ unavailable: true }))
+        : Promise.resolve({ unavailable: true }),
+    ]);
+    return {
+      stage: {
+        inVoice,
+        watching: isWatchingScreen,
+        sharing: isSharingScreen,
+      },
+      stats: { send, receive, screenSend },
+      server,
+    };
+  }, [
+    inVoice,
+    isWatchingScreen,
+    isSharingScreen,
+    collectScreenStats,
+    socket,
+  ]);
+
   return {
+    collectDiagnostics,
+    screenWatchingBusy,
     ...screenShare,
     inVoice,
     joining,

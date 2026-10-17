@@ -5,6 +5,7 @@ import {
   clearServerAccessToken,
   ensureServerAccess,
   getServerAccessToken,
+  readServerSecurityStatus,
   serverRequestInit,
   setServerAccessToken,
   unlockServer,
@@ -21,6 +22,16 @@ const response = (payload: unknown, status = 200) =>
 beforeEach(() => {
   clearServerAccessToken(server);
   globalThis.fetch = jest.fn();
+});
+
+test.each([200, 404])('late disabled status %s cannot clear a grant installed after the request began', async status => {
+  let release!: (value: Response) => void;
+  jest.mocked(fetch).mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+  const pending = readServerSecurityStatus(server);
+  setServerAccessToken(server, { ...grant, accessToken: 'synthetic-new-grant' });
+  release(response({ enabled: false }, status));
+  expect((await pending).enabled).toBe(false);
+  expect(getServerAccessToken(server)).toBe('synthetic-new-grant');
 });
 
 test('HTTP and Socket requests announce release, platform and unlocked access', () => {
@@ -71,7 +82,7 @@ test('configured server unlocks; uninitialized server requires bootstrap', async
     .mockResolvedValueOnce(response(grant));
   await expect(
     ensureServerAccess({ serverURL: server, password: 'synthetic-password' }),
-  ).resolves.toEqual(grant);
+  ).resolves.toEqual(expect.objectContaining(grant));
   expect(fetch).toHaveBeenLastCalledWith(
     `${server}/api/security/access`,
     expect.objectContaining({
@@ -115,4 +126,32 @@ test('version policy blocks authentication independently of password switch', as
     ensureServerAccess({ serverURL: server, password: '' }),
   ).rejects.toMatchObject({ code: 'CLIENT_VERSION_TOO_OLD' });
   expect(fetch).toHaveBeenCalledTimes(1);
+});
+
+test('offline status validation retains a valid grant and never retries password authentication', async () => {
+  setServerAccessToken(server, grant);
+  jest.mocked(fetch).mockRejectedValue(new TypeError('synthetic offline'));
+  await expect(ensureServerAccess({ serverURL: server, password: '' })).rejects.toThrow('synthetic offline');
+  expect(getServerAccessToken(server)).toBe(grant.accessToken);
+  expect(fetch).toHaveBeenCalledTimes(1);
+});
+
+test('a late password response cannot resurrect an access token after logout clears it', async () => {
+  let release!: (value: Response) => void;
+  jest.mocked(fetch).mockImplementation(() => new Promise(resolve => { release = resolve; }));
+  const pending = unlockServer(server, 'synthetic-password');
+  clearServerAccessToken(server);
+  release(response(grant));
+  await expect(pending).rejects.toMatchObject({ code: 'REQUEST_CANCELLED' });
+  expect(getServerAccessToken(server)).toBeNull();
+});
+test('only the newest concurrent password exchange can install its server grant', async () => {
+  let release!: (value: Response) => void;
+  jest.mocked(fetch).mockImplementationOnce(() => new Promise(resolve => { release = resolve; }))
+    .mockResolvedValueOnce(response({ ...grant, accessToken: 'synthetic-newest-grant' }));
+  const earlier = unlockServer(server, 'synthetic-earlier');
+  await unlockServer(server, 'synthetic-newest');
+  release(response(grant));
+  await expect(earlier).rejects.toMatchObject({ code: 'REQUEST_CANCELLED' });
+  expect(getServerAccessToken(server)).toBe('synthetic-newest-grant');
 });

@@ -1,11 +1,22 @@
-import { styles } from './roomStyles';
+import { useRoomStyles } from './roomStyles';
 import { InlineVolumeSlider } from '../../media/components/InlineVolumeSlider';
 export { InlineVolumeSlider } from '../../media/components/InlineVolumeSlider';
 import { useRoomController, type MobileRoomProps } from '../useRoomController';
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 
 import {
   ActivityIndicator,
+  KeyboardAvoidingView,
   Modal,
+  Platform,
   ScrollView,
   StatusBar,
   Switch,
@@ -13,6 +24,10 @@ import {
   TouchableOpacity,
   View,
   TextInput,
+  useWindowDimensions,
+  type StyleProp,
+  type TextInputProps,
+  type ViewStyle,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
@@ -42,23 +57,89 @@ import {
   Square,
 } from 'lucide-react-native';
 import { ZoomableScreenVideo } from '../../media/screen/components/ZoomableScreenVideo';
+import { SCREEN_CAPTURE_SCALES } from '../../media/screen/screenCaptureSettings';
+import { useScreenAnnotations } from '../../media/annotation/useScreenAnnotations';
+import { ScreenAnnotationLayer } from '../../media/annotation/ScreenAnnotationLayer';
+import {
+  AnnotationTools,
+  type MobileAnnotationTool,
+} from '../../media/annotation/AnnotationTools';
+import type { AnnotationPoint } from '@cove/contracts';
+import { useMobileRemoteControl } from '../../remote-control/useMobileRemoteControl';
+import { MobileDiagnostics } from '../../media/diagnostics/MobileDiagnosticsModal';
 import { Avatar } from '../../profiles/components/Avatar';
 import { ROOM_LIMIT_PRESETS } from '../roomSettings';
 
 import { Soundboard } from '../../soundpacks/components/Soundboard';
+import { useSoundboard } from '../../soundpacks/useSoundboard';
+import { SoundpackPlayer } from '../../soundpacks/components/SoundpackPlayer';
 import { ChatPanel } from '../../chat/components/ChatPanel';
 import { UserProfileModal } from '../../profiles/components/UserProfileModal';
 import {
   getProfileDisplayName,
   saveProfileRemark,
 } from '../../profiles/profileRemarks';
-import { colors } from '../../settings/theme';
+import { useCoveTheme } from '../../settings/ThemeProvider';
+import { useKeyboardInset } from '../../keyboard/useKeyboardInset';
 
 import { NOISE_MODES } from '../../media/microphone/microphoneNoise';
 import {
   inputDeviceLabel,
   outputDeviceLabel,
 } from '../../media/audio/audioDevices';
+
+const FormKeyboardContext = createContext<Pick<
+  ReturnType<typeof useKeyboardInset>,
+  'bindInput' | 'unbindInput'
+> | null>(null);
+
+function RoomFormScroll({
+  children,
+  contentStyle,
+}: {
+  children: ReactNode;
+  contentStyle: StyleProp<ViewStyle>;
+}) {
+  const keyboard = useKeyboardInset();
+  const styles = useRoomStyles();
+  return (
+    <KeyboardAvoidingView
+      style={styles.keyboard}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+    >
+      <ScrollView
+        ref={keyboard.scrollView}
+        contentContainerStyle={[
+          contentStyle,
+          { paddingBottom: 20 + keyboard.bottomInset },
+        ]}
+        onScroll={keyboard.onScroll}
+        onLayout={keyboard.onLayout}
+        onContentSizeChange={keyboard.onContentSizeChange}
+        scrollEventThrottle={16}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+      >
+        <FormKeyboardContext.Provider value={keyboard}>
+          {children}
+        </FormKeyboardContext.Provider>
+      </ScrollView>
+    </KeyboardAvoidingView>
+  );
+}
+
+function RoomFormInput(props: TextInputProps) {
+  const keyboard = useContext(FormKeyboardContext);
+  const input = useRef<TextInput>(null);
+  return (
+    <TextInput
+      {...props}
+      ref={input}
+      onFocus={() => keyboard?.bindInput(input.current)}
+      onBlur={() => keyboard?.unbindInput(input.current)}
+    />
+  );
+}
 
 export function RoomScreen({
   socket,
@@ -67,6 +148,8 @@ export function RoomScreen({
   sessionReady,
   onBack,
 }: MobileRoomProps) {
+  const { theme, colors } = useCoveTheme();
+  const styles = useRoomStyles();
   const {
     screenURL,
     media,
@@ -97,6 +180,8 @@ export function RoomScreen({
     screenShareSettingsOpen,
     includeScreenAudio,
     setIncludeScreenAudio,
+    screenCaptureScale,
+    setScreenCaptureScale,
     audioSettingsOpen,
     audioSettingsBusy,
     fullscreen,
@@ -114,12 +199,289 @@ export function RoomScreen({
     setProfileRemarks,
   } = useRoomController({ socket, config, room, sessionReady, onBack });
 
+  const soundboard = useSoundboard({
+    socket,
+    roomId: room.id,
+    serverURL: config.serverURL,
+    accountId: config.accountId ?? config.clientId,
+    accountToken: config.accountToken,
+    ready: roomReady,
+    inVoice: media.inVoice,
+    outputDeviceId: media.selectedAudioOutputId,
+  });
+  const watching = media.availableScreens.find(
+    screen => screen.socketId === media.watchingScreenPeerId,
+  );
+  const annotations = useScreenAnnotations({
+    socket,
+    roomId: room.id,
+    sharerSocketId: watching?.socketId ?? '',
+    sessionId: watching?.videoProducerId ?? null,
+    self: false,
+    active: roomReady && Boolean(screenURL),
+  });
+  const ownAnnotations = useScreenAnnotations({
+    socket,
+    roomId: room.id,
+    sharerSocketId: socket.id ?? '',
+    sessionId: media.screenProducerId ?? null,
+    self: true,
+    active: roomReady && media.sharingScreen,
+  });
+  const remote = useMobileRemoteControl({
+    socket,
+    roomId: room.id,
+    targetSocketId: watching?.socketId ?? null,
+    allowed:
+      roomReady && Boolean(screenURL) && annotations.remoteControlAllowed,
+  });
+  const [annotationTool, setAnnotationTool] =
+    useState<MobileAnnotationTool>('pen');
+  const [annotationColor, setAnnotationColor] = useState('#FF5A5F');
+  const [annotationWidth, setAnnotationWidth] = useState(0.006);
+  const [ownAnnotationsOpen, setOwnAnnotationsOpen] = useState(false);
+  const [remoteKeyboardOpen, setRemoteKeyboardOpen] = useState(false);
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const [remoteText, setRemoteText] = useState('');
+  const remoteTextRef = useRef(remoteText);
+  remoteTextRef.current = remoteText;
+  const sendRemoteText = async () => {
+    const value = remoteTextRef.current;
+    if (await remote.typeText(value)) {
+      if (remoteTextRef.current === value) setRemoteText('');
+    }
+  };
+  const windowSize = useWindowDimensions();
+  const [ownCanvasSize, setOwnCanvasSize] = useState({ width: 1, height: 1 });
+  const touchState = useRef<{
+    strokeId?: string;
+    point: AnnotationPoint;
+    pressed: boolean;
+  }>({ point: { x: 0.5, y: 0.5 }, pressed: false });
+  const actions = useRef({
+    annotations,
+    remote,
+    annotationTool,
+    annotationColor,
+    annotationWidth,
+  });
+  actions.current = {
+    annotations,
+    remote,
+    annotationTool,
+    annotationColor,
+    annotationWidth,
+  };
+  const controlling = Boolean(remote.session) && !annotations.localActive;
+  const setRemoteInputEnabled = remote.setInputEnabled;
+  useEffect(() => {
+    setRemoteInputEnabled(controlling);
+    if (!controlling) setRemoteKeyboardOpen(false);
+  }, [controlling, setRemoteInputEnabled]);
+  const interaction = useMemo(() => {
+    if (!annotations.canDraw && !controlling) return undefined;
+    const end = () => {
+      const current = actions.current;
+      if (touchState.current.pressed)
+        current.remote.button('left', false, touchState.current.point);
+      touchState.current.pressed = false;
+      if (touchState.current.strokeId)
+        current.annotations.finishStroke(touchState.current.strokeId);
+      touchState.current.strokeId = undefined;
+      current.annotations.sendLaser(null);
+    };
+    const start = (point: AnnotationPoint) => {
+      const current = actions.current;
+      touchState.current.point = point;
+      if (current.remote.session && !current.annotations.localActive) {
+        current.remote.button('left', true, point);
+        touchState.current.pressed = true;
+      } else if (current.annotationTool === 'laser')
+        current.annotations.sendLaser(point);
+      else {
+        const id = `mobile-${Date.now().toString(36)}-${Math.random()
+          .toString(36)
+          .slice(2)}`;
+        touchState.current.strokeId =
+          current.annotations.sendStroke(
+            current.annotationTool,
+            current.annotationColor,
+            current.annotationWidth,
+            [point],
+            id,
+            false,
+          ) ?? undefined;
+      }
+    };
+    return {
+      onStart: start,
+      onMove: (point: AnnotationPoint | null) => {
+        if (!point) return end();
+        const current = actions.current;
+        touchState.current.point = point;
+        if (current.remote.session && !current.annotations.localActive)
+          current.remote.pointer(point);
+        else if (current.annotationTool === 'laser')
+          current.annotations.sendLaser(point);
+        else if (touchState.current.strokeId)
+          current.annotations.sendStroke(
+            current.annotationTool,
+            current.annotationColor,
+            current.annotationWidth,
+            [point],
+            touchState.current.strokeId,
+            false,
+          );
+        else start(point);
+      },
+      onEnd: end,
+    };
+  }, [annotations.canDraw, controlling]);
+  const annotationOverlay = (
+    viewport: { width: number; height: number },
+    video?: { width: number; height: number },
+  ) => (
+    <ScreenAnnotationLayer
+      viewport={viewport}
+      video={video}
+      strokes={[
+        ...(annotations.state?.strokes ?? []),
+        ...annotations.optimisticStrokes,
+      ]}
+      lasers={annotations.laserPoints}
+    />
+  );
+  const remoteTargetSupported =
+    members.find(member => member.socketId === watching?.socketId)
+      ?.canReceiveRemoteControl === true;
+  const remoteAction = (
+    label: string,
+    action: () => void,
+    disabled = false,
+  ) => (
+    <TouchableOpacity
+      key={label}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      accessibilityState={{
+        disabled:
+          disabled ||
+          (Boolean(remote.session) && !controlling && label !== '结束远控'),
+      }}
+      disabled={
+        disabled ||
+        (Boolean(remote.session) && !controlling && label !== '结束远控')
+      }
+      onPress={action}
+      style={[
+        styles.toolbarAction,
+        {
+          minHeight: 44,
+          paddingHorizontal: 12,
+          opacity:
+            disabled ||
+            (Boolean(remote.session) && !controlling && label !== '结束远控')
+              ? 0.5
+              : 1,
+        },
+      ]}
+    >
+      <Text style={styles.toolbarText}>{label}</Text>
+    </TouchableOpacity>
+  );
+  const screenTools = (
+    <View style={{ backgroundColor: colors.background, paddingHorizontal: 8 }}>
+      {(annotations.localActive || remote.session) && (
+        <Text
+          testID="screen-interaction-mode"
+          accessibilityLiveRegion="polite"
+          style={styles.sectionSubtitle}
+        >
+          {annotations.localActive
+            ? remote.session ? '批注模式 · 远控输入已暂停' : '批注模式 · 单指绘制，双指缩放'
+            : '远控模式 · 单指操作桌面，双指缩放'}
+        </Text>
+      )}
+      <AnnotationTools
+        annotations={annotations}
+        tool={annotationTool}
+        setTool={value => {interaction?.onEnd(); setAnnotationTool(value);}}
+        color={annotationColor}
+        setColor={value => {interaction?.onEnd(); setAnnotationColor(value);}}
+        width={annotationWidth}
+        setWidth={value => {interaction?.onEnd(); setAnnotationWidth(value);}}
+      />
+      <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+        {remote.session ? (
+          <>
+            {remoteAction('结束远控', remote.stop)}
+            {remoteAction('键盘输入', () => setRemoteKeyboardOpen(true))}
+            {remoteAction('右键', () =>
+              remote.click(touchState.current.point, 'right'),
+            )}
+            {remoteAction('向上滚动', () =>
+              remote.wheel(touchState.current.point, 0, -120),
+            )}
+            {remoteAction('向下滚动', () =>
+              remote.wheel(touchState.current.point, 0, 120),
+            )}
+            {[
+              'Enter',
+              'Escape',
+              'Tab',
+              'Backspace',
+              'ArrowUp',
+              'ArrowDown',
+              'ArrowLeft',
+              'ArrowRight',
+            ].map(code => remoteAction(code, () => remote.shortcut([code])))}
+            {remoteAction('复制', () =>
+              remote.shortcut(['ControlLeft', 'KeyC']),
+            )}
+            {remoteAction('粘贴', () =>
+              remote.shortcut(['ControlLeft', 'KeyV']),
+            )}
+          </>
+        ) : remote.pending ? (
+          remoteAction('取消远控请求', remote.cancel)
+        ) : (
+          remoteAction(
+            '申请远控',
+            () => {
+              annotations.exit();
+              remote.request();
+            },
+            !remoteTargetSupported || !annotations.remoteControlAllowed,
+          )
+        )}
+      </ScrollView>
+      {remote.error && (
+        <Text
+          accessibilityLiveRegion="polite"
+          style={[styles.formError, { paddingBottom: 6 }]}
+        >
+          {remote.error}
+        </Text>
+      )}
+      {!remoteTargetSupported && (
+        <Text style={styles.sectionSubtitle}>
+          此共享端不支持系统被控；手机可控制支持的 Windows 共享端。
+        </Text>
+      )}
+    </View>
+  );
+
   const screenContent = screenURL ? (
-    <ZoomableScreenVideo key={screenURL} streamURL={screenURL} />
+    <ZoomableScreenVideo
+      key={screenURL}
+      streamURL={screenURL}
+      interaction={interaction}
+      overlay={annotationOverlay}
+    />
   ) : media.availableScreens.length > 0 ? (
     <View style={styles.shareAvailable}>
       <View style={styles.shareAvailableIcon}>
-        <MonitorPlay size={30} color="#082f49" />
+        <MonitorPlay size={30} color={colors.onScreen} />
       </View>
       <Text style={styles.shareAvailableTitle}>
         {media.availableScreens.length} 位成员正在共享屏幕
@@ -139,9 +501,12 @@ export function RoomScreen({
               key={screen.videoProducerId}
               style={styles.watchButton}
               onPress={() => media.watchScreen(screen.socketId)}
+              disabled={media.screenWatchingBusy}
               activeOpacity={0.8}
+              accessibilityRole="button"
+              accessibilityLabel={`观看${name}的共享屏幕`}
             >
-              <Eye size={16} color="#082f49" />
+              <Eye size={16} color={colors.onScreen} />
               <Text style={styles.watchButtonText} numberOfLines={1}>
                 {name}
               </Text>
@@ -153,7 +518,7 @@ export function RoomScreen({
   ) : (
     <View style={styles.screenEmpty}>
       <View style={styles.screenEmptyIcon}>
-        <MonitorPlay size={29} color={colors.textFaint} />
+        <MonitorPlay size={29} color={colors.amber} />
       </View>
       <Text style={styles.screenEmptyTitle}>等待屏幕共享</Text>
       <Text style={styles.screenEmptyText}>
@@ -167,13 +532,21 @@ export function RoomScreen({
       style={styles.safeArea}
       edges={['top', 'right', 'bottom', 'left']}
     >
-      <StatusBar barStyle="light-content" backgroundColor={colors.background} />
-      <View style={styles.header}>
-        <TouchableOpacity style={styles.iconButton} onPress={onBack}>
+      <StatusBar
+        barStyle={theme === 'dark' ? 'light-content' : 'dark-content'}
+        backgroundColor={colors.background}
+      />
+      <View style={styles.header} testID="room-header">
+        <TouchableOpacity
+          style={styles.iconButton}
+          onPress={onBack}
+          accessibilityRole="button"
+          accessibilityLabel="离开房间"
+        >
           <ArrowLeft size={21} color={colors.textMuted} />
         </TouchableOpacity>
         <View style={styles.headerCopy}>
-          <Text style={styles.roomName} numberOfLines={1}>
+          <Text style={styles.roomName} numberOfLines={2}>
             {room.name}
           </Text>
           <Text style={styles.ownerName} numberOfLines={1}>
@@ -196,46 +569,59 @@ export function RoomScreen({
               }}
               accessibilityLabel="房间设置"
             >
-              <Settings size={17} color={colors.cyan} />
+              <Settings size={20} color={colors.textMuted} />
             </TouchableOpacity>
           )}
-          <TouchableOpacity
-            style={styles.headerAction}
-            onPress={() => setChatOpen(true)}
-            accessibilityLabel="打开聊天"
-          >
-            <MessageCircle size={17} color={colors.cyan} />
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.headerAction}
-            onPress={() => setSoundboardOpen(true)}
-            accessibilityLabel="打开语音包"
-          >
-            <AudioLines size={17} color={colors.cyan} />
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[
-              styles.mediaState,
-              media.connectionState === 'connected' && styles.mediaConnected,
-            ]}
-            onPress={() => {
-              setAudioSettingsOpen(true);
-              void media.refreshAudioDevices();
-            }}
-            accessibilityRole="button"
-            accessibilityLabel="音频设置"
-            accessibilityHint="设置麦克风降噪和输入输出设备"
-          >
-            <SlidersHorizontal
-              size={17}
-              color={
-                media.connectionState === 'connected'
-                  ? colors.green
-                  : colors.cyan
-              }
-            />
-          </TouchableOpacity>
         </View>
+      </View>
+      <View style={styles.toolbar} testID="room-toolbar">
+        <TouchableOpacity
+          style={[styles.toolbarAction, styles.toolbarChat]}
+          onPress={() => setChatOpen(true)}
+          accessibilityLabel="打开聊天"
+        >
+          <MessageCircle size={18} color={colors.blue} />
+          <Text style={[styles.toolbarText, styles.toolbarChatText]}>聊天</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.toolbarAction}
+          onPress={() => setSoundboardOpen(true)}
+          accessibilityLabel="打开语音包"
+        >
+          <AudioLines size={18} color={colors.purple} />
+          <Text style={styles.toolbarText}>语音包</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[
+            styles.toolbarAction,
+            media.connectionState === 'connected' && styles.mediaConnected,
+          ]}
+          onPress={() => {
+            setAudioSettingsOpen(true);
+            void media.refreshAudioDevices();
+          }}
+          accessibilityRole="button"
+          accessibilityLabel="音频设置"
+          accessibilityHint="设置麦克风降噪和输入输出设备"
+        >
+          <SlidersHorizontal
+            size={17}
+            color={
+              media.connectionState === 'connected'
+                ? colors.green
+                : colors.textMuted
+            }
+          />
+          <Text
+            style={[
+              styles.toolbarText,
+              media.connectionState === 'connected' &&
+                styles.toolbarConnectedText,
+            ]}
+          >
+            音频设置
+          </Text>
+        </TouchableOpacity>
       </View>
 
       <ScrollView
@@ -243,6 +629,23 @@ export function RoomScreen({
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
       >
+        {roomReady && (
+          <TouchableOpacity
+            style={styles.toolbarAction}
+            accessibilityLabel="媒体状态"
+            onPress={() => setDiagnosticsOpen(true)}
+          >
+            <Text style={styles.toolbarText}>媒体状态</Text>
+          </TouchableOpacity>
+        )}
+        {!roomReady && !passwordPrompt && !joinError && (
+          <View style={styles.statusBanner} accessibilityLiveRegion="polite">
+            <ActivityIndicator color={colors.blue} />
+            <Text style={styles.statusText}>
+              {sessionReady ? '正在加入房间…' : '连接已断开，正在重新连接…'}
+            </Text>
+          </View>
+        )}
         {(joinError || media.error) && (
           <TouchableOpacity
             style={styles.errorBanner}
@@ -268,36 +671,54 @@ export function RoomScreen({
           </TouchableOpacity>
         )}
 
-        <View style={styles.screenStage}>
-          {screenContent}
-          {screenURL && (
-            <View style={styles.screenOverlay}>
-              <Text style={styles.sharer}>{sharerName ?? '正在共享'}</Text>
-              <View style={styles.screenActions}>
-                <TouchableOpacity
-                  style={styles.expandButton}
-                  onPress={() => setFullscreen(true)}
-                >
-                  <Expand size={18} color={colors.text} />
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={styles.expandButton}
-                  onPress={media.stopWatchingScreen}
-                >
-                  <EyeOff size={18} color={colors.red} />
-                </TouchableOpacity>
+        {(screenURL || media.availableScreens.length > 0) && (
+          <View
+            style={[styles.screenStage, screenURL && styles.screenStageVideo]}
+          >
+            {screenContent}
+            {screenURL && (
+              <View style={styles.screenOverlay}>
+                <Text style={styles.sharer} numberOfLines={2}>
+                  {sharerName ?? '正在共享'}
+                </Text>
+                <View style={styles.screenActions}>
+                  <TouchableOpacity
+                    style={styles.expandButton}
+                    onPress={() => setFullscreen(true)}
+                    accessibilityLabel="全屏查看共享"
+                  >
+                    <Expand size={18} color={colors.onVideo} />
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.expandButton}
+                    onPress={media.stopWatchingScreen}
+                    accessibilityLabel="停止观看共享"
+                  >
+                    <EyeOff size={18} color={colors.red} />
+                  </TouchableOpacity>
+                </View>
               </View>
-            </View>
-          )}
-        </View>
+            )}
+          </View>
+        )}
+
+        {screenURL && !fullscreen && screenTools}
+        {media.sharingScreen && (
+          <TouchableOpacity
+            style={styles.toolbarAction}
+            accessibilityLabel="管理我的共享批注"
+            onPress={() => setOwnAnnotationsOpen(true)}
+          >
+            <Text style={styles.toolbarText}>
+              共享批注 · {ownAnnotations.state?.strokes.length ?? 0} 笔
+            </Text>
+          </TouchableOpacity>
+        )}
 
         {media.canShareScreen !== false && (
           <View style={styles.ownScreenCard} testID="own-screen-sharing">
             <View style={styles.ownScreenCopy}>
-              <ScreenShare
-                size={20}
-                color={media.sharingScreen ? colors.green : colors.cyan}
-              />
+              <ScreenShare size={20} color={colors.amber} />
               <View style={styles.ownScreenText}>
                 <Text style={styles.sectionTitle}>
                   {media.sharingScreen ? '正在共享我的屏幕' : '共享我的屏幕'}
@@ -331,11 +752,7 @@ export function RoomScreen({
               </TouchableOpacity>
             ) : (
               <TouchableOpacity
-                style={[
-                  styles.startShareButton,
-                  !media.inVoice && styles.controlDisabled,
-                ]}
-                disabled={!media.inVoice}
+                style={styles.startShareButton}
                 onPress={() => {
                   media.clearScreenSharingError();
                   setScreenShareSettingsOpen(true);
@@ -381,7 +798,7 @@ export function RoomScreen({
                 >
                   <MonitorPlay
                     size={14}
-                    color={selected ? '#083344' : colors.textMuted}
+                    color={selected ? colors.onScreen : colors.textMuted}
                   />
                   <Text
                     style={[
@@ -412,7 +829,7 @@ export function RoomScreen({
               {media.screenReceiveVolume === 0 ? (
                 <VolumeX size={18} color={colors.red} />
               ) : (
-                <Volume2 size={18} color={colors.cyan} />
+                <Volume2 size={18} color={colors.blue} />
               )}
             </TouchableOpacity>
             <Text style={styles.screenVolumeLabel}>共享音量</Text>
@@ -438,7 +855,7 @@ export function RoomScreen({
             return (
               <View key={share.producerId} style={styles.applicationAudioCard}>
                 <View style={styles.applicationAudioHeading}>
-                  <AudioLines size={22} color={colors.cyan} />
+                  <AudioLines size={22} color={colors.purple} />
                   <View style={styles.applicationAudioCopy}>
                     <Text style={styles.sectionTitle}>{name} 正在共享音频</Text>
                     <Text style={styles.sectionSubtitle} numberOfLines={2}>
@@ -462,7 +879,7 @@ export function RoomScreen({
                     {share.volume === 0 ? (
                       <VolumeX size={18} color={colors.red} />
                     ) : (
-                      <Volume2 size={18} color={colors.cyan} />
+                      <Volume2 size={18} color={colors.blue} />
                     )}
                   </TouchableOpacity>
                   <InlineVolumeSlider
@@ -483,9 +900,9 @@ export function RoomScreen({
         <View style={styles.memberCard}>
           <View style={styles.sectionHeading}>
             <View style={styles.sectionIcon}>
-              <Users size={18} color={colors.cyan} />
+              <Users size={18} color={colors.blue} />
             </View>
-            <View>
+            <View style={styles.sectionHeadingCopy}>
               <Text style={styles.sectionTitle}>房间成员</Text>
               <Text style={styles.sectionSubtitle}>
                 {members.length} 人在线
@@ -495,11 +912,12 @@ export function RoomScreen({
               </Text>
             </View>
           </View>
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.memberList}
-          >
+          <View style={styles.memberList}>
+            {!members.length && (
+              <Text style={styles.sectionSubtitle}>
+                {roomReady ? '正在同步成员…' : '连接后显示房间成员'}
+              </Text>
+            )}
             {members.map(member => {
               const voiceMember = media.voiceMembers.find(
                 voice => voice.socketId === member.socketId,
@@ -521,10 +939,10 @@ export function RoomScreen({
                   <Avatar
                     username={displayName}
                     avatarUrl={member.avatarUrl}
-                    size={26}
-                    borderRadius={9}
+                    size={40}
+                    borderRadius={20}
                   />
-                  <View>
+                  <View style={styles.memberCopy}>
                     <Text style={styles.memberName}>{displayName}</Text>
                     {profileRemarks[member.userId] ? (
                       <Text style={styles.memberUsername}>
@@ -532,22 +950,24 @@ export function RoomScreen({
                       </Text>
                     ) : null}
                   </View>
-                  {member.isOwner && <Crown size={13} color="#fcd34d" />}
-                  {member.platform === 'mobile' ? (
-                    <Smartphone size={13} color={colors.textFaint} />
-                  ) : member.platform === 'desktop' ? (
-                    <Monitor size={13} color={colors.textFaint} />
-                  ) : null}
-                  {showVoiceState &&
-                    (voiceMember.isMuted ? (
-                      <MicOff size={13} color={colors.red} />
-                    ) : (
-                      <Mic size={13} color={colors.green} />
-                    ))}
+                  <View style={styles.memberIndicators}>
+                    {member.isOwner && <Crown size={15} color={colors.amber} />}
+                    {member.platform === 'mobile' ? (
+                      <Smartphone size={13} color={colors.textFaint} />
+                    ) : member.platform === 'desktop' ? (
+                      <Monitor size={13} color={colors.textFaint} />
+                    ) : null}
+                    {showVoiceState &&
+                      (voiceMember.isMuted ? (
+                        <MicOff size={13} color={colors.red} />
+                      ) : (
+                        <Mic size={13} color={colors.green} />
+                      ))}
+                  </View>
                 </TouchableOpacity>
               );
             })}
-          </ScrollView>
+          </View>
         </View>
       </ScrollView>
 
@@ -563,9 +983,9 @@ export function RoomScreen({
             activeOpacity={0.8}
           >
             {media.joining ? (
-              <ActivityIndicator color="#164e63" />
+              <ActivityIndicator color={colors.green} />
             ) : (
-              <Headphones size={20} color="#164e63" />
+              <Headphones size={20} color={colors.green} />
             )}
             <Text style={styles.joinVoiceText}>
               {media.joining ? '正在加入' : '加入语音'}
@@ -636,8 +1056,8 @@ export function RoomScreen({
           edges={['top', 'right', 'bottom', 'left']}
         >
           <View style={styles.toolHeader}>
-            <View style={styles.toolHeaderIcon}>
-              <ScreenShare size={19} color={colors.cyan} />
+            <View style={[styles.toolHeaderIcon, styles.toolScreenIcon]}>
+              <ScreenShare size={19} color={colors.amber} />
             </View>
             <View style={styles.headerCopy}>
               <Text style={styles.toolTitle}>共享手机屏幕</Text>
@@ -655,6 +1075,40 @@ export function RoomScreen({
             </TouchableOpacity>
           </View>
           <ScrollView contentContainerStyle={styles.audioSettingsContent}>
+            <View style={styles.audioSettingsSection}>
+              <Text style={styles.sectionTitle}>画面采集比例</Text>
+              <Text style={styles.sectionSubtitle}>
+                按屏幕宽高比例采集，降低比例可减少传输的画面尺寸。共享开始后保持不变，下次开始时应用所选比例。
+              </Text>
+              <View style={styles.limitPresets}>
+                {SCREEN_CAPTURE_SCALES.map(option => {
+                  const selected = screenCaptureScale === option.value;
+                  const disabled =
+                    media.screenSharingBusy || media.sharingScreen;
+                  return (
+                    <TouchableOpacity
+                      key={option.value}
+                      style={[
+                        styles.limitPreset,
+                        selected && styles.screenScaleActive,
+                        disabled && styles.screenScaleDisabled,
+                      ]}
+                      accessibilityRole="radio"
+                      accessibilityLabel={`画面采集比例：${option.label}`}
+                      accessibilityState={{ checked: selected, disabled }}
+                      disabled={disabled}
+                      onPress={() => setScreenCaptureScale(option.value)}
+                    >
+                      <Text style={styles.limitPresetText}>{option.label}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+              <Text style={styles.sectionSubtitle}>
+                当前 Android 采集通道以 30 FPS
+                运行。观看帧率由共享源与设备决定；系统会提示屏幕录制授权。
+              </Text>
+            </View>
             <View style={styles.screenShareOption}>
               <View style={styles.ownScreenText}>
                 <Text style={styles.sectionTitle}>同时共享音频</Text>
@@ -664,11 +1118,15 @@ export function RoomScreen({
               </View>
               <Switch
                 value={includeScreenAudio && !!media.canShareScreenAudio}
-                disabled={media.screenSharingBusy || !media.canShareScreenAudio}
+                disabled={
+                  media.screenSharingBusy ||
+                  media.sharingScreen ||
+                  !media.canShareScreenAudio
+                }
                 onValueChange={setIncludeScreenAudio}
                 accessibilityLabel="同时共享音频"
-                trackColor={{ false: colors.borderStrong, true: colors.cyan }}
-                thumbColor={colors.text}
+                trackColor={{ false: colors.borderStrong, true: colors.screen }}
+                thumbColor={colors.onScreen}
               />
             </View>
             <Text style={styles.sectionSubtitle}>
@@ -682,12 +1140,16 @@ export function RoomScreen({
                 开始后请在系统窗口确认共享范围。注意保护屏幕上的聊天、通知和个人信息；可随时在此处或系统录屏指示中停止。
               </Text>
             </View>
+            {!media.inVoice && (
+              <Text style={styles.noiseHint}>加入语音后才能开始共享屏幕。</Text>
+            )}
             {media.screenSharingError && (
               <Text style={styles.errorText}>{media.screenSharingError}</Text>
             )}
             <TouchableOpacity
               style={[
                 styles.submit,
+                styles.screenSubmit,
                 (media.screenSharingBusy || !media.inVoice) &&
                   styles.controlDisabled,
               ]}
@@ -698,17 +1160,18 @@ export function RoomScreen({
                 if (
                   await media.startScreenShare(
                     includeScreenAudio && !!media.canShareScreenAudio,
+                    screenCaptureScale,
                   )
                 )
                   setScreenShareSettingsOpen(false);
               }}
             >
               {media.screenSharingBusy ? (
-                <ActivityIndicator color="#164e63" />
+                <ActivityIndicator color={colors.onScreen} />
               ) : (
-                <ScreenShare size={20} color="#164e63" />
+                <ScreenShare size={20} color={colors.onScreen} />
               )}
-              <Text style={styles.submitText}>
+              <Text style={[styles.submitText, styles.screenSubmitText]}>
                 {media.screenSharingBusy ? '正在启动共享…' : '开始共享'}
               </Text>
             </TouchableOpacity>
@@ -726,8 +1189,8 @@ export function RoomScreen({
           edges={['top', 'right', 'bottom', 'left']}
         >
           <View style={styles.toolHeader}>
-            <View style={styles.toolHeaderIcon}>
-              <Headphones size={19} color={colors.cyan} />
+            <View style={[styles.toolHeaderIcon, styles.toolVoiceIcon]}>
+              <Headphones size={19} color={colors.green} />
             </View>
             <View style={styles.headerCopy}>
               <Text style={styles.toolTitle}>音频设置</Text>
@@ -784,7 +1247,7 @@ export function RoomScreen({
                       {option.label}
                     </Text>
                     {selected ? (
-                      <CheckCircle2 size={18} color={colors.cyan} />
+                      <CheckCircle2 size={18} color={colors.blue} />
                     ) : null}
                   </TouchableOpacity>
                 );
@@ -841,7 +1304,7 @@ export function RoomScreen({
                           outputDeviceLabel(device.id, media.audioOutputs)}
                       </Text>
                       {selected ? (
-                        <CheckCircle2 size={18} color={colors.cyan} />
+                        <CheckCircle2 size={18} color={colors.blue} />
                       ) : null}
                     </TouchableOpacity>
                   );
@@ -886,7 +1349,7 @@ export function RoomScreen({
                           inputDeviceLabel(device.id, media.audioInputs)}
                       </Text>
                       {selected ? (
-                        <CheckCircle2 size={18} color={colors.cyan} />
+                        <CheckCircle2 size={18} color={colors.blue} />
                       ) : null}
                     </TouchableOpacity>
                   );
@@ -909,16 +1372,175 @@ export function RoomScreen({
       >
         <View style={styles.fullscreen}>
           <StatusBar hidden />
-          {screenURL ? (
-            <ZoomableScreenVideo key={screenURL} streamURL={screenURL} />
-          ) : null}
-          <TouchableOpacity
-            style={styles.closeFullscreen}
-            onPress={() => setFullscreen(false)}
+          <KeyboardAvoidingView
+            style={{ flex: 1 }}
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
           >
-            <X size={22} color={colors.text} />
-          </TouchableOpacity>
+            <View style={{ flex: 1 }}>
+              {screenURL ? (
+                <ZoomableScreenVideo
+                  key={screenURL}
+                  streamURL={screenURL}
+                  interaction={interaction}
+                  overlay={annotationOverlay}
+                />
+              ) : null}
+            </View>
+            <SafeAreaView edges={['bottom', 'left', 'right']}>
+              {screenURL && screenTools}
+            </SafeAreaView>
+          </KeyboardAvoidingView>
+          <SafeAreaView style={styles.fullscreenSafe} edges={['top', 'right']}>
+            <TouchableOpacity
+              style={styles.closeFullscreen}
+              onPress={() => setFullscreen(false)}
+              accessibilityLabel="关闭全屏共享"
+            >
+              <X size={22} color={colors.onVideo} />
+            </TouchableOpacity>
+          </SafeAreaView>
         </View>
+      </Modal>
+
+      <Modal
+        visible={ownAnnotationsOpen && media.sharingScreen}
+        supportedOrientations={['portrait', 'landscape']}
+        onRequestClose={() => setOwnAnnotationsOpen(false)}
+      >
+        <SafeAreaView
+          style={styles.toolModal}
+          edges={['top', 'right', 'bottom', 'left']}
+        >
+          <View style={styles.toolHeader}>
+            <View style={styles.headerCopy}>
+              <Text style={styles.toolTitle}>我的共享批注</Text>
+              <Text style={styles.toolSubtitle}>
+                只在 Cove 内显示，不覆盖其他应用
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={styles.iconButton}
+              accessibilityLabel="关闭我的共享批注"
+              onPress={() => setOwnAnnotationsOpen(false)}
+            >
+              <X size={20} color={colors.textMuted} />
+            </TouchableOpacity>
+          </View>
+          <View
+            style={[styles.audioSettingsSection, { paddingHorizontal: 16 }]}
+          >
+            <View style={styles.ownScreenCard}>
+              <Text style={styles.sectionTitle}>允许所有观看者直接批注</Text>
+              <Switch
+                value={ownAnnotations.annotationsAllowed}
+                disabled={
+                  !ownAnnotations.ready || Boolean(ownAnnotations.pendingAction)
+                }
+                onValueChange={value => {
+                  void ownAnnotations.setAnnotationsAllowed(value);
+                }}
+              />
+            </View>
+            <Text style={styles.sectionSubtitle}>
+              画布显示共享视频的归一化位置；Android 无法显示 Windows
+              的系统全屏覆盖层。
+            </Text>
+            {ownAnnotations.error && (
+              <Text style={styles.formError}>{ownAnnotations.error}</Text>
+            )}
+            {ownAnnotations.state?.requests.map(request => (
+              <View key={request.socketId} style={styles.ownScreenCard}>
+                <Text style={styles.sectionTitle}>
+                  {request.username}申请批注
+                </Text>
+                <TouchableOpacity
+                  style={styles.toolbarAction}
+                  onPress={() => {
+                    void ownAnnotations.respond(request.socketId, true);
+                  }}
+                >
+                  <Text style={styles.toolbarText}>允许</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.toolbarAction}
+                  onPress={() => {
+                    void ownAnnotations.respond(request.socketId, false);
+                  }}
+                >
+                  <Text style={styles.toolbarText}>拒绝</Text>
+                </TouchableOpacity>
+              </View>
+            ))}
+          </View>
+          <View
+            style={{ flex: 1, backgroundColor: '#111827', margin: 16 }}
+            onLayout={event => setOwnCanvasSize(event.nativeEvent.layout)}
+          >
+            <ScreenAnnotationLayer
+              viewport={ownCanvasSize}
+              video={media.sharedScreenSize ?? windowSize}
+              strokes={ownAnnotations.state?.strokes ?? []}
+              lasers={ownAnnotations.laserPoints}
+            />
+          </View>
+        </SafeAreaView>
+      </Modal>
+
+      <Modal
+        visible={remoteKeyboardOpen && controlling}
+        supportedOrientations={['portrait', 'landscape']}
+        onRequestClose={() => setRemoteKeyboardOpen(false)}
+      >
+        <SafeAreaView
+          style={styles.toolModal}
+          edges={['top', 'right', 'bottom', 'left']}
+        >
+          <View style={styles.toolHeader}>
+            <View style={styles.headerCopy}>
+              <Text style={styles.toolTitle}>远控键盘</Text>
+              <Text style={styles.toolSubtitle}>
+                输入英文、数字与符号，中文输入法需要共享端完成。
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={styles.iconButton}
+              accessibilityLabel="关闭远控键盘"
+              onPress={() => setRemoteKeyboardOpen(false)}
+            >
+              <X size={20} color={colors.textMuted} />
+            </TouchableOpacity>
+          </View>
+          <RoomFormScroll contentStyle={styles.toolContent}>
+            <Text style={styles.formLabel}>发送到共享端的按键</Text>
+            <RoomFormInput
+              value={remoteText}
+              onChangeText={setRemoteText}
+              maxLength={256}
+              autoCapitalize="none"
+              autoCorrect={false}
+              placeholder="英文、数字和符号"
+              placeholderTextColor={colors.textFaint}
+              style={styles.input}
+              accessibilityLabel="远控键盘输入"
+              onSubmitEditing={() => {
+                void sendRemoteText();
+              }}
+            />
+            <TouchableOpacity
+              style={styles.submit}
+              disabled={!remoteText || !remote.session}
+              onPress={() => {
+                void sendRemoteText();
+              }}
+              accessibilityLabel="发送远控键盘输入"
+            >
+              <Text style={styles.submitText}>发送按键</Text>
+            </TouchableOpacity>
+            {remote.error && (
+              <Text style={styles.formError}>{remote.error}</Text>
+            )}
+          </RoomFormScroll>
+        </SafeAreaView>
       </Modal>
 
       <Modal
@@ -927,38 +1549,47 @@ export function RoomScreen({
         animationType="fade"
         onRequestClose={onBack}
       >
-        <View style={styles.promptBackdrop}>
-          <View style={styles.promptCard}>
-            <Text style={styles.modalTitle}>输入房间密码</Text>
-            {joinError && <Text style={styles.formError}>{joinError}</Text>}
-            <TextInput
-              value={joinPassword}
-              onChangeText={setJoinPassword}
-              secureTextEntry
-              maxLength={128}
-              autoFocus
-              placeholder="房间密码"
-              placeholderTextColor={colors.textFaint}
-              style={styles.input}
-            />
-            <TouchableOpacity
-              style={[styles.submit, joinPending && styles.controlDisabled]}
-              disabled={joinPending}
-              onPress={() => joinRoom(joinPassword)}
-            >
-              <Text style={styles.submitText}>
-                {joinPending ? '验证中…' : '进入房间'}
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.clearPassword}
-              disabled={joinPending}
-              onPress={onBack}
-            >
-              <Text style={styles.clearPasswordText}>取消并返回</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
+        <SafeAreaView
+          style={styles.promptBackdrop}
+          edges={['top', 'right', 'bottom', 'left']}
+        >
+          <RoomFormScroll contentStyle={styles.promptScroll}>
+            <View style={styles.promptCard}>
+              <Text style={styles.modalTitle}>输入房间密码</Text>
+              <Text style={styles.sectionSubtitle}>{room.name}</Text>
+              {joinError && <Text style={styles.formError}>{joinError}</Text>}
+              <Text style={styles.formLabel}>房间密码</Text>
+              <RoomFormInput
+                value={joinPassword}
+                onChangeText={setJoinPassword}
+                secureTextEntry
+                maxLength={128}
+                autoFocus
+                placeholder="房间密码"
+                placeholderTextColor={colors.textFaint}
+                style={styles.input}
+                editable={!joinPending}
+                accessibilityLabel="房间密码"
+                autoCapitalize="none"
+                autoCorrect={false}
+                returnKeyType="go"
+                onSubmitEditing={() => joinRoom(joinPassword)}
+              />
+              <TouchableOpacity
+                style={[styles.submit, joinPending && styles.controlDisabled]}
+                disabled={joinPending}
+                onPress={() => joinRoom(joinPassword)}
+              >
+                <Text style={styles.submitText}>
+                  {joinPending ? '验证中…' : '进入房间'}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.clearPassword} onPress={onBack}>
+                <Text style={styles.cancelText}>取消并返回</Text>
+              </TouchableOpacity>
+            </View>
+          </RoomFormScroll>
+        </SafeAreaView>
       </Modal>
 
       <Modal
@@ -971,19 +1602,23 @@ export function RoomScreen({
           edges={['top', 'right', 'bottom', 'left']}
         >
           <View style={styles.toolHeader}>
-            <Text style={styles.toolTitle}>房间设置</Text>
+            <View style={styles.toolHeaderIcon}>
+              <Settings size={20} color={colors.blue} />
+            </View>
+            <View style={styles.headerCopy}>
+              <Text style={styles.toolTitle}>房间设置</Text>
+              <Text style={styles.toolSubtitle}>{room.name}</Text>
+            </View>
             <TouchableOpacity
-              disabled={settingsPending}
+              style={styles.iconButton}
               onPress={() => setSettingsOpen(false)}
+              accessibilityLabel="关闭房间设置"
             >
               <X size={20} color={colors.textMuted} />
             </TouchableOpacity>
           </View>
-          <ScrollView
-            contentContainerStyle={styles.toolContent}
-            keyboardShouldPersistTaps="handled"
-          >
-            <Text style={styles.sectionSubtitle}>人数上限（含房主）</Text>
+          <RoomFormScroll contentStyle={styles.toolContent}>
+            <Text style={styles.formLabel}>人数上限（含房主）</Text>
             <View style={styles.limitPresets}>
               {ROOM_LIMIT_PRESETS.map(value => (
                 <TouchableOpacity
@@ -994,12 +1629,18 @@ export function RoomScreen({
                   ]}
                   disabled={settingsPending}
                   onPress={() => setSettingsLimit(value)}
+                  accessibilityRole="radio"
+                  accessibilityLabel={`人数上限：${value || '不限'}`}
+                  accessibilityState={{
+                    checked: settingsLimit === value,
+                    disabled: settingsPending,
+                  }}
                 >
                   <Text style={styles.limitPresetText}>{value || '不限'}</Text>
                 </TouchableOpacity>
               ))}
             </View>
-            <TextInput
+            <RoomFormInput
               value={settingsLimit}
               onChangeText={setSettingsLimit}
               editable={!settingsPending}
@@ -1007,9 +1648,10 @@ export function RoomScreen({
               placeholder="自定义人数，留空表示不限"
               placeholderTextColor={colors.textFaint}
               style={styles.input}
+              accessibilityLabel="自定义人数上限"
             />
-            <Text style={styles.sectionSubtitle}>新密码（留空保持不变）</Text>
-            <TextInput
+            <Text style={styles.formLabel}>新密码（留空保持不变）</Text>
+            <RoomFormInput
               value={settingsPassword}
               onChangeText={setSettingsPassword}
               editable={!settingsPending}
@@ -1018,6 +1660,9 @@ export function RoomScreen({
               placeholder="保持不变"
               placeholderTextColor={colors.textFaint}
               style={styles.input}
+              accessibilityLabel="新房间密码"
+              autoCapitalize="none"
+              autoCorrect={false}
             />
             <Text style={styles.sectionSubtitle}>
               修改密码不影响现有成员；降低上限只限制新成员加入。
@@ -1026,11 +1671,15 @@ export function RoomScreen({
               <Text style={styles.formError}>{settingsError}</Text>
             )}
             <TouchableOpacity
-              style={[styles.submit, settingsPending && styles.controlDisabled]}
+              style={[
+                styles.submit,
+                styles.confirmSubmit,
+                settingsPending && styles.controlDisabled,
+              ]}
               disabled={settingsPending || !sessionReady}
               onPress={() => saveRoomSettings()}
             >
-              <Text style={styles.submitText}>
+              <Text style={[styles.submitText, styles.confirmSubmitText]}>
                 {settingsPending ? '保存中…' : '保存设置'}
               </Text>
             </TouchableOpacity>
@@ -1043,7 +1692,7 @@ export function RoomScreen({
                 <Text style={styles.clearPasswordText}>取消房间密码</Text>
               </TouchableOpacity>
             )}
-          </ScrollView>
+          </RoomFormScroll>
         </SafeAreaView>
       </Modal>
 
@@ -1070,7 +1719,7 @@ export function RoomScreen({
         >
           <View style={styles.toolHeader}>
             <View style={styles.toolHeaderIcon}>
-              <AudioLines size={19} color={colors.cyan} />
+              <AudioLines size={19} color={colors.purple} />
             </View>
             <View style={styles.headerCopy}>
               <Text style={styles.toolTitle}>语音包</Text>
@@ -1089,21 +1738,25 @@ export function RoomScreen({
             </TouchableOpacity>
           </View>
           <ScrollView
-            contentContainerStyle={styles.toolContent}
+            contentContainerStyle={styles.soundboardContent}
             showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
           >
             <Soundboard
-              socket={socket}
-              roomId={room.id}
-              serverURL={config.serverURL}
-              ready={roomReady}
-              inVoice={media.inVoice}
+              controller={soundboard}
+              visible={soundboardOpen}
               profileRemarks={profileRemarks}
               showHeading={false}
             />
           </ScrollView>
         </SafeAreaView>
       </Modal>
+      <SoundpackPlayer controller={soundboard} />
+      <MobileDiagnostics
+        visible={diagnosticsOpen}
+        collect={media.collectDiagnostics}
+        onClose={() => setDiagnosticsOpen(false)}
+      />
 
       {viewingProfile && (
         <UserProfileModal

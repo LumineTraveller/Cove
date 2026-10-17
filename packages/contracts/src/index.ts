@@ -97,7 +97,10 @@ export interface RegistrationRequest {
   clientId: string;
   authToken: string;
   platform: ClientPlatform;
+  /** Desktop receiver capability. Mobile must never advertise this as true. */
   remoteControlSupported?: boolean;
+  /** Optional controller-only support; requires a server understanding this field. */
+  remoteControlControllerSupported?: boolean;
 }
 /** Protocol 3 requires application version and platform negotiation. */
 export const CLIENT_PROTOCOL_VERSION = 3;

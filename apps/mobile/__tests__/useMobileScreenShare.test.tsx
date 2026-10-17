@@ -57,12 +57,30 @@ test('video-only sharing has no audio capture and never reuses the microphone tr
   expect(producers[0].options.appData.type).toBe('screen');
   expect(producers[0].options.codec.mimeType).toBe('video/AV1');
   expect(producers[0].options).not.toHaveProperty('encodings');
-  expect(mockGetDisplayMedia).toHaveBeenCalledWith({});
+  expect(mockGetDisplayMedia).toHaveBeenCalledWith({ android: { resolutionScale: 1 } });
   expect(share.sharingScreenAudio).toBe(false);
   await act(async () => share.stopScreenShare());
   expect(screen.release).toHaveBeenCalledWith(true);
   expect(outgoing.close).toHaveBeenCalledTimes(1);
   expect(socket.emit).not.toHaveBeenCalledWith('voice:leave', expect.anything());
+});
+
+test.each([1, 0.75, 0.5] as const)('passes the selected native capture scale %s without adding FPS or changing the protocol', async scale => {
+  await act(async () => { expect(await share.startScreenShare(false, scale)).toBe(true); });
+  expect(mockGetDisplayMedia).toHaveBeenCalledWith({ android: { resolutionScale: scale } });
+  expect(producers[0].options.appData).toEqual({ type: 'screen', client: 'android', syncGroup: expect.any(String) });
+  expect(producers[0].options).not.toHaveProperty('encodings');
+  expect(mockCreatePlayback).not.toHaveBeenCalled();
+});
+
+test('an active capture keeps its scale until stopped and a new capture uses the next choice', async () => {
+  await act(async () => { expect(await share.startScreenShare(false, 0.5)).toBe(true); });
+  await act(async () => { expect(await share.startScreenShare(false, 0.75)).toBe(false); });
+  expect(mockGetDisplayMedia).toHaveBeenCalledTimes(1);
+  expect(mockGetDisplayMedia).toHaveBeenLastCalledWith({ android: { resolutionScale: 0.5 } });
+  await act(async () => share.stopScreenShare());
+  await act(async () => { expect(await share.startScreenShare(false, 0.75)).toBe(true); });
+  expect(mockGetDisplayMedia).toHaveBeenLastCalledWith({ android: { resolutionScale: 0.75 } });
 });
 
 test('playback audio and video share one RTP sync group, independently of mic mute/NS', async () => {

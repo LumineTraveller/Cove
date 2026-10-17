@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useRef } from 'react';
 
 import type { Socket } from 'socket.io-client';
 import { Device } from 'mediasoup-client';
@@ -62,6 +62,7 @@ export interface UseMediaTransportsDependencies {
 }
 
 export function useMediaTransports(deps: UseMediaTransportsDependencies) {
+  const deviceSetup = useRef<Promise<void> | null>(null);
   const {
     deviceRef,
     sendTransport,
@@ -83,7 +84,7 @@ export function useMediaTransports(deps: UseMediaTransportsDependencies) {
     setError,
   } = deps;
 
-  const setupDevice = useCallback(async () => {
+  const setupDeviceOnce = useCallback(async () => {
     if (deviceRef.current && sendTransport.current && recvTransport.current)
       return;
     const generation = mediaGeneration.current;
@@ -169,6 +170,15 @@ export function useMediaTransports(deps: UseMediaTransportsDependencies) {
     setConnectionState,
   ]);
 
+  const setupDevice = useCallback(() => {
+    if (deviceSetup.current) return deviceSetup.current;
+    const pending = setupDeviceOnce().finally(() => {
+      if (deviceSetup.current === pending) deviceSetup.current = null;
+    });
+    deviceSetup.current = pending;
+    return pending;
+  }, [setupDeviceOnce]);
+
   const removeConsumer = useCallback(
     (consumerId: string, notifyServer = false) => {
       const entry = consumers.current.get(consumerId);
@@ -213,11 +223,13 @@ export function useMediaTransports(deps: UseMediaTransportsDependencies) {
       const device = deviceRef.current;
       const incoming = recvTransport.current;
       const generation = mediaGeneration.current;
+      const screenSource =
+        appData.type === 'screen' || appData.type === 'screen-audio';
       if (
         !device ||
         !incoming ||
         !isCurrent() ||
-        !inVoiceRef.current ||
+        (!inVoiceRef.current && !screenSource) ||
         closedProducers.current.has(producerId)
       )
         return false;
@@ -231,7 +243,7 @@ export function useMediaTransports(deps: UseMediaTransportsDependencies) {
       const isStale = () =>
         generation !== mediaGeneration.current ||
         !isCurrent() ||
-        !inVoiceRef.current ||
+        (!inVoiceRef.current && !screenSource) ||
         closedProducers.current.has(producerId);
 
       try {
@@ -243,7 +255,8 @@ export function useMediaTransports(deps: UseMediaTransportsDependencies) {
             rtpCapabilities: device.rtpCapabilities,
           },
         );
-        serverConsumerId = typeof params.id === 'string' ? params.id : undefined;
+        serverConsumerId =
+          typeof params.id === 'string' ? params.id : undefined;
         if (isStale()) {
           if (socket.connected && params.id)
             socket.emit('ms:close-consumer', { consumerId: params.id });

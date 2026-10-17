@@ -17,6 +17,8 @@ jest.mock('../src/features/settings/storage', () => ({
   readSessionConfig: async () => ({ username: 'Alice', serverURL: 'https://example.test:51758', clientId: 'alice', accountToken: 'token', accountId: 'account', email: 'alice@example.test', allowInvalidServerCertificate: true }),
   clearServerConfig: jest.fn(), saveSessionConfig: jest.fn(),
   readRememberedServers: async () => [], forgetRememberedServer: jest.fn(),
+  readLastServerAddress: async () => 'https://example.test:51758',
+  saveLastServerAddress: jest.fn(async (value: string) => value),
 }));
 jest.mock('../src/features/accounts/accountAuth', () => ({ authenticateAccount: jest.fn() }));
 jest.mock('../src/features/connection/serverSecurity', () => ({

@@ -208,7 +208,7 @@
     {
       "from": "mobile/android/app/src/main/java/com/covemobile/CoveNativePackage.kt",
       "path": "apps/mobile/android/app/src/main/java/com/covemobile/CoveNativePackage.kt",
-      "sha256": "54ad1e8ebb3b664fb79b9b5668cb9174bf479d6943735840b4c4ec599ccfeffb"
+      "sha256": "a6f9d5ce72d85d9a29634b8e374d29fac405fb8fab136d878c238f381a1476d8"
     },
     {
       "from": "mobile/android/app/src/main/java/com/covemobile/KeyboardFrame.kt",
@@ -1218,5 +1218,27 @@
     "node_modules/yargs-parser": "21.1.1",
     "node_modules/yauzl": "2.10.0",
     "node_modules/yocto-queue": "0.1.0"
+  },
+  "nativeExtensionEvidence": {
+    "baseCommit": "651607e",
+    "preservedAccountPasswordBase": "f3edea7",
+    "modifiedOriginal": [
+      {
+        "path": "apps/mobile/android/app/src/main/java/com/covemobile/CoveNativePackage.kt",
+        "baseSha256": "424116df6dd0416fcb6873abe0f68cb897cf8dd3417109d9a5870a362242e1b5",
+        "sha256": "a6f9d5ce72d85d9a29634b8e374d29fac405fb8fab136d878c238f381a1476d8",
+        "reason": "Register additive SAF/audio/diagnostic file module; every previous native module remains in the same order"
+      }
+    ],
+    "newSources": [
+      "CoveSoundpacksModule.kt",
+      "SoundpackFiles.kt",
+      "SoundpackAudio.kt"
+    ],
+    "boundaries": [
+      "No manifest permission change",
+      "No version or formal feed change",
+      "No existing capture, DSP, Keystore, DNS or native updater source modification"
+    ]
   }
 }

@@ -1,6 +1,7 @@
 import { useRef } from 'react';
 import { View, StyleSheet, type GestureResponderEvent } from 'react-native';
-import { colors } from '../../settings/theme';
+import { type CoveColors } from '../../settings/theme';
+import { useThemedStyles } from '../../settings/ThemeProvider';
 interface InlineVolumeSliderProps {
   value: number;
   label: string;
@@ -11,6 +12,7 @@ export function InlineVolumeSlider({
   label,
   onChange,
 }: InlineVolumeSliderProps) {
+  const styles = useThemedStyles(createStyles);
   const trackWidth = useRef(1);
   const normalized = Math.max(0, Math.min(1, value));
   const percentage = Math.round(normalized * 100);
@@ -71,31 +73,32 @@ export function InlineVolumeSlider({
     </View>
   );
 }
-const styles = StyleSheet.create({
-  volumeSlider: { flex: 1, height: 32, justifyContent: 'center' },
-  volumeSliderRail: {
-    position: 'absolute',
-    right: 0,
-    left: 0,
-    height: 5,
-    borderRadius: 3,
-    backgroundColor: 'rgba(255,255,255,0.13)',
-  },
-  volumeSliderFill: {
-    position: 'absolute',
-    left: 0,
-    height: 5,
-    borderRadius: 3,
-    backgroundColor: colors.cyan,
-  },
-  volumeSliderThumb: {
-    position: 'absolute',
-    width: 15,
-    height: 15,
-    marginLeft: -7.5,
-    borderWidth: 2,
-    borderColor: '#ecfeff',
-    borderRadius: 8,
-    backgroundColor: colors.cyan,
-  },
-});
+const createStyles = (colors: CoveColors) =>
+  StyleSheet.create({
+    volumeSlider: { flex: 1, height: 44, justifyContent: 'center' },
+    volumeSliderRail: {
+      position: 'absolute',
+      right: 0,
+      left: 0,
+      height: 5,
+      borderRadius: 3,
+      backgroundColor: colors.surfaceRaised,
+    },
+    volumeSliderFill: {
+      position: 'absolute',
+      left: 0,
+      height: 5,
+      borderRadius: 3,
+      backgroundColor: colors.blue,
+    },
+    volumeSliderThumb: {
+      position: 'absolute',
+      width: 15,
+      height: 15,
+      marginLeft: -7.5,
+      borderWidth: 2,
+      borderColor: colors.onPrimary,
+      borderRadius: 8,
+      backgroundColor: colors.blue,
+    },
+  });

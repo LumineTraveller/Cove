@@ -5,6 +5,7 @@ import { resolveServerIdentity } from '../connection/serverIdentity';
 
 const USERNAME_KEY = 'cove_username';
 const SERVER_KEY = 'cove_server_url';
+const LAST_SERVER_ADDRESS_KEY = 'cove_last_server_address';
 const CLIENT_ID_KEY = 'cove_client_id';
 const CERTIFICATE_ORIGIN_KEY = 'cove_certificate_exception_origin';
 const ACCOUNT_TOKEN_KEY = 'cove_account_token';
@@ -12,6 +13,37 @@ const ACCOUNT_ID_KEY = 'cove_account_id';
 const ACCOUNT_EMAIL_KEY = 'cove_account_email';
 const SERVER_IDENTITY_KEY = 'cove_server_identity';
 const REMEMBERED_SERVERS_KEY = 'cove_remembered_servers';
+let sessionRevision = 0;
+let sessionMutations: Promise<unknown> = Promise.resolve();
+export function invalidateSessionConfigSaves() {
+  sessionRevision += 1;
+}
+function queueSessionMutation<T>(run: () => Promise<T>): Promise<T> {
+  const next = sessionMutations.then(run, run);
+  sessionMutations = next.catch(() => undefined);
+  return next;
+}
+const ACTIVE_SESSION_KEYS = [
+  USERNAME_KEY,
+  SERVER_KEY,
+  CERTIFICATE_ORIGIN_KEY,
+  ACCOUNT_TOKEN_KEY,
+  ACCOUNT_ID_KEY,
+  ACCOUNT_EMAIL_KEY,
+  SERVER_IDENTITY_KEY,
+];
+async function removeActiveSession() {
+  await Promise.all(
+    ACTIVE_SESSION_KEYS.map(key => AsyncStorage.removeItem(key)),
+  );
+}
+let historyRevision = 0;
+let historyMutations: Promise<unknown> = Promise.resolve();
+function queueHistoryMutation<T>(run: () => Promise<T>): Promise<T> {
+  const next = historyMutations.then(run, run);
+  historyMutations = next.catch(() => undefined);
+  return next;
+}
 export type RememberedServer = Omit<SessionConfig, 'accountToken'> & {
   accountToken?: string;
 };
@@ -58,57 +90,68 @@ export async function readRememberedServers(): Promise<RememberedServer[]> {
 }
 
 async function rememberServer(config: SessionConfig) {
-  const identity = config.serverKey
-    ? { key: config.serverKey }
-    : await resolveServerIdentity(config.serverURL);
-  const previous = await Promise.all(
-    (
-      await readRememberedServers()
-    ).map(async entry => {
-      const key =
-        entry.serverKey ?? (await resolveServerIdentity(entry.serverURL)).key;
-      return {
-        entry: entry.serverKey ? entry : { ...entry, serverKey: key },
-        key,
-      };
-    }),
-  );
-  const filtered = previous
-    .filter(
-      item =>
-        item.key !== identity.key && item.entry.serverURL !== config.serverURL,
-    )
-    .map(item => item.entry);
-  await AsyncStorage.setItem(
-    REMEMBERED_SERVERS_KEY,
-    JSON.stringify(
-      [{ ...config, serverKey: identity.key }, ...filtered].slice(0, 8),
-    ),
-  );
+  const revision = historyRevision;
+  return queueHistoryMutation(async () => {
+    if (revision !== historyRevision) return;
+    const identity = config.serverKey
+      ? { key: config.serverKey }
+      : await resolveServerIdentity(config.serverURL);
+    const previous = await Promise.all(
+      (
+        await readRememberedServers()
+      ).map(async entry => {
+        const key =
+          entry.serverKey ?? (await resolveServerIdentity(entry.serverURL)).key;
+        return {
+          entry: entry.serverKey ? entry : { ...entry, serverKey: key },
+          key,
+        };
+      }),
+    );
+    const filtered = previous
+      .filter(
+        item =>
+          item.key !== identity.key &&
+          item.entry.serverURL !== config.serverURL,
+      )
+      .map(item => item.entry);
+    await AsyncStorage.setItem(
+      REMEMBERED_SERVERS_KEY,
+      JSON.stringify(
+        [{ ...config, serverKey: identity.key }, ...filtered].slice(0, 8),
+      ),
+    );
+  });
 }
 
 export async function forgetRememberedServer(serverURL: string) {
-  const normalized = normalizeServerURL(serverURL);
-  const previous = await readRememberedServers();
-  await AsyncStorage.setItem(
-    REMEMBERED_SERVERS_KEY,
-    JSON.stringify(previous.filter(entry => entry.serverURL !== normalized)),
-  );
+  historyRevision += 1;
+  return queueHistoryMutation(async () => {
+    const normalized = normalizeServerURL(serverURL);
+    const previous = await readRememberedServers();
+    await AsyncStorage.setItem(
+      REMEMBERED_SERVERS_KEY,
+      JSON.stringify(previous.filter(entry => entry.serverURL !== normalized)),
+    );
+  });
 }
 
 export async function forgetRememberedServerToken(serverURL: string) {
-  const normalized = normalizeServerURL(serverURL);
-  const history = await readRememberedServers();
-  await AsyncStorage.setItem(
-    REMEMBERED_SERVERS_KEY,
-    JSON.stringify(
-      history.map(entry =>
-        entry.serverURL === normalized
-          ? { ...entry, accountToken: undefined }
-          : entry,
+  historyRevision += 1;
+  return queueHistoryMutation(async () => {
+    const normalized = normalizeServerURL(serverURL);
+    const history = await readRememberedServers();
+    await AsyncStorage.setItem(
+      REMEMBERED_SERVERS_KEY,
+      JSON.stringify(
+        history.map(entry =>
+          entry.serverURL === normalized
+            ? { ...entry, accountToken: undefined }
+            : entry,
+        ),
       ),
-    ),
-  );
+    );
+  });
 }
 
 export function normalizeServerURL(value: string): string {
@@ -137,6 +180,61 @@ export function normalizeServerURL(value: string): string {
   }
 }
 
+function lastServerAddress(value: string | null): string | null {
+  if (value === null) return null;
+  const trimmed = value?.trim() ?? '';
+  if (!trimmed) return '';
+  if (
+    trimmed.length > 4096 ||
+    Array.from(trimmed).some(character => {
+      const code = character.charCodeAt(0);
+      return code < 32 || code === 127;
+    }) ||
+    !normalizeServerURL(trimmed)
+  )
+    return null;
+  // Keep the form text, including an explicit port and trailing path slash.
+  // URL normalization is only used to reject credentials and invalid addresses.
+  return trimmed;
+}
+
+let lastServerAddressWrite: Promise<unknown> = Promise.resolve();
+
+function queueLastServerAddressWrite<T>(write: () => Promise<T>): Promise<T> {
+  const next = lastServerAddressWrite.catch(() => undefined).then(write);
+  lastServerAddressWrite = next;
+  return next;
+}
+
+export async function readLastServerAddress(): Promise<string | null> {
+  await lastServerAddressWrite.catch(() => undefined);
+  const saved = await AsyncStorage.getItem(LAST_SERVER_ADDRESS_KEY);
+  // An explicitly cleared address must not resurrect the old session address.
+  if (saved !== null) return lastServerAddress(saved);
+  // Older versions only kept this field alongside the active account session.
+  return lastServerAddress(await AsyncStorage.getItem(SERVER_KEY));
+}
+
+export async function saveLastServerAddress(
+  value: string,
+): Promise<string | null> {
+  const address = lastServerAddress(value);
+  if (address !== null)
+    await queueLastServerAddressWrite(() =>
+      AsyncStorage.setItem(LAST_SERVER_ADDRESS_KEY, address),
+    );
+  return address;
+}
+
+async function preserveLegacyServerAddress(): Promise<void> {
+  await queueLastServerAddressWrite(async () => {
+    if ((await AsyncStorage.getItem(LAST_SERVER_ADDRESS_KEY)) !== null) return;
+    const legacy = lastServerAddress(await AsyncStorage.getItem(SERVER_KEY));
+    if (legacy !== null)
+      await AsyncStorage.setItem(LAST_SERVER_ADDRESS_KEY, legacy);
+  });
+}
+
 function createClientId(): string {
   const random = Array.from({ length: 4 }, () =>
     Math.random().toString(36).slice(2),
@@ -145,6 +243,7 @@ function createClientId(): string {
 }
 
 export async function readSessionConfig(): Promise<SessionConfig | null> {
+  const revision = sessionRevision;
   const [
     storedName,
     storedServer,
@@ -185,8 +284,9 @@ export async function readSessionConfig(): Promise<SessionConfig | null> {
             !!certificateOrigin && certificateOrigin === httpsOrigin(serverURL),
         }
       : null;
+  if (revision !== sessionRevision) return null;
   if (config) await rememberServer(config);
-  return config;
+  return revision === sessionRevision ? config : null;
 }
 
 export async function saveSessionConfig(input: {
@@ -197,56 +297,67 @@ export async function saveSessionConfig(input: {
   email: string;
   serverKey?: string;
   allowInvalidServerCertificate?: boolean;
+  lastServerAddress?: string;
 }): Promise<SessionConfig> {
-  const clientId =
-    (await AsyncStorage.getItem(CLIENT_ID_KEY)) || createClientId();
-  const config = {
-    username: input.username.trim().slice(0, 64),
-    serverURL: normalizeServerURL(input.serverURL),
-    clientId,
-    accountToken: input.accountToken,
-    accountId: input.accountId,
-    email: input.email.trim().toLowerCase(),
-    ...(input.serverKey ? { serverKey: input.serverKey } : {}),
-    allowInvalidServerCertificate:
-      input.allowInvalidServerCertificate === true &&
-      !!httpsOrigin(input.serverURL),
-  };
-  await Promise.all([
-    AsyncStorage.setItem(USERNAME_KEY, config.username),
-    AsyncStorage.setItem(SERVER_KEY, config.serverURL),
-    AsyncStorage.setItem(CLIENT_ID_KEY, config.clientId),
-    AsyncStorage.setItem(ACCOUNT_TOKEN_KEY, config.accountToken),
-    AsyncStorage.setItem(ACCOUNT_ID_KEY, config.accountId),
-    AsyncStorage.setItem(ACCOUNT_EMAIL_KEY, config.email),
-    config.serverKey
-      ? AsyncStorage.setItem(SERVER_IDENTITY_KEY, config.serverKey)
-      : AsyncStorage.removeItem(SERVER_IDENTITY_KEY),
-    config.allowInvalidServerCertificate
-      ? AsyncStorage.setItem(
-          CERTIFICATE_ORIGIN_KEY,
-          httpsOrigin(config.serverURL)!,
-        )
-      : AsyncStorage.removeItem(CERTIFICATE_ORIGIN_KEY),
-  ]);
-  await rememberServer(config);
-  return config;
+  const revision = sessionRevision;
+  return queueSessionMutation(async () => {
+    if (revision !== sessionRevision) throw new Error('登录已取消');
+    // Queue the address immediately so a delayed client ID read cannot move an
+    // older submitted address behind a newer form edit.
+    const [storedClientId] = await Promise.all([
+      AsyncStorage.getItem(CLIENT_ID_KEY),
+      saveLastServerAddress(input.lastServerAddress ?? input.serverURL),
+    ]);
+    const clientId = storedClientId || createClientId();
+    const config = {
+      username: input.username.trim().slice(0, 64),
+      serverURL: normalizeServerURL(input.serverURL),
+      clientId,
+      accountToken: input.accountToken,
+      accountId: input.accountId,
+      email: input.email.trim().toLowerCase(),
+      ...(input.serverKey ? { serverKey: input.serverKey } : {}),
+      allowInvalidServerCertificate:
+        input.allowInvalidServerCertificate === true &&
+        !!httpsOrigin(input.serverURL),
+    };
+    await Promise.all([
+      AsyncStorage.setItem(USERNAME_KEY, config.username),
+      AsyncStorage.setItem(SERVER_KEY, config.serverURL),
+      AsyncStorage.setItem(CLIENT_ID_KEY, config.clientId),
+      AsyncStorage.setItem(ACCOUNT_TOKEN_KEY, config.accountToken),
+      AsyncStorage.setItem(ACCOUNT_ID_KEY, config.accountId),
+      AsyncStorage.setItem(ACCOUNT_EMAIL_KEY, config.email),
+      config.serverKey
+        ? AsyncStorage.setItem(SERVER_IDENTITY_KEY, config.serverKey)
+        : AsyncStorage.removeItem(SERVER_IDENTITY_KEY),
+      config.allowInvalidServerCertificate
+        ? AsyncStorage.setItem(
+            CERTIFICATE_ORIGIN_KEY,
+            httpsOrigin(config.serverURL)!,
+          )
+        : AsyncStorage.removeItem(CERTIFICATE_ORIGIN_KEY),
+    ]);
+    await rememberServer(config);
+    if (revision !== sessionRevision) {
+      await removeActiveSession();
+      throw new Error('登录已取消');
+    }
+    return config;
+  });
 }
 
 export async function clearServerConfig({
   forgetSession = true,
 }: { forgetSession?: boolean } = {}) {
-  const active = await readSessionConfig();
-  if (forgetSession && active) {
-    await forgetRememberedServerToken(active.serverURL);
-  }
-  await Promise.all([
-    AsyncStorage.removeItem(USERNAME_KEY),
-    AsyncStorage.removeItem(SERVER_KEY),
-    AsyncStorage.removeItem(CERTIFICATE_ORIGIN_KEY),
-    AsyncStorage.removeItem(ACCOUNT_TOKEN_KEY),
-    AsyncStorage.removeItem(ACCOUNT_ID_KEY),
-    AsyncStorage.removeItem(ACCOUNT_EMAIL_KEY),
-    AsyncStorage.removeItem(SERVER_IDENTITY_KEY),
-  ]);
+  invalidateSessionConfigSaves();
+  return queueSessionMutation(async () => {
+    // Preserve the legacy address before clearing an incomplete or expired session.
+    await preserveLegacyServerAddress();
+    const active = await readSessionConfig();
+    if (forgetSession && active) {
+      await forgetRememberedServerToken(active.serverURL);
+    }
+    await removeActiveSession();
+  });
 }
