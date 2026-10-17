@@ -5,7 +5,15 @@ const { createWriteStream } = require('node:fs');
 const { Readable } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
 
-function configuredProxy() {
+function configuredProxy(url) {
+  const target = new URL(url);
+  const exclusions = (process.env.NO_PROXY || process.env.no_proxy || '')
+    .split(',').map(value => value.trim().toLowerCase()).filter(Boolean);
+  if (exclusions.some(value => {
+    if (value === '*' || value === target.host.toLowerCase()) return true;
+    const domain = value.replace(/^\./, '');
+    return target.hostname.toLowerCase() === domain || target.hostname.toLowerCase().endsWith(`.${domain}`);
+  })) return null;
   return process.env.HTTPS_PROXY || process.env.https_proxy ||
     process.env.HTTP_PROXY || process.env.http_proxy ||
     process.env.ALL_PROXY || process.env.all_proxy || null;
@@ -19,7 +27,7 @@ async function main() {
     throw new Error('Usage: release-http.cjs <json|download|head> <url> <user-agent> [output-path] [expected-size]');
   }
 
-  const proxy = configuredProxy();
+  const proxy = configuredProxy(url);
   let dispatcher;
   if (proxy) {
     const { ProxyAgent } = require('undici');
