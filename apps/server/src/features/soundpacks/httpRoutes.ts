@@ -1,125 +1,136 @@
 import type * as BetterSqlite3 from 'better-sqlite3';
-
+import type { Response } from 'express';
 import path from 'path';
-
 import fs from 'fs';
-
+import { randomUUID } from 'crypto';
 import { normalizeSoundpack } from './soundpackNormalization';
-
 import { SoundpackRecord, PublicSoundpack } from '../../models';
+import { SoundpackAccessError, soundpackErrorResponse, type SoundpackAccess } from './soundpackAccess';
 
 export interface RegisterSoundpacksRoutesDependencies {
   readonly app: import('express-serve-static-core').Express;
+  readonly access: SoundpackAccess;
   readonly stmtGetSoundpacks: BetterSqlite3.Statement<unknown[], unknown>;
-  readonly toPublicSoundpack: (
-    pack: SoundpackRecord,
-    requesterSocketId?: string,
-    roomId?: string,
-  ) => PublicSoundpack;
-  readonly userClientIds: Map<string, string>;
-  readonly userNames: Map<string, string>;
+  readonly stmtGetSoundpack: BetterSqlite3.Statement<unknown[], unknown>;
+  readonly toPublicSoundpack: (pack: SoundpackRecord, requesterSocketId: string, roomId: string) => PublicSoundpack;
   readonly SOUNDS_DIR: string;
   readonly stmtGetNextSoundpackOrder: BetterSqlite3.Statement<unknown[], unknown>;
   readonly stmtInsertSoundpack: BetterSqlite3.Statement<unknown[], unknown>;
   readonly broadcastSoundpackAdded: (pack: SoundpackRecord) => void;
 }
 
+const privateResponse = (res: Response) => {
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.vary('Authorization');
+  res.vary('X-Cove-Account-Token');
+};
+
 export function registerSoundpacksRoutes(deps: RegisterSoundpacksRoutesDependencies) {
   deps.app.get('/api/soundpacks', (req, res) => {
-    const requesterSocketId =
-      typeof req.query.socketId === 'string' ? req.query.socketId : undefined;
-    const roomId = typeof req.query.roomId === 'string' ? req.query.roomId : undefined;
-    const packs = deps.stmtGetSoundpacks.all() as SoundpackRecord[];
-    res.json(packs.map((pack) => deps.toPublicSoundpack(pack, requesterSocketId, roomId)));
+    privateResponse(res);
+    try {
+      const actor = deps.access.httpRoomActor(req, req.query.roomId);
+      const packs = deps.stmtGetSoundpacks.all(actor.roomId) as SoundpackRecord[];
+      res.json({ roomId: actor.roomId,
+        soundpacks: packs.map((pack) => deps.toPublicSoundpack(pack, actor.socketId, actor.roomId)) });
+    } catch (error) { soundpackErrorResponse(error, res); }
+  });
+
+  // Clients fetch this endpoint into a Blob (or supply native media request
+  // headers). No account credential is embedded in a reusable media URL.
+  deps.app.get('/api/soundpacks/:soundId/file', (req, res) => {
+    privateResponse(res);
+    try {
+      const actor = deps.access.httpRoomActor(req, req.query.roomId);
+      const variant = req.query.variant;
+      if (variant !== 'playback' && variant !== 'original')
+        throw new SoundpackAccessError(400, 'INVALID_REQUEST', '请指定语音包文件类型');
+      const pack = deps.stmtGetSoundpack.get(req.params.soundId, actor.roomId) as SoundpackRecord | undefined;
+      if (!pack || pack.roomId !== actor.roomId)
+        throw new SoundpackAccessError(404, 'SOUNDPACK_NOT_FOUND', '语音包不存在');
+      const filename = variant === 'original' ? pack.originalFilename ?? pack.filename : pack.filename;
+      if (!filename || path.basename(filename) !== filename || /[\\/]/.test(filename))
+        throw new SoundpackAccessError(404, 'SOUNDPACK_NOT_FOUND', '语音包文件不存在');
+      if (variant === 'original') res.attachment(filename);
+      res.sendFile(filename, {
+        root: deps.SOUNDS_DIR, dotfiles: 'deny', cacheControl: false, acceptRanges: true,
+      }, (error) => {
+        if (!error) return;
+        if (res.headersSent) { res.destroy(); return; }
+        const status = (error as Error & { statusCode?: number }).statusCode;
+        res.status(status && status >= 400 && status <= 599 ? status : 500).end();
+      });
+    } catch (error) { soundpackErrorResponse(error, res); }
   });
 
   deps.app.post('/api/soundpacks', async (req, res) => {
-    const { name, data, mimeType, socketId, roomId } = req.body as {
-      name?: string;
-      data?: string;
-      mimeType?: string;
-      socketId?: string;
-      roomId?: string;
-    };
-    if (!name?.trim() || !data || !mimeType) {
-      res.status(400).json({ error: 'name, data, mimeType 均为必填' });
-      return;
-    }
-    if (!mimeType.startsWith('audio/')) {
-      res.status(400).json({ error: '只允许上传音频文件' });
-      return;
-    }
-    const uploaderId = socketId ? deps.userClientIds.get(socketId) : undefined;
-    const uploader = socketId ? deps.userNames.get(socketId) : undefined;
-    if (!socketId || !uploaderId || !uploader) {
-      res.status(401).json({ error: '请先连接并注册用户' });
-      return;
-    }
-    // base64 → Buffer，限制 8MB
-    const buf = Buffer.from(data, 'base64');
-    if (buf.length > 8 * 1024 * 1024) {
-      res.status(400).json({ error: '文件过大，最大支持 8MB' });
-      return;
-    }
-    const subtype = mimeType.split('/')[1]?.split(';')[0]?.toLowerCase();
-    const ext =
-      subtype === 'mpeg'
-        ? 'mp3'
-        : subtype === 'x-wav' || subtype === 'wave'
-        ? 'wav'
-        : subtype && /^[a-z0-9]{1,8}$/.test(subtype)
-        ? subtype
-        : 'audio';
-    const id = Math.random().toString(36).slice(2, 9);
-    const originalFilename = `${id}.${ext}`;
-    const filename = `${id}.normalized.mp3`;
-    const originalPath = path.join(deps.SOUNDS_DIR, originalFilename);
-    const temporaryPath = path.join(deps.SOUNDS_DIR, `${id}.normalizing.mp3`);
-    const playbackPath = path.join(deps.SOUNDS_DIR, filename);
-    let sp: SoundpackRecord;
+    privateResponse(res);
+    let files: string[] = [];
+    let committed = false;
+    let responseClosed = false;
+    res.once('close', () => { if (!res.writableFinished) responseClosed = true; });
     try {
-      fs.writeFileSync(originalPath, buf, { flag: 'wx' });
+      const body = req.body as { name?: unknown; data?: unknown; mimeType?: unknown; roomId?: unknown } | undefined;
+      // Old socketId fields are ignored. Only the account token identifies
+      // its live, registered room connection.
+      const actor = deps.access.httpRoomActor(req, body?.roomId);
+      if (
+        typeof body?.name !== 'string' || !body.name.trim() || body.name.trim().length > 64 ||
+        typeof body.data !== 'string' || !body.data || typeof body.mimeType !== 'string'
+      )
+        throw new SoundpackAccessError(400, 'INVALID_REQUEST', '请填写音频名称和文件');
+      if (!body.mimeType.startsWith('audio/'))
+        throw new SoundpackAccessError(400, 'INVALID_REQUEST', '只允许上传音频文件');
+      const buf = Buffer.from(body.data, 'base64');
+      if (buf.length === 0 || buf.length > 8 * 1024 * 1024)
+        throw new SoundpackAccessError(400, 'INVALID_REQUEST', '音频文件应为 1 字节至 8MB');
+      const subtype = body.mimeType.split('/')[1]?.split(';')[0]?.toLowerCase();
+      const ext = subtype === 'mpeg' ? 'mp3' : subtype === 'x-wav' || subtype === 'wave' ? 'wav'
+        : subtype && /^[a-z0-9]{1,8}$/.test(subtype) ? subtype : 'audio';
+      const id = randomUUID();
+      const originalFilename = `${id}.${ext}`;
+      const filename = `${id}.normalized.mp3`;
+      const originalPath = path.join(deps.SOUNDS_DIR, originalFilename);
+      const temporaryPath = path.join(deps.SOUNDS_DIR, `${id}.normalizing.mp3`);
+      const playbackPath = path.join(deps.SOUNDS_DIR, filename);
+      const originalFd = fs.openSync(originalPath, 'wx');
+      files = [originalPath, temporaryPath, playbackPath];
+      try { fs.writeFileSync(originalFd, buf); }
+      finally { fs.closeSync(originalFd); }
       await normalizeSoundpack(originalPath, temporaryPath);
+      // Recheck after normalization: leaving, kicking, logout, takeover or
+      // room deletion while it awaited must not commit a stale upload.
+      deps.access.revalidateActor(actor);
+      if (req.aborted || res.destroyed || responseClosed)
+        throw new SoundpackAccessError(409, 'UPLOAD_CANCELLED', '上传已取消');
       fs.renameSync(temporaryPath, playbackPath);
-      const nextOrder = (deps.stmtGetNextSoundpackOrder.get() as { sortOrder: number }).sortOrder;
-      sp = {
-        id,
-        name: name.trim(),
-        filename,
-        originalFilename,
-        normalizationVersion: 1,
-        uploader,
-        uploaderId,
-        createdAt: Date.now(),
-        sortOrder: nextOrder,
+      const nextOrder = (deps.stmtGetNextSoundpackOrder.get(actor.roomId) as { sortOrder: number }).sortOrder;
+      const sp: SoundpackRecord = {
+        id, roomId: actor.roomId, name: body.name.trim(), filename, originalFilename,
+        normalizationVersion: 1, uploader: actor.username, uploaderId: actor.clientId,
+        createdAt: Date.now(), sortOrder: nextOrder,
       };
       deps.stmtInsertSoundpack.run(
-        sp.id,
-        sp.name,
-        sp.filename,
-        sp.originalFilename,
-        sp.uploader,
-        sp.uploaderId,
-        sp.createdAt,
-        sp.sortOrder,
+        sp.id, sp.name, sp.filename, sp.originalFilename, sp.uploader, sp.uploaderId,
+        sp.createdAt, sp.sortOrder, sp.roomId,
       );
+      committed = true;
+      deps.broadcastSoundpackAdded(sp);
+      res.json(deps.toPublicSoundpack(sp, actor.socketId, actor.roomId));
     } catch (error) {
-      for (const file of [temporaryPath, playbackPath, originalPath]) {
-        try {
-          fs.rmSync(file, { force: true });
-        } catch {
-          /* report the original failure */
-        }
+      if (!committed) for (const file of files) {
+        try { fs.rmSync(file, { force: true }); } catch { /* preserve original error */ }
       }
-      const message = error instanceof Error ? error.message : '语音包处理失败';
-      console.warn('[soundpack] 上传处理失败', error);
-      res
-        .status(message.startsWith('语音包') || message.includes('FFmpeg') ? 400 : 500)
-        .json({ error: message });
-      return;
+      if (res.destroyed || responseClosed) return;
+      if (error instanceof SoundpackAccessError) { soundpackErrorResponse(error, res); return; }
+      const message = error instanceof Error ? error.message : '';
+      if (message.startsWith('语音包') || message.includes('FFmpeg')) {
+        res.status(400).json({ error: message, code: 'INVALID_AUDIO' });
+        return;
+      }
+      soundpackErrorResponse(error, res);
     }
-    deps.broadcastSoundpackAdded(sp);
-    res.json(deps.toPublicSoundpack(sp, socketId, roomId));
   });
-  return {};
 }

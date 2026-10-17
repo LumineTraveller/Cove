@@ -36,6 +36,7 @@ export interface StoredMessage
 
 export interface SoundpackRecord {
   id: string;
+  roomId: string | null;
   name: string;
   filename: string;
   originalFilename: string | null;
@@ -47,6 +48,7 @@ export interface SoundpackRecord {
 }
 
 export interface PublicSoundpack extends Soundpack {
+  roomId: string;
   originalFilename: string;
   uploaderUserId: string | null;
 }

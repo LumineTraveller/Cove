@@ -95,39 +95,39 @@ export function createRepositories(deps: CreateRepositoriesDependencies) {
   );
 
   const stmtGetSoundpacks = deps.db.prepare(
-    'SELECT * FROM soundpacks ORDER BY sortOrder ASC, createdAt DESC',
+    'SELECT * FROM soundpacks WHERE roomId = ? ORDER BY sortOrder ASC, createdAt DESC',
   );
 
-  const stmtGetSoundpack = deps.db.prepare('SELECT * FROM soundpacks WHERE id = ?');
+  const stmtGetSoundpack = deps.db.prepare('SELECT * FROM soundpacks WHERE id = ? AND roomId = ?');
 
   const stmtGetNextSoundpackOrder = deps.db.prepare(
-    'SELECT COALESCE(MIN(sortOrder), 0) - 1 AS sortOrder FROM soundpacks',
+    'SELECT COALESCE(MIN(sortOrder), 0) - 1 AS sortOrder FROM soundpacks WHERE roomId = ?',
   );
 
   const stmtInsertSoundpack = deps.db.prepare(
-    'INSERT INTO soundpacks (id, name, filename, originalFilename, normalizationVersion, uploader, uploaderId, createdAt, sortOrder) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)',
+    'INSERT INTO soundpacks (id, name, filename, originalFilename, normalizationVersion, uploader, uploaderId, createdAt, sortOrder, roomId) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)',
   );
 
   const stmtGetLegacySoundpacks = deps.db.prepare(
-    'SELECT * FROM soundpacks WHERE normalizationVersion = 0 ORDER BY createdAt ASC',
+    'SELECT * FROM soundpacks WHERE roomId IS NOT NULL AND normalizationVersion = 0 ORDER BY createdAt ASC',
   );
 
   const stmtMarkSoundpackNormalized = deps.db.prepare(
-    'UPDATE soundpacks SET filename = ?, originalFilename = ?, normalizationVersion = 1 WHERE id = ? AND filename = ? AND normalizationVersion = 0',
+    'UPDATE soundpacks SET filename = ?, originalFilename = ?, normalizationVersion = 1 WHERE id = ? AND filename = ? AND roomId = ? AND normalizationVersion = 0',
   );
 
   const stmtUpdateSoundpackOrder = deps.db.prepare(
-    'UPDATE soundpacks SET sortOrder = ? WHERE id = ?',
+    'UPDATE soundpacks SET sortOrder = ? WHERE id = ? AND roomId = ?',
   );
 
-  const stmtRenameSoundpack = deps.db.prepare('UPDATE soundpacks SET name = ? WHERE id = ?');
+  const stmtRenameSoundpack = deps.db.prepare('UPDATE soundpacks SET name = ? WHERE id = ? AND roomId = ?');
 
-  const stmtDeleteSoundpack = deps.db.prepare('DELETE FROM soundpacks WHERE id = ?');
+  const stmtDeleteSoundpack = deps.db.prepare('DELETE FROM soundpacks WHERE id = ? AND roomId = ?');
 
   const migrateLegacyIdentity = deps.db.transaction((legacyId: string, accountId: string) => {
     deps.db.prepare('UPDATE rooms SET ownerId = ? WHERE ownerId = ?').run(accountId, legacyId);
     deps.db
-      .prepare('UPDATE soundpacks SET uploaderId = ? WHERE uploaderId = ?')
+      .prepare('UPDATE soundpacks SET uploaderId = ? WHERE uploaderId = ? AND roomId IS NOT NULL')
       .run(accountId, legacyId);
     deps.db
       .prepare(
@@ -138,8 +138,8 @@ export function createRepositories(deps: CreateRepositoriesDependencies) {
     deps.db.prepare('DELETE FROM room_mutes WHERE clientId = ?').run(legacyId);
   });
 
-  const reorderSoundpacks = deps.db.transaction((orderedIds: string[]) => {
-    orderedIds.forEach((id, index) => stmtUpdateSoundpackOrder.run(index, id));
+  const reorderSoundpacks = deps.db.transaction((roomId: string, orderedIds: string[]) => {
+    orderedIds.forEach((id, index) => stmtUpdateSoundpackOrder.run(index, id, roomId));
   });
 
   const deleteRoomData = deps.db.transaction((roomId: string) => {

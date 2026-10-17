@@ -67,6 +67,7 @@ export interface RoomState extends RoomAppearance {
 }
 export interface Soundpack {
   id: string;
+  roomId: string;
   name: string;
   filename: string;
   originalFilename?: string;
@@ -75,6 +76,10 @@ export interface Soundpack {
   createdAt: number;
   sortOrder: number;
   canDelete: boolean;
+}
+export interface RoomSoundpacksResponse {
+  roomId: string;
+  soundpacks: Soundpack[];
 }
 export interface MessageHistoryCursor {
   timestamp: number;

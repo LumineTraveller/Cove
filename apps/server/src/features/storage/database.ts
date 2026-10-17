@@ -51,6 +51,7 @@ export function createDatabase(deps: CreateDatabaseDependencies) {
   );
   CREATE TABLE IF NOT EXISTS soundpacks (
     id TEXT PRIMARY KEY,
+    roomId TEXT,
     name TEXT NOT NULL,
     filename TEXT NOT NULL,
     uploader TEXT NOT NULL,
@@ -111,6 +112,11 @@ export function createDatabase(deps: CreateDatabaseDependencies) {
 
   const soundpackColumns = db.prepare('PRAGMA table_info(soundpacks)').all() as { name: string }[];
 
+  // Do not infer a room for legacy global packs. Keep their rows and files
+  // intact; NULL assignments are intentionally invisible to room operations.
+  if (!soundpackColumns.some((column) => column.name === 'roomId'))
+    db.exec('ALTER TABLE soundpacks ADD COLUMN roomId TEXT');
+
   if (!soundpackColumns.some((column) => column.name === 'uploaderId'))
     db.exec('ALTER TABLE soundpacks ADD COLUMN uploaderId TEXT');
 
@@ -130,6 +136,7 @@ export function createDatabase(deps: CreateDatabaseDependencies) {
 
   if (!soundpackColumns.some((column) => column.name === 'normalizationVersion'))
     db.exec('ALTER TABLE soundpacks ADD COLUMN normalizationVersion INTEGER NOT NULL DEFAULT 0');
+  db.exec('CREATE INDEX IF NOT EXISTS soundpacks_room_order ON soundpacks(roomId, sortOrder, createdAt)');
   return {
     dataDir,
     dbPath,
