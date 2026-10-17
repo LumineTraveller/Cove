@@ -17,7 +17,7 @@ param(
     [string]$SshTarget = 'Cove_server',
     [ValidatePattern('^/[A-Za-z0-9._/-]+$')]
     [string]$RemoteRoot = '/var/www/cove-download',
-    [uri]$PublicBaseUrl = 'https://cove-cove.space'
+    [uri]$PublicBaseUrl = 'https://cove.luxe'
 )
 
 $ErrorActionPreference = 'Stop'

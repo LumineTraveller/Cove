@@ -7,17 +7,17 @@ test('desktop and mobile floors require protocol 3 and recognized platform, inde
     const policy=clientUpgradePolicy(version,'desktop',3);
     assert.equal(policy.upgradeRequired,true);
     assert.equal(policy.minimumClientVersion,'2.0.0');
-    assert.equal(policy.serverVersion,'2.0.1');
-    assert.equal(policy.releaseVersion,'2.0.1');
-    assert.match(policy.downloadUrl,/\/v2\.0\.1$/);
+    assert.equal(policy.serverVersion,'2.0.2');
+    assert.equal(policy.releaseVersion,'2.0.2');
+    assert.match(policy.downloadUrl,/\/v2\.0\.2$/);
   }
   for (const version of [undefined,'0.7.0','0.8.0-rc.1','invalid']) {
     const policy=clientUpgradePolicy(version,'mobile',3);
     assert.equal(policy.upgradeRequired,true);
     assert.equal(policy.minimumClientVersion,'0.8.0');
-    assert.equal(policy.serverVersion,'2.0.1');
-    assert.equal(policy.releaseVersion,'0.8.1');
-    assert.match(policy.downloadUrl,/\/mobile-v0\.8\.1$/);
+    assert.equal(policy.serverVersion,'2.0.2');
+    assert.equal(policy.releaseVersion,'0.8.2');
+    assert.match(policy.downloadUrl,/\/mobile-v0\.8\.2$/);
     const error=clientUpgradeError(version,'mobile',3);
     assert.equal(error.code,'CLIENT_VERSION_TOO_OLD');
     assert.ok(error.error.includes(policy.downloadUrl));
@@ -46,9 +46,9 @@ test('middleware rejects missing/old identities with a usable download URL, and 
     assert.equal(continued,false);assert.equal(code,426);assert.equal(cache,'no-store');
     assert.equal(body.code,'CLIENT_VERSION_TOO_OLD');assert.equal(body.upgradeRequired,true);
     assert.equal(body.requiredClientProtocol,3);
-    assert.match(body.error,/https:\/\/github\.com\/LumineTraveller\/Cove\/releases\/tag\/v2\.0\.1/);
+    assert.match(body.error,/https:\/\/github\.com\/LumineTraveller\/Cove\/releases\/tag\/v2\.0\.2/);
   }
-  for (const [platform,version] of [['desktop','2.0.0'],['desktop','2.0.1'],['mobile','0.8.0'],['mobile','0.8.1']]) {
+  for (const [platform,version] of [['desktop','2.0.0'],['desktop','2.0.1'],['desktop','2.0.2'],['mobile','0.8.0'],['mobile','0.8.1'],['mobile','0.8.2']]) {
     let continued=false;
     const values:Record<string,string>={'x-cove-client-version':version,'x-cove-client-platform':platform,'x-cove-client-protocol':'3'};
     requireClientVersion({get:(key:string)=>values[key]} as never,{} as never,()=>{continued=true;});

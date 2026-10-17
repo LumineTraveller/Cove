@@ -141,13 +141,13 @@ before(async () => {
     tokenEpoch: 1,
     authorized: false,
     secureTransportRequired: false,
-    serverVersion: '2.0.1',
+    serverVersion: '2.0.2',
     clientPlatform: null,
-    releaseVersion: '2.0.1',
+    releaseVersion: '2.0.2',
     minimumClientVersion: '2.0.0',
     requiredClientProtocol: 3,
     upgradeRequired: true,
-    downloadUrl: 'https://github.com/LumineTraveller/Cove/releases/tag/v2.0.1',
+    downloadUrl: 'https://github.com/LumineTraveller/Cove/releases/tag/v2.0.2',
   });
   const bootstrap = await fetch(`${base}/api/security/bootstrap`, {
     method: 'POST',

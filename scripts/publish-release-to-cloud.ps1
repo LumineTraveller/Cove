@@ -6,7 +6,7 @@
     .\scripts\publish-release-to-cloud.ps1 -Tag v1.4.1
 
     默认使用本机已配置的 ssh 别名 Cove_server，发布到
-    /var/www/cove-download，再核验 https://cove-cove.space 的公开下载地址。
+    /var/www/cove-download，再核验 https://cove.luxe 的公开下载地址。
 #>
 [CmdletBinding()]
 param(
@@ -18,7 +18,7 @@ param(
     [string]$SshTarget = 'Cove_server',
     [ValidatePattern('^/[A-Za-z0-9._/-]+$')]
     [string]$RemoteRoot = '/var/www/cove-download',
-    [uri]$PublicBaseUrl = 'https://cove-cove.space'
+    [uri]$PublicBaseUrl = 'https://cove.luxe'
 )
 
 $ErrorActionPreference = 'Stop'

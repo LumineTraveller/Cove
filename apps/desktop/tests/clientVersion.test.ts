@@ -11,11 +11,11 @@ import {
   safeUpgradeDownloadUrl,
 } from '../src/features/updates/clientVersion';
 
-const policy = { minimumClientVersion: '2.0.0', serverVersion: '2.0.1', upgradeRequired: true };
+const policy = { minimumClientVersion: '2.0.0', serverVersion: '2.0.2', upgradeRequired: true };
 
 test('the actual desktop identity matches its package and a supported patch never loops on upgrade flags', () => {
   assert.equal(CLIENT_VERSION, packageInfo.version);
-  assert.equal(COVE_RELEASE_VERSION, '2.0.1');
+  assert.equal(COVE_RELEASE_VERSION, '2.0.2');
   assert.equal(CLIENT_VERSION, COVE_RELEASE_VERSION);
   assert.equal(isSupportedClientVersion(CLIENT_VERSION, COVE_RELEASE_VERSION), true);
   assert.equal(requiresClientUpgrade(policy), false);

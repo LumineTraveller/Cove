@@ -332,14 +332,14 @@
     }
   ],
   "versions": {
-    "root": "2.0.1",
-    "desktop": "2.0.1",
-    "server": "2.0.1",
-    "mobile": "0.8.1"
+    "root": "2.0.2",
+    "desktop": "2.0.2",
+    "server": "2.0.2",
+    "mobile": "0.8.2"
   },
   "mobileFeed": "{\n  \"schemaVersion\": 1,\n  \"platform\": \"android\",\n  \"release\": {\n    \"packageName\": \"com.cove.mobile\",\n    \"versionName\": \"0.7.0\",\n    \"versionCode\": 12,\n    \"minAndroidApi\": 24,\n    \"tag\": \"mobile-v0.7.0\",\n    \"filename\": \"Cove-Mobile-0.7.0.apk\",\n    \"size\": 55943498,\n    \"sha256\": \"d318c1aeaef36558a30dd7826075bb7a1d939ec8a2a82a236440f358a1753e61\",\n    \"notes\": \"# Cove Mobile v0.7.0\\n\\n发布日期：2026-09-28。Android versionCode：12。\\n\\n## 新增与修复\\n\\n- 新增手机屏幕共享，可选择是否同时共享应用播放音频；屏幕视频使用 AV1，不支持 AV1 的设备或服务器会明确提示，不回退到 H.264。共享音频采集需要 Android 10 及以上，并受应用录制策略限制。\\n- 修复手机麦克风降噪链路的失真问题，重新提供 RNNoise 选项；默认降噪模式改为系统降噪，每次冷启动恢复默认值。\\n- 调整 Android 原生音频处理与 React Native 模块构建/初始化路径，避免原生处理配置导致应用启动即闪退。\\n- 新增独立的 HTTPS 更新下载地址配置。默认留空时不访问预设服务器地址；启动更新检查仍可使用 GitHub，配置地址后才会同时检查对应下载服务器。\\n- 改进登录表单在软键盘弹出时的可视区域处理。\\n\\n## 安装说明\\n\\n下载 `Cove-Mobile-0.7.0.apk` 后覆盖安装。应用 ID 与签名保持不变。\\n正式分发包支持 ARM64 与 ARMv7，最低 Android 7.0；不包含 x86 模拟器架构。\"\n  }\n}\n",
-  "gradleVersion": "versionName \"0.8.1\"",
-  "gradleCode": "versionCode 14",
+  "gradleVersion": "versionName \"0.8.2\"",
+  "gradleCode": "versionCode 15",
   "dependencyVersions": {
     "node_modules/@alloc/quick-lru": "5.2.0",
     "node_modules/@babel/code-frame": "7.29.7",
@@ -1220,6 +1220,63 @@
     "node_modules/yocto-queue": "0.1.0"
   },
   "nativeExtensionEvidence": {
+    "screenEncoderRelease": {
+      "baseCommit": "eda5986",
+      "releaseVersion": "0.8.2",
+      "hashFormat": "SHA-256 of UTF-8 source after CRLF-to-LF normalization, matching the immutable native relocation baseline",
+      "modifiedOriginal": [
+        {
+          "path": "apps/mobile/android/app/src/main/java/com/oney/WebRTCModule/CoveScreenModule.java",
+          "baseSha256": "0e7b57f5ac626d2e87fe629c8bfddc5a002596091ee636b93e97b03353d2985d",
+          "sha256": "3ab335a531c53aca3abd1a8d81d63d38c0e4589568d9ad57e8896d35cf68be84",
+          "reason": "Expose screen encoder capability and initialized-implementation diagnostics plus attempt-scoped failure events; preserve existing playback audio bridge entry points"
+        },
+        {
+          "path": "apps/mobile/android/app/src/main/java/com/oney/WebRTCModule/CoveScreenRuntime.java",
+          "baseSha256": "05ca55a1a9c4e19a9cc45ea2f5d66f3610dbc83834dda1497e20278e2ad97de1",
+          "sha256": "569412acf7d25c076e9792905285561ed05c76860fec51d3199e678530ee5f17",
+          "reason": "Install the screen-scoped encoder factory and video source, associate readiness/failure with the current publication attempt, and preserve screen playback-audio lifecycle"
+        },
+        {
+          "path": "apps/mobile/android/build-logic/src/main/java/com/cove/instrumentation/ScreenSharingVisitor.java",
+          "baseSha256": "2bc0e6ca2d91aa0afa3e8e32a83ff88efa5cdb3bf67c79c6e2d01a6ccef3959c",
+          "sha256": "a981998950bfb7e1e18f5269da171e4ec0b74bbdb0c1755be45ea8ba7579f716",
+          "reason": "Add exact WebRTC 124 factory/source ABI hooks so screen capture retains its chosen dimensions and caps source cadence at the existing 30 FPS target"
+        },
+        {
+          "path": "apps/mobile/android/build-logic/src/main/java/com/cove/instrumentation/ScreenSharingVisitorFactory.java",
+          "baseSha256": "db43b6bb8c5be2bc79ace0daeef96842fb5b1877168ea01b3ee2ced1f54b1817",
+          "sha256": "a461ccf7e660375e50fdc33a6df10d99b53f59b88c130ff9544fb75c15a69645",
+          "reason": "Select only the reviewed WebRTC screen source and encoder construction classes for instrumentation; retain existing screen/audio target selection"
+        },
+        {
+          "path": "apps/mobile/android/build-logic/src/test/java/com/cove/instrumentation/ScreenSharingVisitorTest.java",
+          "baseSha256": "81cf4214d2398993fc1c11a56f8de468f9be8972f87a656cf2dfec46ee3fbd05",
+          "sha256": "3b024cec405bd71926bb9445b0ed0b7b048e1d1b5f8b2a396cf6e72bd8a8a23c",
+          "reason": "Verify source/factory hooks against the locked real WebRTC bytecode and reject ABI drift while retaining capture/audio hook assertions"
+        }
+      ],
+      "newSources": [
+        "apps/mobile/android/app/src/main/java/com/oney/WebRTCModule/CoveScreenEncoderFactory.java",
+        "apps/mobile/android/app/src/main/java/com/oney/WebRTCModule/CoveScreenVideoSource.java"
+      ],
+      "nativeTests": [
+        "apps/mobile/android/app/src/test/java/com/oney/WebRTCModule/CoveScreenEncoderFactoryTest.java",
+        "apps/mobile/android/app/src/androidTest/java/com/oney/WebRTCModule/CoveScreenVideoSourceNativeTest.java",
+        "apps/mobile/android/build-logic/src/test/java/com/cove/instrumentation/ScreenSharingVisitorTest.java"
+      ],
+      "instrumentationRunner": "apps/mobile/android/app/src/androidTest/java/com/covemobile/SoundpackCodecTestRunner.kt",
+      "instrumentationSuite": "screenSource",
+      "boundaries": [
+        "contracts.native retains every original hash; only the five explicit screen paths above may use a replacement hash",
+        "All other existing native capture, DSP, microphone processing, Keystore, DNS, certificate and updater implementations remain outside this exception allowlist",
+        "Only screen senders select the new encoder factory; microphone and unrelated peer connections keep the existing path",
+        "Hardware H.264 is a device/profile/peer capability candidate, not a guarantee; report actual implementation only after encoder initialization succeeds and allow explicit compatible-codec fallback on failure",
+        "Keep the user-selected 100/75/50 percent capture dimensions and the existing 30 FPS target; do not reduce resolution or claim guaranteed measured frame rate or power savings",
+        "No Android manifest permission, application ID, signing identity, RNNoise/DSP or DNS behavior change is authorized by this record",
+        "Factory/source instrumentation tests are separate from real-device acceptance; synthetic cadence checks do not establish real-device frame rate or battery results"
+      ]
+    },
     "baseCommit": "651607e",
     "preservedAccountPasswordBase": "f3edea7",
     "modifiedOriginal": [
@@ -1239,6 +1296,31 @@
       "No manifest permission change",
       "No version or formal feed change",
       "No existing capture, DSP, Keystore, DNS or native updater source modification"
-    ]
+    ],
+    "integratedCandidates": {
+      "baseCommit": "eda598670b828b56d0b7625fb262ccb69acf15a7",
+      "hashFormat": "SHA-256 of UTF-8 source after CRLF-to-LF normalization; original native relocation hashes remain immutable",
+      "modifiedOriginal": [
+        {
+          "path": "apps/mobile/android/app/src/main/java/com/covemobile/CoveNativePackage.kt",
+          "baseSha256": "a6f9d5ce72d85d9a29634b8e374d29fac405fb8fab136d878c238f381a1476d8",
+          "sha256": "4cd639f4f599d5cf26b8a0c405b4401143d3ceab0a9aaadfa7725ae4248910ce",
+          "commit": "c8307ebb6bb6d93124a693674cc11a7e1e973f19",
+          "reason": "Previously reviewed 14-day authentication candidate adds only ServerAccessGrantsModule registration; prior native modules and order remain intact"
+        },
+        {
+          "path": "apps/mobile/android/app/src/main/java/com/covemobile/ServerCertificateNetwork.kt",
+          "baseSha256": "d75df0b106e5aed360a6f83eeba390baa9198b8cd5ab881b0d0f37a32e750cb9",
+          "sha256": "78f302d717994c3ec17b3325da6eaab331eda0198d1a3fd911d86169ff8e763e",
+          "commit": "8d8eba8d684b8b7f2458f077d553ebe067d58c02",
+          "reason": "Previously reviewed room isolation candidate adds SoundpackRedirectGuard network interceptor; certificate trust, DNS, TLS and HTTP protocol policy remain intact"
+        }
+      ],
+      "boundaries": [
+        "These two changes already exist in the merged candidate commit; they are separate from the new screen encoder release changes",
+        "Preserve all historical native hashes and historical extension records; accept only these fixed paths, commits and replacement hashes",
+        "No additional Keystore, certificate, DNS, updater, manifest or capture implementation exception"
+      ]
+    }
   }
 }

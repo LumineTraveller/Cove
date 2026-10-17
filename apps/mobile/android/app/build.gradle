@@ -97,8 +97,8 @@ android {
         applicationId "com.cove.mobile"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 14
-        versionName "0.8.1"
+        versionCode 15
+        versionName "0.8.2"
         testInstrumentationRunner "com.covemobile.SoundpackCodecTestRunner"
         buildConfigField "String", "COVE_UPDATE_DOWNLOAD_BASE_URL", groovy.json.JsonOutput.toJson(updateDownloadBaseUrl)
     }
