@@ -3,15 +3,16 @@ export interface SoundpackGroup { id: string; soundIds: string[]; }
 export const DEFAULT_GROUP_ID = 'default';
 export const initialGroups = (): SoundpackGroup[] => [{ id: DEFAULT_GROUP_ID, soundIds: [] }];
 
-export function soundpackScope(serverURL: string, accountId: string) {
+export function soundpackScope(serverURL: string, accountId: string, roomId: string) {
   let server = serverURL.replace(/\/+$/, '');
   try { server = new URL(server).href.replace(/\/+$/, ''); } catch { /* Retain custom paths. */ }
-  return `${encodeURIComponent(server)}:${encodeURIComponent(accountId)}`;
+  return `${encodeURIComponent(server)}:${encodeURIComponent(accountId)}:${encodeURIComponent(roomId)}`;
 }
-export const groupsStorageKey = (serverURL: string, accountId: string) =>
-  `cove:soundpack-groups:v1:${soundpackScope(serverURL, accountId)}`;
-export const favoritesStorageKey = (serverURL: string, accountId: string) =>
-  `cove:soundpack-favorites:${soundpackScope(serverURL, accountId)}`;
+// v1 global preferences remain untouched and unassigned; never copy them into rooms.
+export const groupsStorageKey = (serverURL: string, accountId: string, roomId: string) =>
+  `cove:soundpack-groups:v2:${soundpackScope(serverURL, accountId, roomId)}`;
+export const favoritesStorageKey = (serverURL: string, accountId: string, roomId: string) =>
+  `cove:soundpack-favorites:v2:${soundpackScope(serverURL, accountId, roomId)}`;
 
 export function readGroups(value: unknown): SoundpackGroup[] {
   const data = value as {version?: unknown; groups?: unknown} | null;

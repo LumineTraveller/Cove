@@ -1,4 +1,5 @@
 import { NativeModules, Platform } from 'react-native';
+import { soundpackFileURI } from './soundpackAccess';
 
 export const MAX_SOUNDPACK_BYTES = 8 * 1024 * 1024;
 export interface SoundpackAudioFile {
@@ -18,6 +19,10 @@ export interface SoundpackAudioRead {
 }
 export interface SoundpackSaveOptions {
   url: string;
+  headers: Record<string, string>;
+  roomId: string;
+  soundId: string;
+  variant: 'original';
   filename: string;
   serverURL: string;
 }
@@ -126,8 +131,11 @@ export async function releaseAudioFiles(ids: string[]): Promise<void> {
 export async function saveSoundpack(
   options: SoundpackSaveOptions,
 ): Promise<SoundpackSaveResult> {
-  if (!options.url || !options.filename || !options.serverURL)
+  if (!options.url || !options.filename || !options.serverURL || !options.roomId || !options.soundId || options.variant !== 'original' || !options.headers)
     throw new Error('下载地址或文件名无效。');
+  const accountToken = new Headers(options.headers).get('X-Cove-Account-Token') ?? '';
+  if (options.url !== soundpackFileURI({serverURL: options.serverURL, roomId: options.roomId, accountToken}, options.soundId, options.variant))
+    throw new Error('下载必须使用当前房间受保护的语音包地址。');
   return native().saveSoundpack(options);
 }
 

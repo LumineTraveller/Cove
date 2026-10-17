@@ -13,16 +13,15 @@ import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.ReadableArray
 import com.facebook.react.bridge.ReadableMap
+import com.facebook.react.bridge.ReadableType
 import com.facebook.react.modules.network.OkHttpClientProvider
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import okhttp3.Call
-import okhttp3.Request
 
 private data class SoundpackSelection(val file: File, val name: String, val mimeType: String,
   val duration: Double, val revoked: AtomicBoolean = AtomicBoolean(false))
@@ -39,9 +38,7 @@ class CoveSoundpacksModule(context: ReactApplicationContext) : ReactContextBaseJ
   private val cache = File(context.cacheDir, "cove-soundpack-selections").apply { mkdirs() }
   @Volatile private var pending: SoundpackDocumentRequest? = null
   @Volatile private var activeCall: Call? = null
-  private val client by lazy { OkHttpClientProvider.getOkHttpClient().newBuilder()
-    .connectTimeout(10, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS)
-    .callTimeout(60, TimeUnit.SECONDS).followRedirects(false).followSslRedirects(false).build() }
+  private val client by lazy { soundpackDownloadClient(OkHttpClientProvider.getOkHttpClient()) }
 
   private val listener = object : BaseActivityEventListener() {
     override fun onActivityResult(activity: Activity, requestCode: Int, resultCode: Int, data: Intent?) {
@@ -219,8 +216,20 @@ class CoveSoundpacksModule(context: ReactApplicationContext) : ReactContextBaseJ
   }
 
   @ReactMethod fun saveSoundpack(options: ReadableMap, promise: Promise) {
-    val url = soundpackDownloadUrl(options.getString("url") ?: "", options.getString("serverURL") ?: "")
-    if (url == null) { promise.reject("SOUNDPACK_SOURCE", "The download must be a sound from the current server"); return }
+    val request = try {
+      val supplied = options.getMap("headers") ?: error("Soundpack download headers are required")
+      val headers = linkedMapOf<String, String>()
+      val keys = supplied.keySetIterator()
+      while (keys.hasNextKey()) {
+        val key = keys.nextKey()
+        require(supplied.getType(key) == ReadableType.String) { "Invalid soundpack download header" }
+        headers[key] = supplied.getString(key) ?: error("Invalid soundpack download header")
+      }
+      soundpackDownloadRequest(options.getString("url") ?: "", options.getString("serverURL") ?: "",
+        options.getString("roomId") ?: "", options.getString("soundId") ?: "",
+        options.getString("variant") ?: "", headers)
+    } catch (_: Exception) { null }
+    if (request == null) { promise.reject("SOUNDPACK_SOURCE", "The download must be an authorized sound from the current room"); return }
     if (!busy.compareAndSet(false, true)) { promise.reject("SOUNDPACK_BUSY", "Another audio operation is running"); return }
     val epoch = generation.get()
     val filename = safeSoundpackFilename(options.getString("filename") ?: "audio")
@@ -228,7 +237,7 @@ class CoveSoundpacksModule(context: ReactApplicationContext) : ReactContextBaseJ
       val file = File(cache, "download-${UUID.randomUUID()}.audio")
       try {
         val cancelled = { generation.get() != epoch }
-        val call = client.newCall(Request.Builder().url(url).header("Accept-Encoding", "identity").build())
+        val call = client.newCall(request)
         synchronized(this) {
           check(!cancelled()) { "Soundpack operation cancelled" }
           activeCall = call

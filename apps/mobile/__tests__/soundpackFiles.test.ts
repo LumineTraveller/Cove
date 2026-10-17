@@ -98,10 +98,11 @@ it('keeps oversize decoded output from entering upload', async () => {
   await expect(readAudioSelection(file.id, 0, 1)).rejects.toThrow('无法读取');
 });
 
-it('sends the original download filename and current server scope, including query tokens', async () => {
+it('sends original filename with exact protected room resource and account header', async () => {
   const options = {
     serverURL: 'https://synthetic.test/cove',
-    url: 'https://synthetic.test/cove/sounds/original.mp3?access_token=synthetic',
+    url: 'https://synthetic.test/cove/api/soundpacks/synthetic-sound/file?roomId=room&variant=original',
+    headers: {'X-Cove-Account-Token': 'synthetic-account-token'}, roomId: 'room', soundId: 'synthetic-sound', variant: 'original' as const,
     filename: '测试.mp3',
   };
   bridge.saveSoundpack.mockResolvedValue({ cancelled: true });
@@ -127,7 +128,8 @@ it('revokes native work on cancellation and lets old builds safely close a scree
   Platform.OS = 'ios';
   await expect(
     saveSoundpack({
-      url: 'https://s.test/sounds/x',
+      url: 'https://s.test/api/soundpacks/x/file?roomId=room&variant=original',
+      headers: {'X-Cove-Account-Token': 'synthetic-account-token'}, roomId: 'room', soundId: 'x', variant: 'original',
       serverURL: 'https://s.test',
       filename: 'x',
     }),

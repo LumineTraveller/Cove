@@ -31,12 +31,15 @@ export function SoundpackImport({controller: board}: {controller: SoundboardCont
   const queueRef = useRef<SoundpackAudioFile[]>([]);
   const generation = useRef(0);
   const pending = useRef(false);
+  const uploadRequest = useRef<AbortController | null>(null);
   const mounted = useRef(true);
   const summary = useRef({uploaded: 0, skipped: 0});
   const current = files[index];
   const selected = current ? soundpackSelection(start, end, current.duration) : null;
   const clear = () => {
     generation.current += 1;
+    uploadRequest.current?.abort();
+    uploadRequest.current = null;
     pending.current = false;
     const ids = queueRef.current.map(file => file.id);
     queueRef.current = [];
@@ -90,15 +93,17 @@ export function SoundpackImport({controller: board}: {controller: SoundboardCont
     pending.current = true;
     setBusy(true); setPreview(false); setError(null);
     const token = generation.current;
+    const request = new AbortController();
+    uploadRequest.current = request;
     const active = () => mounted.current && generation.current === token;
     try {
       const clip = await readAudioSelection(current.id, selected.start, selected.end);
       if (!active()) return;
       if (!clip.mimeType.startsWith('audio/') || clip.size <= 0 || clip.size > MAX_SOUNDPACK_BYTES) throw new Error('音频无效或超过 8MB，请缩短片段后重试');
-      const response = await serverFetch(board.serverURL, '/api/soundpacks', {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({name: name.trim(), data: clip.data, mimeType: clip.mimeType, socketId: board.socket.id, roomId: board.roomId}),
-      });
+      const response = await serverFetch(board.serverURL, '/api/soundpacks', board.requestInit({
+        method: 'POST', headers: {'Content-Type': 'application/json'}, signal: request.signal,
+        body: JSON.stringify({name: name.trim(), data: clip.data, mimeType: clip.mimeType, roomId: board.roomId}),
+      }));
       if (!active()) return;
       if (!response.ok) {
         const result = await response.json().catch(() => ({})) as {error?: string};
@@ -107,7 +112,7 @@ export function SoundpackImport({controller: board}: {controller: SoundboardCont
       summary.current.uploaded += 1;
       advance();
     } catch (cause) {if (active()) setError(cause instanceof Error ? cause.message : '音频上传失败，请重试');}
-    finally {if (active()) {pending.current = false; setBusy(false);}}
+    finally {if (uploadRequest.current === request) uploadRequest.current = null; if (active()) {pending.current = false; setBusy(false);}}
   };
   return <View style={styles.container}>
     {current ? <>

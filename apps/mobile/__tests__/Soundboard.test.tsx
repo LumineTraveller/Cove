@@ -22,7 +22,7 @@ describe('soundboard touch management UI', () => {
   const press = async (label: string) => {await act(async () => touch(label).props.onPress());};
   beforeEach(async () => {
     jest.clearAllMocks(); visible = true; renderer = undefined as any;
-    board = {scope: 'server:alice:room', ready: true, inVoice: false, canManage: true, canAddGroup: true, serverURL: 'http://fixture.test/cove',
+    board = {scope: 'server:alice:room', ready: true, inVoice: false, canManage: true, canAddGroup: true, serverURL: 'http://fixture.test/cove', roomId: 'room', fileSource: (id: string) => ({uri: `http://fixture.test/cove/api/soundpacks/${id}/file?roomId=room&variant=original`, headers: {'x-cove-account-token': 'synthetic-account-token'}}),
       groups: [{id: 'one', soundIds: ['a']}, {id: 'two', soundIds: ['b']}], favorites: [], volume: 0.5, playback: null,
       packs: [{id: 'a', name: '长中文合成测试声音名称', filename: 'a.normalized.mp3', originalFilename: 'a.original.wav', uploader: 'Synthetic', canDelete: true}, {id: 'b', name: '只读声音', filename: 'b.mp3', uploader: 'Synthetic', canDelete: false}],
       loading: false, loadError: null, notice: null, busy: null, moveSound: jest.fn(), swapGroups: jest.fn(), updateVolume: jest.fn(), triggerSound: jest.fn(), toggleFavorite: jest.fn(),
@@ -44,7 +44,7 @@ describe('soundboard touch management UI', () => {
   test('downloads original audio using authorized custom-server path and suppresses repeats', async () => {
     await render(); await press('语音包操作：长中文合成测试声音名称'); const action = button('下载原始音频');
     await act(async () => {action.props.onPress(); action.props.onPress();});
-    expect(saveSoundpack).toHaveBeenCalledTimes(1); expect(saveSoundpack).toHaveBeenCalledWith({url: 'http://fixture.test/cove/sounds/a.original.wav?synthetic-key=fixture', serverURL: 'http://fixture.test/cove', filename: '长中文合成测试声音名称.wav'});
+    expect(saveSoundpack).toHaveBeenCalledTimes(1); expect(saveSoundpack).toHaveBeenCalledWith({url: 'http://fixture.test/cove/api/soundpacks/a/file?roomId=room&variant=original', headers: {'x-cove-account-token': 'synthetic-account-token'}, serverURL: 'http://fixture.test/cove', roomId: 'room', soundId: 'a', variant: 'original', filename: '长中文合成测试声音名称.wav'});
   });
   test('rename supports long Chinese input and cancellation without changing the file', async () => {
     await render(); await press('语音包操作：长中文合成测试声音名称'); await act(async () => button('重命名').props.onPress());

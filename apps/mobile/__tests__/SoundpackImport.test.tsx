@@ -24,7 +24,7 @@ describe('SAF audio selection, trim, upload and cancellation', () => {
   beforeEach(async () => {
     renderer = undefined as any;
     jest.clearAllMocks();
-    board = {ready: true, scope: 'server:alice:room', serverURL: 'http://fixture.test/cove', roomId: 'room', socket: {id: 'synthetic-self'}, volume: 0.6, setNotice: jest.fn()} as unknown as SoundboardController;
+    board = {ready: true, scope: 'server:alice:room', serverURL: 'http://fixture.test/cove', roomId: 'room', socket: {id: 'synthetic-self'}, volume: 0.6, requestInit: jest.fn((init: RequestInit) => ({...init, headers: {...init.headers, 'X-Cove-Account-Token': 'synthetic-account-token'}})), setNotice: jest.fn()} as unknown as SoundboardController;
     (pickAudioFiles as jest.Mock).mockResolvedValue([audio('one'), audio('two')]);
     (readAudioSelection as jest.Mock).mockResolvedValue({data: 'U1lOVEhFVElD', mimeType: 'audio/wav', size: 2048, duration: 3, uri: 'file:///synthetic/clip.wav'});
     (serverFetch as jest.Mock).mockResolvedValue({ok: true, json: async () => ({id: 'uploaded'})});
@@ -41,7 +41,7 @@ describe('SAF audio selection, trim, upload and cancellation', () => {
     await mount(); await press('上传音频');
     await act(async () => {input('上传语音包名称').props.onChangeText('自定义声音'); input('音频开始时间（秒）').props.onChangeText('2'); input('音频结束时间（秒）').props.onChangeText('5');});
     await press('确认并上传'); expect(readAudioSelection).toHaveBeenCalledWith('one', 2, 5);
-    expect(serverFetch).toHaveBeenCalledWith('http://fixture.test/cove', '/api/soundpacks', expect.objectContaining({method: 'POST', body: JSON.stringify({name: '自定义声音', data: 'U1lOVEhFVElD', mimeType: 'audio/wav', socketId: 'synthetic-self', roomId: 'room'})}));
+    expect(serverFetch).toHaveBeenCalledWith('http://fixture.test/cove', '/api/soundpacks', expect.objectContaining({method: 'POST', body: JSON.stringify({name: '自定义声音', data: 'U1lOVEhFVElD', mimeType: 'audio/wav', roomId: 'room'})}));
     expect(input('上传语音包名称').props.value).toBe('two'); await press('跳过此音频');
     expect(board.setNotice).toHaveBeenCalledWith('音频上传完成：成功 1 个，跳过 1 个。');
     expect(releaseAudioFiles).toHaveBeenCalledWith(['one', 'two']);
@@ -82,4 +82,28 @@ describe('SAF audio selection, trim, upload and cancellation', () => {
     expect(player.props.volume).toBe(0.6); expect(player.props.source.uri).toBe(audio('one').uri);
     await act(async () => player.props.onProgress({currentTime: 10})); expect(renderer.root.findAllByType('Video' as any)).toHaveLength(0);
   });
+});
+
+test('changing room aborts an in-flight HTTP upload and ignores its late success', async () => {
+  const waiting = deferred<any>();
+  (serverFetch as jest.Mock).mockReturnValue(waiting.promise);
+  const setNotice = jest.fn();
+  let board = {ready: true, scope: 'server:alice:room-a', serverURL: 'http://fixture.test/cove', roomId: 'room-a', volume: 1,
+    requestInit: (init: RequestInit) => ({...init, headers: {'X-Cove-Account-Token': 'synthetic-account-token'}}), setNotice} as unknown as SoundboardController;
+  (pickAudioFiles as jest.Mock).mockResolvedValue([audio('one')]);
+  (readAudioSelection as jest.Mock).mockResolvedValue({data: 'AAAA', mimeType: 'audio/mpeg', size: 3, duration: 10, uri: 'file:///synthetic/one.mp3'});
+  let renderer!: TestRenderer.ReactTestRenderer;
+  await act(async () => {renderer = TestRenderer.create(<SoundpackImport controller={board}/>);});
+  const button = (title: string) => renderer.root.findAllByType(CoveButton).find(node => node.props.title === title)!;
+  await act(async () => button('上传音频').props.onPress());
+  await act(async () => button('确认并上传').props.onPress());
+  const init = (serverFetch as jest.Mock).mock.calls.at(-1)![2];
+  expect(init.headers['X-Cove-Account-Token']).toBe('synthetic-account-token');
+  expect(JSON.parse(init.body).roomId).toBe('room-a');
+  board = {...board, scope: 'server:alice:room-b', roomId: 'room-b'};
+  await act(async () => renderer.update(<SoundpackImport controller={board}/>));
+  expect(init.signal.aborted).toBe(true);
+  await act(async () => waiting.resolve({ok: true}));
+  expect(setNotice).not.toHaveBeenCalled();
+  await act(async () => renderer.unmount());
 });

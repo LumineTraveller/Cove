@@ -7,7 +7,7 @@ import {setAudioOutputDevice} from '../../media/audio/audioDevices';
 interface AudioPlayerProps {
   controller: SoundboardController;
   playerKey: string;
-  source: {uri: string; cropStart?: number; cropEnd?: number};
+  source: {uri: string; headers?: Record<string, string>; cropStart?: number; cropEnd?: number};
   onEnd: () => void;
   onError: () => void;
   onProgress?: (event: {currentTime: number}) => void;
@@ -49,7 +49,7 @@ export function SoundpackAudioPlayer({controller, playerKey, source, onEnd, onEr
 export function SoundpackPlayer({controller}: {controller: SoundboardController}) {
   const {playback, playbackEnded} = controller;
   if (!playback) return null;
-  return <SoundpackAudioPlayer controller={controller} playerKey={String(playback.key)} source={{uri: playback.uri}}
+  return <SoundpackAudioPlayer controller={controller} playerKey={String(playback.key)} source={{uri: playback.uri, headers: playback.headers}}
     onEnd={() => playbackEnded(playback.key)} onError={() => playbackEnded(playback.key, true)}
     />;
 }

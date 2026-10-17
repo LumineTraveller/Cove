@@ -32,7 +32,14 @@ test('authoritative order preserves membership and leaves concurrent new sounds'
     .toEqual([{id: 'a', soundIds: ['2', '1']}, {id: 'b', soundIds: ['3']}]);
 });
 test('preferences isolate account, origin and server path while normalizing trailing slashes', () => {
-  expect(groupsStorageKey('http://example.test/cove/', 'alice')).toBe(groupsStorageKey('http://example.test/cove', 'alice'));
-  expect(groupsStorageKey('http://example.test/cove', 'alice')).not.toBe(groupsStorageKey('http://example.test/cove', 'bob'));
-  expect(groupsStorageKey('http://example.test/a', 'alice')).not.toBe(groupsStorageKey('http://example.test/b', 'alice'));
+  expect(groupsStorageKey('http://example.test/cove/', 'alice', 'room-a')).toBe(groupsStorageKey('http://example.test/cove', 'alice', 'room-a'));
+  expect(groupsStorageKey('http://example.test/cove', 'alice', 'room-a')).not.toBe(groupsStorageKey('http://example.test/cove', 'bob', 'room-a'));
+  expect(groupsStorageKey('http://example.test/a', 'alice', 'room-a')).not.toBe(groupsStorageKey('http://example.test/b', 'alice', 'room-a'));
+});
+
+test('rooms have independent v2 preference keys and never alias the old global keys', () => {
+  const first = groupsStorageKey('https://example.test/cove', 'alice', 'room-a');
+  expect(first).not.toBe(groupsStorageKey('https://example.test/cove', 'alice', 'room-b'));
+  expect(first).toContain('soundpack-groups:v2:');
+  expect(first).not.toContain('soundpack-groups:v1:');
 });

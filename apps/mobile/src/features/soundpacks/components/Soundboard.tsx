@@ -10,7 +10,6 @@ import type {Soundpack} from '../../../types';
 import type {SoundboardController} from '../useSoundboard';
 import {SoundpackImport} from './SoundpackImport';
 import {saveSoundpack} from '../soundpackFiles';
-import {authorizedResourceURL} from '../../connection/serverSecurity';
 
 interface Props {controller: SoundboardController; profileRemarks: ProfileRemarks; showHeading?: boolean; visible?: boolean;}
 export function Soundboard({controller: board, profileRemarks, showHeading = true, visible = true}: Props) {
@@ -47,12 +46,13 @@ export function Soundboard({controller: board, profileRemarks, showHeading = tru
       const extension = originalFilename.match(/\.[a-z0-9]{1,8}$/i)?.[0] ?? '.audio';
       const safeName = Array.from(sound.name).map(character => character.charCodeAt(0) < 32 ? '_' : character).join('').replace(/[\\/:*?"<>|]/g, '_');
       const filename = `${safeName.slice(0, 100) || sound.id}${extension}`;
-      const result = await saveSoundpack({url: authorizedResourceURL(board.serverURL, `/sounds/${encodeURIComponent(originalFilename)}`), filename, serverURL: board.serverURL});
+      const source = board.fileSource(sound.id, 'original');
+      const result = await saveSoundpack({url: source.uri, headers: source.headers, filename, serverURL: board.serverURL, roomId: board.roomId, soundId: sound.id, variant: 'original'});
       if (downloadGeneration.current === token && !result.cancelled) board.setNotice(`已保存「${sound.name}」`);
     } catch (cause) {if (downloadGeneration.current === token) board.setNotice(cause instanceof Error ? cause.message : '下载失败，请重试');}
     finally {if (downloadGeneration.current === token) {downloadPending.current = false; setDownloadingId(null);}}
   };
-  const remove = (sound: Soundpack) => Alert.alert('删除语音包', `删除「${sound.name}」后，所有成员都将无法再播放。`, [
+  const remove = (sound: Soundpack) => Alert.alert('删除语音包', `删除「${sound.name}」后，本房间成员都将无法再播放。`, [
     {text: '取消', style: 'cancel'}, {text: '删除', style: 'destructive', onPress: () => {board.deleteSound(sound.id);}},
   ]);
   const control = (label: string, icon: ReactNode, onPress: () => void, disabled = false) => (
@@ -61,7 +61,7 @@ export function Soundboard({controller: board, profileRemarks, showHeading = tru
   );
   return <View style={styles.card}>
     {showHeading && <View style={styles.heading}><View style={styles.headingIcon}><Volume2 size={18} color={colors.blue}/></View>
-      <View style={styles.copy}><Text style={styles.title}>语音包</Text><Text style={styles.hint}>{board.inVoice ? '只对当前语音成员同步播放' : '加入语音后可播放，仍可管理语音包'}</Text></View></View>}
+      <View style={styles.copy}><Text style={styles.title}>语音包</Text><Text style={styles.hint}>{board.inVoice ? '只对当前房间语音成员同步播放' : '加入语音后可播放，仍可管理语音包'}</Text></View></View>}
     <View style={styles.volumeHeader}><Text style={styles.label}>本机语音包音量</Text><Text style={styles.value}>{Math.round(board.volume * 100)}%</Text></View>
     <InlineVolumeSlider value={board.volume} label="本机语音包音量" onChange={board.updateVolume}/>
     <Text style={styles.hint}>音量和收藏仅影响此设备。</Text>
@@ -72,7 +72,7 @@ export function Soundboard({controller: board, profileRemarks, showHeading = tru
         accessibilityRole="button" accessibilityLabel="添加语音包分组" accessibilityState={{disabled: !board.canManage || !board.canAddGroup}}
         disabled={!board.canManage || !board.canAddGroup} onPress={board.addSoundpackGroup}>
         <Plus size={16} color={colors.blue}/><Text style={styles.actionText}>添加分组</Text></TouchableOpacity></View>
-    <Text style={styles.hint}>分组保存在本机当前账号；调整顺序会同步给所有成员。先填入空组，再添加下一组。</Text>
+    <Text style={styles.hint}>分组和收藏仅保存在本机当前账号的当前房间；调整顺序只同步此房间。先填入空组，再添加下一组。</Text>
     {board.favorites.length > 0 && <View style={styles.favorites}><Text style={styles.sectionTitle}>快捷收藏 · {board.favorites.length}/6</Text>
       <View style={styles.quickList}>{board.favorites.map(id => {
         const sound = packsById.get(id);

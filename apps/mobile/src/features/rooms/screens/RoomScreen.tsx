@@ -204,6 +204,7 @@ export function RoomScreen({
     roomId: room.id,
     serverURL: config.serverURL,
     accountId: config.accountId ?? config.clientId,
+    accountToken: config.accountToken,
     ready: roomReady,
     inVoice: media.inVoice,
     outputDeviceId: media.selectedAudioOutputId,

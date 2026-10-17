@@ -43,6 +43,7 @@ object ServerCertificateNetwork {
       init(null, arrayOf(exceptionTrust), null)
     }.socketFactory
     return base.newBuilder()
+      .addNetworkInterceptor(SoundpackRedirectGuard())
       .sslSocketFactory(ScopedSocketFactory(base.sslSocketFactory, exceptionFactory, policy), strictTrust)
       // Disallow HTTP/2 origin coalescing across an exception boundary.
       .protocols(listOf(Protocol.HTTP_1_1))

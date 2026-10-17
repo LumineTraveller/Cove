@@ -8,17 +8,12 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SoundpackFilesTest {
-  @Test fun downloadStaysInCurrentServerSoundResourcesAndRetainsAuthorizationQuery() {
+  @Test fun downloadRejectsLegacyPublicResourcesAndQueryCredentials() {
     val base = "https://synthetic.test/cove/"
-    val allowed = soundpackDownloadUrl("https://synthetic.test/cove/sounds/original.mp3?access_token=synthetic", base)!!
-    assertEquals("synthetic", allowed.queryParameter("access_token"))
-    assertNotNull(soundpackDownloadUrl("http://10.0.2.2:3301/sounds/local.wav", "http://10.0.2.2:3301"))
-    for (value in listOf("https://other.test/cove/sounds/x.mp3", "http://synthetic.test/cove/sounds/x.mp3",
-      "https://synthetic.test:444/cove/sounds/x.mp3", "https://user:password@synthetic.test/cove/sounds/x.mp3",
-      "https://synthetic.test/cove/uploads/x.mp3", "https://synthetic.test/sounds/x.mp3",
-      "https://synthetic.test/cove/sounds/a/b.mp3", "https://synthetic.test/cove/sounds/a%2Fb.mp3",
-      "https://synthetic.test/cove/sounds/a%5Cb.mp3", "https://synthetic.test/cove/sounds/../secret", "https://synthetic.test/cove/sounds/x#fragment")) {
-      assertNull(value, soundpackDownloadUrl(value, base))
+    for (value in listOf("https://synthetic.test/cove/sounds/original.mp3?access_token=synthetic",
+      "https://synthetic.test/cove/sounds/original.mp3",
+      "https://synthetic.test/cove/api/soundpacks/sound/file?roomId=room&variant=original&access_token=synthetic")) {
+      assertNull(value, soundpackDownloadUrl(value, base, "room", "sound", "original"))
     }
   }
 
