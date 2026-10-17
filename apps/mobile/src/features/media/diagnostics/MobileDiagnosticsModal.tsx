@@ -16,6 +16,7 @@ import {
   normalizeMobileDiagnostics,
   videoBitrate,
   videoDiagnosticSample,
+  videoEncodingPerformance,
   type MobileDiagnosticsInput,
   type MobileDiagnosticReport,
 } from './mobileDiagnostics';
@@ -32,6 +33,9 @@ export function MobileDiagnostics({
   const styles = useThemedStyles(createStyles);
   const [report, setReport] = useState<MobileDiagnosticReport | null>(null);
   const [bitrate, setBitrate] = useState<number | null>(null);
+  const [encodingPerformance, setEncodingPerformance] = useState<
+    ReturnType<typeof videoEncodingPerformance>
+  >({ framesPerSecond: null, encodeMsPerFrame: null });
   const [busy, setBusy] = useState(false),
     [saving, setSaving] = useState(false);
   const [error, setError] = useState(''),
@@ -52,6 +56,7 @@ export function MobileDiagnostics({
       const next = normalizeMobileDiagnostics(await collectRef.current());
       if (revision !== generation.current) return;
       setBitrate(videoBitrate(previous.current, next));
+      setEncodingPerformance(videoEncodingPerformance(previous.current, next));
       previous.current = next;
       setReport(next);
     } catch (cause) {
@@ -77,6 +82,7 @@ export function MobileDiagnostics({
     previous.current = null;
     setReport(null);
     setBitrate(null);
+    setEncodingPerformance({ framesPerSecond: null, encodeMsPerFrame: null });
     setNotice('');
     setError('');
     setSaving(false);
@@ -94,7 +100,18 @@ export function MobileDiagnostics({
     setNotice('');
     try {
       const saved = await saveTextFile(
-        JSON.stringify(report, null, 2),
+        JSON.stringify(
+          {
+            ...report,
+            interval: {
+              videoBitrateBps: bitrate,
+              encodedFramesPerSecond: encodingPerformance.framesPerSecond,
+              encodeMsPerFrame: encodingPerformance.encodeMsPerFrame,
+            },
+          },
+          null,
+          2,
+        ),
         `Cove-media-${new Date(report.sampledAt)
           .toISOString()
           .replace(/[:.]/g, '-')}.json`,
@@ -112,7 +129,13 @@ export function MobileDiagnostics({
     }
   };
   const video = report ? videoDiagnosticSample(report) : undefined;
-  const actualFps = video?.values.framesPerSecond;
+  const sending =
+    video?.transport === 'screenSend' || report?.stage.sharing === true;
+  const actualFps =
+    video?.values.framesPerSecond ??
+    encodingPerformance.framesPerSecond ??
+    undefined;
+  const ready = sending ? report?.screenEncoder?.ready : undefined;
   const display = (value: number | undefined, unit = '') =>
     value === undefined ? '未提供' : `${Math.round(value * 10) / 10}${unit}`;
   return (
@@ -127,7 +150,7 @@ export function MobileDiagnostics({
           <ScrollView contentContainerStyle={styles.content}>
             <Text style={styles.title}>媒体状态</Text>
             <Text style={styles.hint}>
-              显示设备提供的实际数据。刷新两次可计算视频码率；未提供的指标保持空缺。
+              显示设备提供的实际数据。刷新两次可计算码率、发送帧率与每帧编码耗时；未提供的指标保持空缺。
             </Text>
             {busy && <ActivityIndicator color={colors.blue} />}
             {report && (
@@ -137,6 +160,14 @@ export function MobileDiagnostics({
                   {new Date(report.sampledAt).toLocaleTimeString('zh-CN')}
                 </Text>
                 <View style={styles.metrics}>
+                  <Text style={styles.metric}>
+                    视频方向　
+                    {sending
+                      ? '手机屏幕发送'
+                      : video
+                      ? '手机接收观看'
+                      : '暂无视频数据'}
+                  </Text>
                   <Text style={styles.metric}>
                     视频帧率　{display(actualFps, ' FPS')}
                   </Text>
@@ -149,6 +180,70 @@ export function MobileDiagnostics({
                   <Text style={styles.metric}>
                     视频编码　{video?.codec ?? '未提供'}
                   </Text>
+                  {sending && (
+                    <>
+                      <Text style={styles.metric}>
+                        实际编码器　
+                        {video?.encoderImplementation ??
+                          ready?.implementation ??
+                          '未提供'}
+                      </Text>
+                      <Text style={styles.metric}>
+                        原生硬件加速　
+                        {ready
+                          ? ready.hardwareAccelerated
+                            ? '是（已初始化）'
+                            : '否'
+                          : '未提供'}
+                      </Text>
+                      <Text style={styles.metric}>
+                        编码器帧率上限　
+                        {display(ready?.encoderMaxFramerate, ' FPS')}
+                      </Text>
+                      <Text style={styles.metric}>
+                        省电编码器　
+                        {video?.powerEfficientEncoder === undefined
+                          ? '未提供'
+                          : video.powerEfficientEncoder
+                          ? '是（设备统计）'
+                          : '否（设备统计）'}
+                      </Text>
+                      <Text style={styles.metric}>
+                        编码耗时　
+                        {encodingPerformance.encodeMsPerFrame === null
+                          ? '需再次刷新或设备未提供'
+                          : `${encodingPerformance.encodeMsPerFrame.toFixed(
+                              2,
+                            )} ms／帧`}
+                      </Text>
+                      <Text style={styles.metric}>
+                        质量限制原因　
+                        {video?.qualityLimitationReason
+                          ? {
+                              none: '无',
+                              cpu: 'CPU',
+                              bandwidth: '带宽',
+                              other: '其他',
+                            }[video.qualityLimitationReason]
+                          : '未提供'}
+                      </Text>
+                      {!!report.screenEncoder?.attempts.length && (
+                        <Text style={styles.metric}>
+                          编码尝试　
+                          {report.screenEncoder.attempts
+                            .map(
+                              attempt =>
+                                `${attempt.codec}${
+                                  attempt.outcome === 'failed'
+                                    ? `（失败：${attempt.reason ?? '未提供'}）`
+                                    : '（已选择）'
+                                }`,
+                            )
+                            .join(' → ')}
+                        </Text>
+                      )}
+                    </>
+                  )}
                   <Text style={styles.metric}>
                     视频码率　
                     {bitrate === null
@@ -175,10 +270,10 @@ export function MobileDiagnostics({
                     : report.stage.inVoice
                     ? '语音中'
                     : '未连接媒体'}
-                  。手机采集当前为 30 FPS；观看帧率取决于来源和设备。
+                  。手机采集目标为 30 FPS；实际帧率取决于画面、编码器和设备。
                 </Text>
                 <Text style={styles.hint}>
-                  导出只包含媒体数值和编码信息，排除网络地址、账号与访问凭据。
+                  导出只包含媒体数值和编码器信息，排除网络地址、账号与访问凭据。
                 </Text>
               </>
             )}

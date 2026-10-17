@@ -521,6 +521,8 @@ export function useMobileMedia(
   }, [roomId, socket]);
 
   const collectScreenStats = screenShare.collectScreenStats;
+  const collectScreenEncodingDiagnostics =
+    screenShare.collectScreenEncodingDiagnostics;
   const isSharingScreen = screenShare.sharingScreen;
   const collectDiagnostics = useCallback(async () => {
     const getStats = async (transport: Transport | null) => {
@@ -550,6 +552,7 @@ export function useMobileMedia(
         sharing: isSharingScreen,
       },
       stats: { send, receive, screenSend },
+      screenEncoder: collectScreenEncodingDiagnostics(),
       server,
     };
   }, [
@@ -557,6 +560,7 @@ export function useMobileMedia(
     isWatchingScreen,
     isSharingScreen,
     collectScreenStats,
+    collectScreenEncodingDiagnostics,
     socket,
   ]);
 

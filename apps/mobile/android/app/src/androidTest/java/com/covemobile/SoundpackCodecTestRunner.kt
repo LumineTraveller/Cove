@@ -16,13 +16,24 @@ import kotlin.math.sin
 
 /** No test library or permission: every byte is generated in the isolated debug app's cache. */
 class SoundpackCodecTestRunner : Instrumentation() {
-  override fun onCreate(arguments: Bundle?) { super.onCreate(arguments); start() }
+  private var suite: String? = null
+  override fun onCreate(arguments: Bundle?) {
+    suite = arguments?.getString("suite")
+    super.onCreate(arguments)
+    start()
+  }
 
   override fun onStart() {
     val result = Bundle()
     var directory: File? = null
     try {
       check(targetContext.packageName == "com.cove.mobile.refactor") { "Codec tests require the isolated debug package" }
+      if (suite == "screenSource") {
+        result.putString("stream", com.oney.WebRTCModule.CoveScreenVideoSourceNativeTest.run(targetContext))
+        result.putInt("passed", 1)
+        finish(0, result)
+        return
+      }
       directory = File(targetContext.cacheDir, "soundpack-codec-test-${UUID.randomUUID()}").apply { check(mkdirs()) }
       val rate = 48000
       val pcm = ByteBuffer.allocate(rate * 2).order(ByteOrder.LITTLE_ENDIAN).apply {

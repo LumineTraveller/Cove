@@ -5,7 +5,11 @@ import org.objectweb.asm.*;
 /** Narrow, build-time ABI checked integration; never patches node_modules. */
 public final class ScreenSharingVisitor extends ClassVisitor {
     public static final String RUNTIME = "com/oney/WebRTCModule/CoveScreenRuntime";
+    public static final String VIDEO_SOURCE_RUNTIME = "com/oney/WebRTCModule/CoveScreenVideoSource";
     public static final String MODULE = "com/oney/WebRTCModule/WebRTCModule";
+    public static final String GET_USER_MEDIA = "com/oney/WebRTCModule/GetUserMediaImpl";
+    public static final String CREATE_VIDEO_TRACK_DESCRIPTOR = "(Lcom/oney/WebRTCModule/AbstractVideoCaptureController;)Lorg/webrtc/VideoTrack;";
+    public static final String CREATE_VIDEO_SOURCE_DESCRIPTOR = "(Lorg/webrtc/PeerConnectionFactory;Z)Lorg/webrtc/VideoSource;";
     public static final String OBSERVER = "com/oney/WebRTCModule/PeerConnectionObserver";
     public static final String CAPTURER = "org/webrtc/ScreenCapturerAndroid";
     public static final String RECORD = "org/webrtc/audio/WebRtcAudioRecord";
@@ -39,7 +43,15 @@ public final class ScreenSharingVisitor extends ClassVisitor {
                 super.visitInsn(opcode);
             }
             @Override public void visitMethodInsn(int opcode, String owner, String method, String descriptor, boolean iface) {
-                if (owner.equals(RUNTIME)) duplicate = true;
+                if (owner.equals(RUNTIME) || owner.equals(VIDEO_SOURCE_RUNTIME)) duplicate = true;
+                if (target.equals(GET_USER_MEDIA) && name.equals("createVideoTrack") && desc.equals(CREATE_VIDEO_TRACK_DESCRIPTOR)
+                    && owner.equals("org/webrtc/PeerConnectionFactory") && method.equals("createVideoSource")) {
+                    if (opcode != Opcodes.INVOKEVIRTUAL || iface || !descriptor.equals("(Z)Lorg/webrtc/VideoSource;")) {
+                        throw new IllegalStateException("Screen video source factory ABI changed");
+                    }
+                    super.visitMethodInsn(Opcodes.INVOKESTATIC, VIDEO_SOURCE_RUNTIME, "createVideoSource", CREATE_VIDEO_SOURCE_DESCRIPTOR, false);
+                    hooks++; return;
+                }
                 if (target.equals(OBSERVER) && name.equals("dispose") && owner.equals("org/webrtc/PeerConnection") && method.equals("dispose") && descriptor.equals("()V")) {
                     super.visitInsn(Opcodes.DUP);
                     super.visitMethodInsn(opcode, owner, method, descriptor, iface);
