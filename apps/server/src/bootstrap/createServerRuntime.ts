@@ -462,6 +462,24 @@ export function createServerRuntime() {
     }),
   );
 
+  // Released desktop clients parse list errors as Soundpack[] even when the
+  // panel is closed. Reject their account-less request with an empty array
+  // before server-access errors can replace it with an object and crash chat.
+  // Requests carrying an account token retain the normal access/recovery flow.
+  app.get('/api/soundpacks', (req, res, next) => {
+    if (req.get('x-cove-account-token')?.trim()) {
+      next();
+      return;
+    }
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Cove-Error-Code', 'ACCOUNT_AUTH_REQUIRED');
+    res.vary('Authorization');
+    res.vary('X-Cove-Account-Token');
+    res.status(403).json([]);
+  });
+
   app.use('/api', requireServerAccess);
 
   const distPath = path.join(__dirname, '../../../desktop/dist');

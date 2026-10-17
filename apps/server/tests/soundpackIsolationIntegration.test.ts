@@ -236,6 +236,45 @@ test('soundpack HTTP, files, mutations and broadcasts enforce current account an
     const packC = await upload(c, roomA, { name: 'Member A sound' });
     const packB = await upload(b, roomB, { name: 'B sound' });
 
+    await t.test('released clients receive a safe denied array without weakening account or server access', async () => {
+      for (const [platform, version] of [['desktop', '2.0.1'], ['mobile', '0.8.1']]) {
+        for (const authorization of [`Bearer ${serverToken}`, '', 'Bearer fictional-invalid-server-token']) {
+          const response = await fetch(base + `/api/soundpacks?roomId=${roomA}&socketId=${a.socket.id}`, {
+            headers: {
+              ...headers(), authorization,
+              'x-cove-client-platform': platform, 'x-cove-client-version': version,
+            },
+          });
+          assert.equal(response.status, 403);
+          assert.match(response.headers.get('cache-control') ?? '', /no-store/);
+          assert.equal(response.headers.get('x-cove-error-code'), 'ACCOUNT_AUTH_REQUIRED');
+          // Desktop 2.0.1 calls json() without checking status, then map/find
+          // during render. Mobile 0.8.1 rejects this non-OK response first.
+          const oldDesktopList = await response.json() as Pack[];
+          assert.deepEqual(oldDesktopList, []);
+          assert.deepEqual(oldDesktopList.map(pack => pack.id), []);
+          assert.equal(oldDesktopList.find(pack => pack.id === packA.id), undefined);
+        }
+        const rooms = await api('/api/rooms', undefined, { headers: {
+          'x-cove-client-platform': platform, 'x-cove-client-version': version,
+        } });
+        assert.equal(rooms.status, 200, 'legacy chat/room access remains available');
+      }
+      for (const authorization of ['', 'Bearer fictional-invalid-server-token']) {
+        const response = await api(`/api/soundpacks?roomId=${roomA}`, a.account, { headers: { authorization } });
+        assert.equal(response.status, 401);
+        assert.equal((await response.json()).code, 'SERVER_ACCESS_REQUIRED');
+      }
+      const chat = bounded(new Promise<any>(resolve => c.socket.once('message:new', resolve)), 'legacy-compatible chat');
+      a.socket.emit('message:send', { roomId: roomA, content: 'Compatibility fixture chat' });
+      assert.equal((await chat).content, 'Compatibility fixture chat');
+      assert.equal((await emit(a.socket, 'voice:join', roomA)).ok, true);
+      a.socket.emit('voice:leave', roomA);
+      await barrier(a, c);
+      assert.equal(a.socket.connected, true);
+      assert.ok((await list(a, roomA)).some(pack => pack.id === packA.id));
+    });
+
     await t.test('lists require an account and explicit joined room; client socket ids grant no authority', async () => {
       assert.ok((await list(a, roomA)).some(pack => pack.id === packA.id));
       assert.equal((await list(a, roomA)).some(pack => pack.id === packB.id || pack.id === 'unassigned-legacy'), false);
@@ -476,7 +515,12 @@ test('soundpack HTTP, files, mutations and broadcasts enforce current account an
       const grant = inspect(db => db.prepare('SELECT createdAt, expiresAt FROM server_access_sessions').get()!);
       assert.equal(Number(grant.expiresAt) - Number(grant.createdAt), 14 * 24 * 60 * 60 * 1000);
       inspect(db => db.prepare('UPDATE server_access_sessions SET expiresAt = ?').run(Date.now() - 1));
-      await denied(await api(`/api/soundpacks?roomId=${roomA}`, a.account));
+      const expiredList = await api(`/api/soundpacks?roomId=${roomA}`, a.account);
+      assert.equal(expiredList.status, 401);
+      assert.equal((await expiredList.json()).code, 'SERVER_ACCESS_REQUIRED');
+      const expiredLegacyList = await api(`/api/soundpacks?roomId=${roomA}&socketId=${a.socket.id}`);
+      assert.equal(expiredLegacyList.status, 403);
+      assert.deepEqual(await expiredLegacyList.json(), []);
       for (const init of [{}, { method: 'HEAD' }, { headers: { range: 'bytes=0-1' } }])
         await denied(await api(file(packA, roomA), a.account, init));
       resetEvents();
