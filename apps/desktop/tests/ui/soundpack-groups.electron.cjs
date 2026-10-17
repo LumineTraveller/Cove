@@ -68,8 +68,18 @@ const lift = async (selector, target) => {
 const up = async point => {
   input('mouseUp', point, { button: 'left', clickCount: 1 });
   await wait('!window.soundpackGroupsQa.snapshot().dragging');
-  await delay(100);
+  await wait('!document.querySelector(".soundpack-item-overlay,.soundpack-group-drag-line,[data-soundpack-settling]")');
+  await delay(40);
 };
+const motionState = () => js(`(()=>{
+  const overlay=document.querySelector('.soundpack-item-overlay,.soundpack-group-drag-line');
+  const animations=[...document.querySelectorAll('[data-soundpack-id],[data-soundpack-group],[data-soundpack-divider]')]
+    .flatMap(element=>element.getAnimations().filter(animation=>animation.playState==='running').map(animation=>({duration:animation.effect.getTiming().duration,currentTime:animation.currentTime})));
+  const placeholder=document.querySelector('[data-soundpack-placeholder]');
+  return {overlay:overlay?{rect:overlay.getBoundingClientRect().toJSON(),transform:getComputedStyle(overlay).transform,settling:overlay.dataset.soundpackSettling==='true',animations:overlay.getAnimations().map(animation=>({duration:animation.effect.getTiming().duration,currentTime:animation.currentTime}))}:null,
+    animations,target:Boolean(document.querySelector('[data-soundpack-drop-target]')),
+    placeholder:placeholder?{border:getComputedStyle(placeholder).borderStyle,background:getComputedStyle(placeholder).backgroundColor}:null};
+})()`);
 const click = async selector => {
   const r = await rect(selector);
   if (!r) throw Error('Missing click target ' + selector);
@@ -136,6 +146,46 @@ app.whenReady().then(async () => {
       return { state, styles };
     });
 
+    await test('pointer-motion-and-settle', async () => {
+      await reset();
+      const destination = center(await cardRect('s3'));
+      await lift(cardSelector('s1'), destination);
+      const first = await motionState();
+      check(first.animations.some(animation => animation.duration === 480), 'real pointer insertion animates displaced cards with the restored FLIP transition', first);
+      check(first.target && first.placeholder?.border.includes('dashed') && first.placeholder.background !== 'rgba(0, 0, 0, 0)', 'pointed destination has a visible highlighted placeholder', first);
+      const adjusted = { x: destination.x + 12, y: destination.y + 8 };
+      await move(adjusted);
+      const moved = await motionState();
+      check(Math.abs(moved.overlay.rect.left - first.overlay.rect.left - 12) < 3 && Math.abs(moved.overlay.rect.top - first.overlay.rect.top - 8) < 3, 'drag overlay follows real mouse coordinates across compositor frames', { first, moved });
+      input('mouseUp', adjusted, { button: 'left', clickCount: 1 });
+      await wait('Boolean(document.querySelector("[data-soundpack-settling]"))');
+      const released = await motionState();
+      check(released.overlay.animations.some(animation => animation.duration === 380), 'mouseup retains a spring animation toward the drop slot', released);
+      await delay(90);
+      const settling = await motionState();
+      check(settling.overlay && released.overlay.transform !== settling.overlay.transform, 'release transition changes the visible overlay transform before removal', { released, settling });
+      await wait('!document.querySelector(".soundpack-item-overlay,[data-soundpack-settling]")');
+      await capture('pointer-motion-settled');
+      return { first, moved, released, settling };
+    });
+
+    await test('close-during-settle', async () => {
+      await reset();
+      const destination = center(await cardRect('s3'));
+      await lift(cardSelector('s1'), destination);
+      input('mouseUp', destination, { button: 'left', clickCount: 1 });
+      await wait('Boolean(document.querySelector("[data-soundpack-settling]"))');
+      const released = await motionState();
+      const started = Date.now();
+      await js('window.soundpackGroupsQa.setOpen(false)');
+      check(!await js('Boolean(document.querySelector(".soundpack-item-overlay,.soundpack-group-drag-line,[data-soundpack-settling]"))'), 'closing the mounted management panel immediately cancels its release overlay', { released, elapsedMs: Date.now() - started });
+      await delay(430);
+      check(!await js('Boolean(document.querySelector(".soundpack-item-overlay,.soundpack-group-drag-line"))'), 'a cancelled settle timer cannot recreate the overlay after the panel closes');
+      await js('window.soundpackGroupsQa.setOpen(true)');
+      await wait('document.querySelectorAll("[data-soundpack-scroll] [data-soundpack-id]").length === 12');
+      return { released, reopened: await snapshot() };
+    });
+
     const insertion = async (name, sourceId, targetId, side, expectedIndex) => {
       await reset();
       const target = await cardRect(targetId);
@@ -173,7 +223,7 @@ app.whenReady().then(async () => {
       input('mouseMove', finalTarget);
       input('mouseUp', finalTarget, { button: 'left', clickCount: 1 });
       await wait('!window.soundpackGroupsQa.snapshot().dragging');
-      await delay(100);
+      await wait('!document.querySelector(".soundpack-item-overlay,[data-soundpack-settling]")');
       const committed = await snapshot();
       const expected = allIds.slice(1); expected.splice(2, 0, 's1');
       check(same(committed.groups[0].soundIds, expected), 'rapid last move and pointerup use the final pointer coordinates', committed.groups[0].soundIds);
@@ -223,6 +273,8 @@ app.whenReady().then(async () => {
       await lift('[data-soundpack-divider="middle"]', target);
       const preview = await snapshot();
       check(Boolean(preview.groupPreview), 'dragging a divider paints the group drag preview line');
+      const groupMotion = await motionState();
+      check(groupMotion.animations.some(animation => animation.duration === 480) && groupMotion.target, 'whole-group swapping animates room groups and marks the pointed destination', groupMotion);
       check(same(preview.groups.map(group => group.id), ['middle', 'default', 'last']), 'divider drag previews a direct group swap');
       await capture('divider-group-preview');
       await up(target);
@@ -232,6 +284,64 @@ app.whenReady().then(async () => {
       check(same(committed.serverOrder, flat(canonical(committed))), 'group swap sends its flattened order using the existing server protocol');
       await capture('divider-group-committed');
       return { groups, preview, committed, divider };
+    });
+
+    await test('room-scope-and-stale-response', async () => {
+      await reset();
+      await js('window.soundpackGroupsQa.reloadWithHeldFetch()');
+      await wait('window.soundpackGroupsQa.snapshot().pendingFetch');
+      await js('window.soundpackGroupsQa.switchRoom()');
+      await wait('document.querySelectorAll("[data-soundpack-scroll] [data-soundpack-id]").length === 3');
+      const before = await snapshot();
+      await js(`window.soundpackGroupsQa.broadcast('soundpack:added',{id:'legacy-global',name:'Legacy global'});
+        window.soundpackGroupsQa.broadcast('soundpack:deleted',{roomId:'soundpack-fixture-room',soundId:'other-s1'});
+        window.soundpackGroupsQa.releaseFetch()`);
+      await delay(120);
+      const after = await snapshot();
+      check(after.roomId === 'other-fixture-room' && same(canonical(before), canonical(after)) && flat(after.groups).every(id => id.startsWith('other-')), 'switching rooms ignores global events, other-room events and a late source-room list response', { before, after });
+      check(after.requests.every(request => request.accountHeader && request.redirect === 'error'), 'all room list requests use the account header and reject redirects', after.requests);
+      await capture('room-scope-isolated');
+      return { before, after };
+    });
+
+    await test('initial-list-mutations-reload-snapshot', async () => {
+      const evidence = {};
+      for (const kind of ['added', 'deleted', 'renamed', 'normalized', 'reordered']) {
+        await reset();
+        await js('window.soundpackGroupsQa.reloadWithHeldFetch()');
+        await wait('window.soundpackGroupsQa.snapshot().pendingFetch');
+        const pending = await snapshot();
+        const expected = await js(`window.soundpackGroupsQa.mutateWhileLoading(${JSON.stringify(kind)})`);
+        const blocked = await snapshot();
+        check(flat(blocked.groups).length === 0 && blocked.addDisabled, kind + ': pending room capability only marks the snapshot dirty without applying the event', blocked);
+        await js('window.soundpackGroupsQa.releaseFetch()');
+        await wait(`window.soundpackGroupsQa.snapshot().requests.length > ${pending.requests.length} && document.querySelectorAll('[data-soundpack-scroll] [data-soundpack-id]').length === ${expected.length}`);
+        const loaded = await snapshot();
+        check(same(flat(loaded.groups), expected) && loaded.addDisabled === false, kind + ': the stale first snapshot is discarded and the reloaded room list is visible', { pending, expected, loaded });
+        if (kind === 'renamed') check(await js("document.querySelector('[data-soundpack-id=s1]')?.textContent.includes('Renamed while loading')"), 'rename during initial load is retained by the replacement snapshot');
+        evidence[kind] = { pending, blocked, loaded };
+      }
+      return evidence;
+    });
+
+    await test('disconnect-revalidates-capability', async () => {
+      await reset();
+      await js('window.soundpackGroupsQa.setSuspended(true)');
+      const paused = await snapshot();
+      check(flat(paused.groups).length === 0 && paused.addDisabled, 'losing the room connection immediately removes old pack cards and locks management', paused);
+      await js('window.soundpackGroupsQa.setSuspended(false)');
+      await wait('document.querySelectorAll("[data-soundpack-scroll] [data-soundpack-id]").length === 12');
+      check((await snapshot()).addDisabled === false, 'reconnection validates a fresh room envelope before enabling management');
+      return { paused, resumed: await snapshot() };
+    });
+
+    await test('legacy-server-capability-denied', async () => {
+      await reset();
+      await js('window.soundpackGroupsQa.legacyServer()');
+      await wait('Boolean(document.querySelector("[role=alert]"))');
+      const state = await snapshot();
+      check(flat(state.groups).length === 0 && state.addDisabled && state.emissions.length === 0, 'a legacy full-server array cannot enable uploads or room management', state);
+      return { state };
     });
 
     await test('keyboard-divider-to-first', async () => {

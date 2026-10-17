@@ -788,6 +788,7 @@ export default function ChatRoomV2({
       <SoundPackPanel
         socket={socket}
         roomId={roomId!}
+        accountId={accountId}
         serverURL={serverURL}
         profileRemarks={profileRemarks}
         outputDeviceId={rtc.selectedAudioOutputId}

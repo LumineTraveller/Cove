@@ -11,11 +11,13 @@ import '../../src/styles/ui-v2.css';
 const SERVER_URL = 'http://soundpack-fixture.test';
 const ACCOUNT_ID = 'fixture-account';
 const ROOM_ID = 'soundpack-fixture-room';
+const OTHER_ROOM_ID = 'other-fixture-room';
 const SERVER_ORDER_KEY = 'cove:qa:soundpack-server-order';
-const GROUPS_KEY = soundpackGroupsStorageKey(SERVER_URL, ACCOUNT_ID);
+const GROUPS_KEY = soundpackGroupsStorageKey(SERVER_URL, ACCOUNT_ID, ROOM_ID);
 const allIds = Array.from({ length: 12 }, (_, index) => `s${index + 1}`);
 const packs = allIds.map((id, index) => ({
   id,
+  roomId: ROOM_ID,
   name: `${String(index + 1).padStart(2, '0')} · A deliberately long sound name for stable card width and ellipsis ${index + 1}`,
   filename: `${id}.ogg`,
   originalFilename: `${id}.ogg`,
@@ -25,8 +27,12 @@ const packs = allIds.map((id, index) => ({
   sortOrder: index,
   canDelete: true,
 }));
+const initialPacks = packs.map(pack => ({ ...pack }));
 
 let currentAccountId = ACCOUNT_ID;
+let currentRoomId = ROOM_ID;
+let suspended = false;
+let managementOpen = true;
 const setAccount = (accountId: string) => {
   currentAccountId = accountId;
   localStorage.setItem('cove_account_session', JSON.stringify({
@@ -43,6 +49,7 @@ try {
   if (Array.isArray(stored) && stored.length === allIds.length && allIds.every(id => stored.includes(id))) serverOrder = stored;
 } catch { /* Fresh fixture profile. */ }
 const fetches: string[] = [];
+const requests: { roomId: string | null; accountHeader: boolean; redirect?: RequestRedirect }[] = [];
 const emissions: { event: string; payload: unknown }[] = [];
 const alerts: string[] = [];
 let rejectNextReorder = false;
@@ -50,6 +57,7 @@ let holdNextReorder = false;
 let heldReorder: { ids: string[]; callback: (...args: any[]) => void } | null = null;
 let holdNextFetch = false;
 let heldFetch: (() => void) | null = null;
+let legacyResponse = false;
 const listeners = new Map<string, Set<(...args: any[]) => void>>();
 const fixtureSocket = {
   id: 'fixture-socket',
@@ -85,9 +93,9 @@ const fixtureSocket = {
       }
       serverOrder = [...ids];
       localStorage.setItem(SERVER_ORDER_KEY, JSON.stringify(serverOrder));
-      // Match the existing flat server protocol: broadcast, then acknowledgement.
+      // Room-scoped flat ordering: broadcast, then acknowledgement.
       queueMicrotask(() => {
-        listeners.get('soundpack:reordered')?.forEach(listener => listener({ orderedIds: [...serverOrder] }));
+        listeners.get('soundpack:reordered')?.forEach(listener => listener({ roomId: ROOM_ID, orderedIds: [...serverOrder] }));
         callback?.(null, { ok: true });
       });
     } else {
@@ -98,13 +106,21 @@ const fixtureSocket = {
 } as unknown as Socket;
 
 window.alert = message => { alerts.push(String(message)); };
-window.fetch = async input => {
+window.fetch = async (input, init) => {
   const url = input instanceof Request ? input.url : String(input);
   fetches.push(url);
   const parsed = new URL(url, SERVER_URL);
   if (parsed.origin !== SERVER_URL || parsed.pathname !== '/api/soundpacks')
     throw new Error(`Fixture blocked an unexpected request: ${url}`);
-  const response = () => new Response(JSON.stringify(serverOrder.map(id => packs.find(pack => pack.id === id))), {
+  if (new Headers(init?.headers).get('X-Cove-Account-Token') !== 'fixture-token' || init?.redirect !== 'error')
+    throw new Error('Fixture requires a header-only account token and redirect:error');
+  const requestedRoomId = parsed.searchParams.get('roomId');
+  requests.push({ roomId: requestedRoomId, accountHeader: true, redirect: init?.redirect });
+  if (requestedRoomId !== ROOM_ID && requestedRoomId !== OTHER_ROOM_ID) throw new Error('Fixture rejected an unknown room');
+  const roomPacks = requestedRoomId === ROOM_ID ? serverOrder.map(id => packs.find(pack => pack.id === id)) :
+    packs.slice(0, 3).map(pack => ({ ...pack, id: `other-${pack.id}`, roomId: OTHER_ROOM_ID }));
+  const body = legacyResponse ? roomPacks : { roomId: requestedRoomId, soundpacks: roomPacks };
+  const response = () => new Response(JSON.stringify(body), {
     status: 200, headers: { 'Content-Type': 'application/json' },
   });
   if (holdNextFetch) {
@@ -133,8 +149,8 @@ function Fixture() {
       .soundpack-qa-anchor { position:fixed; left:50%; bottom:28px; transform:translateX(-50%); width:72px; height:38px; border:1px solid #d6dbe2; border-radius:12px; background:white; color:#15191f; }
     `}</style>
     <button ref={anchor} className="soundpack-qa-anchor" type="button">声音包</button>
-    <SoundPackPanel key={mount} socket={fixtureSocket} roomId={ROOM_ID} serverURL={SERVER_URL}
-      inVoice={false} profileRemarks={{}} compact anchorRef={anchor} open hideTrigger />
+    <SoundPackPanel key={mount} socket={fixtureSocket} roomId={currentRoomId} accountId={currentAccountId} serverURL={SERVER_URL}
+      disabled={suspended} inVoice={false} profileRemarks={{}} compact anchorRef={anchor} open={managementOpen} hideTrigger />
   </main>;
 }
 
@@ -157,13 +173,15 @@ function snapshot(draggedSoundId?: string) {
     addDisabled: add?.disabled ?? null,
     dragging: document.body.classList.contains('soundpack-dragging') || document.body.classList.contains('sortable-dragging'),
     scroll: scroll ? { top: scroll.scrollTop, height: scroll.clientHeight, contentHeight: scroll.scrollHeight, rect: scroll.getBoundingClientRect().toJSON() } : null,
-    storage: localStorage.getItem(soundpackGroupsStorageKey(SERVER_URL, currentAccountId)),
+    storage: localStorage.getItem(soundpackGroupsStorageKey(SERVER_URL, currentAccountId, currentRoomId)),
     accountId: currentAccountId,
+    roomId: currentRoomId,
     pendingFetch: Boolean(heldFetch),
     pendingReorder: Boolean(heldReorder),
     serverOrder: [...serverOrder],
     emissions: [...emissions],
     fetches: [...fetches],
+    requests: [...requests],
     alerts: [...alerts],
   };
 }
@@ -176,6 +194,11 @@ window.soundpackGroupsQa = {
   snapshot,
   async reset(groups?: SoundpackGroup[]) {
     setAccount(ACCOUNT_ID);
+    currentRoomId = ROOM_ID;
+    suspended = false;
+    managementOpen = true;
+    legacyResponse = false;
+    packs.splice(0, packs.length, ...initialPacks.map(pack => ({ ...pack })));
     serverOrder = [...allIds];
     localStorage.setItem(SERVER_ORDER_KEY, JSON.stringify(serverOrder));
     for (const key of Object.keys(localStorage)) {
@@ -206,13 +229,13 @@ window.soundpackGroupsQa = {
     if (ok) {
       serverOrder = [...pending.ids];
       localStorage.setItem(SERVER_ORDER_KEY, JSON.stringify(serverOrder));
-      listeners.get('soundpack:reordered')?.forEach(listener => listener({ orderedIds: [...serverOrder] }));
+      listeners.get('soundpack:reordered')?.forEach(listener => listener({ roomId: ROOM_ID, orderedIds: [...serverOrder] }));
     }
     pending.callback(null, ok ? { ok: true } : { ok: false, error: 'Fixture delayed reorder rejected' });
   },
   async switchAccount(accountId: string, groups: SoundpackGroup[], holdFetch = false) {
     setAccount(accountId);
-    const key = soundpackGroupsStorageKey(SERVER_URL, accountId);
+    const key = soundpackGroupsStorageKey(SERVER_URL, accountId, ROOM_ID);
     localStorage.setItem(key, JSON.stringify({ version: 1, groups }));
     holdNextFetch = holdFetch;
     rerender();
@@ -220,9 +243,39 @@ window.soundpackGroupsQa = {
     return key;
   },
   releaseFetch() { heldFetch?.(); },
+  async switchRoom(roomId = OTHER_ROOM_ID) { currentRoomId = roomId; rerender(); await frames(); },
+  async reloadWithHeldFetch() { holdNextFetch = true; remount(); await frames(); },
+  async legacyServer() { legacyResponse = true; remount(); await frames(); },
+  async setSuspended(value: boolean) { suspended = value; rerender(); await frames(); },
+  async setOpen(value: boolean) { managementOpen = value; rerender(); await frames(); },
+  mutateWhileLoading(kind: 'added' | 'deleted' | 'renamed' | 'normalized' | 'reordered' | 'play') {
+    let payload: Record<string, unknown> = { roomId: ROOM_ID, soundId: 's1' };
+    if (kind === 'added') {
+      const sound = { ...initialPacks[0], id: 'added-during-load', name: 'Added while the initial list was pending' };
+      packs.push(sound);
+      serverOrder = [sound.id, ...serverOrder];
+      payload = sound;
+    } else if (kind === 'deleted') serverOrder = serverOrder.filter(id => id !== 's1');
+    else if (kind === 'renamed') {
+      const index = packs.findIndex(pack => pack.id === 's1');
+      packs[index] = { ...packs[index], name: 'Renamed while loading' };
+      payload.name = packs[index].name;
+    } else if (kind === 'normalized') {
+      const index = packs.findIndex(pack => pack.id === 's1');
+      packs[index] = { ...packs[index], filename: 'normalized-while-loading.ogg' };
+      payload.filename = packs[index].filename;
+      payload.originalFilename = packs[index].originalFilename;
+    } else if (kind === 'reordered') {
+      serverOrder = [...serverOrder].reverse();
+      payload.orderedIds = [...serverOrder];
+    }
+    listeners.get(`soundpack:${kind}`)?.forEach(listener => listener(payload));
+    return [...serverOrder];
+  },
+  broadcast(event: string, payload: unknown) { listeners.get(event)?.forEach(listener => listener(payload)); },
   broadcastDelete(soundId: string) {
     serverOrder = serverOrder.filter(id => id !== soundId);
-    listeners.get('soundpack:deleted')?.forEach(listener => listener({ soundId }));
+    listeners.get('soundpack:deleted')?.forEach(listener => listener({ roomId: ROOM_ID, soundId }));
   },
 };
 
@@ -237,6 +290,13 @@ declare global {
     releaseReorder: (ok?: boolean) => void;
     switchAccount: (accountId: string, groups: SoundpackGroup[], holdFetch?: boolean) => Promise<string>;
     releaseFetch: () => void;
+    switchRoom: (roomId?: string) => Promise<void>;
+    reloadWithHeldFetch: () => Promise<void>;
+    legacyServer: () => Promise<void>;
+    setSuspended: (value: boolean) => Promise<void>;
+    setOpen: (value: boolean) => Promise<void>;
+    mutateWhileLoading: (kind: 'added' | 'deleted' | 'renamed' | 'normalized' | 'reordered' | 'play') => string[];
+    broadcast: (event: string, payload: unknown) => void;
     broadcastDelete: (soundId: string) => void;
   }; }
 }

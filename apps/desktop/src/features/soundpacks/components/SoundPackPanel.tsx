@@ -29,13 +29,16 @@ import { encodeAudioBufferSegment } from '../audioTrim';
 import { soundpackDownloadFileName } from '../soundpackDownload';
 import { readAccountSession } from '../../accounts/accountAuth';
 import { useSoundpackGroups } from '../useSoundpackGroups';
-import { addSoundpackGroup, canAddSoundpackGroup, flattenSoundpackGroups, readSoundpackGroups, reconcileSoundpackGroups, soundpackGroupsStorageKey, type SoundpackGroup } from '../soundpackGroups';
+import { reconcileSoundpackGroupOrder } from '../soundpackGroups';
+import { createSoundpackRoomLifetime, readSoundpackRoomList, soundpackRequestInit, soundpackRoomFilePath } from '../soundpackRoom';
+import { addSoundpackGroup, canAddSoundpackGroup, flattenSoundpackGroups, readSoundpackGroups, readSoundpackFavorites, reconcileSoundpackGroups, soundpackGroupsStorageKey, soundpackFavoritesStorageKey, type SoundpackGroup } from '../soundpackGroups';
 import { AudioTrimEditor } from './AudioTrimEditor';
-import { authorizedResourceURL, serverFetch } from '../../connection/serverSecurity';
+import { serverFetch } from '../../connection/serverSecurity';
 import { getProfileDisplayName, type ProfileRemarks } from '../../profiles/profileRemarks';
 
 interface Soundpack {
   id: string;
+  roomId: string;
   name: string;
   filename: string;
   originalFilename?: string;
@@ -48,6 +51,7 @@ interface Soundpack {
 interface Props {
   socket: Socket;
   roomId: string;
+  accountId?: string;
   serverURL: string;
   outputDeviceId?: string;
   inVoice: boolean;
@@ -66,19 +70,12 @@ interface Props {
 }
 
 const SOUNDPACK_VOLUME_KEY = 'cove:soundpack-volume';
-const SOUNDPACK_FAVORITES_KEY = 'cove:soundpack-favorites';
-
-function soundpackFavoritesStorageKey(serverURL: string) {
-  return `${SOUNDPACK_FAVORITES_KEY}:${encodeURIComponent(serverURL)}`;
-}
-
-function loadSoundpackFavorites(serverURL: string) {
+function loadSoundpackFavorites(storageKey: string) {
   try {
     const stored = JSON.parse(
-      localStorage.getItem(soundpackFavoritesStorageKey(serverURL)) ?? '[]',
+      localStorage.getItem(storageKey) ?? '[]',
     ) as unknown;
-    if (!Array.isArray(stored)) return [];
-    return stored.filter((value): value is string => typeof value === 'string').slice(0, 6);
+    return readSoundpackFavorites(stored);
   } catch {
     return [];
   }
@@ -113,14 +110,20 @@ function applySoundpackOrder(packs: Soundpack[], orderedIds: string[]) {
   return [...ordered, ...byId.values()];
 }
 
-export function SoundPackPanel({
+export function SoundPackPanel(props: Props) {
+  const accountId = props.accountId ?? readAccountSession(props.serverURL)?.accountId ?? '';
+  return <RoomSoundPackPanel key={JSON.stringify([props.serverURL, accountId, props.roomId, props.socket.id, Boolean(props.disabled)])} {...props} accountId={accountId} />;
+}
+
+function RoomSoundPackPanel({
   socket,
   roomId,
+  accountId,
   serverURL,
   outputDeviceId = DEFAULT_AUDIO_DEVICE_ID,
   inVoice,
   profileRemarks,
-  disabled = false,
+  disabled: roomDisabled = false,
   hideTrigger = false,
   defaultOpen = false,
   open: controlledOpen,
@@ -131,13 +134,16 @@ export function SoundPackPanel({
   quickOpen: controlledQuickOpen,
   onQuickOpen,
   onQuickClose,
-}: Props) {
-  const accountId = readAccountSession(serverURL)?.accountId ?? localStorage.getItem('cove_client_id') ?? 'local';
-  const groupStorageKey = soundpackGroupsStorageKey(serverURL, accountId);
+}: Props & { accountId: string }) {
+  const groupStorageKey = soundpackGroupsStorageKey(serverURL, accountId, roomId);
+  const favoriteStorageKey = soundpackFavoritesStorageKey(serverURL, accountId, roomId);
   const [packs, setPacks] = useState<Soundpack[]>([]);
   const [groups, setGroups] = useState<SoundpackGroup[]>(() => loadGroups(groupStorageKey));
   const [loadedGroupScope, setLoadedGroupScope] = useState<string | null>(null);
+  const confirmedListScopeRef = useRef<string | null>(null);
   const listReady = loadedGroupScope === groupStorageKey;
+  const disabled = roomDisabled || !listReady;
+  const [listError, setListError] = useState('');
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<{
     completed: number;
@@ -150,7 +156,7 @@ export function SoundPackPanel({
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [reordering, setReordering] = useState(false);
   const [soundpackVolume, setSoundpackVolume] = useState(loadSoundpackVolume);
-  const [favoriteIds, setFavoriteIds] = useState<string[]>(() => loadSoundpackFavorites(serverURL));
+  const [favoriteIds, setFavoriteIds] = useState<string[]>(() => loadSoundpackFavorites(favoriteStorageKey));
   const [internalOpen, setInternalOpen] = useState(defaultOpen);
   const [internalQuickOpen, setInternalQuickOpen] = useState(false);
   const [popoverPosition, setPopoverPosition] = useState<{
@@ -175,6 +181,12 @@ export function SoundPackPanel({
   const cardMenuRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioObjectUrlRef = useRef<string | null>(null);
+  const playbackRequestRef = useRef(0);
+  const playbackAbortRef = useRef<AbortController | null>(null);
+  const inVoiceRef = useRef(inVoice);
+  inVoiceRef.current = inVoice;
+  const lifetimeRef = useRef(createSoundpackRoomLifetime(roomId));
   const audioPreviewSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const uploadQueueRef = useRef<File[]>([]);
@@ -192,15 +204,44 @@ export function SoundPackPanel({
   const groupsRef = useRef(groups);
   groupsRef.current = groups;
   const listRevisionRef = useRef(0);
+  const pendingServerOrderRef = useRef(false);
   const groupScopeRef = useRef(groupStorageKey);
   groupScopeRef.current = groupStorageKey;
   const reorderTokenRef = useRef(0);
   const mountedRef = useRef(true);
   useEffect(() => {
+    if (!lifetimeRef.current.active()) lifetimeRef.current = createSoundpackRoomLifetime(roomId);
+    const lifetime = lifetimeRef.current;
     mountedRef.current = true;
-    return () => { mountedRef.current = false; reorderTokenRef.current += 1; };
-  }, []);
+    return () => {
+      mountedRef.current = false;
+      lifetime.cancel();
+      reorderTokenRef.current += 1;
+      playbackRequestRef.current += 1;
+      playbackAbortRef.current?.abort();
+      playbackAbortRef.current = null;
+      packsRef.current = [];
+      uploadQueueRef.current = [];
+      uploadQueueIndexRef.current = 0;
+      const audio = audioRef.current;
+      if (audio) {
+        audio.onended = null;
+        audio.onerror = null;
+        audio.pause();
+        audio.src = '';
+      }
+      audioRef.current = null;
+      if (audioObjectUrlRef.current) URL.revokeObjectURL(audioObjectUrlRef.current);
+      audioObjectUrlRef.current = null;
+    };
+  }, [roomId]);
   const soundpackScrollRef = useRef<HTMLDivElement>(null);
+  const soundpackFetch = useCallback((target: string, init: RequestInit = {}) => {
+    const session = readAccountSession(serverURL);
+    if (!session || session.accountId !== accountId) return Promise.reject(new Error('账号认证已失效，请重新登录'));
+    return serverFetch(serverURL, target, soundpackRequestInit(session.token,
+      { ...init, signal: init.signal ?? lifetimeRef.current.signal }));
+  }, [serverURL, accountId]);
   const saveGroups = useCallback((next: SoundpackGroup[]) => {
     groupsRef.current = next;
     setGroups(next);
@@ -241,18 +282,15 @@ export function SoundPackPanel({
     packsRef.current = packs;
   }, [packs]);
   useEffect(() => {
-    setFavoriteIds(loadSoundpackFavorites(serverURL));
-  }, [serverURL]);
-  useEffect(() => {
     try {
       localStorage.setItem(
-        soundpackFavoritesStorageKey(serverURL),
+        favoriteStorageKey,
         JSON.stringify(favoriteIds.slice(0, 6)),
       );
     } catch {
       /* 本地存储不可用时仍保留本次会话收藏。 */
     }
-  }, [favoriteIds, serverURL]);
+  }, [favoriteIds, favoriteStorageKey]);
   useEffect(() => {
     if (!compact || (!open && !quickOpen)) {
       setPopoverPosition(null);
@@ -336,9 +374,13 @@ export function SoundPackPanel({
 
   useEffect(() => {
     if (inVoice) return;
+    playbackRequestRef.current += 1;
+    playbackAbortRef.current?.abort();
     audioRef.current?.pause();
     if (audioRef.current) audioRef.current.src = '';
     audioRef.current = null;
+    if (audioObjectUrlRef.current) URL.revokeObjectURL(audioObjectUrlRef.current);
+    audioObjectUrlRef.current = null;
     setPlayingId(null);
   }, [inVoice]);
 
@@ -365,32 +407,43 @@ export function SoundPackPanel({
   };
 
   useEffect(() => {
+    confirmedListScopeRef.current = null;
     setLoadedGroupScope(null);
+    setListError('');
     const socketId = socket.id;
-    if (disabled || !socketId) return;
+    if (roomDisabled || !socketId || !roomId) return;
     let active = true;
+    const lifetime = lifetimeRef.current;
     const load = () => {
       const revision = listRevisionRef.current;
-      serverFetch(
-        serverURL,
-        `/api/soundpacks?socketId=${encodeURIComponent(socketId)}&roomId=${encodeURIComponent(
+      soundpackFetch(
+        `/api/soundpacks?roomId=${encodeURIComponent(
           roomId,
-        )}`,
+        )}`, { signal: lifetime.signal },
       )
-        .then((response) => response.json())
-        .then((list: Soundpack[]) => {
-          if (!active) return;
+        .then((response) => { if (!response.ok) throw new Error('读取当前房间语音包失败'); return response.json(); })
+        .then((payload: unknown) => {
+          if (!active || !lifetime.active()) return;
+          const list = readSoundpackRoomList<Soundpack>(payload, roomId);
+          if (!list) throw new Error('服务器尚未支持房间语音包，请升级服务器后重试。原有语音包保留为未分配。');
           // A request started before an add/delete/reorder must not overwrite it.
           if (revision !== listRevisionRef.current) { load(); return; }
+          if (pendingServerOrderRef.current) {
+            saveGroups(reconcileSoundpackGroupOrder(groupsRef.current, list.map(sound => sound.id)));
+            pendingServerOrderRef.current = false;
+          }
+          // Mark protocol confirmation synchronously: an event arriving before
+          // React replaces the old effect must still follow the accepted list.
+          confirmedListScopeRef.current = groupStorageKey;
           packsRef.current = list;
           setPacks(list);
           setLoadedGroupScope(groupStorageKey);
         })
-        .catch(() => undefined);
+        .catch((error) => { if (active && lifetime.active()) setListError(error instanceof Error ? error.message : '读取当前房间语音包失败'); });
     };
     load();
     return () => { active = false; };
-  }, [serverURL, socket, roomId, disabled, groupStorageKey]);
+    }, [socket, roomId, roomDisabled, groupStorageKey, soundpackFetch, saveGroups]);
 
   const toggleFavorite = (soundId: string) => {
     setFavoriteIds((current) => {
@@ -406,9 +459,17 @@ export function SoundPackPanel({
   });
 
   const playSound = useCallback(
-    (soundId: string, filename?: string) => {
+    (soundId: string) => {
+      const lifetime = lifetimeRef.current;
       const sound = packsRef.current.find((pack) => pack.id === soundId);
-      if (!sound) return;
+      if (!sound || sound.roomId !== roomId || !inVoiceRef.current || !lifetime.active()) return;
+      const revision = ++playbackRequestRef.current;
+      playbackAbortRef.current?.abort();
+      const controller = new AbortController();
+      playbackAbortRef.current = controller;
+      const abort = () => controller.abort();
+      lifetime.signal.addEventListener('abort', abort, { once: true });
+      const current = () => lifetime.active() && revision === playbackRequestRef.current && inVoiceRef.current;
       const previous = audioRef.current;
       if (previous) {
         // 摘掉回调再清空 src：空 src 会让资源选择失败并在该元素上触发 error，
@@ -418,60 +479,87 @@ export function SoundPackPanel({
         previous.pause();
         previous.src = '';
       }
-      const audio = new Audio(
-        authorizedResourceURL(
-          serverURL,
-          `/sounds/${encodeURIComponent(filename ?? sound.filename)}`,
-        ),
-      );
-      audio.volume = soundpackVolumeRef.current / 100;
-      audioRef.current = audio;
+      audioRef.current = null;
+      if (audioObjectUrlRef.current) URL.revokeObjectURL(audioObjectUrlRef.current);
+      audioObjectUrlRef.current = null;
       setPlayingId(soundId);
-      applyAudioElementOutput(audio, outputDeviceId)
-        .catch((error) => {
-          console.warn('[soundpack] 切换输出设备失败，使用系统默认设备', error);
-        })
-        .finally(() => {
-          if (audioRef.current !== audio) return;
-          audio.play().catch(() => {
-            if (audioRef.current === audio) setPlayingId(null);
-          });
-        });
-      audio.onended = () => {
-        if (audioRef.current === audio) setPlayingId(null);
-      };
-      audio.onerror = () => {
-        if (audioRef.current === audio) setPlayingId(null);
-      };
+      void (async () => {
+        try {
+          const response = await soundpackFetch(soundpackRoomFilePath(soundId, roomId, 'playback'), { signal: controller.signal });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const blob = await response.blob();
+          if (!current()) return;
+          const objectUrl = URL.createObjectURL(blob);
+          const audio = new Audio(objectUrl);
+          audioObjectUrlRef.current = objectUrl;
+          audio.volume = soundpackVolumeRef.current / 100;
+          audioRef.current = audio;
+          const finish = () => {
+            if (audioRef.current !== audio) return;
+            audio.onended = null;
+            audio.onerror = null;
+            audio.pause();
+            audio.src = '';
+            audioRef.current = null;
+            URL.revokeObjectURL(objectUrl);
+            audioObjectUrlRef.current = null;
+            if (current()) setPlayingId(null);
+          };
+          audio.onended = finish;
+          audio.onerror = finish;
+          await applyAudioElementOutput(audio, outputDeviceId).catch(() => undefined);
+          if (!current() || audioRef.current !== audio) return;
+          await audio.play().catch(finish);
+        } catch {
+          if (current()) {
+            setPlayingId(null);
+            setDownloadNotice('无法播放当前房间的语音包，请重试');
+          }
+        } finally {
+          lifetime.signal.removeEventListener('abort', abort);
+        }
+      })();
     },
-    [serverURL, outputDeviceId],
+    [roomId, soundpackFetch, outputDeviceId],
   );
 
   useEffect(() => {
-    const onAdded = (sound: Soundpack) => {
+    const lifetime = lifetimeRef.current;
+    const observeRoomEvent = (event: unknown) => {
+      if (!lifetime.accepts(event) || roomDisabled) return false;
+      // Even before capability confirmation, a matching-room event makes any
+      // in-flight snapshot stale. Apply it only after a room envelope loaded.
       listRevisionRef.current += 1;
+      return confirmedListScopeRef.current === groupStorageKey;
+    };
+    const onAdded = (sound: Soundpack) => {
+      if (!observeRoomEvent(sound)) return;
       setPacks((previous) => [sound, ...previous.filter((pack) => pack.id !== sound.id)]);
     };
-    const onPlay = ({ soundId, filename }: { soundId: string; filename?: string; }) => {
-      if (inVoice) playSound(soundId, filename);
+    const onPlay = (event: { roomId?: string; soundId: string; }) => {
+      if (!lifetime.accepts(event) || roomDisabled || confirmedListScopeRef.current !== groupStorageKey) return;
+      if (inVoice) playSound(event.soundId);
     };
     const onNormalized = ({
+      roomId: eventRoomId,
       soundId,
       filename,
       originalFilename,
     }: {
+      roomId?: string;
       soundId: string;
       filename: string;
       originalFilename: string;
     }) => {
+      if (!observeRoomEvent({ roomId: eventRoomId })) return;
       setPacks((previous) =>
         previous.map((sound) =>
           sound.id === soundId ? { ...sound, filename, originalFilename } : sound,
         ),
       );
     };
-    const onDeleted = ({ soundId }: { soundId: string; }) => {
-      listRevisionRef.current += 1;
+    const onDeleted = ({ soundId, roomId: eventRoomId }: { soundId: string; roomId?: string; }) => {
+      if (!observeRoomEvent({ roomId: eventRoomId })) return;
       setPacks((previous) => previous.filter((sound) => sound.id !== soundId));
       setFavoriteIds((previous) => previous.filter((id) => id !== soundId));
       setPlayingId((current) => {
@@ -484,18 +572,25 @@ export function SoundPackPanel({
           playing.pause();
           playing.src = '';
         }
+        audioRef.current = null;
+        playbackRequestRef.current += 1;
+        playbackAbortRef.current?.abort();
+        if (audioObjectUrlRef.current) URL.revokeObjectURL(audioObjectUrlRef.current);
+        audioObjectUrlRef.current = null;
         return null;
       });
       setPendingRename((current) => (current?.id === soundId ? null : current));
     };
-    const onRenamed = ({ soundId, name }: { soundId: string; name: string; }) => {
+    const onRenamed = ({ soundId, name, roomId: eventRoomId }: { soundId: string; name: string; roomId?: string; }) => {
+      if (!observeRoomEvent({ roomId: eventRoomId })) return;
       setPacks((previous) =>
         previous.map((sound) => (sound.id === soundId ? { ...sound, name } : sound)),
       );
       setPendingRename((current) => (current?.id === soundId ? { ...current, name } : current));
     };
-    const onReordered = ({ orderedIds }: { orderedIds: string[]; }) => {
-      listRevisionRef.current += 1;
+    const onReordered = ({ orderedIds, roomId: eventRoomId }: { orderedIds: string[]; roomId?: string; }) => {
+      if (!lifetime.accepts({ roomId: eventRoomId }) || roomDisabled) return;
+      if (!observeRoomEvent({ roomId: eventRoomId })) { pendingServerOrderRef.current = true; return; }
       setPacks((previous) => applySoundpackOrder(previous, orderedIds));
       const rank = new Map(orderedIds.map((id, index) => [id, index]));
       saveGroups(groupsRef.current.map((group) => ({ ...group, soundIds: [...group.soundIds].sort((a, b) => (rank.get(a) ?? Infinity) - (rank.get(b) ?? Infinity)) })));
@@ -514,16 +609,18 @@ export function SoundPackPanel({
       socket.off('soundpack:renamed', onRenamed);
       socket.off('soundpack:reordered', onReordered);
     };
-  }, [socket, playSound, inVoice, saveGroups]);
+  }, [socket, playSound, inVoice, saveGroups, roomDisabled, groupStorageKey]);
 
   const handlePlay = (sound: Soundpack) => {
-    if (disabled || !inVoice) return;
+    const lifetime = lifetimeRef.current;
+    if (disabled || !inVoice || sound.roomId !== roomId) return;
     socket
       .timeout(5_000)
       .emit(
         'soundpack:play',
         { soundId: sound.id, roomId },
         (error: Error | null, result?: { ok: boolean; error?: string; }) => {
+          if (!lifetime.active()) return;
           if (error) {
             window.alert('语音包播放请求超时，请重试');
             return;
@@ -534,21 +631,23 @@ export function SoundPackPanel({
   };
 
   const uploadSoundpack = async (file: File, displayName = file.name) => {
+    const lifetime = lifetimeRef.current;
     const bytes = new Uint8Array(await file.arrayBuffer());
+    if (!lifetime.active()) throw new DOMException('房间已切换', 'AbortError');
     let binary = '';
     for (let index = 0; index < bytes.length; index += 8192)
       binary += String.fromCharCode(...bytes.slice(index, index + 8192));
-    const response = await serverFetch(serverURL, '/api/soundpacks', {
+    const response = await soundpackFetch('/api/soundpacks', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         name: displayName.replace(/\.[^.]+$/, ''),
         data: btoa(binary),
         mimeType: file.type,
-        socketId: socket.id,
         roomId,
       }),
     });
+    if (!lifetime.active()) throw new DOMException('房间已切换', 'AbortError');
     if (response.ok) return;
     let message = '上传失败';
     try {
@@ -582,14 +681,18 @@ export function SoundPackPanel({
   };
 
   const openAudioEditor = async (file: File, index: number, total: number) => {
+    const lifetime = lifetimeRef.current;
     setAudioEditor(null);
     try {
       const context = audioContextRef.current ?? new AudioContext();
       audioContextRef.current = context;
       const source = await file.arrayBuffer();
+      if (!lifetime.active()) return;
       const buffer = await context.decodeAudioData(source.slice(0));
+      if (!lifetime.active()) return;
       setAudioEditor({ file, buffer, index, total, busy: false });
     } catch {
+      if (!lifetime.active()) return;
       uploadSummaryRef.current.failed.push(`${file.name}：无法解析音频格式`);
       const nextIndex = index + 1;
       if (nextIndex < uploadQueueRef.current.length) {
@@ -650,6 +753,7 @@ export function SoundPackPanel({
   };
 
   const confirmAudioSelection = async (start: number, end: number) => {
+    const lifetime = lifetimeRef.current;
     const editor = audioEditor;
     if (!editor || editor.busy) return;
     setAudioEditor({ ...editor, busy: true, error: undefined });
@@ -665,10 +769,12 @@ export function SoundPackPanel({
       if (uploadFile.size > 8 * 1024 * 1024)
         throw new Error('裁剪后的音频超过 8MB，请缩短片段后重试');
       await uploadSoundpack(uploadFile, editor.file.name);
+      if (!lifetime.active()) return;
       uploadSummaryRef.current.succeeded += 1;
       setUploadProgress({ completed: editor.index + 1, total: editor.total });
       advanceAudioQueue();
     } catch (cause) {
+      if (!lifetime.active()) return;
       setAudioEditor({
         ...editor,
         busy: false,
@@ -720,7 +826,8 @@ export function SoundPackPanel({
   };
 
   const deleteSoundTarget = async (target: Soundpack) => {
-    if (disabled) return;
+    const lifetime = lifetimeRef.current;
+    if (disabled || target.roomId !== roomId) return;
     setDeletingId(target.id);
     try {
       const result = await new Promise<{ ok: boolean; error?: string; }>((resolve, reject) => {
@@ -733,14 +840,16 @@ export function SoundPackPanel({
               error ? reject(error) : resolve(response),
           );
       });
+      if (!lifetime.active()) return;
       if (!result.ok) throw new Error(result.error ?? '删除失败');
       setPacks((previous) => previous.filter((sound) => sound.id !== target.id));
       setFavoriteIds((previous) => previous.filter((soundId) => soundId !== target.id));
       setPendingRename((current) => (current?.id === target.id ? null : current));
     } catch (cause) {
+      if (!lifetime.active()) return;
       alert(cause instanceof Error ? cause.message : '删除失败，请检查网络连接');
     } finally {
-      setDeletingId(null);
+      if (lifetime.active()) setDeletingId(null);
     }
   };
 
@@ -751,13 +860,15 @@ export function SoundPackPanel({
 
   /** 播放标准化副本；下载仍取上传时的原始文件。 */
   const downloadSound = async (sound: Soundpack) => {
+    const lifetime = lifetimeRef.current;
+    if (disabled || sound.roomId !== roomId) return;
     const originalFilename = sound.originalFilename ?? sound.filename;
-    const url = authorizedResourceURL(serverURL, `/sounds/${encodeURIComponent(originalFilename)}`);
     setDownloadNotice('');
     try {
-      const response = await fetch(url);
+      const response = await soundpackFetch(soundpackRoomFilePath(sound.id, roomId, 'original'), { signal: lifetime.signal });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const blob = await response.blob();
+      if (!lifetime.active()) return;
       const objectUrl = URL.createObjectURL(blob);
       const anchor = document.createElement('a');
       anchor.href = objectUrl;
@@ -769,6 +880,7 @@ export function SoundPackPanel({
       window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
       setDownloadNotice(`已开始下载「${sound.name}」`);
     } catch (error) {
+      if (!lifetime.active()) return;
       console.warn('[soundpack] 下载语音包失败', error);
       setDownloadNotice('下载失败，请重试');
     }
@@ -786,7 +898,8 @@ export function SoundPackPanel({
   };
 
   const renameSound = async () => {
-    if (!pendingRename || disabled || !renameValue.trim()) return;
+    const lifetime = lifetimeRef.current;
+    if (!pendingRename || pendingRename.roomId !== roomId || disabled || !renameValue.trim()) return;
     const target = pendingRename;
     setRenamingId(target.id);
     try {
@@ -806,6 +919,7 @@ export function SoundPackPanel({
             error ? reject(error) : resolve(response),
         );
       });
+      if (!lifetime.active()) return;
       if (!result.ok) throw new Error(result.error ?? '改名失败');
       const nextName = result.name ?? renameValue.trim();
       setPacks((previous) =>
@@ -813,9 +927,10 @@ export function SoundPackPanel({
       );
       setPendingRename(null);
     } catch (cause) {
+      if (!lifetime.active()) return;
       alert(cause instanceof Error ? cause.message : '改名失败，请检查网络连接');
     } finally {
-      setRenamingId(null);
+      if (lifetime.active()) setRenamingId(null);
     }
   };
 
@@ -866,10 +981,14 @@ export function SoundPackPanel({
 
   const sortable = useSoundpackGroups({
     groups,
+    scopeKey: groupStorageKey,
     disabled: disabled || reordering || !listReady || !open,
     onCommit: commitGroups,
     scrollRef: soundpackScrollRef,
   });
+  useEffect(() => {
+    if (!open) sortable.cancel();
+  }, [open, sortable.cancel]);
   const addGroup = () => {
     if (disabled || reordering || !listReady) return;
     saveGroups(addSoundpackGroup(groupsRef.current, crypto.randomUUID()));
@@ -977,7 +1096,7 @@ export function SoundPackPanel({
     </div>
   );
   const groupDragOverlay = sortable.groupOverlay && sortable.overlayStyle
-    ? createPortal(<div className="soundpack-group-drag-line" style={sortable.overlayStyle} aria-hidden="true"><span /></div>, document.body)
+    ? createPortal(<div ref={sortable.overlayRef} className="soundpack-group-drag-line" style={sortable.overlayStyle} aria-hidden="true"><span /></div>, document.body)
     : null;
 
   if (compact) {
@@ -1123,10 +1242,11 @@ export function SoundPackPanel({
 
               <div className="soundpack-management-list" ref={soundpackScrollRef} data-soundpack-scroll>
                 <div className="soundpack-list-heading">
-                  <b>全部语音包</b>
+                  <b>当前房间语音包</b>
                   <span>{packs.length} 个</span>
                   {addGroupButton}
                 </div>
+                {listError && <p role="alert" className="text-sm text-amber-300">{listError}</p>}
                 {packs.length > 0 || groups.length > 1 ? (
                   <div
                     className="soundpack-groups"
@@ -1473,7 +1593,8 @@ export function SoundPackPanel({
               </div>
 
               <div className="overflow-y-auto p-5" ref={soundpackScrollRef} data-soundpack-scroll>
-                <div className="soundpack-list-heading">{addGroupButton}</div>
+                <div className="soundpack-list-heading"><b>当前房间语音包</b>{addGroupButton}</div>
+                {listError && <p role="alert" className="text-sm text-amber-300">{listError}</p>}
                 {packs.length === 0 && groups.length === 1 ? (
                   <button
                     onClick={() => fileInputRef.current?.click()}

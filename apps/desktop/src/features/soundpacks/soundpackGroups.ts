@@ -12,10 +12,25 @@ export interface SoundpackGroupSettings {
 
 export const DEFAULT_SOUNDPACK_GROUP_ID = 'default';
 
-export function soundpackGroupsStorageKey(serverURL: string, accountId: string): string {
-  let server = serverURL.replace(/\/+$/, '');
+/** Keep endpoint paths and opaque IDs distinct; delimiters inside them are encoded. */
+export function soundpackPreferenceScope(serverURL: string, accountId: string, roomId: string): string {
+  let server = serverURL.trim().replace(/\/+$/, '');
   try { server = new URL(server).href.replace(/\/+$/, ''); } catch { /* Keep custom server paths. */ }
-  return `cove:soundpack-groups:v1:${encodeURIComponent(server)}:${encodeURIComponent(accountId)}`;
+  return [server, accountId, roomId].map(encodeURIComponent).join(':');
+}
+
+// Server-wide preferences cannot safely be assigned to a room. Leave their old keys untouched.
+export function soundpackGroupsStorageKey(serverURL: string, accountId: string, roomId: string): string {
+  return `cove:soundpack-groups:room:v1:${soundpackPreferenceScope(serverURL, accountId, roomId)}`;
+}
+
+export function soundpackFavoritesStorageKey(serverURL: string, accountId: string, roomId: string): string {
+  return `cove:soundpack-favorites:room:v1:${soundpackPreferenceScope(serverURL, accountId, roomId)}`;
+}
+
+export function readSoundpackFavorites(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter((id): id is string => typeof id === 'string' && id.length > 0))].slice(0, 6);
 }
 
 /** Old installations have no grouping settings: retain their server order in one group. */
@@ -54,6 +69,15 @@ export function reconcileSoundpackGroups(groups: readonly SoundpackGroup[], avai
   }));
   next[0].soundIds = [...availableIds.filter((id) => !assigned.has(id)), ...next[0].soundIds];
   return next;
+}
+
+/** A room reorder changes positions within each local group, never group membership. */
+export function reconcileSoundpackGroupOrder(groups: readonly SoundpackGroup[], orderedIds: readonly string[]): SoundpackGroup[] {
+  const rank = new Map(orderedIds.map((id, index) => [id, index]));
+  return reconcileSoundpackGroups(groups, orderedIds).map(group => ({
+    ...group,
+    soundIds: [...group.soundIds].sort((a, b) => (rank.get(a) ?? Infinity) - (rank.get(b) ?? Infinity)),
+  }));
 }
 
 export const flattenSoundpackGroups = (groups: readonly SoundpackGroup[]) => groups.flatMap((group) => group.soundIds);

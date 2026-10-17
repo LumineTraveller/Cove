@@ -70,7 +70,7 @@ export interface MessageHistoryResponse {
   cursor?: MessageHistoryCursor | null;
 }
 
-export function useRoomController({ profile, serverURL, sessionReady, theme }: ChatRoomProps) {
+export function useRoomController({ profile, accountId, serverURL, sessionReady, theme }: ChatRoomProps) {
   const { roomId } = useParams<{ roomId: string }>();
   const navigate = useNavigate();
   const rtc = useWebRTC(socket, roomId ?? '');
@@ -229,6 +229,11 @@ export function useRoomController({ profile, serverURL, sessionReady, theme }: C
     setShowSoundboardQuick(false);
     setShowSoundboard((current) => !current);
   };
+  useEffect(() => {
+    clearSoundboardHoverTimer();
+    setShowSoundboard(false);
+    setShowSoundboardQuick(false);
+  }, [roomId, serverURL, accountId, roomSynced, sessionReady]);
   useEffect(
     () => () => {
       clearSoundboardHoverTimer();

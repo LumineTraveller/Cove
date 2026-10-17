@@ -1,5 +1,41 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { flattenSoundpackGroups, moveSoundpackToGroup, resolveSoundpackDrop, resolveSoundpackGroup, swapSoundpackGroups, type SoundpackGroup, type SoundpackGroupGeometry } from './soundpackGroups';
+import { SORTABLE_SPRING_EASING } from '../sorting/useSortableList';
+
+const FLIP_DURATION_MS = 480;
+const SETTLE_DURATION_MS = 380;
+type MotionRect = Pick<DOMRect, 'left' | 'top'>;
+
+/** Animate from the last visible positions, including an interrupted transition. */
+export function animateSoundpackLayout(
+  before: ReadonlyMap<string, MotionRect>,
+  elements: ReadonlyMap<string, HTMLElement>,
+  reducedMotion: boolean,
+): Map<HTMLElement, Animation> {
+  const animations = new Map<HTMLElement, Animation>();
+  if (reducedMotion) return animations;
+  for (const [id, element] of elements) {
+    const previous = before.get(id);
+    if (!previous || typeof element.animate !== 'function') continue;
+    const current = element.getBoundingClientRect();
+    const x = previous.left - current.left;
+    const y = previous.top - current.top;
+    if (Math.abs(x) < 0.5 && Math.abs(y) < 0.5) continue;
+    animations.set(element, element.animate([
+      { transform: `translate3d(${x}px, ${y}px, 0)` },
+      { transform: 'translate3d(0, 0, 0)' },
+    ], { duration: FLIP_DURATION_MS, easing: SORTABLE_SPRING_EASING }));
+  }
+  return animations;
+}
+
+export function soundpackOverlayTransform(rect: MotionRect, point: { x: number; y: number }, offset: { x: number; y: number }): string {
+  return `translate3d(${point.x - offset.x - rect.left}px, ${point.y - offset.y - rect.top}px, 0)`;
+}
+
+function prefersReducedMotion() {
+  return window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+}
 
 interface DragSession {
   kind: 'sound' | 'group';
@@ -16,18 +52,19 @@ interface DragSession {
   moved: boolean;
 }
 
-export function useSoundpackGroups({ groups, onCommit, disabled, scrollRef }: {
+export function useSoundpackGroups({ groups, onCommit, disabled, scrollRef, scopeKey }: {
   groups: SoundpackGroup[];
   onCommit: (groups: SoundpackGroup[]) => void;
   disabled: boolean;
   scrollRef: React.RefObject<HTMLDivElement>;
+  scopeKey?: string;
 }) {
   const [preview, setPreview] = useState(groups);
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [draggingGroupId, setDraggingGroupId] = useState<string | null>(null);
   const [keyboardId, setKeyboardId] = useState<string | null>(null);
   const [overlay, setOverlay] = useState<DragSession | null>(null);
-  const [point, setPoint] = useState({ x: 0, y: 0 });
+  const [settleToken, setSettleToken] = useState(0);
   const [announcement, setAnnouncement] = useState('');
   const [pointerSession, setPointerSession] = useState<number | null>(null);
   const rows = useRef(new Map<string, HTMLElement>());
@@ -44,20 +81,98 @@ export function useSoundpackGroups({ groups, onCommit, disabled, scrollRef }: {
   disabledRef.current = disabled;
   const commitRef = useRef(onCommit);
   commitRef.current = onCommit;
-  const pointRef = useRef(point);
+  const pointRef = useRef({ x: 0, y: 0 });
   const suppressClick = useRef(false);
   const scrollFrame = useRef<number | null>(null);
   const placeholderRef = useRef<HTMLDivElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
+  const pointerFrame = useRef<number | null>(null);
+  const settleTimer = useRef<number | null>(null);
+  const settling = useRef<DragSession | null>(null);
+  const layoutAnimations = useRef(new Map<HTMLElement, Animation>());
+  const pendingFlip = useRef<{ kind: DragSession['kind']; rects: Map<string, MotionRect> } | null>(null);
+  const targetGroup = useRef<HTMLElement | null>(null);
   const groupsKey = JSON.stringify(groups);
   const previousGroupsKey = useRef(groupsKey);
+  const previousScope = useRef(scopeKey);
 
-  const applyPreview = useCallback((next: SoundpackGroup[]) => {
+  const motionElements = useCallback((kind: DragSession['kind']) => {
+    if (kind === 'group') return new Map(groupElements.current);
+    const elements = new Map([...rows.current].map(([id, element]) => [`row:${id}`, element]));
+    for (const [id, group] of groupElements.current) {
+      const divider = group.querySelector<HTMLElement>('[data-soundpack-divider]');
+      if (divider) elements.set(`divider:${id}`, divider);
+    }
+    return elements;
+  }, []);
+  const cancelLayoutAnimations = useCallback(() => {
+    for (const animation of layoutAnimations.current.values()) animation.cancel();
+    layoutAnimations.current.clear();
+  }, []);
+
+  const applyPreview = useCallback((next: SoundpackGroup[], animate = true) => {
+    if (JSON.stringify(next) === JSON.stringify(previewRef.current)) return;
+    const kind = session.current?.kind ?? keyboardBase.current?.kind ?? 'sound';
+    const elements = motionElements(kind);
+    // Read the current visual positions before cancelling our own animations.
+    // The next transition then continues from those positions instead of jumping.
+    pendingFlip.current = animate && !prefersReducedMotion()
+      ? { kind, rects: new Map([...elements].map(([id, element]) => [id, element.getBoundingClientRect()])) }
+      : null;
+    cancelLayoutAnimations();
     previewRef.current = next;
     setPreview(next);
+  }, [cancelLayoutAnimations, motionElements]);
+
+  const syncOverlayTransform = useCallback(() => {
+    const active = session.current;
+    if (!active?.moved || !overlayRef.current) return;
+    overlayRef.current.style.transform = soundpackOverlayTransform(active.rect, pointRef.current, { x: active.offsetX, y: active.offsetY });
   }, []);
+
+  const resetOverlay = useCallback(() => {
+    if (settleTimer.current !== null) window.clearTimeout(settleTimer.current);
+    settleTimer.current = null;
+    settling.current = null;
+    overlayRef.current?.getAnimations().forEach(animation => animation.cancel());
+    overlayRef.current?.removeAttribute('data-soundpack-settling');
+    setOverlay(null);
+    setDraggingId(null);
+    setDraggingGroupId(null);
+  }, []);
+
+  useLayoutEffect(() => {
+    const before = pendingFlip.current;
+    pendingFlip.current = null;
+    if (before) layoutAnimations.current = animateSoundpackLayout(before.rects, motionElements(before.kind), prefersReducedMotion());
+    syncOverlayTransform();
+    const dropped = settling.current;
+    if (!dropped || settleTimer.current !== null) return;
+    const element = overlayRef.current;
+    const group = groupElements.current.get(dropped.id);
+    const destination = dropped.kind === 'sound'
+      ? placeholderRef.current
+      : group?.querySelector<HTMLElement>('[data-soundpack-divider]') ?? group;
+    if (!element || !destination || prefersReducedMotion() || typeof element.animate !== 'function') {
+      resetOverlay();
+      return;
+    }
+    // Layout animations may translate a destination divider. The drop flies to
+    // its final layout position, so the overlay and divider arrive together.
+    const destinationAnimation = layoutAnimations.current.get(dropped.kind === 'group' && group ? group : destination);
+    const currentTime = destinationAnimation?.currentTime;
+    if (destinationAnimation) destinationAnimation.currentTime = FLIP_DURATION_MS;
+    const slot = destination.getBoundingClientRect();
+    if (destinationAnimation && currentTime !== undefined) destinationAnimation.currentTime = currentTime;
+    element.setAttribute('data-soundpack-settling', 'true');
+    element.animate([
+      { transform: soundpackOverlayTransform(dropped.rect, pointRef.current, { x: dropped.offsetX, y: dropped.offsetY }) },
+      { transform: `translate3d(${slot.left - dropped.rect.left}px, ${slot.top - dropped.rect.top}px, 0)` },
+    ], { duration: SETTLE_DURATION_MS, easing: SORTABLE_SPRING_EASING, fill: 'forwards' });
+    settleTimer.current = window.setTimeout(resetOverlay, SETTLE_DURATION_MS + 20);
+  }, [preview, settleToken, motionElements, resetOverlay, syncOverlayTransform]);
   useEffect(() => {
-    if (!session.current && !keyboardBase.current) applyPreview(groupsRef.current);
+    if (!session.current && !keyboardBase.current && !settling.current) applyPreview(groupsRef.current, false);
   }, [groupsKey, applyPreview]);
 
   const register = useCallback((id: string, isGroup: boolean) => {
@@ -72,6 +187,7 @@ export function useSoundpackGroups({ groups, onCommit, disabled, scrollRef }: {
   }, []);
 
   const captureGeometry = useCallback((base: SoundpackGroup[]) => {
+    cancelLayoutAnimations();
     const scroll = scrollRef.current?.scrollTop ?? 0;
     return base.flatMap((group) => {
       const element = groupElements.current.get(group.id);
@@ -85,7 +201,7 @@ export function useSoundpackGroups({ groups, onCommit, disabled, scrollRef }: {
         }),
       }];
     });
-  }, [scrollRef]);
+  }, [cancelLayoutAnimations, scrollRef]);
 
   const updateAtPoint = useCallback(() => {
     const active = session.current;
@@ -94,49 +210,77 @@ export function useSoundpackGroups({ groups, onCommit, disabled, scrollRef }: {
     const y = current.y + (scrollRef.current?.scrollTop ?? 0);
     if (active.kind === 'group') {
       const target = resolveSoundpackGroup(active.geometry, y);
-      if (target) applyPreview(swapSoundpackGroups(active.base, active.id, target.id));
+      if (target) {
+        targetGroup.current?.removeAttribute('data-soundpack-drop-target');
+        targetGroup.current = groupElements.current.get(target.id) ?? null;
+        targetGroup.current?.setAttribute('data-soundpack-drop-target', 'true');
+        applyPreview(swapSoundpackGroups(active.base, active.id, target.id));
+      }
     } else {
       const target = resolveSoundpackDrop(active.geometry, active.sourceGroupId, active.id, current.x, y);
-      if (target) applyPreview(moveSoundpackToGroup(active.base, active.id, target));
+      if (target) {
+        targetGroup.current?.removeAttribute('data-soundpack-drop-target');
+        targetGroup.current = groupElements.current.get(target.groupId) ?? null;
+        targetGroup.current?.setAttribute('data-soundpack-drop-target', 'true');
+        applyPreview(moveSoundpackToGroup(active.base, active.id, target));
+      }
     }
   }, [applyPreview, scrollRef]);
 
-  const clear = useCallback(() => {
+  const releasePointer = useCallback(() => {
     session.current = null;
     keyboardBase.current = null;
-    setDraggingId(null);
-    setDraggingGroupId(null);
     setKeyboardId(null);
-    setOverlay(null);
     setPointerSession(null);
+    if (pointerFrame.current !== null) cancelAnimationFrame(pointerFrame.current);
+    pointerFrame.current = null;
     if (scrollFrame.current !== null) cancelAnimationFrame(scrollFrame.current);
     scrollFrame.current = null;
+    targetGroup.current?.removeAttribute('data-soundpack-drop-target');
+    targetGroup.current = null;
     document.body.classList.remove('soundpack-dragging');
   }, []);
+  const clear = useCallback(() => {
+    releasePointer();
+    resetOverlay();
+    cancelLayoutAnimations();
+    pendingFlip.current = null;
+  }, [cancelLayoutAnimations, releasePointer, resetOverlay]);
+  const cancel = useCallback(() => {
+    applyPreview(groupsRef.current, false);
+    clear();
+  }, [applyPreview, clear]);
   const finish = useCallback((commit: boolean, event?: PointerEvent) => {
     const active = session.current;
     if (!active) return;
     if (event) pointRef.current = { x: event.clientX, y: event.clientY };
     if (active.moved) {
       suppressClick.current = true;
-      if (commit) { updateAtPoint(); commitRef.current(previewRef.current); }
-      else applyPreview(groupsRef.current);
+      if (commit) {
+        updateAtPoint();
+        settling.current = active;
+        setSettleToken(token => token + 1);
+        commitRef.current(previewRef.current);
+      } else applyPreview(groupsRef.current);
       setAnnouncement(commit ? '已放下' : '已取消排序');
     }
-    clear();
-  }, [applyPreview, clear, updateAtPoint]);
+    releasePointer();
+    if (!commit || !active.moved) resetOverlay();
+  }, [applyPreview, releasePointer, resetOverlay, updateAtPoint]);
   useEffect(() => {
-    if (previousGroupsKey.current === groupsKey) return;
+    const changedScope = previousScope.current !== scopeKey;
+    previousScope.current = scopeKey;
+    if (!changedScope && previousGroupsKey.current === groupsKey) return;
     previousGroupsKey.current = groupsKey;
-    if (session.current || keyboardBase.current) {
+    if (changedScope || session.current || keyboardBase.current || (settling.current && groupsKey !== JSON.stringify(previewRef.current))) {
       clear();
       setAnnouncement('列表已更新，已取消排序');
     }
-    applyPreview(groupsRef.current);
-  }, [groupsKey, applyPreview, clear]);
+    applyPreview(groupsRef.current, false);
+  }, [groupsKey, scopeKey, applyPreview, clear]);
   useEffect(() => {
     const blur = () => {
-      if (!session.current && !keyboardBase.current) return;
+      if (!session.current && !keyboardBase.current && !settling.current) return;
       applyPreview(groupsRef.current);
       clear();
     };
@@ -160,7 +304,6 @@ export function useSoundpackGroups({ groups, onCommit, disabled, scrollRef }: {
       const active = session.current;
       if (!active || event.pointerId !== active.pointerId) return;
       pointRef.current = { x: event.clientX, y: event.clientY };
-      setPoint(pointRef.current);
       if (!active.moved) {
         if (Math.hypot(event.clientX - active.startX, event.clientY - active.startY) < 5) return;
         active.geometry = captureGeometry(active.base);
@@ -172,7 +315,11 @@ export function useSoundpackGroups({ groups, onCommit, disabled, scrollRef }: {
         setAnnouncement(active.kind === 'sound' ? '已拾起语音包，Esc 取消' : '已拾起分组，Esc 取消');
         scrollFrame.current = requestAnimationFrame(autoScroll);
       }
-      updateAtPoint();
+      if (pointerFrame.current === null) pointerFrame.current = requestAnimationFrame(() => {
+        pointerFrame.current = null;
+        syncOverlayTransform();
+        updateAtPoint();
+      });
     };
     const up = (event: PointerEvent) => { if (event.pointerId === pointerSession) finish(true, event); };
     const cancel = (event: PointerEvent) => { if (event.pointerId === pointerSession) finish(false); };
@@ -193,11 +340,16 @@ export function useSoundpackGroups({ groups, onCommit, disabled, scrollRef }: {
       window.removeEventListener('resize', resize);
       scroller?.removeEventListener('scroll', updateAtPoint);
     };
-  }, [pointerSession, captureGeometry, finish, scrollRef, updateAtPoint]);
+  }, [pointerSession, captureGeometry, finish, scrollRef, syncOverlayTransform, updateAtPoint]);
   useEffect(() => () => {
     if (scrollFrame.current !== null) cancelAnimationFrame(scrollFrame.current);
+    if (pointerFrame.current !== null) cancelAnimationFrame(pointerFrame.current);
+    if (settleTimer.current !== null) window.clearTimeout(settleTimer.current);
+    overlayRef.current?.getAnimations().forEach(animation => animation.cancel());
+    cancelLayoutAnimations();
+    targetGroup.current?.removeAttribute('data-soundpack-drop-target');
     document.body.classList.remove('soundpack-dragging');
-  }, []);
+  }, [cancelLayoutAnimations]);
   useEffect(() => {
     if (!disabled || (!session.current && !keyboardBase.current)) return;
     applyPreview(groupsRef.current);
@@ -207,6 +359,10 @@ export function useSoundpackGroups({ groups, onCommit, disabled, scrollRef }: {
   const begin = useCallback((kind: 'sound' | 'group', id: string, event: ReactPointerEvent<HTMLElement>) => {
     if (disabledRef.current || event.button !== 0 || session.current || keyboardBase.current) return;
     if (kind === 'sound' && (event.target as HTMLElement).closest('button:not([data-soundpack-play]),a,input,textarea,select,[data-sortable-ignore]')) return;
+    // A new drag must not inherit a previous drop's forwards-filled animation
+    // or delayed cleanup, which could freeze or remove its reused portal node.
+    resetOverlay();
+    cancelLayoutAnimations();
     const element = kind === 'sound' ? rows.current.get(id) : event.currentTarget;
     if (!element) return;
     const rect = element.getBoundingClientRect();
@@ -222,7 +378,7 @@ export function useSoundpackGroups({ groups, onCommit, disabled, scrollRef }: {
       rect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height }, moved: false
     };
     setPointerSession(event.pointerId);
-  }, []);
+  }, [cancelLayoutAnimations, resetOverlay]);
 
   const handleKeyDown = useCallback((event: ReactKeyboardEvent<HTMLElement>, id: string, kind: 'sound' | 'group' = 'sound'): boolean => {
     if (disabledRef.current || session.current) return false;
@@ -230,6 +386,8 @@ export function useSoundpackGroups({ groups, onCommit, disabled, scrollRef }: {
     if (!active) {
       if (event.key !== ' ' || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return false;
       event.preventDefault();
+      resetOverlay();
+      cancelLayoutAnimations();
       keyboardBase.current = { kind, id, base: previewRef.current };
       setKeyboardId(id);
       if (kind === 'sound') setDraggingId(id); else setDraggingGroupId(id);
@@ -263,7 +421,7 @@ export function useSoundpackGroups({ groups, onCommit, disabled, scrollRef }: {
     }
     requestAnimationFrame(() => (kind === 'sound' ? rows.current.get(id) : groupElements.current.get(id)?.querySelector<HTMLElement>('[data-soundpack-divider]'))?.focus());
     return true;
-  }, [applyPreview, clear]);
+  }, [applyPreview, cancelLayoutAnimations, clear, resetOverlay]);
   const getRowProps = (id: string) => ({
     onPointerDown: (event: ReactPointerEvent<HTMLElement>) => begin('sound', id, event),
     tabIndex: disabled ? -1 : 0,
@@ -281,14 +439,14 @@ export function useSoundpackGroups({ groups, onCommit, disabled, scrollRef }: {
   });
   const overlayStyle: CSSProperties | undefined = overlay ? {
     position: 'fixed', left: overlay.rect.left, top: overlay.rect.top, width: overlay.rect.width, height: overlay.rect.height,
-    margin: 0, transform: `translate3d(${point.x - overlay.startX}px, ${point.y - overlay.startY}px, 0)`, pointerEvents: 'none',
+    margin: 0, transform: soundpackOverlayTransform(overlay.rect, pointRef.current, { x: overlay.offsetX, y: overlay.offsetY }), pointerEvents: 'none',
   } : undefined;
   return {
     groups: preview, orderedIds: flattenSoundpackGroups(preview), draggingId, draggingGroupId, keyboardId,
     overlay: overlay?.kind === 'sound' ? overlay : null, groupOverlay: overlay?.kind === 'group' ? overlay : null,
     overlayStyle, overlayHeight: overlay?.rect.height ?? 0, overlayRef, placeholderRef, announcement,
     registerRow: (id: string) => register(id, false), registerGroup: (id: string) => register(id, true),
-    getRowProps, getDividerProps, handleKeyDown,
+    getRowProps, getDividerProps, handleKeyDown, cancel,
     consumeClickSuppression: () => { const suppressed = suppressClick.current; suppressClick.current = false; return suppressed; },
   };
 }

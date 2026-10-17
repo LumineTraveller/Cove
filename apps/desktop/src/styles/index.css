@@ -112,10 +112,12 @@ body.sortable-dragging * {
   width: 100%;
   height: 1px;
   background: var(--line, rgba(255, 255, 255, 0.2));
+  transition: background-color 140ms ease;
 }
 .soundpack-group-divider:hover > span,
 .soundpack-group-divider:focus-visible > span,
-[data-soundpack-group-preview] .soundpack-group-divider > span {
+[data-soundpack-group-preview] .soundpack-group-divider > span,
+[data-soundpack-drop-target="true"] > .soundpack-group-divider > span {
   background: var(--blue, #67e8f9);
 }
 .soundpack-group-divider:focus-visible {
@@ -147,6 +149,7 @@ body.sortable-dragging * {
   z-index: 900;
   display: flex;
   align-items: center;
+  will-change: transform;
 }
 .soundpack-group-drag-line > span {
   background: var(--blue, #67e8f9);
@@ -159,6 +162,16 @@ body.sortable-dragging * {
   border: 1px dashed rgba(148, 163, 184, 0.45);
   border-radius: 16px;
   background: rgba(148, 163, 184, 0.08);
+}
+.soundpack-groups [data-soundpack-placeholder] {
+  border-color: var(--blue, #67e8f9);
+  background: color-mix(in srgb, var(--blue, #67e8f9) 8%, transparent);
+}
+@media (prefers-reduced-motion: reduce) {
+  .soundpack-group-divider > span,
+  .soundpack-group-drag-line > span {
+    transition: none;
+  }
 }
 .soundpack-card-lifted {
   position: relative;
