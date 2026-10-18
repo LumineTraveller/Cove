@@ -29,7 +29,8 @@ async function until(predicate: () => boolean) {
 }
 
 function fixture(t: TestContext) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cove-integrity-test-'));
+  const tempRoot = fs.realpathSync.native(os.tmpdir());
+  const root = fs.mkdtempSync(path.join(tempRoot, 'cove-integrity-test-'));
   const installRoot = path.join(root, 'install');
   const userDataDir = path.join(root, 'userdata');
   const cacheRoot = path.join(root, 'repair-cache');
@@ -80,7 +81,7 @@ function fixture(t: TestContext) {
   t.after(() => {
     for (const controller of created) controller.dispose();
     const resolved = path.resolve(root);
-    assert.equal(path.dirname(resolved), path.resolve(os.tmpdir()));
+    assert.equal(path.dirname(resolved), tempRoot);
     assert.match(path.basename(resolved), /^cove-integrity-test-/);
     fs.rmSync(resolved, { recursive: true, force: true });
   });
@@ -113,6 +114,37 @@ test('official exact-version manifest checks only listed files and publishes det
   assert.equal(JSON.stringify(f.states).includes(f.root), false);
   assert.equal(JSON.stringify(f.states).includes('https:'), false);
   assert.equal(fs.readFileSync(path.join(f.userDataDir, 'keep-private.txt'), 'utf8'), 'must never change');
+});
+
+test('Windows short directory spellings canonicalize without relaxing link or profile isolation', async t => {
+  const f = fixture(t);
+  const alias = `${f.root}-short-spelling`;
+  const remap = (file: fs.PathLike) => typeof file === 'string' && (file === alias || file.startsWith(alias + path.sep))
+    ? f.root + file.slice(alias.length) : file;
+  const lstat = fs.lstatSync;
+  const realpath = fs.realpathSync.native;
+  t.mock.method(fs, 'lstatSync', (file: fs.PathLike, options: any) => lstat(remap(file), options));
+  t.mock.method(fs.realpathSync, 'native', (file: fs.PathLike, options: any) => realpath(remap(file), options));
+  const controller = f.create({ installRoot: path.join(alias, 'install'), userDataDir: path.join(alias, 'userdata'),
+    cacheRoot: path.join(alias, 'repair-cache'), confirmInstall: async () => false });
+  assert.equal((await controller.checkNow()).status, 'healthy');
+  assert.equal((await controller.downloadRepair()).status, 'downloaded');
+  assert.equal(await controller.launchRepair(), false);
+  assert.equal(f.opens(), 0);
+  const forbidden = f.create({ cacheRoot: path.join(alias, 'userdata', 'repair') });
+  assert.equal((await forbidden.downloadRepair()).errorCode, 'UNSAFE_PATH');
+  assert.equal(fs.existsSync(path.join(f.userDataDir, 'repair')), false);
+  assert.equal(fs.readFileSync(path.join(f.userDataDir, 'keep-private.txt'), 'utf8'), 'must never change');
+});
+
+test('canonical directory spelling never legitimizes a junction used as the installation root', async t => {
+  const f = fixture(t);
+  const linked = path.join(f.root, 'linked-install');
+  fs.symlinkSync(f.installRoot, linked, process.platform === 'win32' ? 'junction' : 'dir');
+  const controller = f.create({ installRoot: linked });
+  assert.equal((await controller.checkNow()).errorCode, 'UNSAFE_PATH');
+  assert.equal((await controller.downloadRepair()).errorCode, 'UNSAFE_INSTALL_PATH');
+  assert.equal(f.requests.includes(assetUrl(installerName)), false);
 });
 
 test('missing and modified managed files remain distinct', async t => {

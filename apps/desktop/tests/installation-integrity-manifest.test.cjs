@@ -19,7 +19,7 @@ function pe(machine = 0x8664) {
 }
 
 function fixture(t) {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'cove-integrity-manifest-test-'));
+  const temp = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'cove-integrity-manifest-test-'));
   const root = path.join(temp, 'payload');
   const output = path.join(temp, 'output');
   fs.mkdirSync(root);

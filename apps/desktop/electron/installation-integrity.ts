@@ -276,6 +276,41 @@ function safeDirectorySync(directory: string): Stats {
   return stat;
 }
 
+/** Expand legitimate Windows short names only after checking the original path. */
+function canonicalDirectorySpelling(directory: string): string {
+  const absolute = path.resolve(directory);
+  try {
+    const root = path.parse(absolute).root;
+    const parts = absolute.slice(root.length).split(path.sep).filter(Boolean);
+    const inspected: Array<{ directory: string; stat: Stats }> = [];
+    let existing = root;
+    let missingAt = parts.length;
+    const rootStat = fsSync.lstatSync(root);
+    if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) return absolute;
+    inspected.push({ directory: root, stat: rootStat });
+    for (let index = 0; index < parts.length; index++) {
+      const next = path.join(existing, parts[index]);
+      let stat: Stats;
+      try { stat = fsSync.lstatSync(next); }
+      catch (error) {
+        if (errorCode(error) !== 'ENOENT') return absolute;
+        missingAt = index;
+        break;
+      }
+      if (stat.isSymbolicLink() || !stat.isDirectory()) return absolute;
+      inspected.push({ directory: next, stat });
+      existing = next;
+    }
+    const canonical = fsSync.realpathSync.native(existing);
+    if (!sameFile(inspected[inspected.length - 1].stat, safeDirectorySync(canonical))) return absolute;
+    for (const entry of inspected) {
+      const now = fsSync.lstatSync(entry.directory);
+      if (now.isSymbolicLink() || !now.isDirectory() || !sameFile(entry.stat, now)) return absolute;
+    }
+    return path.join(canonical, ...parts.slice(missingAt));
+  } catch { return absolute; } // Preserve unsafe/unreadable paths for normal failure reporting.
+}
+
 function regularFile(stat: Stats): void {
   if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) fail('UNSAFE_PATH', '文件不是安全的单链接普通文件。');
 }
@@ -335,6 +370,14 @@ function verifyInternetDownload(file: string): boolean {
 
 export function createInstallationIntegrityController(options: InstallationIntegrityOptions) {
   const enabled = options.isPackaged && options.platform === 'win32' && options.arch === 'x64' && VERSION.test(options.version);
+  if (enabled) {
+    let userDataDir = canonicalDirectorySpelling(options.userDataDir);
+    // This is an exclusion, so resolve a redirected profile to exclude its target too.
+    try { userDataDir = fsSync.realpathSync.native(options.userDataDir); } catch { /* May not exist yet. */ }
+    options = { ...options, userDataDir,
+      installRoot: canonicalDirectorySpelling(options.installRoot),
+      cacheRoot: canonicalDirectorySpelling(options.cacheRoot) };
+  }
   const base = { version: options.version, platform: options.platform, arch: options.arch };
   let state: InstallationIntegrityState = { ...base, status: enabled ? 'idle' : 'disabled',
     ...(!enabled ? { message: '安装完整性检查仅支持正式发布的 Windows x64 版本。', repairAvailable: false } : {}) };
