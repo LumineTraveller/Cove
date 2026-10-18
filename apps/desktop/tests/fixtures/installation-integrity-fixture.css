@@ -1,0 +1,11 @@
+body { padding: 24px; background: var(--surface); }
+.integrity-fixture.global-settings { position: static; width: min(900px, 100%); height: calc(100vh - 48px); margin: auto; background: #fff; border: 1px solid var(--line); box-shadow: none; transform: none; }
+.integrity-fixture-panel-only .update-center-details { display: none; }
+:root[data-theme="dark"] .integrity-fixture.global-settings { background: #101720; }
+@media (max-width: 600px) {
+  body { padding: 8px; }
+  .integrity-fixture.global-settings { height: calc(100vh - 16px); display: block; }
+  .integrity-fixture.global-settings > aside { display: none; }
+  .integrity-fixture.global-settings > main { height: 100%; }
+  .integrity-fixture.global-settings .settings-page { padding: 16px; }
+}

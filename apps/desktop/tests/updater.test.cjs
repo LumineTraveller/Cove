@@ -134,6 +134,44 @@ function createHarness(overrides = {}) {
   return { updater, controller, once, repeating, cleared, progress, states, logs };
 }
 
+test('installation maintenance prevents background checks and concurrent update installation', async () => {
+  let busy = true;
+  const h = createHarness({ isMaintenanceBusy: () => busy });
+  try {
+    await h.controller.checkNow();
+    h.once[0].callback();
+    h.repeating[0].callback();
+    assert.equal(h.updater.checkCount, 0);
+    assert.equal(h.controller.getState().status, 'idle');
+    h.updater.emit('update-downloaded', { version: '2.0.3' });
+    assert.equal(h.controller.installNow(), false);
+    assert.deepEqual(h.updater.installCalls, []);
+    assert.equal(h.updater.autoInstallOnAppQuit, true, 'checking alone preserves the ordinary update policy');
+    busy = false;
+    assert.equal(h.controller.installNow(), true);
+  } finally { h.controller.dispose(); }
+});
+
+test('external repair handoff suppresses a queued updater installer on application exit', () => {
+  const h = createHarness();
+  try {
+    h.updater.emit('update-downloaded', { version: '2.0.3' });
+    assert.equal(h.updater.autoInstallOnAppQuit, true);
+    const restore = h.controller.suppressInstallOnQuit();
+    assert.equal(h.updater.autoInstallOnAppQuit, false);
+    assert.deepEqual(h.updater.installCalls, []);
+    restore();
+    assert.equal(h.updater.autoInstallOnAppQuit, true);
+    h.updater.autoInstallOnAppQuit = false;
+    const restoreDisabled = h.controller.suppressInstallOnQuit();
+    restoreDisabled();
+    assert.equal(h.updater.autoInstallOnAppQuit, false, 'a pre-existing opt-out stays disabled');
+    h.updater.autoInstallOnAppQuit = true;
+    restoreDisabled();
+    assert.equal(h.updater.autoInstallOnAppQuit, true, 'restoring twice cannot overwrite a later decision');
+  } finally { h.controller.dispose(); }
+});
+
 test('development builds do not contact the update service', async () => {
   const updater = new FakeUpdater();
   let scheduled = false;

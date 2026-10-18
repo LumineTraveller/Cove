@@ -4,6 +4,7 @@ import type { RemoteControlInput } from './features/remote-control/remoteControl
 import type { UpdateState } from './features/updates/update';
 import type { AnnotationOverlayFrame } from '../electron/annotation-overlay-state';
 import type { AnnotationOverlayInput } from '../electron/annotation-overlay-input';
+import type { InstallationIntegrityApi } from '../electron/integrity-state';
 
 interface CoveUpdaterApi {
   getState(): Promise<UpdateState>;
@@ -93,6 +94,7 @@ declare global {
     };
     coveAudioLatencyProfile?: 'adaptive' | 'legacy';
     coveUpdater?: CoveUpdaterApi;
+    coveIntegrity?: InstallationIntegrityApi;
     coveShell?: CoveShellApi;
     coveWindow?: CoveWindowApi;
     coveClipboard?: CoveClipboardApi;

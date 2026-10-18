@@ -19,6 +19,7 @@ import {
 import { useWebRTC } from '../../media/useWebRTC';
 import { AvatarCropDialog } from '../../profiles/components/AvatarCropDialog';
 import { UpdateCenter } from '../../updates/components/UpdateCenter';
+import { InstallationIntegrityPanel } from '../../integrity/components/InstallationIntegrityPanel';
 import packageInfo from '../../../../package.json';
 import type { UserProfile } from '../../../types';
 import type { AppTheme } from '../theme';
@@ -347,6 +348,7 @@ export function GlobalSettingsV2({
           {page === 'update' && (
             <div className="settings-page update-settings-page">
               <UpdateCenter embedded serverURL={serverURL} />
+              <InstallationIntegrityPanel />
             </div>
           )}
           {page === 'about' && (

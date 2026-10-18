@@ -68,6 +68,8 @@ export interface AutoUpdaterOptions {
   resolveSources?: (serverUrl: string) => Promise<UpdateSourceCandidate[]>;
   downloadBaseUrl?: string;
   now?: () => number;
+  /** Installation verification/repair owns the maintenance lock while active. */
+  isMaintenanceBusy?: () => boolean;
 }
 
 export interface AutoUpdaterController {
@@ -75,6 +77,8 @@ export interface AutoUpdaterController {
   checkNow: () => Promise<UpdateState>;
   getState: () => UpdateState;
   installNow: () => boolean;
+  /** Suspend before handing another verified installer to the OS; restore on failure. */
+  suppressInstallOnQuit: () => () => void;
   dispose: () => void;
 }
 
@@ -102,6 +106,7 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
     resolveSources = async () => [],
     downloadBaseUrl = UPDATE_DOWNLOAD_BASE_URL,
     now = Date.now,
+    isMaintenanceBusy = () => false,
   } = options;
 
   let state: UpdateState = isPackaged
@@ -125,6 +130,7 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
       checkNow: async () => state,
       getState: () => state,
       installNow: () => false,
+      suppressInstallOnQuit: () => () => undefined,
       dispose: () => undefined,
     };
   }
@@ -297,7 +303,7 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
   updater.on('error', onError);
 
   const checkNow = async (): Promise<UpdateState> => {
-    if (disposed || checking || isUpdateBusy(state.status) || state.status === 'downloaded') return state;
+    if (disposed || checking || isMaintenanceBusy() || isUpdateBusy(state.status) || state.status === 'downloaded') return state;
     checking = true;
     activeSource = undefined;
     handledError = null;
@@ -352,8 +358,18 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
     enabled: true,
     checkNow,
     getState: () => state,
+    suppressInstallOnQuit: () => {
+      const previous = updater.autoInstallOnAppQuit;
+      updater.autoInstallOnAppQuit = false;
+      let restored = false;
+      return () => {
+        if (restored) return;
+        restored = true;
+        updater.autoInstallOnAppQuit = previous;
+      };
+    },
     installNow: () => {
-      if (disposed || state.status !== 'downloaded') return false;
+      if (disposed || isMaintenanceBusy() || state.status !== 'downloaded') return false;
       setState(stateForSource({ ...state, status: 'installing', message: '正在请求启动安装并退出 Cove。安装将中断通话；此处不代表已经安装成功。' }));
       try {
         updater.quitAndInstall(true, true);

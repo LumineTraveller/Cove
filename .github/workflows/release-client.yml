@@ -50,11 +50,15 @@ jobs:
       - name: Test desktop client
         run: npm test -w cove-client
 
+      - name: Test release mirror asset selection without network access
+        shell: pwsh
+        run: ./apps/desktop/tests/publish-release-mirror.test.ps1
+
       - name: Test server
         run: npm test -w cove-server
 
       - name: Build Windows release
-        run: npm run build:electron -w cove-client -- --publish never --config.electronDist=node_modules/electron/dist
+        run: npm run build:electron -w cove-client -- --win --x64 --publish never --config.electronDist=node_modules/electron/dist
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
@@ -82,10 +86,11 @@ jobs:
           $installer = "apps/desktop/dist-app/Cove-Setup-$version.exe"
           $blockmap = "$installer.blockmap"
           $manifest = "apps/desktop/dist-app/latest.yml"
+          $integrityManifest = "apps/desktop/dist-app/Cove-Integrity-$version-win32-x64.json"
           $serverInstaller = "apps/server/dist-app/Cove-Server-Setup-$version.exe"
           $serverBlockmap = "$serverInstaller.blockmap"
 
-          foreach ($asset in @($installer, $blockmap, $manifest, $serverInstaller, $serverBlockmap)) {
+          foreach ($asset in @($installer, $blockmap, $manifest, $serverInstaller, $serverBlockmap, $integrityManifest)) {
             if (-not (Test-Path -LiteralPath $asset)) {
               throw "Missing release asset: $asset"
             }
@@ -107,8 +112,18 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "Creating the draft release failed" }
           }
 
-          gh release upload $tag $installer $blockmap $manifest $serverInstaller $serverBlockmap --clobber --repo $repo
+          gh release upload $tag $installer $blockmap $manifest $serverInstaller $serverBlockmap $integrityManifest --clobber --repo $repo
           if ($LASTEXITCODE -ne 0) { throw "Uploading release assets failed" }
+          # The checker authenticates the manifest with this official HTTPS API
+          # asset digest, never with a checksum downloaded beside the manifest.
+          $releaseApi = gh api "repos/$repo/releases/tags/$tag" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "Reading official release asset digests failed" }
+          $integrityName = Split-Path $integrityManifest -Leaf
+          $integrityAsset = @($releaseApi.assets | Where-Object name -ceq $integrityName)
+          $integrityDigest = 'sha256:' + (Get-FileHash -LiteralPath $integrityManifest -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($integrityAsset.Count -ne 1 -or $integrityAsset[0].digest -cne $integrityDigest) {
+            throw "Official GitHub API integrity manifest digest does not match the release file"
+          }
           gh release edit $tag --draft=false --latest --title "Cove v$version" --notes-file RELEASE_NOTES.md --repo $repo
           if ($LASTEXITCODE -ne 0) { throw "Publishing release failed" }
 
@@ -116,7 +131,7 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $published.isDraft -or $published.isPrerelease -or $published.tagName -ne $tag) {
             throw "Release is not publicly published with the expected tag"
           }
-          foreach ($asset in @($installer, $blockmap, $manifest, $serverInstaller, $serverBlockmap)) {
+          foreach ($asset in @($installer, $blockmap, $manifest, $serverInstaller, $serverBlockmap, $integrityManifest)) {
             $name = Split-Path $asset -Leaf
             $remote = @($published.assets | Where-Object name -eq $name)
             if ($remote.Count -ne 1 -or $remote[0].size -ne (Get-Item -LiteralPath $asset).Length) {

@@ -1,0 +1,68 @@
+.installation-integrity {
+  min-width: 0;
+  margin-top: 13px;
+  padding-top: 23px;
+  border-top: 1px solid var(--line);
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.integrity-heading { display: flex; align-items: flex-start; gap: 10px; }
+.integrity-icon { width: 40px; height: 40px; flex: 0 0 40px; display: grid; place-items: center; border-radius: 12px; background: var(--surface); color: var(--muted); }
+.integrity-icon.tone-success { color: var(--green); background: #eaf8f1; }
+.integrity-icon.tone-warning { color: var(--danger); background: #fff0f0; }
+.integrity-icon.tone-progress { color: var(--blue); background: #edf4ff; }
+.integrity-heading-copy { flex: 1; min-width: 0; }
+.integrity-heading h3 { margin: 0; font-size: 14px; line-height: 1.5; font-weight: 730; }
+.installation-integrity p { margin: 0; overflow-wrap: anywhere; }
+.integrity-heading .integrity-version { color: var(--muted); font-size: 11px; }
+.integrity-status { display: grid; gap: 4px; margin-top: 16px; }
+.integrity-status strong { font-weight: 650; font-size: 12px; }
+.integrity-status p, .integrity-last-check, .integrity-scope, .integrity-manual-help { color: var(--muted); font-size: 11px; }
+.integrity-service-message { padding: 7px 10px; border-radius: 7px; background: var(--surface); }
+.installation-integrity .integrity-last-check { margin-top: 12px; }
+.installation-integrity .integrity-scope { margin-top: 14px; }
+.integrity-button { min-height: 34px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 7px 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--ink); font-size: 11px; font-weight: 650; line-height: 1.5; text-align: center; }
+.integrity-button svg { flex: 0 0 auto; }
+.integrity-button:hover:not(:disabled) { background: var(--surface-strong); border-color: var(--line-strong); }
+.integrity-button:focus-visible, .installation-integrity summary:focus-visible { outline: 3px solid var(--blue); outline-offset: 3px; }
+.integrity-button:disabled { opacity: .5; cursor: default; }
+.integrity-primary { background: var(--blue); color: #fff; border-color: transparent; }
+.integrity-primary:hover:not(:disabled) { background: var(--blue); filter: brightness(1.08); border-color: transparent; }
+.integrity-release { background: transparent; color: var(--muted); }
+.integrity-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
+.integrity-progress { margin-top: 14px; }
+.integrity-progress-track { height: 5px; overflow: hidden; border-radius: 5px; background: var(--surface-strong); }
+.integrity-progress-track > span { display: block; height: 100%; border-radius: inherit; background: var(--blue); transition: width 150ms ease; }
+.integrity-progress-track > span.indeterminate { width: 35%; animation: integrity-progress 1.5s ease-in-out infinite alternate; }
+.integrity-progress-caption { display: flex; justify-content: space-between; gap: 12px; margin-top: 6px; font-size: 11px; color: var(--muted); }
+.integrity-issues { margin-top: 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; }
+.installation-integrity summary { cursor: pointer; width: fit-content; max-width: 100%; border-radius: 3px; }
+.integrity-issues summary { font-weight: 650; }
+.integrity-issues ul { display: grid; gap: 7px; padding: 0; margin: 10px 0 0; list-style: none; }
+.integrity-issues li { display: flex; gap: 10px; align-items: flex-start; min-width: 0; }
+.integrity-issues li > span { flex: 0 0 64px; color: var(--muted); font-size: 11px; }
+.integrity-issues code { min-width: 0; overflow-wrap: anywhere; white-space: normal; font-size: 11px; line-height: 1.65; }
+.integrity-issues > p { margin-top: 10px; font-size: 11px; color: var(--muted); }
+.installation-integrity .integrity-repair-notice { margin-top: 14px; padding: 10px 12px; border-radius: 9px; background: var(--surface); font-size: 11px; }
+.installation-integrity .integrity-action-error { margin-top: 10px; color: var(--danger); font-size: 11px; }
+.integrity-manual-help { margin-top: 16px; }
+.integrity-manual-help p { margin-top: 8px; }
+.integrity-spin { animation: integrity-spin 900ms linear infinite; }
+@keyframes integrity-spin { to { transform: rotate(360deg); } }
+@keyframes integrity-progress { from { transform: translateX(0); } to { transform: translateX(185%); } }
+:root[data-theme="dark"] .integrity-icon.tone-success { background: #173629; }
+:root[data-theme="dark"] .integrity-icon.tone-warning { background: #351d24; }
+:root[data-theme="dark"] .integrity-icon.tone-progress { background: #1c3049; }
+:root[data-theme="dark"] .integrity-primary { background: #4d80d7; }
+:root[data-theme="dark"] .integrity-primary:hover:not(:disabled) { background: #4d80d7; }
+@media (max-width: 680px) {
+  .integrity-heading { flex-wrap: wrap; }
+  .integrity-heading-copy { flex-basis: calc(100% - 50px); }
+  .integrity-check { margin-left: 50px; }
+  .integrity-actions > button { flex-grow: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .integrity-spin, .integrity-progress-track > span.indeterminate { animation: none; }
+  .integrity-progress-track > span { transition: none; }
+}

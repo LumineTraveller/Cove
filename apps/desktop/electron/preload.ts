@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from "electron";
 import type { UpdateState } from "./updater-core";
 import type { RemoteControlActivation } from "./remote-control-activation";
 import type { RemoteControlInput } from "./remote-control";
+import type { InstallationIntegrityState } from './integrity-state';
 
 contextBridge.exposeInMainWorld('coveServerAccess', {
   get: (server: string, email: string) => ipcRenderer.invoke('cove:server-access:get', server, email),
@@ -47,6 +48,20 @@ contextBridge.exposeInMainWorld("coveUpdater", {
       listener(state);
     ipcRenderer.on("cove:update:state", handler);
     return () => ipcRenderer.off("cove:update:state", handler);
+  },
+});
+
+contextBridge.exposeInMainWorld('coveIntegrity', {
+  getState: (): Promise<InstallationIntegrityState> => ipcRenderer.invoke('cove:integrity:get-state'),
+  checkNow: (): Promise<InstallationIntegrityState> => ipcRenderer.invoke('cove:integrity:check'),
+  downloadRepair: (): Promise<InstallationIntegrityState> => ipcRenderer.invoke('cove:integrity:download'),
+  cancel: (): Promise<InstallationIntegrityState> => ipcRenderer.invoke('cove:integrity:cancel'),
+  launchRepair: (): Promise<boolean> => ipcRenderer.invoke('cove:integrity:launch'),
+  openRelease: (): Promise<boolean> => ipcRenderer.invoke('cove:integrity:open-release'),
+  onState: (listener: (state: InstallationIntegrityState) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, state: InstallationIntegrityState) => listener(state);
+    ipcRenderer.on('cove:integrity:state', handler);
+    return () => ipcRenderer.off('cove:integrity:state', handler);
   },
 });
 

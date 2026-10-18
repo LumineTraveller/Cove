@@ -46,7 +46,7 @@ function publishState(state: UpdateState): void {
   }
 }
 
-export function startAutoUpdater(isPackaged: boolean): AutoUpdaterController {
+export function startAutoUpdater(isPackaged: boolean, isMaintenanceBusy: () => boolean = () => false): AutoUpdaterController {
   const logger = createLogger();
   let installerCache: ReturnType<typeof createGiteeInstallerCache> | undefined;
   if (isPackaged && process.platform === 'win32') {
@@ -65,6 +65,7 @@ export function startAutoUpdater(isPackaged: boolean): AutoUpdaterController {
     getWindow: getMainWindow,
     publishState,
     logger,
+    isMaintenanceBusy,
     // Serialize startup cleanup with ALL checks (including a manual check) so a
     // cleanup cannot race this process's next download into the same directory.
     resolveSources: async (serverUrl) => { await cleanup; return discoverUpdateSources(serverUrl); },

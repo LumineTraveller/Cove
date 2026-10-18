@@ -38,6 +38,9 @@ $expectedNames = @(
     "Cove-Server-Setup-$version.exe",
     "Cove-Server-Setup-$version.exe.blockmap"
 )
+# Historical releases have five assets. Mirror the exact-version Windows x64
+# integrity manifest as a sixth asset only when the GitHub release contains it.
+$integrityManifestName = "Cove-Integrity-$version-win32-x64.json"
 
 function Invoke-Checked([string]$command, [string[]]$arguments) {
     & $command @arguments
@@ -61,8 +64,8 @@ function Invoke-ReleaseHttp([string]$mode, [string]$url, [string]$userAgent, [st
     if ($output) { Write-Output $output }
 }
 
-function Assert-PublicHead([string]$url) {
-    Invoke-ReleaseHttp 'head' $url 'cove-cloud-publisher' | Out-Null
+function Assert-PublicHead([string]$url, [string]$expectedSize = '') {
+    Invoke-ReleaseHttp 'head' $url 'cove-cloud-publisher' '' $expectedSize | Out-Null
 }
 
 function Get-GithubRelease([string]$repo, [string]$tag) {
@@ -80,10 +83,16 @@ if ($release.draft -or $release.prerelease) {
 }
 
 $assetsByName = @{}
-foreach ($asset in @($release.assets)) { $assetsByName[$asset.name] = $asset }
+foreach ($asset in @($release.assets)) {
+    if ($assetsByName.ContainsKey($asset.name)) { throw "Duplicate GitHub release asset: $($asset.name)" }
+    $assetsByName[$asset.name] = $asset
+}
+$hasIntegrityManifest = @($release.assets | Where-Object name -ceq $integrityManifestName).Count -eq 1
+if ($hasIntegrityManifest) { $expectedNames += $integrityManifestName }
 $selectedAssets = @()
 foreach ($name in $expectedNames) {
     if (-not $assetsByName.ContainsKey($name)) { throw "GitHub Release 缺少附件：$name" }
+    if ($assetsByName[$name].name -cne $name) { throw "Release asset has an unexpected filename: $name" }
     $selectedAssets += $assetsByName[$name]
 }
 $assetHashes = @{}
@@ -122,6 +131,14 @@ try {
         }
     }
 
+    if ($hasIntegrityManifest) {
+        $integrity = Get-Content -LiteralPath (Join-Path $tempDir $integrityManifestName) -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($integrity.schemaVersion -ne 1 -or $integrity.version -cne $version -or
+            $integrity.platform -cne 'win32' -or $integrity.arch -cne 'x64' -or -not $integrity.files.Count) {
+            throw "Integrity manifest identity does not match this Windows x64 release"
+        }
+    }
+
     $checksums = Join-Path $tempDir 'SHA256SUMS'
     $checksumLines = @($selectedAssets | ForEach-Object { "$($assetHashes[$_.name])  $($_.name)" })
     [System.IO.File]::WriteAllText($checksums, ($checksumLines -join "`n") + "`n", [System.Text.UTF8Encoding]::new($false))
@@ -139,18 +156,18 @@ try {
     $remoteCommands = @(
         'set -eu',
         "cd '$staging' && sha256sum -c SHA256SUMS",
-        "sudo install -d -m 0755 '$releaseDir' '$RemoteRoot/downloads'",
-        "sudo install -m 0644 '$staging/latest.yml' '$releaseDir/latest.yml'",
-        "sudo install -m 0644 '$staging/Cove-Setup-$version.exe' '$releaseDir/Cove-Setup-$version.exe'",
-        "sudo install -m 0644 '$staging/Cove-Setup-$version.exe.blockmap' '$releaseDir/Cove-Setup-$version.exe.blockmap'",
-        "sudo install -m 0644 '$staging/Cove-Server-Setup-$version.exe' '$releaseDir/Cove-Server-Setup-$version.exe'",
-        "sudo install -m 0644 '$staging/Cove-Server-Setup-$version.exe.blockmap' '$releaseDir/Cove-Server-Setup-$version.exe.blockmap'",
+        "sudo install -d -m 0755 '$releaseDir' '$RemoteRoot/downloads'"
+    )
+    $remoteCommands += @($selectedAssets | ForEach-Object {
+        "sudo install -m 0644 '$staging/$($_.name)' '$releaseDir/$($_.name)'"
+    })
+    $stagedAssetPaths = ($selectedAssets | ForEach-Object { "'$staging/$($_.name)'" }) -join ' '
+    $remoteCommands += @(
         "sudo install -m 0644 '$releaseDir/Cove-Setup-$version.exe' '$RemoteRoot/downloads/Cove-Setup.exe'",
         "sudo install -m 0644 '$releaseDir/Cove-Server-Setup-$version.exe' '$RemoteRoot/downloads/Cove-Server-Setup.exe'",
         "cd '$releaseDir' && sha256sum -c '$staging/SHA256SUMS'",
         "sudo install -m 0644 '$staging/latest.json' '$RemoteRoot/releases/latest.json'",
-        "rm -f -- '$staging/SHA256SUMS'",
-        "rm -f -- '$staging/latest.yml' '$staging/latest.json' '$staging/Cove-Setup-$version.exe' '$staging/Cove-Setup-$version.exe.blockmap' '$staging/Cove-Server-Setup-$version.exe' '$staging/Cove-Server-Setup-$version.exe.blockmap'",
+        "rm -f -- '$staging/SHA256SUMS' '$staging/latest.json' $stagedAssetPaths",
         "rmdir -- '$staging'"
     )
     Invoke-Checked 'ssh' @($SshTarget, ($remoteCommands -join '; '))
@@ -161,6 +178,9 @@ try {
     }
     foreach ($name in @("releases/$Tag/latest.yml", 'downloads/Cove-Setup.exe', 'downloads/Cove-Server-Setup.exe')) {
         Assert-PublicHead "$publicBase/$name`?check=$Tag"
+    }
+    foreach ($asset in $selectedAssets) {
+        Assert-PublicHead "$publicBase/releases/$Tag/$($asset.name)?check=$Tag" ([string]$asset.size)
     }
     Write-Output "完成：$Tag 已发布到 $publicBase。"
     $completed = $true

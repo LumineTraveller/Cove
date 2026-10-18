@@ -3,6 +3,7 @@ import {
   BrowserWindow,
   ClipboardItem,
   clipboard,
+  dialog,
   Menu,
   session,
   desktopCapturer,
@@ -20,6 +21,11 @@ import { readFileSync, mkdirSync } from "node:fs";
 import { promises as dns } from "node:dns";
 import { openUpdaterLog, startAutoUpdater } from "./updater";
 import type { AutoUpdaterController, UpdateState } from "./updater-core";
+import { isUpdateBusy } from './update-state';
+import { createInstallationIntegrityController } from './installation-integrity';
+import { registerInstallationIntegrityIpc } from './installation-integrity-ipc';
+import { handoffRepairInstaller } from './installation-integrity-handoff';
+import type { InstallationIntegrityState } from './integrity-state';
 import { normalizeExternalHttpUrl } from "./external-links";
 import { ServerCertificatePolicy } from "./server-certificate-policy";
 import { installNativeResizeState } from "./window-resize";
@@ -83,6 +89,7 @@ if (isDev && process.env.COVE_DESKTOP_DATA_DIR) {
 }
 const devRendererURL = process.env.COVE_DEV_RENDERER_URL || 'http://127.0.0.1:55173';
 let updaterController: AutoUpdaterController | null = null;
+let integrityController: ReturnType<typeof createInstallationIntegrityController> | null = null;
 let mainWindow: BrowserWindow | null = null;
 const annotationOverlay = new AnnotationOverlayController((token, reason) => {
   mainWindow?.webContents.send('cove:annotation-overlay:failure', { token, reason });
@@ -292,6 +299,24 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  const integritySender = (event: Electron.IpcMainInvokeEvent) =>
+    event.sender === mainWindow?.webContents && event.senderFrame === mainWindow?.webContents.mainFrame;
+  const unavailableIntegrityState: InstallationIntegrityState = {
+    status: 'disabled', version: app.getVersion(), platform: process.platform, arch: process.arch,
+    message: '安装完整性服务尚未就绪。',
+  };
+  registerInstallationIntegrityIpc<Electron.IpcMainInvokeEvent>(ipcMain, {
+    controller: () => integrityController,
+    isTrustedSender: integritySender,
+    unavailableState: unavailableIntegrityState,
+    openRelease: async () => {
+      const version = app.getVersion();
+      const url = /^\d+\.\d+\.\d+$/.test(version)
+        ? `https://github.com/LumineTraveller/Cove/releases/tag/v${version}`
+        : 'https://github.com/LumineTraveller/Cove/releases';
+      try { await shell.openExternal(url); return true; } catch { return false; }
+    },
+  });
   registerAccountPasswordIpc(ipcMain, new AccountPasswordStore(path.join(app.getPath('userData'), 'account-passwords.v1.json'), safeStorage),
     event => event.sender === mainWindow?.webContents && event.senderFrame === mainWindow?.webContents.mainFrame);
   registerServerAccessIpc(ipcMain, new ServerAccessStore(path.join(app.getPath('userData'), 'server-access.v1.json'), safeStorage),
@@ -474,12 +499,17 @@ app.whenReady().then(() => {
     "cove:update:check",
     (event) => {
       if (event.sender !== mainWindow?.webContents) return unavailableUpdateState;
+      if (integrityController?.isBusy()) return {
+        status: 'error', message: '安装完整性操作正在进行，请完成后再检查更新。',
+        errorCode: 'INSTALLATION_MAINTENANCE_BUSY',
+      } satisfies UpdateState;
       return updaterController?.checkNow() ?? unavailableUpdateState;
     },
   );
   ipcMain.handle(
     "cove:update:install",
-    () => updaterController?.installNow() ?? false,
+    (event, ...args: unknown[]) => integritySender(event) && !args.length && !integrityController?.isBusy()
+      ? updaterController?.installNow() ?? false : false,
   );
   ipcMain.handle("cove:update:open-log", (event) => {
     if (event.sender !== mainWindow?.webContents) return false;
@@ -574,8 +604,41 @@ app.whenReady().then(() => {
     return true;
   });
   createWindow();
+  integrityController = createInstallationIntegrityController({
+    isPackaged: app.isPackaged && !isNetworkLabBuild,
+    platform: process.platform,
+    arch: process.arch,
+    version: app.getVersion(),
+    installRoot: path.dirname(process.execPath),
+    userDataDir: app.getPath('userData'),
+    cacheRoot: path.join(app.getPath('temp'), 'cove-installation-integrity'),
+    publishState: state => {
+      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+        mainWindow.webContents.send('cove:integrity:state', state);
+      }
+    },
+    isExternalBusy: () => isUpdateBusy(updaterController?.getState().status ?? 'idle'),
+    confirmInstall: async () => {
+      const win = mainWindow;
+      if (!win || win.isDestroyed()) return false;
+      const result = await dialog.showMessageBox(win, {
+        type: 'warning',
+        title: '修复 Cove 安装',
+        message: `退出 Cove 并启动当前版本 ${app.getVersion()} 的修复安装器？`,
+        detail: '请先保存正在进行的工作。通话和屏幕共享会中断。安装器将按 Windows 正常流程请求确认，请选择原安装位置。账户、聊天记录和语音包不属于完整性检查范围；无需卸载或清除应用数据。安装后重新检查才能确认修复结果。',
+        buttons: ['取消', '退出并启动修复安装器'],
+        defaultId: 0, cancelId: 0, noLink: true,
+      });
+      return result.response === 1 && mainWindow === win && !win.isDestroyed();
+    },
+    openInstaller: file => handoffRepairInstaller(file, {
+      suspendAutoInstall: () => updaterController?.suppressInstallOnQuit() ?? (() => undefined),
+      openPath: installer => shell.openPath(installer),
+    }),
+    quit: () => app.quit(),
+  });
   // Experimental installs must never discover or install formal Cove releases.
-  updaterController = isNetworkLabBuild ? null : startAutoUpdater(app.isPackaged);
+  updaterController = isNetworkLabBuild ? null : startAutoUpdater(app.isPackaged, () => integrityController?.isBusy() ?? false);
 });
 
 app.on("will-quit", () => {
@@ -586,6 +649,7 @@ app.on("will-quit", () => {
   remoteInputController.stop();
   setRemoteStopShortcut(false);
   updaterController?.dispose();
+  integrityController?.dispose();
 });
 
 app.on("window-all-closed", () => {
