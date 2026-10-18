@@ -116,7 +116,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Uploading release assets failed" }
           # The checker authenticates the manifest with this official HTTPS API
           # asset digest, never with a checksum downloaded beside the manifest.
-          $releaseApi = gh api "repos/$repo/releases/tags/$tag" | ConvertFrom-Json
+          # Draft releases may not resolve through REST's tag endpoint. The CLI
+          # resolves the draft and exposes its exact release-ID API URL instead.
+          $draftDetails = gh release view $tag --repo $repo --json apiUrl | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $draftDetails.apiUrl -notmatch "^https://api\.github\.com/repos/$([regex]::Escape($repo))/releases/\d+$") {
+            throw "Resolving the exact draft release API URL failed"
+          }
+          $releaseApi = gh api $draftDetails.apiUrl | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0) { throw "Reading official release asset digests failed" }
           $integrityName = Split-Path $integrityManifest -Leaf
           $integrityAsset = @($releaseApi.assets | Where-Object name -ceq $integrityName)
@@ -124,6 +130,14 @@ jobs:
           if ($integrityAsset.Count -ne 1 -or $integrityAsset[0].digest -cne $integrityDigest) {
             throw "Official GitHub API integrity manifest digest does not match the release file"
           }
+          $verifyAssets = Join-Path $env:RUNNER_TEMP ("cove-release-verify-" + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $verifyAssets | Out-Null
+          foreach ($asset in @($installer, $blockmap, $manifest, $serverInstaller, $serverBlockmap, $integrityManifest)) {
+            New-Item -ItemType HardLink -Path (Join-Path $verifyAssets (Split-Path $asset -Leaf)) -Target (Resolve-Path $asset).Path | Out-Null
+          }
+          [IO.File]::WriteAllText((Join-Path $verifyAssets 'release.json'), ($releaseApi | ConvertTo-Json -Depth 30), [Text.UTF8Encoding]::new($false))
+          node tools/verify-release-integrity.cjs $verifyAssets --allow-draft
+          if ($LASTEXITCODE -ne 0) { throw "Actual installer payload does not match the official inventory" }
           gh release edit $tag --draft=false --latest --title "Cove v$version" --notes-file RELEASE_NOTES.md --repo $repo
           if ($LASTEXITCODE -ne 0) { throw "Publishing release failed" }
 

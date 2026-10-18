@@ -1,0 +1,148 @@
+name: Publish verified existing Windows assets
+
+on:
+  push:
+    branches:
+      - 'release/publish-existing-*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing unpublished Windows release tag
+        required: true
+        type: string
+      source_run_id:
+        description: Release run whose only failed step was publication
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: publish-existing-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish-existing:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      INPUT_TAG: ${{ inputs.tag }}
+      INPUT_RUN: ${{ inputs.source_run_id }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Resolve and validate the original build and existing draft
+        id: source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repo = $env:GITHUB_REPOSITORY
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+            $tag = $env:INPUT_TAG
+            $runId = $env:INPUT_RUN
+          } elseif ($env:GITHUB_REF_NAME -match '^release/publish-existing-(v\d+\.\d+\.\d+)-(\d+)$') {
+            $tag = $Matches[1]
+            $runId = $Matches[2]
+          } else { throw 'Invalid recovery branch' }
+          if ($tag -notmatch '^v\d+\.\d+\.\d+$' -or $runId -notmatch '^\d+$') { throw 'Invalid release identity' }
+          $run = gh api "repos/$repo/actions/runs/$runId" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.status -ne 'completed' -or $run.event -ne 'push' -or
+              $run.path -ne '.github/workflows/release-client.yml' -or $run.conclusion -ne 'failure') {
+            throw 'Recovery requires the completed original release run'
+          }
+          $jobs = gh api "repos/$repo/actions/runs/$runId/jobs" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $jobs.jobs.Count -ne 1) { throw 'Unexpected source jobs' }
+          $steps = $jobs.jobs[0].steps
+          foreach ($name in @('Verify tag matches client version', 'Install dependencies',
+              'Verify architecture and development startup contracts', 'Test desktop client',
+              'Test release mirror asset selection without network access', 'Test server',
+              'Build Windows release', 'Prepare server Visual C++ runtime', 'Build Windows server release')) {
+            $step = @($steps | Where-Object name -ceq $name)
+            if ($step.Count -ne 1 -or $step[0].conclusion -ne 'success') { throw "Source gate did not pass: $name" }
+          }
+          $failed = @($steps | Where-Object conclusion -eq 'failure')
+          if ($failed.Count -ne 1 -or $failed[0].name -cne 'Create GitHub release') { throw 'Source failed outside publication' }
+          $ref = gh api "repos/$repo/git/ref/tags/$tag" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Missing source tag' }
+          $tagObject = $ref.object.sha
+          $object = $ref.object
+          for ($depth = 0; $object.type -eq 'tag'; $depth++) {
+            if ($depth -ge 4) { throw 'Invalid tag chain' }
+            $annotated = gh api "repos/$repo/git/tags/$($object.sha)" | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0) { throw 'Invalid annotated tag' }
+            $object = $annotated.object
+          }
+          if ($object.type -ne 'commit' -or $object.sha -cne $run.head_sha) { throw 'Tag does not match the tested build' }
+          $details = gh release view $tag --repo $repo --json apiUrl,isDraft,tagName | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $details.isDraft -or $details.tagName -cne $tag -or
+              $details.apiUrl -notmatch "^https://api\.github\.com/repos/$([regex]::Escape($repo))/releases/\d+$") {
+            throw 'An exact existing unpublished draft is required'
+          }
+          $release = gh api $details.apiUrl | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $release.draft -or $release.prerelease -or $release.tag_name -cne $tag) { throw 'Invalid draft metadata' }
+          $version = $tag.Substring(1)
+          $names = @("Cove-Setup-$version.exe", "Cove-Setup-$version.exe.blockmap", 'latest.yml',
+            "Cove-Server-Setup-$version.exe", "Cove-Server-Setup-$version.exe.blockmap", "Cove-Integrity-$version-win32-x64.json")
+          if ($release.assets.Count -ne $names.Count) { throw 'Unexpected existing assets' }
+          foreach ($name in $names) {
+            $asset = @($release.assets | Where-Object name -ceq $name)
+            if ($asset.Count -ne 1 -or $asset[0].state -ne 'uploaded' -or $asset[0].size -le 0 -or
+                $asset[0].size -gt 120MB -or $asset[0].digest -notmatch '^sha256:[a-f0-9]{64}$' -or
+                $asset[0].uploader.login -cne 'github-actions[bot]' -or
+                [datetime]$asset[0].created_at -lt [datetime]$run.run_started_at -or
+                [datetime]$asset[0].created_at -gt [datetime]$run.updated_at) { throw "Invalid source asset: $name" }
+          }
+          $assets = Join-Path $env:RUNNER_TEMP 'cove-existing-release-assets'
+          New-Item -ItemType Directory -Path $assets -ErrorAction Stop | Out-Null
+          gh release download $tag --repo $repo --dir $assets
+          if ($LASTEXITCODE -ne 0) { throw 'Downloading existing draft assets failed' }
+          [IO.File]::WriteAllText((Join-Path $assets 'release.json'), ($release | ConvertTo-Json -Depth 30), [Text.UTF8Encoding]::new($false))
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "tag_object=$tagObject" >> $env:GITHUB_OUTPUT
+          "assets=$assets" >> $env:GITHUB_OUTPUT
+          "api_url=$($details.apiUrl)" >> $env:GITHUB_OUTPUT
+          Write-Output "Validated source run $runId at $($run.head_sha); reusing $($release.assets.Count) existing assets. No rebuild."
+
+      - name: Install only the locked verification dependencies without build scripts
+        run: npm ci --ignore-scripts --registry=https://registry.npmjs.org --replace-registry-host=registry.npmmirror.com
+
+      - name: Verify actual installer payload against the official file manifest
+        shell: pwsh
+        env:
+          ASSET_DIRECTORY: ${{ steps.source.outputs.assets }}
+        run: |
+          node tools/verify-release-integrity.cjs $env:ASSET_DIRECTORY --allow-draft
+          if ($LASTEXITCODE -ne 0) { throw 'Existing assets failed payload verification' }
+
+      - name: Publish the unchanged verified draft
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ steps.source.outputs.tag }}
+          TAG_OBJECT: ${{ steps.source.outputs.tag_object }}
+          ASSET_DIRECTORY: ${{ steps.source.outputs.assets }}
+          RELEASE_API_URL: ${{ steps.source.outputs.api_url }}
+        run: |
+          $repo = $env:GITHUB_REPOSITORY
+          $tag = $env:RELEASE_TAG
+          $ref = gh api "repos/$repo/git/ref/tags/$tag" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $ref.object.sha -cne $env:TAG_OBJECT) { throw 'Source tag changed during verification' }
+          $before = Get-Content -LiteralPath (Join-Path $env:ASSET_DIRECTORY 'release.json') -Raw | ConvertFrom-Json
+          $current = gh api $env:RELEASE_API_URL | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $current.draft -or $current.assets.Count -ne $before.assets.Count) { throw 'Draft changed during verification' }
+          foreach ($old in $before.assets) {
+            $asset = @($current.assets | Where-Object id -eq $old.id)
+            if ($asset.Count -ne 1 -or $asset[0].name -cne $old.name -or
+                $asset[0].digest -cne $old.digest -or $asset[0].size -ne $old.size) { throw 'Asset changed during verification' }
+          }
+          gh release edit $tag --repo $repo --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Publishing existing draft failed' }
+          $public = gh api "repos/$repo/releases/tags/$tag" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $public.draft -or $public.prerelease -or $public.tag_name -cne $tag) { throw 'Publication was not confirmed' }
+          Write-Output "Published unchanged verified assets: $($public.html_url)"
