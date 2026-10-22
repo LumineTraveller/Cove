@@ -743,12 +743,12 @@ function configureIceRecovery(supported = true) {
     else emit(event, payload, reply);
   });
   const change = async (side: 'send' | 'receive', state: string) => {
-    const transport = side === 'send' ? mockTransport : mockReceiveTransport;
+    const transport = side === 'send' ? (mockNextTransports?.send ?? mockTransport) : (mockNextTransports?.receive ?? mockReceiveTransport);
     const changed = transport.on.mock.calls.find(([event]) => event === 'connectionstatechange')![1];
     await act(async () => { transport.connectionState = state; changed(state); });
   };
   const recovered = (side: 'send' | 'receive') => {
-    const transport = side === 'send' ? mockTransport : mockReceiveTransport;
+    const transport = side === 'send' ? (mockNextTransports?.send ?? mockTransport) : (mockNextTransports?.receive ?? mockReceiveTransport);
     transport.restartIce.mockImplementation(async () => {
       transport.connectionState = 'connected';
       transport.on.mock.calls.find(([event]) => event === 'connectionstatechange')![1]('connected');
@@ -1051,5 +1051,97 @@ test('internal viewer switching keeps its transport ownership during an ICE reco
   expect(media.isWatchingScreen).toBe(true);
   expect(mockTransport.close).not.toHaveBeenCalled();
   expect(mockReceiveTransport.close).not.toHaveBeenCalled();
+  expect(mockGetUserMedia).not.toHaveBeenCalled();
+});
+
+test.each(['send', 'receive'] as const)('watching then joining voice reuses transports with working %s ICE recovery', async side => {
+  jest.useFakeTimers();
+  const ice = configureIceRecovery();
+  await act(async () => handlers.get('ms:new-producer')!({ producerId: 'screen', peerId: 'desktop', kind: 'video', appData: { type: 'screen' } }));
+  await act(async () => media.watchScreen('desktop'));
+  await ice.change('receive', 'connected');
+  const screen = media.remoteScreen;
+  const created = socket.emit.mock.calls.filter(([event]: any[]) => event === 'ms:create-transport').length;
+  await act(async () => media.joinVoice());
+  await ice.change('send', 'connected');
+  ice.recovered(side);
+  await ice.change(side, 'failed');
+  await act(async () => jest.advanceTimersByTime(0));
+  expect(ice.requests).toHaveLength(1);
+  expect((side === 'send' ? mockTransport : mockReceiveTransport).restartIce).toHaveBeenCalledTimes(1);
+  expect(socket.emit.mock.calls.filter(([event]: any[]) => event === 'ms:create-transport')).toHaveLength(created);
+  expect(media.inVoice).toBe(true);
+  expect(media.isWatchingScreen).toBe(true);
+  expect(media.remoteScreen).toBe(screen);
+  expect(mockTransport.close).not.toHaveBeenCalled();
+  expect(mockReceiveTransport.close).not.toHaveBeenCalled();
+  expect(mockGetUserMedia).toHaveBeenCalledTimes(1);
+});
+
+test('reusing viewer transports for voice retains the existing ICE sequence and recovery ownership', async () => {
+  jest.useFakeTimers();
+  const ice = configureIceRecovery();
+  await act(async () => handlers.get('ms:new-producer')!({ producerId: 'screen', peerId: 'desktop', kind: 'video', appData: { type: 'screen' } }));
+  await act(async () => media.watchScreen('desktop'));
+  await ice.change('receive', 'connected');
+  ice.recovered('receive');
+  await ice.change('receive', 'failed');
+  await act(async () => jest.advanceTimersByTime(0));
+  expect(ice.requests).toHaveLength(1);
+  await act(async () => media.joinVoice());
+  await ice.change('receive', 'failed');
+  await act(async () => jest.advanceTimersByTime(0));
+  expect(ice.requests).toHaveLength(2);
+  expect(ice.requests.map(({ payload }) => payload.sequence)).toEqual([1, 2]);
+  expect(mockReceiveTransport.restartIce).toHaveBeenCalledTimes(2);
+  expect(media.isWatchingScreen).toBe(true);
+  expect(media.inVoice).toBe(true);
+});
+
+test.each(['producer-closed', 'user-left'] as const)('remote %s retires a viewer ICE session before another manual watch starts at sequence one', async closedBy => {
+  jest.useFakeTimers();
+  const ice = configureIceRecovery();
+  for (const peerId of ['desktop', 'other'])
+    await act(async () => handlers.get('ms:new-producer')!({ producerId: `screen-${peerId}`, peerId, kind: 'video', appData: { type: 'screen' } }));
+  await act(async () => media.watchScreen('desktop'));
+  await ice.change('receive', 'connected');
+  ice.recovered('receive');
+  await ice.change('receive', 'failed');
+  await act(async () => jest.advanceTimersByTime(0));
+  expect(ice.requests).toHaveLength(1);
+  ice.respond(() => {});
+  await ice.change('receive', 'failed');
+  await act(async () => jest.advanceTimersByTime(0));
+  const old = ice.requests[1];
+  expect(old.payload.sequence).toBe(2);
+  await act(async () => {
+    if (closedBy === 'producer-closed')
+      handlers.get('ms:producer-closed')!({ producerId: 'screen-desktop', peerId: 'desktop', sourceType: 'screen' });
+    else handlers.get('voice:user-left')!({ socketId: 'desktop' });
+  });
+  expect(mockReceiveTransport.close).toHaveBeenCalledTimes(1);
+  expect(mockTransport.close).toHaveBeenCalledTimes(1);
+  expect(media.isWatchingScreen).toBe(false);
+  expect(media.availableScreens.map(source => source.socketId)).toEqual(['other']);
+  const nextSend = { ...mockTransport, id: 'next-send', on: jest.fn(), close: jest.fn(), restartIce: jest.fn(async (_options: unknown) => {}) };
+  const nextReceive = { ...mockReceiveTransport, id: 'next-receive', on: jest.fn(), close: jest.fn(), restartIce: jest.fn(async (_options: unknown) => {}) };
+  mockNextTransports = { send: nextSend, receive: nextReceive };
+  await act(async () => media.watchScreen('other'));
+  await act(async () => old.reply({ ok: true, version: 1, ...old.payload, iceParameters: { usernameFragment: 'late', password: 'late-password' } }));
+  expect(mockReceiveTransport.restartIce).toHaveBeenCalledTimes(1);
+  expect(nextReceive.restartIce).not.toHaveBeenCalled();
+  await ice.change('receive', 'connected');
+  ice.recovered('receive');
+  ice.respond((payload, reply) => reply({ ok: true, version: 1, ...payload, iceParameters: { usernameFragment: 'current', password: 'current-password' } }));
+  await ice.change('receive', 'failed');
+  await act(async () => jest.advanceTimersByTime(0));
+  expect(ice.requests.map(({ payload }) => [payload.transportId, payload.sequence])).toEqual([
+    ['voice-receive', 1], ['voice-receive', 2], ['next-receive', 1],
+  ]);
+  expect(nextReceive.restartIce).toHaveBeenCalledTimes(1);
+  expect(media.remoteScreen?.socketId).toBe('other');
+  expect(media.isWatchingScreen).toBe(true);
+  expect(media.inVoice).toBe(false);
+  expect(media.error).toBeNull();
   expect(mockGetUserMedia).not.toHaveBeenCalled();
 });

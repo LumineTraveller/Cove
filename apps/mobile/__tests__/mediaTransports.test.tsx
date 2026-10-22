@@ -23,7 +23,7 @@ async function fixture() {
   const deps: any = {
     deviceRef: ref({ rtpCapabilities: {} }), sendTransport: ref(null),
     recvTransport: ref({ closed: false, consume: jest.fn(async () => consumer) }),
-    mediaGeneration: ref(1), socket: { connected: true, emit: jest.fn() },
+    mediaGeneration: ref(1), transportGeneration: ref(1), socket: { connected: true, emit: jest.fn() },
     checkTransport: jest.fn(), setConnectionState: jest.fn(),
     consumers: ref(new Map()), consumerByProducer: ref(new Map()),
     applicationAudioVolumes: ref(new Map()), setApplicationAudioShares: jest.fn(),
@@ -69,7 +69,7 @@ test('send and receive transport RPCs are both outstanding before either ACK', a
   await f.dispose();
 });
 
-test('ICE registrations retain the creating socket and exact generation and transport ownership', async () => {
+test('ICE registrations retain resource ownership across operations and invalidate with the transport generation', async () => {
   const f = await fixture();
   f.deps.deviceRef.current = null;
   f.deps.socket.id = 'creating-session';
@@ -99,6 +99,8 @@ test('ICE registrations retain the creating socket and exact generation and tran
   sent('failed');
   expect(f.deps.checkTransport).toHaveBeenCalledTimes(2);
   f.deps.mediaGeneration.current++;
+  expect(recvRegistration.isCurrent()).toBe(true);
+  f.deps.transportGeneration.current++;
   expect(recvRegistration.isCurrent()).toBe(false);
   await f.dispose();
 });
@@ -220,4 +222,32 @@ test('a duplicate pending consume is not reported as a ready subscription after 
   expect(f.deps.pendingProducers.current.size).toBe(0);
   expect(f.deps.consumers.current.size).toBe(0);
   await f.dispose();
+});
+
+test('watch termination notifies the owner before clearing intent, while internal switching keeps resources', async () => {
+  const watching = ref(null);
+  const stopped: string[] = [];
+  const deps: any = {
+    watchingScreenPeerRef: watching, consumers: ref(new Map()), removeConsumer: jest.fn(),
+    setIsWatchingScreen: jest.fn(), setRemoteScreen: jest.fn(),
+    availableScreensRef: ref(new Map(['first', 'second'].map(socketId => [socketId, { socketId, videoProducerId: `screen-${socketId}` }]))),
+    consumeProducer: jest.fn(async () => true),
+    onBeforeStop: jest.fn(() => stopped.push(watching.current)),
+  };
+  let view!: ReturnType<typeof useScreenViewing>;
+  let renderer!: TestRenderer.ReactTestRenderer;
+  function Viewing() { view = useScreenViewing(deps); return null; }
+  await act(async () => { renderer = TestRenderer.create(<Viewing />); });
+  await act(async () => view.watchScreen('first'));
+  await act(async () => view.watchScreen('second'));
+  expect(deps.onBeforeStop).not.toHaveBeenCalled();
+  await act(async () => view.stopWatchingScreen());
+  expect(stopped).toEqual(['second']);
+  expect(watching.current).toBeNull();
+  deps.consumeProducer.mockResolvedValueOnce(false);
+  await act(async () => view.watchScreen('first'));
+  expect(stopped).toEqual(['second', 'first']);
+  expect(watching.current).toBeNull();
+  expect(deps.setIsWatchingScreen).toHaveBeenLastCalledWith(false);
+  await act(async () => renderer.unmount());
 });

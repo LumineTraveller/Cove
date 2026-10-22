@@ -22,6 +22,7 @@ import {
 export interface UseVoiceTeardownDependencies {
   readonly stopScreenShare: () => void;
   readonly mediaGeneration: import('react').RefObject<number>;
+  readonly transportGeneration: import('react').RefObject<number>;
   readonly joiningRef: import('react').RefObject<boolean>;
   readonly connectionGrace: import('react').RefObject<DisconnectGrace>;
   readonly iceRecovery: import('react').RefObject<TransportIceRecovery | null>;
@@ -94,6 +95,7 @@ export function useVoiceTeardown(deps: UseVoiceTeardownDependencies) {
   const {
     stopScreenShare,
     mediaGeneration,
+    transportGeneration,
     joiningRef,
     connectionGrace,
     iceRecovery,
@@ -130,6 +132,7 @@ export function useVoiceTeardown(deps: UseVoiceTeardownDependencies) {
   const teardown = useCallback(
     (notifyServer: boolean, options: { preserveAvailableScreens?: boolean } = {}) => {
       iceRecovery.current?.cancelAll();
+      transportGeneration.current += 1;
       stopScreenShare();
       mediaGeneration.current += 1;
       cancelPendingWatch();
@@ -181,6 +184,7 @@ export function useVoiceTeardown(deps: UseVoiceTeardownDependencies) {
     [
       stopScreenShare,
       mediaGeneration,
+      transportGeneration,
       joiningRef,
       connectionGrace,
       iceRecovery,

@@ -6,6 +6,7 @@ import { MediaStream } from 'react-native-webrtc';
 import { Consumer, RemoteScreen, AvailableScreen } from '../mobileMediaSupport';
 
 export interface UseScreenViewingDependencies {
+  readonly onBeforeStop?: () => void;
   readonly watchingScreenPeerRef: import('react').RefObject<string | null>;
   readonly consumers: import('react').RefObject<
     Map<
@@ -55,6 +56,7 @@ export function useScreenViewing(deps: UseScreenViewingDependencies) {
     setRemoteScreen,
     availableScreensRef,
     consumeProducer,
+    onBeforeStop,
   } = deps;
 
   // Also used for screen audio announced after viewing has already started.
@@ -63,7 +65,8 @@ export function useScreenViewing(deps: UseScreenViewingDependencies) {
     return () => watchEpoch.current === epoch && watchingScreenPeerRef.current === peerId;
   }, [watchingScreenPeerRef]);
 
-  const stopWatchingScreen = useCallback(() => {
+  const stopWatchingScreen = useCallback((endViewing = true) => {
+    if (endViewing) onBeforeStop?.();
     recovery.current?.cancel();
     watchEpoch.current += 1;
     const peerId = watchingScreenPeerRef.current;
@@ -85,6 +88,7 @@ export function useScreenViewing(deps: UseScreenViewingDependencies) {
     setIsWatchingScreen,
     setRemoteScreen,
     watchingScreenPeerRef,
+    onBeforeStop,
   ]);
 
   recoveryActions.current = {
@@ -125,7 +129,7 @@ export function useScreenViewing(deps: UseScreenViewingDependencies) {
             | AvailableScreen
             | undefined);
       if (!source || watchingScreenPeerRef.current === source.socketId) return;
-      if (watchingScreenPeerRef.current) stopWatchingScreen();
+      if (watchingScreenPeerRef.current) stopWatchingScreen(false);
       const epoch = ++watchEpoch.current;
       const isCurrent = () => watchEpoch.current === epoch &&
         watchingScreenPeerRef.current === source.socketId;
@@ -141,9 +145,7 @@ export function useScreenViewing(deps: UseScreenViewingDependencies) {
       );
       if (!isCurrent()) return;
       if (!videoOk) {
-        recovery.current?.cancel();
-        watchingScreenPeerRef.current = null;
-        setIsWatchingScreen(false);
+        stopWatchingScreen();
         return;
       }
       const current = availableScreensRef.current.get(source.socketId);

@@ -21,6 +21,7 @@ export interface UseMediaTransportsDependencies {
   readonly sendTransport: import('react').RefObject<Transport | null>;
   readonly recvTransport: import('react').RefObject<Transport | null>;
   readonly mediaGeneration: import('react').RefObject<number>;
+  readonly transportGeneration: import('react').RefObject<number>;
   readonly socket: Socket<
     import('@socket.io/component-emitter/lib/cjs').DefaultEventsMap,
     import('@socket.io/component-emitter/lib/cjs').DefaultEventsMap
@@ -67,6 +68,7 @@ export function useMediaTransports(deps: UseMediaTransportsDependencies) {
     sendTransport,
     recvTransport,
     mediaGeneration,
+    transportGeneration,
     socket,
     checkTransport,
     consumers,
@@ -86,6 +88,7 @@ export function useMediaTransports(deps: UseMediaTransportsDependencies) {
     if (deviceRef.current && sendTransport.current && recvTransport.current)
       return;
     const generation = mediaGeneration.current;
+    const ownerGeneration = transportGeneration.current;
     const ownerSocketId = socket.id;
     const ensureCurrent = () => {
       if (generation !== mediaGeneration.current)
@@ -138,7 +141,7 @@ export function useMediaTransports(deps: UseMediaTransportsDependencies) {
       if (sendTransport.current !== outgoing) return;
       checkTransport('send', state, {
         transport: outgoing, capability: sendParams.iceRestart, ownerSocketId,
-        isCurrent: () => generation === mediaGeneration.current && sendTransport.current === outgoing,
+        isCurrent: () => ownerGeneration === transportGeneration.current && sendTransport.current === outgoing,
       });
     });
     sendTransport.current = outgoing;
@@ -157,7 +160,7 @@ export function useMediaTransports(deps: UseMediaTransportsDependencies) {
       if (recvTransport.current !== incoming) return;
       checkTransport('recv', state, {
         transport: incoming, capability: recvParams.iceRestart, ownerSocketId,
-        isCurrent: () => generation === mediaGeneration.current && recvTransport.current === incoming,
+        isCurrent: () => ownerGeneration === transportGeneration.current && recvTransport.current === incoming,
       });
     });
     recvTransport.current = incoming;
@@ -166,6 +169,7 @@ export function useMediaTransports(deps: UseMediaTransportsDependencies) {
     sendTransport,
     recvTransport,
     mediaGeneration,
+    transportGeneration,
     socket,
     checkTransport,
   ]);

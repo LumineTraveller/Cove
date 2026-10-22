@@ -97,6 +97,9 @@ export function useMobileMedia(
   const pendingProducers = useRef(new Set<string>());
   const closedProducers = useRef(new Set<string>());
   const mediaGeneration = useRef(0);
+  // Voice/watch operations may reuse transports; only resource teardown
+  // invalidates the transport owner's generation.
+  const transportGeneration = useRef(0);
   const joiningRef = useRef(false);
   const mediaSocketId = useRef<string | undefined>(undefined);
   const voiceAudioSessionActive = useRef(false);
@@ -132,6 +135,7 @@ export function useMobileMedia(
   const { teardown } = useVoiceTeardown({
     stopScreenShare,
     mediaGeneration,
+    transportGeneration,
     joiningRef,
     connectionGrace,
     iceRecovery,
@@ -173,6 +177,7 @@ export function useMobileMedia(
     sendTransport,
     recvTransport,
     mediaGeneration,
+    transportGeneration,
     socket,
     checkTransport,
     consumers,
@@ -187,6 +192,14 @@ export function useMobileMedia(
     memberVolumesRef,
     setError,
   });
+  const retireIdleWatchTransports = useCallback(() => {
+    const recovering = iceRecovery.current?.isRecovering() === true;
+    cancelPendingWatch();
+    // A stopped viewer must not hand an in-flight ICE credential rotation
+    // to a later manual watch. Voice still owns the shared transports.
+    if (recovering && !inVoiceRef.current && !joiningRef.current)
+      teardown(true, { preserveAvailableScreens: true });
+  }, [cancelPendingWatch, teardown]);
   const {
     stopWatchingScreen,
     watchScreen: consumeScreen,
@@ -201,16 +214,11 @@ export function useMobileMedia(
     setRemoteScreen,
     availableScreensRef,
     consumeProducer,
+    onBeforeStop: retireIdleWatchTransports,
   });
   const stopWatchingScreenExplicitly = useCallback(() => {
-    const recovering = iceRecovery.current?.isRecovering() === true;
-    cancelPendingWatch();
     stopWatchingScreen();
-    // A cancelled viewer must not hand a transport with an in-flight ICE
-    // credential rotation to the next manual watch. Keep source discovery.
-    if (recovering && !inVoiceRef.current && !joiningRef.current)
-      teardown(true, { preserveAvailableScreens: true });
-  }, [cancelPendingWatch, stopWatchingScreen, teardown]);
+  }, [stopWatchingScreen]);
   const watchScreen = useCallback(
     async (socketId?: string) => {
       if (!roomReady || !socket.connected || watchingGeneration.current === mediaGeneration.current) return;
