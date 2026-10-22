@@ -1,6 +1,8 @@
 // Real SQLite + real mediasoup, always scoped to an isolated temporary profile.
 const fs=require('node:fs');const path=require('node:path');const assert=require('node:assert/strict');
 const {io}=require('socket.io-client');
+const {smokeClientIdentity}=require('./smoke-client-identity.cjs');
+const identity=smokeClientIdentity();
 const root=path.resolve(__dirname,'..');
 fs.mkdirSync(path.join(root,'runtime'),{recursive:true});
 process.env.COVE_DATA_DIR=fs.mkdtempSync(path.join(root,'runtime','smoke-'));
@@ -14,12 +16,12 @@ async function main(){
   const base='http://127.0.0.1:'+port;
   const accounts=[];
   for(let index=0;index<2;index++){
-    const response=await fetch(base+'/api/auth/register',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:`refactor-${index}@example.test`,password:'isolated-test-password-123',username:`Refactor ${index}`})});
+    const response=await fetch(base+'/api/auth/register',{method:'POST',headers:{'content-type':'application/json',...identity.headers},body:JSON.stringify({email:`refactor-${index}@example.test`,password:'isolated-test-password-123',username:`Refactor ${index}`})});
     assert.equal(response.status,201);accounts.push(await response.json());
   }
-  const socket=io(base,{auth:{clientProtocol:2},autoConnect:false});sockets.push(socket);
+  const socket=io(base,{auth:identity.auth,autoConnect:false});sockets.push(socket);
   await new Promise((resolve,reject)=>{socket.once('connect',resolve);socket.once('connect_error',reject);socket.connect();});
-  const registration=await request(socket,'user:register',{username:'Refactor 0',avatarUrl:null,clientId:'smoke-owner',authToken:accounts[0].token,platform:'desktop'});assert.equal(registration.ok,true);
+  const registration=await request(socket,'user:register',{username:'Refactor 0',avatarUrl:null,clientId:'smoke-owner',authToken:accounts[0].token,...identity.registration});assert.equal(registration.ok,true);
   const created=await request(socket,'room:create',{name:'Isolated refactor validation'});assert.ok(created.room?.id);
   const roomId=created.room.id;
   const joined=await request(socket,'room:join',roomId);assert.equal(joined.ok,true);

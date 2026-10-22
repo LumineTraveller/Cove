@@ -1,6 +1,6 @@
 # Cove
 
-这是独立的三端重构工作目录，不是原项目的覆盖更新。现有工作区改动一并保留；版本、媒体策略、原生采集与降噪实现不升级。模块边界和扩展约定见 [架构说明](docs/architecture/README.md)，验证记录见 [REFACTOR_STATUS.md](REFACTOR_STATUS.md)。
+当前分支包含本地改进，尚未发布。模块边界和扩展约定见 [架构说明](docs/architecture/README.md)，连接生命周期与恢复边界见 [连接恢复说明](docs/architecture/connection-recovery.md)，历史重构记录见 [REFACTOR_STATUS.md](REFACTOR_STATUS.md)。版本号以各应用的 `package.json` 和发布清单为准。
 
 Cove 是一个可自托管的实时语音与聊天应用。成员在房间内保持在线状态，随时加入语音、共享屏幕、播放语音包，并支持远程控制共享方的桌面。
 
@@ -8,7 +8,7 @@ Cove 是一个可自托管的实时语音与聊天应用。成员在房间内保
 
 - **Windows 桌面客户端** —— Electron + React，功能最完整（屏幕共享、系统/单应用音频共享、远程控制）
 - **Windows 桌面服务器** —— Electron 托盘程序，内嵌服务端，适合本机或小范围自托管
-- **Android 手机客户端** —— React Native，可创建或加入房间、加入语音、发起或观看屏幕共享、播放语音包
+- **Android 手机客户端** —— React Native，可创建或加入房间、加入语音、发起或观看屏幕共享、播放语音包，也可请求控制支持远控的桌面共享
 
 ## 技术栈
 
@@ -18,7 +18,7 @@ Cove 是一个可自托管的实时语音与聊天应用。成员在房间内保
 | 桌面客户端 | React 18 + TypeScript + Vite + Tailwind CSS、mediasoup-client、socket.io-client、Electron |
 | 手机客户端 | React Native（bare workflow，New Architecture + Hermes）、react-native-webrtc、mediasoup-client、Kotlin 原生模块 |
 
-媒体走 SFU 架构：所有客户端只与服务器建立 WebRTC 连接，由服务器转发，**不需要 STUN/TURN**。
+媒体走 SFU 架构：客户端与服务器建立 WebRTC 连接，由服务器转发。当前实现依赖可达的 SFU 候选地址，需要正确配置公网 IP 并放通 UDP/TCP 媒体端口；没有配置通用 TURN 中继，受限网络仍需单独验证。
 
 ## 仓库结构
 
@@ -49,7 +49,7 @@ baseline/                原工作区指纹和旧路径到新路径映射
 mobile/update.json       保留原 raw 更新清单 URL 的兼容副本
 scripts/                 发布脚本（镜像安装包到下载服务器）
 docs/                    技术实验记录
-.github/workflows/       release-client.yml、release-mobile.yml
+.github/workflows/       PR/main 回归门禁、桌面与手机发布工作流
 AGENTS.md                发布流程与协作约定（发布前必读）
 CHANGELOG.md             历史版本记录
 RELEASE_NOTES.md         当前版本的发布说明
@@ -78,7 +78,7 @@ Android    ─┘                    │
 
 ## 快速开始（开发）
 
-前提：Node.js LTS（建议 22）、npm。Windows 桌面客户端的部分功能（系统音频、远程控制）依赖 Windows。
+前提：Node.js 24、npm。Windows 桌面客户端的部分功能（系统音频、受控端远程输入）依赖 Windows。普通回归与服务端测试使用 Node 24 的 `node:sqlite`；手机包需要独立安装依赖。
 
 ```bash
 npm ci
@@ -214,16 +214,20 @@ $env:COVE_SERVER_SECURITY_ENABLED = "false"
 **语音**
 - 随时加入/退出房间语音，独立调节每个成员的音量
 - 麦克风降噪（RNNoise）、回声消除、发送增益、输入设备选择
-- 断线宽限：网络抖动或短暂掉线不会立刻失去语音席位
+- 信令与媒体分别判断断线：短暂信令中断可保留已有媒体和静音状态；新服务器会话或持续媒体失败会清理旧资源，需要重新加入
+- 登录登记确认缺失时有限重试，耗尽后保留登录记录并允许手动重试；不将丢失 ACK 当成凭据失效
 
 **屏幕与音频共享**
 - 屏幕共享，多档分辨率与帧率预设，按画面活跃度自动调整帧率
 - 共享屏幕附带系统音频
 - Windows 独有：共享单个应用的音频（WASAPI 进程级采集，自动排除 Cove 自身）
+- Android：支持屏幕共享和采集缩放选项，目标为 30 FPS；可选播放音频受 Android 版本和被共享应用录音策略限制
+- 桌面可显式开启“兼容观看（VP8）”，默认关闭；不改变分辨率、帧率或码率上限，需停止后重新共享。详见 [编码兼容说明](docs/architecture/screen-codec-compatibility.md)，设备兼容性仍需真机验证
 
 **远程控制**
 - 请求控制他人的共享屏幕，支持指针、滚轮、按键与安全白名单
 - 本地用户活动时自动让位，`Ctrl+Alt+Shift+X` 全局急停
+- Android 可作为控制端；远控授权在断线后撤销，重连不会自动重新授权
 
 **语音包**
 - 上传音频、裁剪编辑、拖拽排序、重命名、向全房间播放、收藏
@@ -239,13 +243,20 @@ $env:COVE_SERVER_SECURITY_ENABLED = "false"
 
 ## 测试
 
+普通 PR 和 `main` 提交的自动门禁位于 [regression.yml](.github/workflows/regression.yml)，与本地使用同一入口。工作流只检查代码，不打包、发布或安装到设备：
+
 ```bash
-npm run check
-npm test
-node tooling/runtime-smoke.cjs  # 真实 SQLite/mediasoup，本地临时数据
+node tooling/ci-regression.cjs server   # 共享包、服务端类型/单测、loopback 集成和真实 SQLite/SFU smoke
+node tooling/ci-regression.cjs desktop  # 桌面类型、独立进程 TS/CJS 测试；Windows 包含原生 helper 夹具
+node tooling/ci-regression.cjs mobile   # 手机类型与 Jest（原生边界使用 mock）
+node tooling/ci-regression.cjs server --plan  # 仅列出步骤，不执行
 ```
 
-客户端真实 Chromium 音频测试见 `apps/desktop/package.json` 的 `test:microphone`、`test:rnnoise` 等脚本。手机端 Kotlin 测试在 `apps/mobile/android` 执行 `gradlew.bat testDebugUnitTest -PcoveRefactor`。更多真实媒体与界面验证命令见架构说明。
+先按上文安装根目录和手机依赖。入口会构建共享包，遇到失败立即停止；服务端 smoke 只使用 `runtime/` 临时资料和本地端口。桌面测试必须使用桌面目录的 JSX 配置及每文件进程隔离，不能将全套测试改成 `--test-isolation=none`。
+
+这些门禁覆盖逻辑、原生边界夹具和本地集成，不等同于真机或真实网络验收。真实 Chromium 音频测试见 `apps/desktop/package.json` 的 `test:microphone`、`test:rnnoise` 等脚本。手机端 Kotlin 测试在 `apps/mobile/android` 执行 `gradlew.bat testDebugUnitTest -PcoveRefactor`。Android 路由、Wi-Fi/蜂窝切换、弱网、锁屏和长通话仍需统一验收；更多命令见 [自动回归说明](docs/architecture/regression-ci.md) 和 [媒体恢复验证矩阵](docs/testing/media-recovery-matrix.md)。
+
+离线诊断导出可用 `node tooling/analyze-media-diagnostics.cjs <诊断文件.json>` 汇总；`node tooling/verify-media-recovery.cjs --repeat 3` 可重复运行本地恢复回归。RTT 是往返时间，回归报告中的 testDuration 是测试耗时，二者都不是端到端媒体延迟，也不能据此宣称画面或声音延迟改善。
 
 ## 发布
 
@@ -260,6 +271,7 @@ node tooling/runtime-smoke.cjs  # 真实 SQLite/mediasoup，本地临时数据
 ## 已知限制
 
 - 服务端成员与语音状态保存在内存中，重启服务器会使所有成员退出语音（房间、消息、账号、禁言记录不受影响）。
-- WASAPI 系统/单应用音频共享与远程控制仅支持 Windows；Android 的播放音频采集使用系统屏幕共享授权，受应用录音策略限制。
-- 手机端可发起屏幕共享；可选播放音频采集要求 Android 10 及以上且被共享应用允许录制，需要配套新版服务端的独立共享通道。没有分辨率、帧率设置。
-- 手机端 Release APK 目前使用 debug keystore 签名，更换签名密钥会破坏覆盖安装。
+- WASAPI 系统/单应用音频共享和远控受控端仅支持 Windows；Android 可作为远控控制端，其播放音频采集使用系统屏幕共享授权，受应用录音策略限制。
+- 手机端可发起屏幕共享并选择采集缩放；可选播放音频采集要求 Android 10 及以上且被共享应用允许录制，需要配套支持独立共享通道的服务端。实际帧率取决于画面、编码器和设备。
+- 手机端 Release APK 默认保留既有 debug keystore 签名；外部正式签名仅提供显式配置入口，不能直接切换现有用户的签名身份。确认、备份和覆盖安装边界见 [签名迁移说明](docs/architecture/mobile-signing-migration.md)。
+- Windows 服务端托盘仍保留现有 Electron 运行时；维护候选未通过原生 SQLite ABI 验证，未激活升级，详见 [运行时维护状态](docs/architecture/runtime-maintenance.md)。

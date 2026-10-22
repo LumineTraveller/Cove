@@ -1,0 +1,74 @@
+name: Regression
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: regression-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server:
+    name: Shared core and server
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install locked workspace dependencies
+        run: npm ci --registry=https://registry.npmjs.org --replace-registry-host=registry.npmmirror.com
+      - name: Typecheck, test and smoke isolated server runtime
+        run: node tooling/ci-regression.cjs server
+
+  desktop:
+    name: Windows desktop
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install locked workspace dependencies
+        run: npm ci --registry=https://registry.npmjs.org --replace-registry-host=registry.npmmirror.com
+      - name: Typecheck and test desktop including Windows helper fixtures
+        run: node tooling/ci-regression.cjs desktop
+
+  mobile:
+    name: Mobile logic
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            apps/mobile/package-lock.json
+      - name: Install locked workspace dependencies
+        run: npm ci --registry=https://registry.npmjs.org --replace-registry-host=registry.npmmirror.com
+      - name: Install locked mobile dependencies
+        working-directory: apps/mobile
+        run: npm ci --registry=https://registry.npmjs.org --replace-registry-host=registry.npmmirror.com
+      - name: Typecheck and test mobile logic
+        run: node tooling/ci-regression.cjs mobile
