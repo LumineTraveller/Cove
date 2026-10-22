@@ -145,6 +145,7 @@ export function useRoomController({ profile, accountId, serverURL, sessionReady,
   const [pendingAudio, setPendingAudio] = useState(false);
   const [pendingGameMode, setPendingGameMode] = useState(false);
   const [pendingNativeResolution, setPendingNativeResolution] = useState(false);
+  const [pendingCompatibilityMode, setPendingCompatibilityMode] = useState(false);
   const [showAudioModal, setShowAudioModal] = useState(false);
   const [audioSources, setAudioSources] = useState<ApplicationAudioSource[]>([]);
   const [audioLoading, setAudioLoading] = useState(false);
@@ -774,6 +775,7 @@ export function useRoomController({ profile, accountId, serverURL, sessionReady,
     setPendingAudio(rtc.shareAudio);
     setPendingGameMode(rtc.screenGameMode);
     setPendingNativeResolution(rtc.screenNativeResolution);
+    setPendingCompatibilityMode(rtc.screenCompatibilityMode);
     setShowScreenModal(true);
   };
   const createRoom = () => {
@@ -1090,6 +1092,8 @@ export function useRoomController({ profile, accountId, serverURL, sessionReady,
     pendingGameMode,
     pendingNativeResolution,
     setPendingNativeResolution,
+    pendingCompatibilityMode,
+    setPendingCompatibilityMode,
     editingScreen,
     setPendingPreset,
     setPendingFps,

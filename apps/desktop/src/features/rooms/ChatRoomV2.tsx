@@ -159,6 +159,8 @@ export default function ChatRoomV2({
     pendingGameMode,
     pendingNativeResolution,
     setPendingNativeResolution,
+    pendingCompatibilityMode,
+    setPendingCompatibilityMode,
     editingScreen,
     setPendingPreset,
     setPendingFps,
@@ -833,6 +835,9 @@ export default function ChatRoomV2({
           gameMode={pendingGameMode}
           nativeResolution={pendingNativeResolution}
           onNativeResolution={setPendingNativeResolution}
+          compatibilityMode={pendingCompatibilityMode}
+          onCompatibilityMode={setPendingCompatibilityMode}
+          editing={editingScreen && rtc.isSharing}
           confirmLabel={editingScreen ? '更新共享' : '开始共享'}
           onPreset={setPendingPreset}
           onFps={setPendingFps}
@@ -850,6 +855,7 @@ export default function ChatRoomV2({
               pendingAudio,
               pendingGameMode,
               pendingNativeResolution,
+              pendingCompatibilityMode,
             );
           }}
           onCancel={() => {

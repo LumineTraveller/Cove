@@ -14,6 +14,7 @@ import {
   type ScreenPreset,
 } from './screenCapture';
 import { ApplicationAudioPipeline } from '../application-audio/applicationAudio';
+import { screenPublicationCodecCandidates } from './screenCodecPolicy';
 import {
   Transport,
   Producer,
@@ -30,6 +31,8 @@ export interface useScreenPublishingDependencies {
   readonly screenPreset: '540p' | '720p' | '1080p' | '1440p';
   readonly screenGameMode: boolean;
   readonly screenNativeResolution: boolean;
+  readonly screenCompatibilityMode: boolean;
+  readonly setScreenCompatibilityMode: import('react').Dispatch<import('react').SetStateAction<boolean>>;
   readonly fps: Fps;
   readonly shareAudio: boolean;
   readonly setScreenPreset: import('react').Dispatch<
@@ -106,6 +109,7 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
       initAudio?: boolean,
       initGameMode?: boolean,
       initNativeResolution?: boolean,
+      initCompatibilityMode?: boolean,
     ) => {
       if (!deps.inVoice || deps.isSharing) return;
       const preset = initPreset ?? deps.screenPreset;
@@ -113,11 +117,13 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
       const nativeResolution = initNativeResolution ?? deps.screenNativeResolution;
       const currentFps = initFps ?? deps.fps;
       const audio = initAudio ?? deps.shareAudio;
+      const compatibilityMode = initCompatibilityMode ?? deps.screenCompatibilityMode ?? false;
       if (initPreset !== undefined) deps.setScreenPreset(initPreset);
       if (initFps !== undefined) deps.setFps(currentFps);
       if (initAudio !== undefined) deps.setShareAudio(initAudio);
       if (initGameMode !== undefined) deps.setScreenGameMode(initGameMode);
       if (initNativeResolution !== undefined) deps.setScreenNativeResolution(initNativeResolution);
+      if (initCompatibilityMode !== undefined) deps.setScreenCompatibilityMode(initCompatibilityMode);
 
       // System-audio sharing must use the native process-exclusion bridge so
       // Cove's own voice and sound-pack playback can never enter the stream.
@@ -131,6 +137,11 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
       let acquiredStream: MediaStream | null = null;
       let startupStage = '申请屏幕采集';
       try {
+        // rtpCapabilities is the receive-capabilities alias in mediasoup-client.
+        // Explicit publication codecs must come from the sending intersection.
+        const device = deps.deviceRef.current;
+        const negotiatedCodecs = device?.sendRtpCapabilities?.codecs ?? device?.rtpCapabilities.codecs ?? [];
+        const codecCandidates = screenPublicationCodecCandidates(negotiatedCodecs, compatibilityMode);
         const stream = await navigator.mediaDevices.getDisplayMedia({
           // 桌面源保持原始尺寸，720p/1080p 由 RTP 编码缩放统一控制。
           video: screenCaptureVideoConstraints(currentFps),
@@ -176,19 +187,12 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
         deps.videoCounterPrev.current = null;
         deps.remoteLossPrev.current = null;
 
-        const negotiatedCodecs = deps.deviceRef.current?.rtpCapabilities.codecs ?? [];
-        const codecCandidates = ['video/av1', 'video/vp9']
-          .map((mimeType) =>
-            negotiatedCodecs.find((codec) => codec.mimeType.toLowerCase() === mimeType),
-          )
-          .filter((codec): codec is NonNullable<typeof codec> => Boolean(codec));
-
         // 直接发送 getDisplayMedia 返回的原始轨道；旧实现 clone() 后继续约束原轨道，
         // 会让 Producer 的轨道停留在 Chromium 自行选择的采集帧率。
         startupStage = '初始化屏幕视频发送';
         let producer: Producer | null = null;
         let lastProduceError: unknown = null;
-        for (const codec of [...codecCandidates, undefined]) {
+        for (const codec of codecCandidates) {
           try {
             producer = await produceWithSsrcRetry(() =>
               deps.sendTransport.current!.produce({
@@ -203,6 +207,7 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
                   outputWidth: initialPlan.outputWidth,
                   outputHeight: initialPlan.outputHeight,
                   preferredCodec: codec?.mimeType ?? 'auto',
+                  compatibilityMode,
                 },
                 encodings: [toScreenRtpEncoding(initialPlan)],
                 // 初始带宽估计（kbps），不是上限；与 SFU 启动估计一致，之后由拥塞控制调整。
@@ -220,10 +225,7 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
             break;
           } catch (error) {
             lastProduceError = error;
-            console.warn(
-              `[screen share] ${codec?.mimeType ?? '自动 codec'} 编码失败，尝试回退`,
-              error,
-            );
+            console.warn('[screen share] codec publication failed', { codec: codec?.mimeType ?? 'auto', compatibilityMode }, error);
           }
         }
         if (!producer) throw lastProduceError ?? new Error('没有可用的屏幕共享视频编码器');
@@ -295,6 +297,7 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
       deps.shareAudio,
       deps.screenGameMode,
       deps.screenNativeResolution,
+      deps.screenCompatibilityMode,
       deps.armScreenRampGuard,
       deps.applyScreenActivity,
       deps.startScreenAnalysis,
@@ -315,10 +318,15 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
       initAudio?: boolean,
       initGameMode?: boolean,
       initNativeResolution?: boolean,
+      initCompatibilityMode?: boolean,
     ) => {
       if (!deps.inVoice || !deps.isSharing) return;
       const producer = deps.screenProducer.current;
       if (!producer) return;
+      if (initCompatibilityMode !== undefined && initCompatibilityMode !== (deps.screenCompatibilityMode ?? false)) {
+        window.alert('编码兼容模式需要停止当前共享后重新开始，当前共享未更改。');
+        return;
+      }
 
       const preset = initPreset ?? deps.screenPreset;
       const gameMode = initGameMode ?? deps.screenGameMode;
@@ -437,6 +445,7 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
       deps.isSharing,
       deps.screenGameMode,
       deps.screenNativeResolution,
+      deps.screenCompatibilityMode,
       deps.screenPreset,
       deps.shareAudio,
       deps.startScreenAnalysis,

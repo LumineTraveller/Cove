@@ -8,11 +8,14 @@ export function ScreenShareSettingsV2({
   audio,
   gameMode,
   nativeResolution,
+  compatibilityMode,
+  editing,
   onPreset,
   onFps,
   onAudio,
   onGameMode,
   onNativeResolution,
+  onCompatibilityMode,
   confirmLabel,
   onConfirm,
   onCancel,
@@ -22,11 +25,14 @@ export function ScreenShareSettingsV2({
   audio: boolean;
   gameMode: boolean;
   nativeResolution: boolean;
+  compatibilityMode: boolean;
+  editing: boolean;
   onPreset: (preset: ScreenPreset) => void;
   onFps: (fps: Fps) => void;
   onAudio: () => void;
   onGameMode: () => void;
   onNativeResolution: (enabled: boolean) => void;
+  onCompatibilityMode: (enabled: boolean) => void;
   confirmLabel: string;
   onConfirm: () => void;
   onCancel: () => void;
@@ -52,6 +58,14 @@ export function ScreenShareSettingsV2({
           {gameMode ? `游戏模式持续以所选 ${fps} FPS 为目标。` : '画面变化时使用所选帧率，静止后降到 15 FPS。'}{' '}
           视频码率上限为 200 Mbps，实际速率由网络与设备能力决定。
         </p>
+        <label className="settings-toggle-card">
+          <span>
+            <b>兼容观看（VP8）</b>
+            <small>{editing ? '停止当前共享后可更改编码模式' : '手机无法观看时可开启；保留分辨率与帧率，实际编码效率可能不同'}</small>
+          </span>
+          <input type="checkbox" aria-label="兼容观看（VP8）" checked={compatibilityMode} disabled={editing}
+            onChange={(event) => onCompatibilityMode(event.target.checked)} />
+        </label>
         <section className={`media-choice-section ${nativeResolution ? 'disabled' : ''}`}>
           <span>分辨率</span>
           <div className="choice-grid resolution-grid">

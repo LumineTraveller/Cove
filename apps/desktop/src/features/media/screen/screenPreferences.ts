@@ -13,6 +13,7 @@ export interface ScreenPreferences {
   audio: boolean;
   gameMode: boolean;
   nativeResolution: boolean;
+  compatibilityMode: boolean;
 }
 
 export const DEFAULT_SCREEN_PREFERENCES: Readonly<ScreenPreferences> = {
@@ -21,6 +22,7 @@ export const DEFAULT_SCREEN_PREFERENCES: Readonly<ScreenPreferences> = {
   audio: false,
   gameMode: false,
   nativeResolution: false,
+  compatibilityMode: false,
 };
 
 /** Older partial settings retain supported values; missing/invalid fields use safe defaults. */
@@ -41,6 +43,8 @@ export function normalizeScreenPreferences(value: unknown): ScreenPreferences {
       typeof saved.nativeResolution === 'boolean'
         ? saved.nativeResolution
         : DEFAULT_SCREEN_PREFERENCES.nativeResolution,
+    compatibilityMode: typeof saved.compatibilityMode === 'boolean'
+      ? saved.compatibilityMode : DEFAULT_SCREEN_PREFERENCES.compatibilityMode,
   };
 }
 
