@@ -1,0 +1,8 @@
+{
+  "electron": "44.0.0",
+  "source": "apps/desktop/package.json",
+  "status": "candidate-not-activated",
+  "platform": "win32",
+  "arch": "x64",
+  "reason": "Reuse the desktop runtime candidate only after native ABI and tray acceptance pass. This file does not change the packaged server runtime."
+}
