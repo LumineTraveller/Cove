@@ -1,4 +1,5 @@
 import { useCallback, useRef } from 'react';
+import { screenWatchError } from '../screen/screenWatchError';
 
 import type { Socket } from 'socket.io-client';
 import { Device } from 'mediasoup-client';
@@ -351,7 +352,7 @@ export function useMediaTransports(deps: UseMediaTransportsDependencies) {
             socket.emit('ms:close-consumer', { consumerId: serverConsumerId });
         }
         if (!isStale())
-          setError(cause instanceof Error ? cause.message : '无法接收媒体流');
+          setError(screenWatchError(cause, kind === 'video' && appData.type === 'screen'));
         return false;
       } finally {
         if (generation === mediaGeneration.current)

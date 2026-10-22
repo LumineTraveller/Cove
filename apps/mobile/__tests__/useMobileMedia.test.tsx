@@ -630,6 +630,56 @@ test('healthy receiver-only media survives a delayed CONNECT without starting ca
   expect(PermissionsAndroid.request).not.toHaveBeenCalled();
 });
 
+test.each(['close-first', 'new-first'] as const)('watch intent follows a codec fallback in the same publication: %s', async order => {
+  const announce = (id: string, attempt: number) => handlers.get('ms:new-producer')!({
+    producerId: id, peerId: 'desktop', kind: 'video',
+    appData: { type: 'screen', shareSessionId: 'share-1', publicationAttempt: attempt },
+  });
+  await act(async () => announce('screen-old', 1));
+  await act(async () => media.watchScreen('desktop'));
+  const closed = () => handlers.get('ms:producer-closed')!({
+    peerId: 'desktop', producerId: 'screen-old', sourceType: 'screen',
+    shareSessionId: 'share-1', replacing: true,
+  });
+  if (order === 'close-first') await act(async () => closed());
+  await act(async () => announce('screen-new', 2));
+  if (order === 'new-first') await act(async () => closed());
+  expect(media.isWatchingScreen).toBe(true);
+  expect(media.remoteScreen?.consumerId).toBe('consumer-screen-new');
+  expect(mockGetUserMedia).not.toHaveBeenCalled();
+  expect(mockTransport.produce).not.toHaveBeenCalled();
+});
+
+test('cancel watching wins over a pending codec replacement, and another share never auto starts', async () => {
+  await act(async () => handlers.get('ms:new-producer')!({ producerId: 'screen-old', peerId: 'desktop', kind: 'video', appData: { type: 'screen', shareSessionId: 'share-1', publicationAttempt: 1 } }));
+  await act(async () => media.watchScreen('desktop'));
+  await act(async () => handlers.get('ms:producer-closed')!({ producerId: 'screen-old', peerId: 'desktop', sourceType: 'screen', shareSessionId: 'share-1', replacing: true }));
+  await act(async () => media.stopWatchingScreen());
+  socket.emit.mockClear();
+  await act(async () => handlers.get('ms:new-producer')!({ producerId: 'screen-new', peerId: 'desktop', kind: 'video', appData: { type: 'screen', shareSessionId: 'share-1', publicationAttempt: 2 } }));
+  await act(async () => handlers.get('ms:new-producer')!({ producerId: 'another-share', peerId: 'desktop', kind: 'video', appData: { type: 'screen', shareSessionId: 'share-2', publicationAttempt: 1 } }));
+  expect(media.isWatchingScreen).toBe(false);
+  expect(media.remoteScreen).toBeNull();
+  expect(socket.emit.mock.calls.filter(([event]: any[]) => event === 'ms:consume')).toHaveLength(0);
+});
+
+test.each([{ session: 'older-share', attempt: 1 }, { session: 'share-1', attempt: 1 }])('late screen audio from $session attempt $attempt cannot attach to a replacement', async stale => {
+  const announce = (id: string, type: string, session: string, attempt: number) => handlers.get('ms:new-producer')!({
+    producerId: id, peerId: 'desktop', kind: type === 'screen' ? 'video' : 'audio',
+    appData: { type, shareSessionId: session, publicationAttempt: attempt },
+  });
+  await act(async () => announce('screen-new', 'screen', 'share-1', 2));
+  await act(async () => announce('audio-new', 'screen-audio', 'share-1', 2));
+  await act(async () => media.watchScreen('desktop'));
+  const newAudio = mockConsumers.get('audio-new');
+  await act(async () => announce('audio-old', 'screen-audio', stale.session, stale.attempt));
+  await act(async () => handlers.get('ms:producer-closed')!({ producerId: 'audio-old', peerId: 'desktop', sourceType: 'screen-audio' }));
+  expect(mockConsumers.has('audio-old')).toBe(false);
+  expect(newAudio.close).not.toHaveBeenCalled();
+  expect(media.remoteScreen?.consumerId).toBe('consumer-screen-new');
+  expect(media.isWatchingScreen).toBe(true);
+});
+
 test.each(['send', 'receive'] as const)('retaining media for signal loss never cancels the independent %s failure deadline', async side => {
   jest.useFakeTimers();
   mockSeparateTransports = true;

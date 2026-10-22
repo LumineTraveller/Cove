@@ -168,6 +168,8 @@ export interface AvailableScreen {
   socketId: string;
   videoProducerId: string;
   audioProducerId?: string;
+  shareSessionId?: string;
+  publicationAttempt?: number;
 }
 
 export interface RemoteApplicationAudio {

@@ -1,4 +1,5 @@
-import { useCallback, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
+import { createScreenWatchRecovery, isStaleScreenPublication, type ScreenPublication, type ScreenPublicationClosed } from '@cove/client-core';
 import { Socket } from 'socket.io-client';
 
 import { type RtcVideoCounterSample } from '../diagnostics/mediaDiagnostics';
@@ -77,14 +78,22 @@ export interface useScreenViewingDependencies {
 
 export function useScreenViewing(deps: useScreenViewingDependencies) {
   const watchEpoch = useRef(0);
+  const recovery = useRef<ReturnType<typeof createScreenWatchRecovery> | null>(null);
+  const recoveryActions = useRef<{
+    replacing: (peerId: string) => void;
+    resume: (source: ScreenPublication, current: () => boolean) => Promise<boolean>;
+    stop: () => void;
+  } | null>(null);
   const publishAvailableScreens = useCallback(() => {
     deps.setAvailableScreens([...deps.availableScreensRef.current.values()]);
   }, []);
 
   const storeAvailableScreen = useCallback(
     (value: AvailableScreen) => {
+      if (isStaleScreenPublication(deps.availableScreensRef.current.get(value.socketId), value)) return;
       deps.availableScreensRef.current.set(value.socketId, value);
       publishAvailableScreens();
+      recovery.current?.sourceAvailable(value);
     },
     [publishAvailableScreens],
   );
@@ -100,6 +109,7 @@ export function useScreenViewing(deps: useScreenViewingDependencies) {
   );
 
   const clearAvailableScreens = useCallback(() => {
+    recovery.current?.cancel();
     deps.availableScreensRef.current.clear();
     publishAvailableScreens();
   }, [publishAvailableScreens]);
@@ -109,7 +119,8 @@ export function useScreenViewing(deps: useScreenViewingDependencies) {
       const entry = deps.consumers.current.get(consumerId);
       if (!entry) return;
       deps.consumers.current.delete(consumerId);
-      deps.consumerByProducer.current.delete(entry.producerId);
+      if (deps.consumerByProducer.current.get(entry.producerId) === consumerId)
+        deps.consumerByProducer.current.delete(entry.producerId);
       if (notifyServer) deps.socket.emit('ms:close-consumer', { consumerId });
       entry.consumer.close();
       const el = deps.audioEls.current.get(consumerId);
@@ -124,11 +135,15 @@ export function useScreenViewing(deps: useScreenViewingDependencies) {
         deps.remoteAudioOutputs.current.delete(consumerId);
       }
       deps.detachAnalyser(consumerId);
-      if (entry.sourceType === 'screen-audio') deps.setScreenReceiveHasAudio(false);
+      if (entry.sourceType === 'screen-audio') deps.setScreenReceiveHasAudio(
+        [...deps.consumers.current.values()].some(item => item.sourceType === 'screen-audio' && !item.consumer.closed),
+      );
       if (entry.kind === 'video') {
-        deps.screenStreams.current.delete(entry.socketId);
-        deps.setScreenReceiveHasAudio(false);
-        deps.setRemoteScreen((current) => (current?.socketId === entry.socketId ? null : current));
+        const current = deps.availableScreensRef.current.get(entry.socketId);
+        if (!current || current.videoProducerId === entry.producerId) {
+          deps.screenStreams.current.delete(entry.socketId);
+          deps.setRemoteScreen(value => value?.socketId === entry.socketId ? null : value);
+        }
       }
     },
     [deps.socket],
@@ -141,6 +156,7 @@ export function useScreenViewing(deps: useScreenViewingDependencies) {
   }, [deps.watchingScreenPeerRef]);
 
   const stopWatchingScreen = useCallback(() => {
+    recovery.current?.cancel();
     watchEpoch.current += 1;
     const peerId = deps.watchingScreenPeerRef.current;
     if (!peerId) return;
@@ -153,12 +169,42 @@ export function useScreenViewing(deps: useScreenViewingDependencies) {
       closeLocalConsumer(consumerId, true);
     }
     deps.watchingScreenPeerRef.current = null;
+    deps.screenStreams.current.delete(peerId);
     deps.setWatchingScreenPeer(null);
     deps.setRemoteScreen((current) => (current?.socketId === peerId ? null : current));
     deps.videoCounterPrev.current = null;
     deps.receiveLossPrev.current = null;
     if (!deps.screenProducer.current) deps.setStats(EMPTY_STATS);
   }, [closeLocalConsumer]);
+
+  recoveryActions.current = {
+    replacing: peerId => {
+      watchEpoch.current++;
+      for (const [consumerId, entry] of [...deps.consumers.current]) {
+        if (entry.socketId === peerId && ['screen', 'screen-audio'].includes(entry.sourceType ?? ''))
+          closeLocalConsumer(consumerId, true);
+      }
+    },
+    resume: async (source, current) => {
+      const guard = captureWatchGuard(source.socketId);
+      const isCurrent = () => current() && guard();
+      const ok = await deps.consumeProducer(source.videoProducerId, source.socketId, 'video', { type: 'screen' }, isCurrent);
+      if (!ok || !isCurrent()) return false;
+      const latest = deps.availableScreensRef.current.get(source.socketId);
+      if (latest?.audioProducerId)
+        await deps.consumeProducer(latest.audioProducerId, source.socketId, 'audio', { type: 'screen-audio' }, isCurrent);
+      return isCurrent();
+    },
+    stop: stopWatchingScreen,
+  };
+  if (!recovery.current) recovery.current = createScreenWatchRecovery({
+    isWatching: peerId => deps.watchingScreenPeerRef.current === peerId,
+    onReplacing: peerId => recoveryActions.current!.replacing(peerId),
+    resume: (source, current) => recoveryActions.current!.resume(source, current),
+    stop: () => recoveryActions.current!.stop(),
+  });
+  useEffect(() => () => recovery.current?.cancel(), []);
+  const screenPublicationClosed = useCallback((closed: ScreenPublicationClosed) => recovery.current?.sourceClosed(closed), []);
 
   const watchScreen = useCallback(
     async (socketId?: string) => {
@@ -172,6 +218,7 @@ export function useScreenViewing(deps: useScreenViewingDependencies) {
       const isCurrent = () => watchEpoch.current === epoch &&
         deps.watchingScreenPeerRef.current === source.socketId;
       deps.watchingScreenPeerRef.current = source.socketId;
+      recovery.current!.begin(source);
       deps.setWatchingScreenPeer(source.socketId);
       deps.videoCounterPrev.current = null;
       deps.receiveLossPrev.current = null;
@@ -180,6 +227,7 @@ export function useScreenViewing(deps: useScreenViewingDependencies) {
       }, isCurrent);
       if (!isCurrent()) return;
       if (!videoOk) {
+        recovery.current?.cancel();
         deps.watchingScreenPeerRef.current = null;
         deps.setWatchingScreenPeer(null);
         return;
@@ -201,5 +249,6 @@ export function useScreenViewing(deps: useScreenViewingDependencies) {
     stopWatchingScreen,
     watchScreen,
     captureWatchGuard,
+    screenPublicationClosed,
   };
 }

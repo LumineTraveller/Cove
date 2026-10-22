@@ -1,4 +1,5 @@
 import { useCallback } from 'react';
+import { screenPublicationMetadata } from '@cove/client-core';
 
 import type { Socket } from 'socket.io-client';
 
@@ -229,6 +230,7 @@ export function useVoiceJoin(deps: UseVoiceJoinDependencies) {
             socketId: item.peerId,
             videoProducerId: item.producerId,
             audioProducerId: pendingScreenAudioByPeer.current.get(item.peerId),
+            ...screenPublicationMetadata(item.appData),
           });
           continue;
         }

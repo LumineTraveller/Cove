@@ -424,7 +424,7 @@ test('mobile screen transport is isolated from voice and closes independently', 
   const { room } = await emit<any>(client.socket, 'room:create', { name: 'Mobile Share' });
   assert.equal((await emit<any>(client.socket, 'room:join', room.id)).ok, true);
   const peer = fake.peers.get(client.socket.id);
-  assert.deepEqual(await emit<any>(client.socket, 'ms:screen-sharing-capabilities', {}), { dedicatedTransport: true });
+  assert.deepEqual(await emit<any>(client.socket, 'ms:screen-sharing-capabilities', {}), { dedicatedTransport: true, publicationContinuity: true });
   // Legacy mobile joins voice AFTER setting up its mic. Keep that path working.
   const voice = await emit<any>(client.socket, 'ms:create-transport', { direction: 'send' });
   const mic = await emit<any>(client.socket, 'ms:produce', { transportId: voice.id, kind: 'audio', rtpParameters: {}, appData: { type: 'mic' } });

@@ -1,4 +1,5 @@
 import { useEffect, useCallback } from 'react';
+import { screenPublicationMetadata } from '@cove/client-core';
 import { Socket } from 'socket.io-client';
 import { Device } from 'mediasoup-client';
 import { DisconnectGrace } from '../../connection/disconnectGrace';
@@ -352,6 +353,7 @@ export function useVoiceSession(deps: useVoiceSessionDependencies) {
             socketId: peerId,
             videoProducerId: producerId,
             audioProducerId: deps.pendingScreenAudioByPeer.current.get(peerId),
+            ...screenPublicationMetadata(appData),
           });
           continue;
         }

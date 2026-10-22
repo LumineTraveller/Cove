@@ -1,4 +1,5 @@
 import { useCallback } from 'react';
+import { isStaleScreenPublication } from '@cove/client-core';
 
 import { AvailableScreen } from '../mobileMediaSupport';
 
@@ -20,6 +21,7 @@ export function useAvailableScreens(deps: UseAvailableScreensDependencies) {
 
   const storeAvailableScreen = useCallback(
     (screen: AvailableScreen) => {
+      if (isStaleScreenPublication(availableScreensRef.current.get(screen.socketId), screen)) return;
       availableScreensRef.current.set(screen.socketId, screen);
       publishAvailableScreens();
     },

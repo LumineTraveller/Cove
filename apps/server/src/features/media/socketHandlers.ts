@@ -4,6 +4,7 @@ import { router, webRtcServer, peers, getRoomProducers } from './ms';
 
 import { OnDemandMediaType } from '../../models';
 import { mediaGeneration, beginTransportRequest } from './mediaLifecycle';
+import { markScreenReplacement, screenProducerClosure } from './screenPublication';
 
 export interface RegisterMediaSocketHandlersDependencies {
   readonly mediaRouter?: Pick<import('mediasoup').types.Router, 'createWebRtcTransport' | 'canConsume'>;
@@ -114,7 +115,7 @@ export function registerMediaSocketHandlers(deps: RegisterMediaSocketHandlersDep
   deps.socket.on(
     'ms:screen-sharing-capabilities',
     (_data: unknown, cb: (data: unknown) => void) => {
-      cb({ dedicatedTransport: true });
+      cb({ dedicatedTransport: true, publicationContinuity: true });
     },
   );
 
@@ -298,6 +299,7 @@ export function registerMediaSocketHandlers(deps: RegisterMediaSocketHandlersDep
           for (const [existingId, existing] of peer.producers) {
             const existingAppData = existing.appData as Record<string, unknown>;
             if (existingAppData.type !== sourceType) continue;
+            markScreenReplacement(existing, producerAppData.shareSessionId);
             existing.close();
             peer.producers.delete(existingId);
           }
@@ -331,6 +333,7 @@ export function registerMediaSocketHandlers(deps: RegisterMediaSocketHandlersDep
             producerId: producer.id,
             peerId: deps.socket.id,
             sourceType: demandType,
+            ...screenProducerClosure(producer),
           });
           if (demandType === 'screen') {
             // A new producer of the same source may replace this one in the
@@ -460,7 +463,12 @@ export function registerMediaSocketHandlers(deps: RegisterMediaSocketHandlersDep
         });
         consumer.on('producerclose', () => {
           peer.consumers.delete(consumer.id);
-          deps.socket.emit('ms:consumer-closed', { consumerId: consumer.id });
+          deps.socket.emit('ms:consumer-closed', {
+            consumerId: consumer.id,
+            producerId,
+            peerId: owner.socketId,
+            ...screenProducerClosure(owner.producer),
+          });
         });
 
         cb({
@@ -509,10 +517,13 @@ export function registerMediaSocketHandlers(deps: RegisterMediaSocketHandlersDep
   );
 
   /** 9. 关闭一个 producer（停止屏幕共享等） */
-  deps.socket.on('ms:close-producer', ({ producerId }: { producerId: string }) => {
+  deps.socket.on('ms:close-producer', ({ producerId, shareSessionId, replacing }: {
+    producerId: string; shareSessionId?: string; replacing?: boolean;
+  }) => {
     const peer = peers.get(deps.socket.id);
     const producer = peer?.producers.get(producerId);
     if (!peer || !producer) return;
+    if (replacing === true) markScreenReplacement(producer, shareSessionId);
     producer.close();
     peer.producers.delete(producerId);
     if (peer.roomId) deps.broadcastRoomMembers(peer.roomId);

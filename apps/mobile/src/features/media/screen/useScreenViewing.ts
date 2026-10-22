@@ -1,4 +1,5 @@
-import { useCallback, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
+import { createScreenWatchRecovery, type ScreenPublication, type ScreenPublicationClosed } from '@cove/client-core';
 
 import { MediaStream } from 'react-native-webrtc';
 
@@ -40,6 +41,12 @@ export interface UseScreenViewingDependencies {
 
 export function useScreenViewing(deps: UseScreenViewingDependencies) {
   const watchEpoch = useRef(0);
+  const recovery = useRef<ReturnType<typeof createScreenWatchRecovery> | null>(null);
+  const recoveryActions = useRef<{
+    replacing: (peerId: string) => void;
+    resume: (source: ScreenPublication, current: () => boolean) => Promise<boolean>;
+    stop: () => void;
+  } | null>(null);
   const {
     watchingScreenPeerRef,
     consumers,
@@ -57,6 +64,7 @@ export function useScreenViewing(deps: UseScreenViewingDependencies) {
   }, [watchingScreenPeerRef]);
 
   const stopWatchingScreen = useCallback(() => {
+    recovery.current?.cancel();
     watchEpoch.current += 1;
     const peerId = watchingScreenPeerRef.current;
     if (!peerId) return;
@@ -79,6 +87,36 @@ export function useScreenViewing(deps: UseScreenViewingDependencies) {
     watchingScreenPeerRef,
   ]);
 
+  recoveryActions.current = {
+    replacing: peerId => {
+      watchEpoch.current++;
+      for (const [consumerId, entry] of [...consumers.current]) {
+        if (entry.socketId === peerId && ['screen', 'screen-audio'].includes(entry.sourceType ?? ''))
+          removeConsumer(consumerId, true);
+      }
+    },
+    resume: async (source, current) => {
+      const guard = captureWatchGuard(source.socketId);
+      const isCurrent = () => current() && guard();
+      const ok = await consumeProducer(source.videoProducerId, source.socketId, 'video', { type: 'screen' }, isCurrent);
+      if (!ok || !isCurrent()) return false;
+      const latest = availableScreensRef.current.get(source.socketId);
+      if (latest?.audioProducerId)
+        await consumeProducer(latest.audioProducerId, source.socketId, 'audio', { type: 'screen-audio' }, isCurrent);
+      return isCurrent();
+    },
+    stop: stopWatchingScreen,
+  };
+  if (!recovery.current) recovery.current = createScreenWatchRecovery({
+    isWatching: peerId => watchingScreenPeerRef.current === peerId,
+    onReplacing: peerId => recoveryActions.current!.replacing(peerId),
+    resume: (source, current) => recoveryActions.current!.resume(source, current),
+    stop: () => recoveryActions.current!.stop(),
+  });
+  useEffect(() => () => recovery.current?.cancel(), []);
+  const screenPublicationAvailable = useCallback((source: AvailableScreen) => recovery.current?.sourceAvailable(source), []);
+  const screenPublicationClosed = useCallback((closed: ScreenPublicationClosed) => recovery.current?.sourceClosed(closed), []);
+
   const watchScreen = useCallback(
     async (socketId?: string) => {
       const source = socketId
@@ -92,6 +130,7 @@ export function useScreenViewing(deps: UseScreenViewingDependencies) {
       const isCurrent = () => watchEpoch.current === epoch &&
         watchingScreenPeerRef.current === source.socketId;
       watchingScreenPeerRef.current = source.socketId;
+      recovery.current!.begin(source);
       setIsWatchingScreen(true);
       const videoOk = await consumeProducer(
         source.videoProducerId,
@@ -102,6 +141,7 @@ export function useScreenViewing(deps: UseScreenViewingDependencies) {
       );
       if (!isCurrent()) return;
       if (!videoOk) {
+        recovery.current?.cancel();
         watchingScreenPeerRef.current = null;
         setIsWatchingScreen(false);
         return;
@@ -125,5 +165,5 @@ export function useScreenViewing(deps: UseScreenViewingDependencies) {
       watchingScreenPeerRef,
     ],
   );
-  return { stopWatchingScreen, watchScreen, captureWatchGuard };
+  return { stopWatchingScreen, watchScreen, captureWatchGuard, screenPublicationAvailable, screenPublicationClosed };
 }

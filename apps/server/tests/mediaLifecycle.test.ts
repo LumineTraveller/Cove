@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events';
 import { createPeer, peers } from '../src/features/media/ms';
 import { registerMediaSocketHandlers, type RegisterMediaSocketHandlersDependencies } from '../src/features/media/socketHandlers';
 import { createVoiceService, type CreateVoiceServiceDependencies } from '../src/features/voice/voiceService';
+import { markScreenReplacement } from '../src/features/media/screenPublication';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -17,19 +18,62 @@ function setup(t: any, overrides: Partial<RegisterMediaSocketHandlersDependencie
   const peer = createPeer(socket.id);
   peer.roomId = 'room';
   const events: string[] = [];
-  const io = { to: () => ({ emit: (event: string) => events.push(event) }), emit() {} };
+  const payloads: Array<{ event: string; payload: any }> = [];
+  const io = { to: () => ({ emit: (event: string, payload: any) => { events.push(event); payloads.push({ event, payload }); } }), emit() {} };
   const voiceRooms = new Map([['room', new Set([socket.id, 'listener'])]]);
   const shared = { socket, io, voiceRooms, broadcastRoomMembers() {}, isSocketMuted: () => false, stopRemoteControlForSocket() {}, removeAnnotationMember() {}, endAnnotationSessionForSocket() {}, closePeerConsumer() {} };
   registerMediaSocketHandlers({ ...shared, onDemandMediaType: () => null, syncOnDemandProducer() {}, findProducerOwner: () => null, ...overrides } as unknown as RegisterMediaSocketHandlersDependencies);
   const voice = createVoiceService({ ...shared, selfMutedVoiceMembers: new Set(), userNames: new Map(), userAvatars: new Map(), publicUserId: (id: string) => id, emitAvatarPayload() {} } as unknown as CreateVoiceServiceDependencies);
   t.after(() => peers.delete(socket.id));
-  return { handlers, socket, peer, events, voice, voiceRooms };
+  return { handlers, socket, peer, events, payloads, voice, voiceRooms };
 }
 
 function producer(id = 'producer') {
   const result = Object.assign(new EventEmitter(), { id, kind: 'audio', appData: { type: 'mic' }, closed: false, observer: new EventEmitter(), pause: async () => {}, close() { result.closed = true; result.observer.emit('close'); } });
   return result;
 }
+
+test('screen closure only forwards replacement intent matching its registered publication', async t => {
+  const s = setup(t, { onDemandMediaType: () => 'screen', isSharingScreen: () => false });
+  const screen = producer('screen');
+  screen.kind = 'video';
+  Object.assign(screen.appData, { type: 'screen', shareSessionId: 'share-1', publicationAttempt: 1 });
+  s.peer.sendTransport = { id: 'send', closed: false, produce: async () => screen } as any;
+  await s.handlers.get('ms:produce')!({ transportId: 'send', kind: 'video', rtpParameters: {}, appData: screen.appData }, () => {});
+  s.handlers.get('ms:close-producer')!({ producerId: screen.id, shareSessionId: 'share-1', replacing: true });
+  assert.deepEqual(s.payloads.find(item => item.event === 'ms:producer-closed')?.payload,
+    { producerId: screen.id, peerId: s.socket.id, sourceType: 'screen', shareSessionId: 'share-1', replacing: true });
+});
+
+test('a wrong replacement session cannot turn an explicit producer close into automatic viewing', async t => {
+  const s = setup(t, { onDemandMediaType: () => 'screen', isSharingScreen: () => false });
+  const screen = producer('screen');
+  Object.assign(screen.appData, { type: 'screen', shareSessionId: 'share-1' });
+  s.peer.sendTransport = { id: 'send', closed: false, produce: async () => screen } as any;
+  await s.handlers.get('ms:produce')!({ transportId: 'send', kind: 'video', rtpParameters: {}, appData: screen.appData }, () => {});
+  s.handlers.get('ms:close-producer')!({ producerId: screen.id, shareSessionId: 'different', replacing: true });
+  assert.equal(s.payloads.find(item => item.event === 'ms:producer-closed')?.payload.replacing, false);
+});
+
+test('consumer close carries replacement metadata even when it precedes the producer notice', async t => {
+  const owner = createPeer('screen-owner'); owner.roomId = 'room';
+  t.after(() => peers.delete('screen-owner'));
+  const screen = producer('screen');
+  Object.assign(screen.appData, { type: 'screen', shareSessionId: 'share-1' });
+  owner.producers.set(screen.id, screen as any);
+  const consumer = Object.assign(new EventEmitter(), { id: 'consumer', closed: false, kind: 'video', rtpParameters: {}, appData: {}, close() {} });
+  const s = setup(t, { mediaRouter: { canConsume: () => true } as any,
+    findProducerOwner: () => ({ socketId: 'screen-owner', peer: owner, producer: screen as any }) });
+  let closed: any;
+  s.socket.emit = ((event: string, payload: any) => { if (event === 'ms:consumer-closed') closed = payload; }) as any;
+  s.peer.recvTransport = { closed: false, consume: async () => consumer } as any;
+  await s.handlers.get('ms:consume')!({ producerId: screen.id, rtpCapabilities: {} }, () => {});
+  markScreenReplacement(screen, 'share-1');
+  consumer.emit('producerclose');
+  assert.equal(closed?.shareSessionId, 'share-1');
+  assert.equal(closed?.replacing, true);
+  assert.equal(closed?.producerId, screen.id);
+});
 
 test('a pending produce cannot resurrect media after leaving and rejoining voice', async t => {
   const s = setup(t);

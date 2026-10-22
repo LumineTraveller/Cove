@@ -18,7 +18,7 @@ import {
   ConnectionState,
 } from './mobileMediaSupport';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { request } from '@cove/client-core';
+import { request, screenAudioMatchesPublication, screenPublicationMetadata } from '@cove/client-core';
 
 import type { Socket } from 'socket.io-client';
 import { Device } from 'mediasoup-client';
@@ -190,6 +190,8 @@ export function useMobileMedia(
     stopWatchingScreen,
     watchScreen: consumeScreen,
     captureWatchGuard,
+    screenPublicationAvailable,
+    screenPublicationClosed,
   } = useScreenViewing({
     watchingScreenPeerRef,
     consumers,
@@ -256,6 +258,7 @@ export function useMobileMedia(
               audioProducerId: pendingScreenAudioByPeer.current.get(
                 item.peerId,
               ),
+              ...screenPublicationMetadata(item.appData),
             });
         }
       },
@@ -290,16 +293,21 @@ export function useMobileMedia(
       appData: Record<string, unknown>;
     }) => {
       if (appData?.type === 'screen') {
-        storeAvailableScreen({
+        const metadata = screenPublicationMetadata(appData);
+        const source = {
           socketId: peerId,
           videoProducerId: producerId,
-          audioProducerId: pendingScreenAudioByPeer.current.get(peerId),
-        });
+          audioProducerId: metadata.shareSessionId ? undefined : pendingScreenAudioByPeer.current.get(peerId),
+          ...metadata,
+        };
+        storeAvailableScreen(source);
+        screenPublicationAvailable(source);
         return;
       }
       if (appData?.type === 'screen-audio') {
-        pendingScreenAudioByPeer.current.set(peerId, producerId);
         const current = availableScreensRef.current.get(peerId);
+        if (!screenAudioMatchesPublication(current, appData)) return;
+        pendingScreenAudioByPeer.current.set(peerId, producerId);
         if (current)
           storeAvailableScreen({ ...current, audioProducerId: producerId });
         if (watchingScreenPeerRef.current === peerId) {
@@ -322,10 +330,14 @@ export function useMobileMedia(
       producerId,
       peerId,
       sourceType,
+      shareSessionId,
+      replacing,
     }: {
       producerId: string;
       peerId: string;
       sourceType: string;
+      shareSessionId?: string;
+      replacing?: boolean;
     }) => {
       closedProducers.current.add(producerId);
       const consumerId = consumerByProducer.current.get(producerId);
@@ -344,7 +356,8 @@ export function useMobileMedia(
       const currentScreen = availableScreensRef.current.get(peerId);
       if (currentScreen?.videoProducerId !== producerId) return;
       removeAvailableScreen(peerId, producerId);
-      if (watchingScreenPeerRef.current === peerId) stopWatchingScreen();
+      if (watchingScreenPeerRef.current === peerId)
+        screenPublicationClosed({ peerId, producerId, shareSessionId, replacing });
     };
     const onVoicePresence = ({ action }: { action: 'join' | 'leave' }) => {
       if (inVoiceRef.current) CoveNative?.playPresenceTone(action);
@@ -396,6 +409,8 @@ export function useMobileMedia(
     stopWatchingScreen,
     storeAvailableScreen,
     removeAvailableScreen,
+    screenPublicationAvailable,
+    screenPublicationClosed,
     teardown,
   ]);
 

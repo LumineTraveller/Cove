@@ -252,3 +252,67 @@ test('late announced screen audio uses the same cancellation guard as the pictur
   assert.equal(f.deps.remoteAudioOutputs.current.size, 0);
   assert.equal(f.events.includes('ms:close-consumer'), true);
 });
+
+test('closing an old screen consumer never clears the replacement picture for the same peer', () => {
+  const f = fixture();
+  const view = viewing(f);
+  const replacementStream = {};
+  f.deps.availableScreensRef.current.set('peer-1', { socketId: 'peer-1', videoProducerId: 'producer-new' });
+  f.deps.screenStreams.current.set('peer-1', replacementStream);
+  f.deps.screen = { socketId: 'peer-1', stream: replacementStream };
+  f.deps.consumers.current.set('consumer-old', {
+    consumer: f.consumer, socketId: 'peer-1', producerId: 'producer-old', kind: 'video', sourceType: 'screen',
+  });
+  view.closeLocalConsumer('consumer-old', false);
+  assert.equal(f.deps.screen?.stream, replacementStream);
+  assert.equal(f.deps.screenStreams.current.get('peer-1'), replacementStream);
+});
+
+for (const order of ['close-first', 'new-first']) test(`desktop viewer follows a publication replacement: ${order}`, async () => {
+  const f = fixture();
+  const requests: string[] = [];
+  f.api.consumeProducer = (async (id: string) => { requests.push(id); return true; }) as any;
+  const view = viewing(f);
+  f.deps.setAvailableScreens = () => {};
+  const original = { socketId: 'peer-1', videoProducerId: 'old-video', shareSessionId: 'share-1', publicationAttempt: 1 };
+  const next = { ...original, videoProducerId: 'new-video', publicationAttempt: 2 };
+  view.storeAvailableScreen(original);
+  await view.watchScreen('peer-1');
+  const closed = () => view.screenPublicationClosed({ peerId: 'peer-1', producerId: 'old-video', shareSessionId: 'share-1', replacing: true });
+  if (order === 'close-first') closed();
+  view.storeAvailableScreen(next);
+  if (order === 'new-first') closed();
+  await flush();
+  view.storeAvailableScreen(original); // late previous-attempt announcement
+  assert.equal(f.deps.availableScreensRef.current.get('peer-1').videoProducerId, 'new-video');
+  assert.deepEqual(requests, ['old-video', 'new-video']);
+  assert.equal(f.deps.watchingScreenPeerRef.current, 'peer-1');
+  view.stopWatchingScreen();
+});
+
+test('cancelling a new-first replacement while consume is pending releases the retained old stream reference', async () => {
+  const f = fixture();
+  let release!: (value: boolean) => void;
+  let calls = 0;
+  f.api.consumeProducer = (async () => ++calls === 1 ? true :
+    await new Promise<boolean>(resolve => { release = resolve; })) as any;
+  const view = viewing(f);
+  f.deps.setAvailableScreens = () => {};
+  const original = { socketId: 'peer-1', videoProducerId: 'old-video', shareSessionId: 'share-1', publicationAttempt: 1 };
+  view.storeAvailableScreen(original);
+  await view.watchScreen('peer-1');
+  const oldStream = {};
+  f.deps.screenStreams.current.set('peer-1', oldStream);
+  f.deps.screen = { socketId: 'peer-1', stream: oldStream };
+  f.deps.consumers.current.set('consumer-old', {
+    consumer: f.consumer, socketId: 'peer-1', producerId: 'old-video', kind: 'video', sourceType: 'screen',
+  });
+  view.storeAvailableScreen({ ...original, videoProducerId: 'new-video', publicationAttempt: 2 });
+  assert.equal(f.deps.screenStreams.current.has('peer-1'), true);
+  view.stopWatchingScreen();
+  assert.equal(f.deps.screenStreams.current.has('peer-1'), false);
+  assert.equal(f.deps.screen, null);
+  release(false);
+  await flush();
+  assert.equal(f.deps.watchingScreenPeerRef.current, null);
+});

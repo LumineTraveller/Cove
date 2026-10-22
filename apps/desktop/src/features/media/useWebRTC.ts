@@ -5,6 +5,7 @@ import { useMediaDiagnostics } from './diagnostics/useMediaDiagnostics';
 import { type diagnosticVideoCounters } from './diagnostics/mediaDiagnostics';
 import { useMediaTransports } from './transport/useMediaTransports';
 import { useScreenViewing } from './screen/useScreenViewing';
+import { screenAudioMatchesPublication, screenPublicationMetadata } from '@cove/client-core';
 import { useMicrophoneControls } from './microphone/useMicrophoneControls';
 import { useVoiceSession } from './voice/useVoiceSession';
 import { useScreenAnalysis } from './screen/useScreenAnalysis';
@@ -662,6 +663,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
     stopWatchingScreen,
     watchScreen,
     captureWatchGuard,
+    screenPublicationClosed,
   } = useScreenViewing({
     get setAvailableScreens() {
       return setAvailableScreens;
@@ -777,16 +779,19 @@ export function useWebRTC(socket: Socket, roomId: string) {
       if (!deviceRef.current) return; // 尚未加入语音时不建立媒体订阅
       const sourceType = appData?.type;
       if (sourceType === 'screen') {
+        const metadata = screenPublicationMetadata(appData);
         storeAvailableScreen({
           socketId: peerId,
           videoProducerId: producerId,
-          audioProducerId: pendingScreenAudioByPeer.current.get(peerId),
+          audioProducerId: metadata.shareSessionId ? undefined : pendingScreenAudioByPeer.current.get(peerId),
+          ...metadata,
         });
         return;
       }
       if (sourceType === 'screen-audio') {
-        pendingScreenAudioByPeer.current.set(peerId, producerId);
         const current = availableScreensRef.current.get(peerId);
+        if (!screenAudioMatchesPublication(current, appData)) return;
+        pendingScreenAudioByPeer.current.set(peerId, producerId);
         if (current) storeAvailableScreen({ ...current, audioProducerId: producerId });
         if (watchingScreenPeerRef.current === peerId)
           await consumeProducer(producerId, peerId, kind, appData, captureWatchGuard(peerId));
@@ -808,13 +813,15 @@ export function useWebRTC(socket: Socket, roomId: string) {
     };
 
     // 服务端通知：某个 consumer 对应的 producer 已关闭
-    const onConsumerClosed = ({ consumerId }: { consumerId: string }) => {
+    const onConsumerClosed = ({ consumerId, shareSessionId, replacing }: {
+      consumerId: string; shareSessionId?: string; replacing?: boolean;
+    }) => {
       const entry = consumers.current.get(consumerId);
       if (!entry) return;
       closeLocalConsumer(consumerId, false);
       if (entry.sourceType === 'screen') {
         // 视频已结束时一并关闭关联音频，避免残留无画面的订阅。
-        stopWatchingScreen();
+        screenPublicationClosed({ peerId: entry.socketId, producerId: entry.producerId, shareSessionId, replacing });
       }
       if (entry.sourceType === 'application-audio')
         removeRemoteApplicationAudio(entry.socketId, entry.producerId);
@@ -825,10 +832,14 @@ export function useWebRTC(socket: Socket, roomId: string) {
       producerId,
       peerId,
       sourceType,
+      shareSessionId,
+      replacing,
     }: {
       producerId: string;
       peerId: string;
       sourceType: 'screen' | 'screen-audio';
+      shareSessionId?: string;
+      replacing?: boolean;
     }) => {
       if (sourceType === 'screen-audio') {
         if (pendingScreenAudioByPeer.current.get(peerId) === producerId)
@@ -838,8 +849,10 @@ export function useWebRTC(socket: Socket, roomId: string) {
           storeAvailableScreen({ ...current, audioProducerId: undefined });
         return;
       }
+      if (availableScreensRef.current.get(peerId)?.videoProducerId !== producerId) return;
       removeAvailableScreen(peerId, producerId);
-      if (watchingScreenPeerRef.current === peerId) stopWatchingScreen();
+      if (watchingScreenPeerRef.current === peerId)
+        screenPublicationClosed({ peerId, producerId, shareSessionId, replacing });
     };
 
     const onScreenViewers = ({ peerId, viewerCount }: { peerId: string; viewerCount: number }) => {
@@ -925,6 +938,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
     inVoice,
     consumeProducer,
     captureWatchGuard,
+    screenPublicationClosed,
     closeLocalConsumer,
     stopWatchingScreen,
     storeAvailableScreen,
@@ -1351,6 +1365,9 @@ export function useWebRTC(socket: Socket, roomId: string) {
     },
   });
   const { closeScreenAudio, startScreenAudio } = useScreenAudio({
+    get mediaGeneration() {
+      return mediaGeneration;
+    },
     get screenAudioProducer() {
       return screenAudioProducer;
     },

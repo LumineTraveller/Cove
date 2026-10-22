@@ -143,6 +143,8 @@ type Attempt = {
   closedServerProducers: Set<string>;
   reject?: (error: Error) => void;
   failure?: EncoderFailure;
+  shareSessionId?: string;
+  replacing?: boolean;
 };
 type Publication = {
   sessionId: string;
@@ -183,15 +185,19 @@ export function useMobileScreenShare(
   const pendingPlayback = useRef<Promise<void>>(Promise.resolve());
 
   const closeAttempt = useCallback(
-    (attempt: Attempt | undefined) => {
+    (attempt: Attempt | undefined, replacing?: boolean) => {
       if (!attempt) return;
+      if (replacing !== undefined) attempt.replacing = replacing;
       attempt.closed = true;
       attempt.reject?.(new Error('共享已取消'));
       attempt.reject = undefined;
       for (const id of attempt.serverProducers) {
         // Socket.IO buffers these exact IDs across a recoverable disconnect.
         if (!attempt.closedServerProducers.has(id))
-          socket.emit('ms:close-producer', { producerId: id });
+          socket.emit('ms:close-producer', {
+            producerId: id,
+            ...(attempt.replacing && attempt.shareSessionId ? { shareSessionId: attempt.shareSessionId, replacing: true } : {}),
+          });
         attempt.closedServerProducers.add(id);
         demand.current.delete(id);
       }
@@ -275,7 +281,7 @@ export function useMobileScreenShare(
         ensureCurrent();
         pendingPlayback.current = Promise.resolve();
         // Old servers replace the microphone on a second send request; probe first.
-        const capability = await request<{ dedicatedTransport: boolean }>(
+        const capability = await request<{ dedicatedTransport: boolean; publicationContinuity?: boolean }>(
           socket,
           'ms:screen-sharing-capabilities',
           {},
@@ -353,6 +359,7 @@ export function useMobileScreenShare(
               producers: [],
               serverProducers: new Set(),
               closedServerProducers: new Set(),
+              shareSessionId: capability.publicationContinuity === true ? prepared.sessionId : undefined,
             };
             context.attempt = attempt;
             const active = () =>
@@ -463,7 +470,8 @@ export function useMobileScreenShare(
                   stopTracks: false,
                   zeroRtpOnPause: true,
                   disableTrackOnPause: false,
-                  appData: { type: 'screen', client: 'android', syncGroup },
+                  appData: { type: 'screen', client: 'android', syncGroup,
+                    ...(attempt.shareSessionId ? { shareSessionId: attempt.shareSessionId, publicationAttempt: attempt.id } : {}) },
                 }),
               );
               video.current = producer;
@@ -491,6 +499,7 @@ export function useMobileScreenShare(
                       type: 'screen-audio',
                       client: 'android',
                       syncGroup,
+                      ...(attempt.shareSessionId ? { shareSessionId: attempt.shareSessionId, publicationAttempt: attempt.id } : {}),
                     },
                   }),
                 );
@@ -523,7 +532,7 @@ export function useMobileScreenShare(
                 error instanceof EncoderFailure || codecPhase
                   ? failureReason(error)
                   : undefined;
-              closeAttempt(attempt);
+              closeAttempt(attempt, !!reason && nextIndex < candidates.codecs.length);
               ensureCurrent();
               if (!reason) throw error;
               diagnostic.outcome = 'failed';
@@ -555,7 +564,7 @@ export function useMobileScreenShare(
                 diagnostic.reason = old.failure.reason;
                 diagnostic.code = old.failure.code;
               }
-              closeAttempt(old);
+              closeAttempt(old, !!old?.failure && nextIndex < candidates.codecs.length);
               ensureCurrent();
               if (nextIndex >= candidates.codecs.length)
                 throw old?.failure ?? new Error('没有可用的屏幕视频编码回退');

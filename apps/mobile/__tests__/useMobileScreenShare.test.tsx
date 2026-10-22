@@ -144,7 +144,7 @@ beforeEach(async () => {
     emit: jest.fn((name, data, callback) => {
       if (!callback) return;
       if (name === 'ms:screen-sharing-capabilities')
-        callback({ dedicatedTransport: true });
+        callback({ dedicatedTransport: true, publicationContinuity: true });
       else if (name === 'ms:create-transport')
         callback({
           id:
@@ -196,6 +196,18 @@ test('video-only sharing has no audio capture and never reuses the microphone tr
   );
 });
 
+test('an existing server without publication continuity keeps legacy producer payloads and explicit closes', async () => {
+  const emit = socket.emit.getMockImplementation();
+  socket.emit.mockImplementation((event: string, data: any, callback: any) => {
+    if (event === 'ms:screen-sharing-capabilities') callback({ dedicatedTransport: true });
+    else emit(event, data, callback);
+  });
+  await act(async () => { expect(await share.startScreenShare(false)).toBe(true); });
+  expect(producers[0].options.appData.shareSessionId).toBeUndefined();
+  await act(async () => share.stopScreenShare());
+  expect(socket.emit).toHaveBeenCalledWith('ms:close-producer', { producerId: producers[0].id });
+});
+
 test.each([1, 0.75, 0.5] as const)(
   'passes the selected native capture scale %s without adding FPS or changing the protocol',
   async scale => {
@@ -209,6 +221,8 @@ test.each([1, 0.75, 0.5] as const)(
       type: 'screen',
       client: 'android',
       syncGroup: expect.any(String),
+      shareSessionId: 'playback1',
+      publicationAttempt: 1,
     });
     expect(producers[0].options).not.toHaveProperty('encodings');
     expect(mockCreatePlayback).not.toHaveBeenCalled();
@@ -524,6 +538,7 @@ test('native failure during pending produce releases a late producer and uses a 
   expect(stale.close).toHaveBeenCalled();
   expect(socket.emit).toHaveBeenCalledWith('ms:close-producer', {
     producerId: 'late-h264',
+    shareSessionId: 'playback1', replacing: true,
   });
   expect(outgoings[1].produce.mock.calls[0][0].codec.mimeType).toBe(
     'video/VP8',
@@ -549,6 +564,13 @@ test('first-frame H264 init failure after sharing starts rebuilds both screen pr
   first.forEach(producer => expect(producer.close).toHaveBeenCalledTimes(1));
   expect(producers).toHaveLength(4);
   expect(producers[2].options.codec.mimeType).toBe('video/VP8');
+  expect(producers[0].options.appData.shareSessionId).toBe('playback1');
+  expect(producers[2].options.appData.shareSessionId).toBe('playback1');
+  expect(producers[0].options.appData.publicationAttempt).toBe(1);
+  expect(producers[2].options.appData.publicationAttempt).toBe(2);
+  expect(socket.emit).toHaveBeenCalledWith('ms:close-producer', {
+    producerId: first[0].id, replacing: true, shareSessionId: 'playback1',
+  });
   expect(producers[2].options.streamId).toBe(producers[3].options.streamId);
   expect(mockCreatePlayback).toHaveBeenCalledTimes(1);
   expect(systemAudio.release).not.toHaveBeenCalled();
