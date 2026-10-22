@@ -1377,6 +1377,9 @@ export function useWebRTC(socket: Socket, roomId: string) {
     },
   });
   const { startScreenShare, updateScreenShare, stopScreenShare } = useScreenPublishing({
+    get mediaGeneration() {
+      return mediaGeneration;
+    },
     get inVoice() {
       return inVoice;
     },

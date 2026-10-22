@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useRef } from 'react';
 import { Socket } from 'socket.io-client';
 import { Device } from 'mediasoup-client';
 
@@ -27,6 +27,7 @@ import {
 
 export interface useScreenPublishingDependencies {
   readonly inVoice: boolean;
+  readonly mediaGeneration: import('react').MutableRefObject<number>;
   readonly isSharing: boolean;
   readonly screenPreset: '540p' | '720p' | '1080p' | '1440p';
   readonly screenGameMode: boolean;
@@ -101,7 +102,11 @@ export interface useScreenPublishingDependencies {
   readonly clearRemoteApplicationAudios: () => void;
 }
 
+class CancelledScreenPublication extends Error {}
+
 export function useScreenPublishing(deps: useScreenPublishingDependencies) {
+  const publicationGeneration = useRef(0);
+  const pendingStart = useRef<{ operation: number; isCurrent: () => boolean } | null>(null);
   const startScreenShare = useCallback(
     async (
       initPreset?: ScreenPreset,
@@ -111,7 +116,9 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
       initNativeResolution?: boolean,
       initCompatibilityMode?: boolean,
     ) => {
-      if (!deps.inVoice || deps.isSharing) return;
+      if (!deps.inVoice || deps.isSharing || pendingStart.current?.isCurrent()) return;
+      const transport = deps.sendTransport.current;
+      if (!transport) return;
       const preset = initPreset ?? deps.screenPreset;
       const gameMode = initGameMode ?? deps.screenGameMode;
       const nativeResolution = initNativeResolution ?? deps.screenNativeResolution;
@@ -134,7 +141,16 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
       }
 
       const initialActivity: ScreenActivity = gameMode ? 'motion' : 'active';
+      const operation = ++publicationGeneration.current;
+      const generation = deps.mediaGeneration.current;
+      const socketId = deps.socket.id;
+      const isCurrent = () => operation === publicationGeneration.current &&
+        generation === deps.mediaGeneration.current && transport === deps.sendTransport.current &&
+        socketId === deps.socket.id;
+      const ensureCurrent = () => { if (!isCurrent()) throw new CancelledScreenPublication(); };
+      pendingStart.current = { operation, isCurrent };
       let acquiredStream: MediaStream | null = null;
+      let acquiredProducer: Producer | null = null;
       let startupStage = '申请屏幕采集';
       try {
         // rtpCapabilities is the receive-capabilities alias in mediasoup-client.
@@ -151,10 +167,12 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
           audio: false,
         });
         acquiredStream = stream;
+        ensureCurrent();
         const videoTrack = stream.getVideoTracks()[0];
         if (!videoTrack) throw new Error('没有取得屏幕视频轨道');
         startupStage = '等待屏幕采集轨道就绪';
         await waitForMediaTrackWarmup(videoTrack);
+        ensureCurrent();
         videoTrack.contentHint = gameMode ? 'motion' : 'detail';
         // getDisplayMedia already requested this frame rate. Reapplying even
         // the same constraints here can restart Windows' capture source; on
@@ -182,11 +200,6 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
           constraints: videoTrack.getConstraints(),
           capabilities: videoTrack.getCapabilities(),
         });
-        deps.localScreenRef.current = stream;
-        deps.setLocalScreen(stream);
-        deps.videoCounterPrev.current = null;
-        deps.remoteLossPrev.current = null;
-
         // 直接发送 getDisplayMedia 返回的原始轨道；旧实现 clone() 后继续约束原轨道，
         // 会让 Producer 的轨道停留在 Chromium 自行选择的采集帧率。
         startupStage = '初始化屏幕视频发送';
@@ -194,8 +207,9 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
         let lastProduceError: unknown = null;
         for (const codec of codecCandidates) {
           try {
-            producer = await produceWithSsrcRetry(() =>
-              deps.sendTransport.current!.produce({
+            producer = await produceWithSsrcRetry(() => {
+              ensureCurrent();
+              return transport.produce({
                 track: videoTrack,
                 streamId: `screen-${deps.socket.id}`,
                 appData: {
@@ -219,17 +233,24 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
                 stopTracks: false,
                 disableTrackOnPause: false,
                 zeroRtpOnPause: true,
-              }),
-            );
+              });
+            });
+            acquiredProducer = producer;
+            ensureCurrent();
             console.info(`[screen share] 编码器：${codec?.mimeType ?? '浏览器自动选择'}`);
             break;
           } catch (error) {
+            ensureCurrent();
             lastProduceError = error;
             console.warn('[screen share] codec publication failed', { codec: codec?.mimeType ?? 'auto', compatibilityMode }, error);
           }
         }
         if (!producer) throw lastProduceError ?? new Error('没有可用的屏幕共享视频编码器');
         deps.screenProducer.current = producer;
+        deps.localScreenRef.current = stream;
+        deps.setLocalScreen(stream);
+        deps.videoCounterPrev.current = null;
+        deps.remoteLossPrev.current = null;
         if (!deps.screenDemandActiveRef.current) producer.pause();
         deps.armScreenRampGuard(preset, currentFps, nativeResolution);
         deps.applyScreenActivity(preset, currentFps, initialActivity, nativeResolution);
@@ -244,7 +265,9 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
           startupStage = '启动共享系统音频';
           try {
             await deps.startScreenAudio();
+            ensureCurrent();
           } catch (e) {
+            ensureCurrent();
             console.warn('[screen share] 排除 Cove 后的系统音频发布失败:', e);
             window.alert('屏幕画面已开始共享，但系统音频发布失败。请停止共享后重试。');
           }
@@ -253,18 +276,25 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
         deps.setIsSharing(true);
 
         // 用户在浏览器 UI 点"停止共享"
-        stream.getVideoTracks()[0].onended = () => stopScreenShare();
+        stream.getVideoTracks()[0].onended = () => {
+          if (isCurrent() && deps.localScreenRef.current === stream && deps.screenProducer.current === producer)
+            stopScreenShare();
+        };
       } catch (e) {
+        const current = isCurrent();
+        if (acquiredProducer) {
+          if (deps.screenProducer.current === acquiredProducer) deps.screenProducer.current = null;
+          if (!acquiredProducer.closed) {
+            if (deps.socket.id === socketId && deps.socket.connected !== false)
+              deps.socket.emit('ms:close-producer', { producerId: acquiredProducer.id });
+            acquiredProducer.close();
+          }
+        }
+        acquiredStream?.getTracks().forEach((track) => { track.onended = null; track.stop(); });
+        if (!current || e instanceof CancelledScreenPublication) return;
         console.error(`[screen share] ${startupStage}失败`, e);
         deps.stopScreenAnalysis();
         deps.clearScreenRampGuard();
-        if (deps.screenProducer.current) {
-          deps.socket.emit('ms:close-producer', {
-            producerId: deps.screenProducer.current.id,
-          });
-          deps.screenProducer.current.close();
-          deps.screenProducer.current = null;
-        }
         if (deps.screenAudioProducer.current) {
           deps.socket.emit('ms:close-producer', {
             producerId: deps.screenAudioProducer.current.id,
@@ -277,13 +307,14 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
         deps.screenAudioPipeline.current?.close();
         deps.screenAudioPipeline.current = null;
         await window.coveScreenAudio?.stop();
-        acquiredStream?.getTracks().forEach((track) => track.stop());
         if (deps.localScreenRef.current === acquiredStream) deps.localScreenRef.current = null;
         deps.setLocalScreen(null);
         deps.setIsSharing(false);
         deps.setScreenEncodingPlan(null);
         if (!(e instanceof DOMException && e.name === 'NotAllowedError'))
           window.alert(`无法开始屏幕共享：${e instanceof Error ? e.message : String(e)}`);
+      } finally {
+        if (pendingStart.current?.operation === operation) pendingStart.current = null;
       }
       // eslint-disable-next-line react-hooks/exhaustive-deps
     },
@@ -327,6 +358,16 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
         window.alert('编码兼容模式需要停止当前共享后重新开始，当前共享未更改。');
         return;
       }
+      const transport = deps.sendTransport.current;
+      if (!transport) return;
+      const operation = publicationGeneration.current;
+      const generation = deps.mediaGeneration.current;
+      const socketId = deps.socket.id;
+      const isSessionCurrent = () => operation === publicationGeneration.current &&
+        generation === deps.mediaGeneration.current && transport === deps.sendTransport.current &&
+        socketId === deps.socket.id && deps.screenProducer.current === producer && !producer.closed;
+      const isCurrent = isSessionCurrent;
+      const ensureCurrent = () => { if (!isCurrent()) throw new CancelledScreenPublication(); };
 
       const preset = initPreset ?? deps.screenPreset;
       const gameMode = initGameMode ?? deps.screenGameMode;
@@ -346,6 +387,7 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
           audio: false,
         });
         acquiredStream = stream;
+        ensureCurrent();
         const videoTrack = stream.getVideoTracks()[0];
         if (!videoTrack) throw new Error('没有取得屏幕视频轨道');
         videoTrack.contentHint = gameMode ? 'motion' : 'detail';
@@ -367,6 +409,7 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
           return;
         }
         await producer.replaceTrack({ track: videoTrack });
+        ensureCurrent();
         if (producer.appData && typeof producer.appData === 'object')
           Object.assign(producer.appData, {
             adaptation: gameMode ? 'game' : 'content',
@@ -408,8 +451,10 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
         if (audio && !hasScreenAudio) {
           try {
             await deps.startScreenAudio();
+            ensureCurrent();
             hasScreenAudio = Boolean(deps.screenAudioProducer.current);
           } catch (error) {
+            ensureCurrent();
             hasScreenAudio = false;
             console.warn('[screen share] 更新共享音频失败:', error);
             window.alert('屏幕画面已更新，但共享电脑音频启动失败。请稍后重试。');
@@ -419,7 +464,9 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
           hasScreenAudio = false;
         }
         deps.setShareAudio(audio && hasScreenAudio);
-        videoTrack.onended = () => stopScreenShare();
+        videoTrack.onended = () => {
+          if (isSessionCurrent() && deps.localScreenRef.current === stream) stopScreenShare();
+        };
         console.info('[screen share] 共享参数已更新', {
           preset,
           fps: currentFps,
@@ -428,7 +475,8 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
           audio: audio && hasScreenAudio,
         });
       } catch (error) {
-        acquiredStream?.getTracks().forEach((track) => track.stop());
+        acquiredStream?.getTracks().forEach((track) => { track.onended = null; track.stop(); });
+        if (!isCurrent() || error instanceof CancelledScreenPublication) return;
         if (!(error instanceof DOMException && error.name === 'NotAllowedError'))
           window.alert(
             `无法更新屏幕共享：${error instanceof Error ? error.message : String(error)}`,
@@ -455,6 +503,8 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
   );
 
   const stopScreenShare = useCallback(() => {
+    publicationGeneration.current += 1;
+    pendingStart.current = null;
     deps.stopScreenAnalysis();
     deps.clearScreenRampGuard();
     if (deps.screenProducer.current) {
@@ -476,7 +526,7 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
     deps.screenAudioPipeline.current?.close();
     deps.screenAudioPipeline.current = null;
     void window.coveScreenAudio?.stop();
-    deps.localScreenRef.current?.getTracks().forEach((t) => t.stop());
+    deps.localScreenRef.current?.getTracks().forEach((track) => { track.onended = null; track.stop(); });
     deps.localScreenRef.current = null;
     deps.setLocalScreen(null);
     deps.setIsSharing(false);

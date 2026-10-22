@@ -28,6 +28,7 @@ function fixture(t: TestContext, compatibilityMode: boolean, sendCodecs: string[
   const ref = () => ({ current: null });
   const noop = () => {};
   const deps = {
+    mediaGeneration: { current: 0 },
     inVoice: true, get isSharing() { return sharing; },
     screenPreset: '1080p', fps: 60, screenGameMode: false, screenNativeResolution: false,
     screenCompatibilityMode: compatibilityMode, shareAudio: false,

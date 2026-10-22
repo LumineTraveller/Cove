@@ -68,6 +68,7 @@ test('real publishing hooks carry selected 120 through normal/game start and sou
   context.after(() => analysis.clearScreenRampGuard());
   const state = { sharing: false, fps: 30, preset: '720p', gameMode: false, nativeResolution: false, audio: false };
   const deps = {
+    mediaGeneration: { current: 0 },
     inVoice: true, get isSharing() { return state.sharing; },
     get fps() { return state.fps; }, get screenPreset() { return state.preset; },
     get screenGameMode() { return state.gameMode; }, get screenNativeResolution() { return state.nativeResolution; },
