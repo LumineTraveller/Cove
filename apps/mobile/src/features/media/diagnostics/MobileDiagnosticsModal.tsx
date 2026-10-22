@@ -14,6 +14,7 @@ import { type CoveColors } from '../../settings/theme';
 import { saveTextFile } from '../../soundpacks/soundpackFiles';
 import {
   normalizeMobileDiagnostics,
+  mobileRoundTripTimeMs,
   videoBitrate,
   videoDiagnosticSample,
   videoEncodingPerformance,
@@ -159,7 +160,13 @@ export function MobileDiagnostics({
                   采样于{' '}
                   {new Date(report.sampledAt).toLocaleTimeString('zh-CN')}
                 </Text>
+                <Text style={styles.hint}>
+                  RTT 是手机与 SFU 的往返时间，不是采集到显示的端到端延迟。
+                </Text>
                 <View style={styles.metrics}>
+                  <Text style={styles.metric}>
+                    RTT　{display(mobileRoundTripTimeMs(report) ?? undefined, ' ms')}
+                  </Text>
                   <Text style={styles.metric}>
                     视频方向　
                     {sending

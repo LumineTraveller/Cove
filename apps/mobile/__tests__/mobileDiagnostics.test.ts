@@ -1,10 +1,27 @@
 import {
   normalizeMobileDiagnostics,
+  mobileRoundTripTimeMs,
   videoBitrate,
   videoDiagnosticSample,
   videoEncodingPerformance,
 } from '../src/features/media/diagnostics/mobileDiagnostics';
 const stage = { inVoice: false, watching: true, sharing: false };
+it('RTT uses the selected client/SFU pair, keeps seconds distinct from ms and never invents end-to-end delay', () => {
+  const output = normalizeMobileDiagnostics({
+    stage, stats: { send: null, screenSend: null, receive: [
+      { type: 'candidate-pair', currentRoundTripTime: 0.5 },
+      { type: 'candidate-pair', currentRoundTripTime: 0.0123, nominated: true },
+    ] }, server: null,
+  });
+  expect(mobileRoundTripTimeMs(output)).toBe(12.3);
+  expect(output.metricDefinitions?.endToEndLatency.measured).toBe(false);
+  output.samples.forEach(sample => { delete sample.selected; });
+  expect(mobileRoundTripTimeMs(output)).toBeNull();
+  output.samples.push({ transport: 'receive', type: 'remote-inbound-rtp', kind: 'video', values: { roundTripTime: 0.035 } });
+  expect(mobileRoundTripTimeMs(output)).toBe(35);
+  output.stage = { inVoice: false, sharing: true, watching: false };
+  expect(mobileRoundTripTimeMs(output)).toBeNull();
+});
 const report = (bytes: number, at: number) =>
   normalizeMobileDiagnostics(
     {

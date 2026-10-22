@@ -83,7 +83,7 @@ export function DiagnosticsOverlayV2({
             </b>
           </div>
           <div>
-            <span>延迟/抖动</span>
+            <span title="客户端与 SFU 的往返时间；不代表采集到显示的端到端延迟">RTT / RTP 抖动</span>
             <b>
               {rtc.stats.rtt ?? '—'} / {rtc.stats.jitter ?? '—'} ms
             </b>

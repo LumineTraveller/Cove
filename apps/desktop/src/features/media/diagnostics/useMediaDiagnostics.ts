@@ -1,5 +1,6 @@
 import { useCallback } from 'react';
 import { Socket } from 'socket.io-client';
+import { MEDIA_TIMING_DEFINITIONS, rtcSecondsToMilliseconds } from '@cove/client-core';
 
 import {
   diagnosticVideoCounters,
@@ -111,7 +112,7 @@ export function useMediaDiagnostics(deps: useMediaDiagnosticsDependencies) {
           pairs.find((value) => value.nominated === true || value.selected === true) ?? pairs[0];
         if (pair) {
           if (typeof pair.currentRoundTripTime === 'number')
-            next.rtt = Math.round(pair.currentRoundTripTime * 1_000);
+            next.rtt = rtcSecondsToMilliseconds(pair.currentRoundTripTime);
           if (sendingScreen && typeof pair.availableOutgoingBitrate === 'number')
             next.availableBitrate = Math.round(pair.availableOutgoingBitrate / 1_000);
           const candidate = report.get(String(pair.localCandidateId ?? '')) as unknown as
@@ -251,7 +252,7 @@ export function useMediaDiagnostics(deps: useMediaDiagnosticsDependencies) {
           );
           deps.remoteLossPrev.current = { lost, packets: sample.packets };
           if (typeof remoteInbound.roundTripTime === 'number')
-            next.rtt = Math.round(remoteInbound.roundTripTime * 1_000);
+            next.rtt = rtcSecondsToMilliseconds(remoteInbound.roundTripTime);
           if (typeof remoteInbound.jitter === 'number')
             next.jitter = Math.round(remoteInbound.jitter * 1_000);
         } else if (!sendingScreen) {
@@ -349,6 +350,7 @@ export function useMediaDiagnostics(deps: useMediaDiagnosticsDependencies) {
     const producer = deps.screenProducer.current;
     const payload = {
       exportedAt: new Date().toISOString(),
+      metricDefinitions: MEDIA_TIMING_DEFINITIONS,
       roomId: deps.roomId,
       socketId: deps.socket.id ?? null,
       userAgent: navigator.userAgent,

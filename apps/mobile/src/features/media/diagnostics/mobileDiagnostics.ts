@@ -1,4 +1,5 @@
 import type { ScreenEncodingDiagnostics } from '../screen/screenSharing';
+import { MEDIA_TIMING_DEFINITIONS, diagnosticRoundTripTimeMs } from '@cove/client-core';
 
 export interface MobileDiagnosticsInput {
   stage: { inVoice: boolean; watching: boolean; sharing: boolean };
@@ -13,6 +14,7 @@ export interface DiagnosticSample {
   codec?: string;
   encoderImplementation?: string;
   powerEfficientEncoder?: boolean;
+  selected?: boolean;
   qualityLimitationReason?: 'none' | 'cpu' | 'bandwidth' | 'other';
   values: Record<string, number>;
 }
@@ -24,6 +26,7 @@ export interface MobileDiagnosticReport {
   samples: DiagnosticSample[];
   server: unknown;
   screenEncoder?: ScreenEncodingDiagnostics;
+  metricDefinitions?: typeof MEDIA_TIMING_DEFINITIONS;
 }
 const numericKeys = new Set([
   'timestamp',
@@ -276,6 +279,10 @@ export function normalizeMobileDiagnostics(
         type: report.type,
         ...(kind === 'audio' || kind === 'video' ? { kind } : {}),
         ...(codec ? { codec } : {}),
+        ...(report.type === 'candidate-pair' &&
+          (typeof report.selected === 'boolean' || typeof report.nominated === 'boolean' ||
+            (typeof report.state === 'string' && report.state !== 'succeeded'))
+          ? { selected: (!report.state || report.state === 'succeeded') && (report.selected === true || report.nominated === true) } : {}),
         ...(encoderImplementation(report.encoderImplementation)
           ? {
               encoderImplementation: encoderImplementation(
@@ -302,6 +309,7 @@ export function normalizeMobileDiagnostics(
     schemaVersion: 1,
     platform: 'android',
     sampledAt,
+    metricDefinitions: MEDIA_TIMING_DEFINITIONS,
     stage: {
       inVoice: input.stage?.inVoice === true,
       watching: input.stage?.watching === true,
@@ -337,6 +345,12 @@ export function videoDiagnosticSample(report: MobileDiagnosticReport) {
     )
   );
 }
+/** Avoid choosing an arbitrary ICE pair when a platform omits selection flags. */
+export function mobileRoundTripTimeMs(report: MobileDiagnosticReport): number | null {
+  const transport = report.stage.sharing ? 'screenSend' : report.stage.watching ? 'receive' : 'send';
+  return diagnosticRoundTripTimeMs(report.samples, transport);
+}
+
 export function videoBitrate(
   previous: MobileDiagnosticReport | null,
   current: MobileDiagnosticReport,
