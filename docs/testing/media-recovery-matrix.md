@@ -5,6 +5,10 @@
 
 ## 可重复的本地检查
 
+本次本地交付的启动入口与实测记录见 [统一验收说明](2026-10-22-improvements.md)。
+Windows 下先执行 `./tooling/start-local-test.ps1 -Check` 查看独立目录和端口，
+再执行 `./tooling/start-local-test.ps1` 启动测试服务端和桌面客户端；此入口不安装软件。
+
 先构建共享包，再执行对应 CI 门禁或恢复专项：
 
 ```powershell
@@ -18,6 +22,12 @@ node tooling/verify-media-recovery.cjs --repeat 3 --output runtime/recovery-veri
 专项工具只启动仓库内固定的逻辑、hook 和 loopback 合成测试，不接受服务器
 地址，不使用真实麦克风/屏幕。重复次数限制为 1–10，失败后停止；超时或取消
 只终止它启动的测试进程树。报告中的 `testDurationMs` 是测试执行耗时。
+
+2026-10-22 的额外双 Chromium 回归已使用真实 WebRTC/SFU、合成麦克风与画面完成
+VP8 协商、非黑解码帧、同 session 短暂信令恢复和停止共享后保留语音检查。
+结果保存为 `runtime/media-integration-result.json`，每次运行先写入新的 runId 和
+未完成状态，清理自有后端后才记录通过。此测试没有使用真实屏幕采集、Android
+硬件编码或真实弱网，也没有测量端到端延迟。
 
 桌面打开媒体诊断并导出 JSON；手机打开媒体状态，连续刷新两次后保存 JSON。
 离线汇总不读取账号数据，不连接网络，也不输出导出中的 room/socket 标识：

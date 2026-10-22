@@ -4,6 +4,7 @@ import react from '@vitejs/plugin-react';
 export default defineConfig({
   plugins: [react()],
   base: './',
+  cacheDir: process.env.COVE_VITE_CACHE_DIR || undefined,
   optimizeDeps: {
     entries: ['index.html'],
     include: ['@cove/client-core', '@cove/contracts'],

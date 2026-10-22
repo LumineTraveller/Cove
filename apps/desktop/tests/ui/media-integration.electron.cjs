@@ -6,19 +6,37 @@ const renderer=new URL(process.env.COVE_QA_RENDERER_URL||'http://127.0.0.1:55173
 if(renderer.protocol!=='http:'||renderer.hostname!=='127.0.0.1'||renderer.username||renderer.password||renderer.pathname!=='/'||renderer.search||renderer.hash)
   throw new Error('COVE_QA_RENDERER_URL must be a loopback HTTP origin');
 const temp=fs.mkdtempSync(path.join(root,'runtime','electron-media-'));app.setPath('userData',temp);
+const resultPath=path.join(root,'runtime','media-integration-result.json');
+const runId=require('node:crypto').randomUUID();const startedAt=new Date().toISOString();
+fs.writeFileSync(resultPath,JSON.stringify({passed:false,status:'running',runId,startedAt},null,2));
+// Keep the process alive until owned backend cleanup and result persistence finish.
+app.on('window-all-closed',()=>{});
 app.commandLine.appendSwitch('use-fake-device-for-media-stream');app.commandLine.appendSwitch('use-fake-ui-for-media-stream');
 app.commandLine.appendSwitch('autoplay-policy','no-user-gesture-required');
 const backend=spawn(process.env.COVE_TEST_NODE,[path.join(root,'tooling/runtime-smoke.cjs'),'--hold'],{cwd:root,stdio:['ignore','inherit','inherit','ipc'],windowsHide:true});
 const ready=new Promise((resolve,reject)=>{backend.on('message',message=>{if(message?.type==='ready')resolve(message);});backend.once('error',reject);backend.once('exit',code=>reject(new Error('Backend exited '+code)));});
-const windows=[];let finished=false;
+const windows=[];let finished=false;let failure=null;
 async function finish(code){
   if(finished)return;finished=true;for(const win of windows)if(!win.isDestroyed())win.destroy();
   if(backend.exitCode===null){
-    await new Promise(resolve=>{backend.once('exit',resolve);backend.send({type:'stop'});setTimeout(()=>{backend.kill();resolve();},5000).unref();});
+    await new Promise(resolve=>{
+      const kill=setTimeout(()=>backend.kill(),5000);
+      const deadline=setTimeout(resolve,10000);
+      backend.once('exit',()=>{clearTimeout(kill);clearTimeout(deadline);resolve();});
+      if(backend.connected)backend.send({type:'stop'},error=>{if(error)backend.kill();});
+      else backend.kill();
+    });
   }
-  app.exit(code);
+  const cleaned=backend.exitCode!==null;
+  const passed=code===0&&cleaned;
+  fs.writeFileSync(resultPath,JSON.stringify({
+    passed,status:'completed',runId,startedAt,finishedAt:new Date().toISOString(),backendStopped:cleaned,error:failure,
+    scope:'two real Chromium peers; synthetic devices; VP8; decoded frame; short signal recovery; independent screen teardown',
+    endToEndLatencyMeasured:false,
+  },null,2));
+  app.exit(passed?0:1);
 }
-const watchdog=setTimeout(()=>{console.error('Media regression timed out');void finish(1);},90000);
+const watchdog=setTimeout(()=>{failure='Media regression timed out';console.error(failure);void finish(1);},90000);
 async function waitFor(win,code){for(let attempt=0;attempt<240;attempt++){if(await win.webContents.executeJavaScript(code))return;await new Promise(resolve=>setTimeout(resolve,100));}throw new Error('Timed out: '+code);}
 app.whenReady().then(async()=>{
   try{
@@ -60,5 +78,5 @@ app.whenReady().then(async()=>{
     for(const win of windows)await win.webContents.executeJavaScript('window.coveMediaQA.rtc.leaveVoice()');
     console.log('PASS: two real Chromium/WebRTC peers, synthetic mic/video, negotiated VP8, non-black decoded frame, short transport recovery and independent screen teardown.');
     clearTimeout(watchdog);await finish(0);
-  }catch(error){console.error(error);clearTimeout(watchdog);await finish(1);}
+  }catch(error){failure=error.stack||String(error);console.error(error);clearTimeout(watchdog);await finish(1);}
 });

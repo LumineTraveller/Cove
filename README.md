@@ -2,6 +2,8 @@
 
 当前分支包含本地改进，尚未发布。模块边界和扩展约定见 [架构说明](docs/architecture/README.md)，连接生命周期与恢复边界见 [连接恢复说明](docs/architecture/connection-recovery.md)，历史重构记录见 [REFACTOR_STATUS.md](REFACTOR_STATUS.md)。版本号以各应用的 `package.json` 和发布清单为准。
 
+2026-10-22 本地交付、独立测试启动入口、回归结果和统一人工验收步骤见 [本次改进验收说明](docs/testing/2026-10-22-improvements.md)。
+
 Cove 是一个可自托管的实时语音与聊天应用。成员在房间内保持在线状态，随时加入语音、共享屏幕、播放语音包，并支持远程控制共享方的桌面。
 
 提供三个客户端形态，共用同一个服务器：
