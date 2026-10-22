@@ -133,3 +133,19 @@ export interface MediaCapabilities {
   remoteControl: boolean;
   videoCodecs: readonly string[];
 }
+
+/** Optional per-transport SFU capability; absent on legacy servers. */
+export interface IceRestartCapability { version: 1; sessionId: string }
+export interface IceRestartRequest {
+  transportId: string;
+  roomId: string;
+  sessionId: string;
+  sequence: number;
+}
+export type IceRestartResponse = {
+  ok: true;
+  transportId: string;
+  sessionId: string;
+  sequence: number;
+  iceParameters: { usernameFragment: string; password: string; iceLite?: boolean };
+} | { ok: false; code: string };

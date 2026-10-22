@@ -257,3 +257,87 @@ test('resume cannot ACK success after voice leave', async t => {
   await operation;
   assert.ok(result.error);
 });
+
+async function restartFixture(t: any, restartIce?: () => Promise<any>, direction = 'send', purpose?: string) {
+  let rotations = 0;
+  const transport = Object.assign(new EventEmitter(), {
+    id: `ice-${direction}-${purpose ?? 'voice'}`, closed: false, iceState: 'connected', dtlsState: 'connected',
+    iceParameters: { usernameFragment: 'initial-user', password: 'initial-password', iceLite: true },
+    iceCandidates: [], dtlsParameters: {}, sctpParameters: {},
+    close() { this.closed = true; },
+    async restartIce() { rotations++; return restartIce ? restartIce() : { usernameFragment: `rotation-${rotations}`, password: 'test-secret', iceLite: true }; },
+  });
+  const s = setup(t, { mediaRouter: { createWebRtcTransport: async () => transport } as any });
+  let created: any;
+  await s.handlers.get('ms:create-transport')!({ direction, purpose }, (value: any) => { created = value; });
+  assert.equal(created?.iceRestart?.version, 1);
+  assert.match(created.iceRestart.sessionId, /^[a-f\d-]{36}$/i);
+  const request = { transportId: transport.id, roomId: 'room', sessionId: created.iceRestart.sessionId, sequence: 1 };
+  const restart = async (changes: Record<string, unknown> = {}) => {
+    let result: any;
+    await s.handlers.get('ms:restart-ice')!({ ...request, ...changes }, (value: any) => { result = value; });
+    return result;
+  };
+  return { ...s, transport, created, request, restart, rotations: () => rotations };
+}
+
+for (const [direction, purpose] of [['send', undefined], ['recv', undefined], ['send', 'screen']])
+  test(`ICE restart advertises an opaque session for its exact ${purpose ?? direction} transport`, async t => {
+    const f = await restartFixture(t, undefined, direction, purpose);
+    const result = await f.restart();
+    assert.equal(result.ok, true);
+    assert.equal(result.transportId, f.transport.id);
+    assert.equal(result.sessionId, f.created.iceRestart.sessionId);
+    assert.equal(result.sequence, 1);
+    assert.equal(result.iceParameters.usernameFragment, 'rotation-1');
+    assert.equal(f.rotations(), 1);
+    assert.equal(result.error, undefined);
+  });
+
+test('ICE restart duplicate sequence reuses one pending rotation and its completed result', async t => {
+  const pending = deferred<any>();
+  const f = await restartFixture(t, () => pending.promise);
+  const first = f.restart();
+  const duplicate = f.restart();
+  assert.equal(f.rotations(), 1);
+  assert.deepEqual(await f.restart({ sequence: 2 }), { ok: false, code: 'BUSY' });
+  pending.resolve({ usernameFragment: 'rotated', password: 'test-secret', iceLite: true });
+  assert.deepEqual(await first, await duplicate);
+  assert.deepEqual(await f.restart(), await first);
+  assert.equal(f.rotations(), 1);
+});
+
+test('ICE restart cannot reuse a main transport retained across voice leave/rejoin', async t => {
+  const f = await restartFixture(t);
+  f.voice.handleVoiceLeave(f.socket.id, 'room');
+  f.voiceRooms.get('room')!.add(f.socket.id);
+  assert.equal(f.peer.sendTransport, f.transport);
+  assert.equal(f.transport.closed, false);
+  assert.deepEqual(await f.restart(), { ok: false, code: 'SESSION_EXPIRED' });
+  assert.equal(f.rotations(), 0);
+});
+
+for (const change of ['leave', 'replace', 'disconnect'])
+  test(`ICE restart rejects a late worker result after ${change}`, async t => {
+    const pending = deferred<any>();
+    const f = await restartFixture(t, () => pending.promise);
+    const operation = f.restart();
+    if (change === 'leave') f.voice.handleVoiceLeave(f.socket.id, 'room');
+    else if (change === 'replace') f.peer.sendTransport = { id: 'replacement', closed: false } as any;
+    else f.socket.connected = false;
+    pending.resolve({ usernameFragment: 'rotated', password: 'test-secret', iceLite: true });
+    const result = await operation;
+    assert.equal(result.ok, false);
+    assert.equal(result.iceParameters, undefined);
+    assert.equal(f.rotations(), 1);
+  });
+
+test('ICE restart rejects malformed requests and missing callbacks without throwing or rotating', async t => {
+  const f = await restartFixture(t);
+  assert.doesNotThrow(() => f.handlers.get('ms:restart-ice')!(null));
+  assert.doesNotThrow(() => f.handlers.get('ms:restart-ice')!({}));
+  assert.deepEqual(await f.restart({ sequence: 0 }), { ok: false, code: 'BAD_REQUEST' });
+  assert.deepEqual(await f.restart({ sequence: 1.5 }), { ok: false, code: 'BAD_REQUEST' });
+  assert.deepEqual(await f.restart({ roomId: 'other-room' }), { ok: false, code: 'SESSION_MISMATCH' });
+  assert.equal(f.rotations(), 0);
+});

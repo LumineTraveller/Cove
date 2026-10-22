@@ -5,6 +5,7 @@ import { router, webRtcServer, peers, getRoomProducers } from './ms';
 import { OnDemandMediaType } from '../../models';
 import { mediaGeneration, beginTransportRequest } from './mediaLifecycle';
 import { markScreenReplacement, screenProducerClosure } from './screenPublication';
+import { bindTransportIceRestart, restartTransportIce } from './transportIceRestart';
 
 export interface RegisterMediaSocketHandlersDependencies {
   readonly mediaRouter?: Pick<import('mediasoup').types.Router, 'createWebRtcTransport' | 'canConsume'>;
@@ -195,6 +196,7 @@ export function registerMediaSocketHandlers(deps: RegisterMediaSocketHandlersDep
           );
       });
 
+      const iceRestart = bindTransportIceRestart(peer, roomId, transport, generation);
       cb({
         id: transport.id,
         iceParameters: transport.iceParameters,
@@ -202,10 +204,16 @@ export function registerMediaSocketHandlers(deps: RegisterMediaSocketHandlersDep
         dtlsParameters: transport.dtlsParameters,
         sctpParameters: transport.sctpParameters,
         purpose: isScreen ? 'screen' : undefined,
+        ...(iceRestart ? { iceRestart } : {}),
       });
     } catch (e: unknown) {
       cb({ error: String(e) });
     }
+  });
+
+  deps.socket.on('ms:restart-ice', async (data: unknown, cb?: (result: unknown) => void) => {
+    if (typeof cb !== 'function') return;
+    cb(await restartTransportIce(deps.socket, data));
   });
 
   /** 3. 完成 DTLS 握手 */
