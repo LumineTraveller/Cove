@@ -63,7 +63,8 @@ async function main() {
   const result = JSON.parse(fs.readFileSync(resultPath, 'utf8'));
   const fresh = typeof result.runId === 'string' && Date.parse(result.startedAt) >= started && result.status === 'completed';
   if (code !== 0 || !fresh || !result.passed || !result.backendStopped ||
-      !result.iceEvidence?.decodedFramesResumed || !result.iceEvidence?.syntheticAudioPacketsAndSamplesResumed)
+      !result.iceEvidence?.decodedFramesResumed || !result.iceEvidence?.syntheticAudioPacketsAndSamplesResumed ||
+      !result.iceEvidence?.nonConcealedAudioSamplesResumed || !result.iceEvidence?.nonSilentAudioDecodeVerified)
     throw new Error('ICE integration failed or completion was not confirmed; see runtime/ice-restart-browser.log');
   console.log(JSON.stringify({ passed: true, runId: result.runId, ...result.iceEvidence, endToEndLatencyMeasured: false }, null, 2));
   if (renderer.connected) renderer.send({ type: 'stop' }, () => {});

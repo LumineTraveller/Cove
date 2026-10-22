@@ -8,16 +8,30 @@ const renderer=new URL(process.env.COVE_QA_RENDERER_URL||'http://127.0.0.1:55173
 if(renderer.protocol!=='http:'||renderer.hostname!=='127.0.0.1'||renderer.username||renderer.password||renderer.pathname!=='/'||renderer.search||renderer.hash)
   throw new Error('COVE_QA_RENDERER_URL must be a loopback HTTP origin');
 const temp=fs.mkdtempSync(path.join(root,'runtime','electron-media-'));app.setPath('userData',temp);
+// Deterministic PCM input, not Chromium's unspecified fake-device signal and
+// never the physical microphone. A changing envelope avoids a stationary NS tone.
+const sampleRate=48000;const sampleCount=sampleRate*4;const pcm=Buffer.alloc(sampleCount*2);let squared=0;let peak=0;
+for(let i=0;i<sampleCount;i++){
+  const t=i/sampleRate;const envelope=.15+.2*(.5+.5*Math.sin(2*Math.PI*3*t));
+  const sample=envelope*(Math.sin(2*Math.PI*440*t)+.3*Math.sin(2*Math.PI*660*t));
+  pcm.writeInt16LE(Math.round(sample*32767),i*2);squared+=sample*sample;peak=Math.max(peak,Math.abs(sample));
+}
+const wav=Buffer.alloc(44);wav.write('RIFF');wav.writeUInt32LE(36+pcm.length,4);wav.write('WAVEfmt ',8);wav.writeUInt32LE(16,16);
+wav.writeUInt16LE(1,20);wav.writeUInt16LE(1,22);wav.writeUInt32LE(sampleRate,24);wav.writeUInt32LE(sampleRate*2,28);
+wav.writeUInt16LE(2,32);wav.writeUInt16LE(16,34);wav.write('data',36);wav.writeUInt32LE(pcm.length,40);
+const fakeAudioFile=path.join(temp,'microphone.wav');fs.writeFileSync(fakeAudioFile,Buffer.concat([wav,pcm]));
+const syntheticAudioInput={type:'generated PCM WAV',sampleRate,channels:1,seconds:4,rms:Math.sqrt(squared/sampleCount),peak};
 const resultPath=path.join(root,'runtime',testIce?'ice-restart-integration-result.json':'media-integration-result.json');
 const runId=require('node:crypto').randomUUID();const startedAt=new Date().toISOString();
 fs.writeFileSync(resultPath,JSON.stringify({passed:false,status:'running',runId,startedAt},null,2));
 // Keep the process alive until owned backend cleanup and result persistence finish.
 app.on('window-all-closed',()=>{});
 app.commandLine.appendSwitch('use-fake-device-for-media-stream');app.commandLine.appendSwitch('use-fake-ui-for-media-stream');
+app.commandLine.appendSwitch('use-file-for-fake-audio-capture',fakeAudioFile);
 app.commandLine.appendSwitch('autoplay-policy','no-user-gesture-required');
 const backend=spawn(process.env.COVE_TEST_NODE,[path.join(root,'tooling/runtime-smoke.cjs'),'--hold'],{cwd:root,stdio:['ignore','inherit','inherit','ipc'],windowsHide:true});
 const ready=new Promise((resolve,reject)=>{backend.on('message',message=>{if(message?.type==='ready')resolve(message);});backend.once('error',reject);backend.once('exit',code=>reject(new Error('Backend exited '+code)));});
-const windows=[];let finished=false;let failure=null;let proxy=null;let iceEvidence=null;
+const windows=[];let finished=false;let failure=null;let proxy=null;let iceEvidence=null;const audioEvidence={syntheticAudioInput};
 async function finish(code){
   if(finished)return;finished=true;for(const win of windows)if(!win.isDestroyed())win.destroy();
   if(proxy)await proxy.close();
@@ -36,6 +50,7 @@ async function finish(code){
     passed,status:'completed',runId,startedAt,finishedAt:new Date().toISOString(),backendStopped:cleaned,error:failure,
     scope:'two real Chromium peers; synthetic devices; VP8; decoded frame; short signal recovery; independent screen teardown',
     endToEndLatencyMeasured:false,
+    audioEvidence,
     ...(testIce?{iceEvidence}:{}),
   },null,2));
   app.exit(passed?0:1);
@@ -49,12 +64,15 @@ app.whenReady().then(async()=>{
     session.defaultSession.setPermissionRequestHandler((_wc,permission,done)=>done(permission==='media'));
     session.defaultSession.setPermissionCheckHandler((_wc,permission)=>permission==='media');
     for(let index=0;index<2;index++){
-      const win=new BrowserWindow({show:false,webPreferences:{offscreen:true,backgroundThrottling:false}});windows.push(win);win.webContents.setAudioMuted(true);
-      win.webContents.on('console-message',(_event,_level,message)=>{if(message.includes('Error')||message.includes('error')||message.includes('[media-recovery]'))console.log('[renderer]',message);});
+      const win=new BrowserWindow({show:false,webPreferences:{offscreen:true,backgroundThrottling:false}});windows.push(win);
+      win.webContents.on('console-message',(_event,_level,message)=>{if(message.includes('Error')||message.includes('error')||message.includes('[media-recovery]')||message.includes('[mic-uplink]'))console.log('[renderer]',message);});
       const query=new URLSearchParams({base:info.base,room:info.roomId,token:info.accounts[index].token,index:String(index)});
       if(testIce&&index===1)query.set('iceProxy',String(proxy.port));
       await win.loadURL(renderer.origin+'/tests/ui/media-integration.html?'+query);
       await waitFor(win,'Boolean(window.coveMediaQA?.ready)');
+      // The fixture checks transport recovery rather than RNNoise's response to
+      // synthetic tones. Keep the normal gain/AEC/Opus/receive product paths.
+      await win.webContents.executeJavaScript("window.coveMediaQA.rtc.selectMicrophoneNoiseMode('system')");
       await win.webContents.executeJavaScript('window.coveMediaQA.rtc.joinVoice()');
       await waitFor(win,'Boolean(window.coveMediaQA.rtc.inVoice)');
     }
@@ -75,18 +93,35 @@ app.whenReady().then(async()=>{
       assert.ok(recv&&recv.consumers.length>=2,'viewer receives voice and screen');
       await waitFor(viewer,'window.coveMediaQA.ice.audioProgress().then(a=>a.packets>5)');
       const audioBefore=await viewer.webContents.executeJavaScript('window.coveMediaQA.ice.audioProgress()');
+      audioEvidence.before={sender:await sender.webContents.executeJavaScript('window.coveMediaQA.ice.audioDiagnostics()'),viewer:await viewer.webContents.executeJavaScript('window.coveMediaQA.ice.audioDiagnostics()'),progress:audioBefore};
+      console.log('[audio-baseline]',JSON.stringify(audioEvidence.before));
+      const nonSilent=diagnostics=>diagnostics.taps.some(tap=>tap.label==='consumer'&&tap.rms>1e-5&&tap.tracks.some(track=>track.enabled&&track.state==='live'));
+      assert.ok(nonSilent(audioEvidence.before.viewer),'non-silent decoded consumer PCM must exist before injecting a media fault');
+      assert.ok(audioEvidence.before.sender.transports.some(t=>t.producers.some(p=>!p.paused&&p.trackEnabled&&p.trackState==='live'&&p.stats.some(s=>s.packetsSent>5))),'sender must publish actual audio RTP');
+      for(const peer of [audioEvidence.before.sender,audioEvidence.before.viewer])assert.ok(peer.contexts.every(c=>c.state==='running'&&c.sinkType==='none'),'all analysis/playback contexts must run on silent sinks');
       await viewer.webContents.executeJavaScript('window.coveMediaQA.rtc.toggleMute()');
       await waitFor(viewer,'window.coveMediaQA.rtc.isMuted');
       proxy.setBlocked(true);
       await waitFor(viewer,'window.coveMediaQA.ice.snapshot().some(t=>t.direction==="recv"&&["disconnected","failed"].includes(t.state))');
       const blockedFrames=await viewer.webContents.executeJavaScript('window.coveMediaQA.ice.decodedFrames()');
       const blockedAudio=await viewer.webContents.executeJavaScript('window.coveMediaQA.ice.audioProgress()');
+      audioEvidence.blocked=blockedAudio;
       await waitFor(viewer,'window.coveMediaQA.ice.snapshot().some(t=>t.direction==="recv"&&t.restartCalls>0)');
       proxy.setBlocked(false);
       await waitFor(viewer,'window.coveMediaQA.ice.snapshot().some(t=>t.direction==="recv"&&t.state==="connected")');
       await waitFor(viewer,`window.coveMediaQA.ice.decodedFrames().then(n=>n>${blockedFrames}+2)`);
-      await waitFor(viewer,`window.coveMediaQA.ice.audioProgress().then(a=>a.packets>${blockedAudio.packets}+2&&a.samples>${blockedAudio.samples})`);
+      await waitFor(viewer,`window.coveMediaQA.ice.audioProgress().then(a=>a.packets>${blockedAudio.packets}+2&&a.samples>${blockedAudio.samples}&&a.nonConcealedSamples>${blockedAudio.nonConcealedSamples}+960)`);
       const audioAfter=await viewer.webContents.executeJavaScript('window.coveMediaQA.ice.audioProgress()');
+      await waitFor(viewer,'window.coveMediaQA.ice.audioDiagnostics().then(d=>d.taps.some(t=>t.label==="consumer"&&t.rms>1e-5))');
+      // Sample two distinct render windows after fresh RTP/sample counters have
+      // advanced. RTC inbound energy is preserved verbatim: Chromium may report
+      // zero there even while this actual consumer track decodes non-zero PCM.
+      const firstDecode=await viewer.webContents.executeJavaScript('window.coveMediaQA.ice.audioDiagnostics()');
+      await new Promise(resolve=>setTimeout(resolve,300));
+      const secondDecode=await viewer.webContents.executeJavaScript('window.coveMediaQA.ice.audioDiagnostics()');
+      audioEvidence.after={firstDecode,secondDecode,progress:audioAfter};
+      console.log('[audio-resumed]',JSON.stringify(audioEvidence.after));
+      assert.ok(nonSilent(firstDecode)&&nonSilent(secondDecode),'decoded audio must remain non-silent across separate post-recovery render windows');
       const after=await viewer.webContents.executeJavaScript('window.coveMediaQA.ice.snapshot()');
       const restarted=after.find(t=>t.id===recv.id);
       assert.ok(restarted?.credentialsChanged,'real SFU restart must change the ICE username fragment');
@@ -97,7 +132,10 @@ app.whenReady().then(async()=>{
         restartCalls:restarted.restartCalls,credentialsChanged:true,transportRetained:true,consumersRetained:true,
         producersRetained:true,muteRetained:true,watchRetained:true,decodedFramesResumed:true,
         syntheticAudioPacketsAndSamplesResumed:true,
-        nonSilentAudioDecodeVerified:audioBefore.energy>0&&audioAfter.energy>blockedAudio.energy,
+        nonConcealedAudioSamplesResumed:true,
+        nonSilentAudioDecodeVerified:nonSilent(audioEvidence.before.viewer)&&nonSilent(firstDecode)&&nonSilent(secondDecode),
+        audioVerificationMethod:'actual consumer MediaStreamTrack PCM analyser on a running silent AudioContext, with RTP/sample growth',
+        inboundEnergyMetricReportedZero:audioBefore.energy===0&&audioAfter.energy===0,
         speakerAudibilityMeasured:false};
       assert.ok(iceEvidence.interruptedConnections>0);
     }
