@@ -21,7 +21,7 @@ export function shouldRetainMediaOnSignalTimeout(state: MediaRecoveryState): boo
 }
 
 export function isRecoveredMediaSession(state: MediaRecoveryState): boolean {
-  return state.recovered && state.mediaSocketId === state.socketId;
+  return state.recovered && state.mediaSocketId !== undefined && state.mediaSocketId === state.socketId;
 }
 
 interface MediaConnectionRecoveryOptions {

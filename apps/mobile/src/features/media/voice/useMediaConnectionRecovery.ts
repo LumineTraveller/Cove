@@ -9,9 +9,12 @@ interface MediaConnectionRecoveryDependencies {
   socket: Socket;
   roomId: string;
   connectionGrace: RefObject<DisconnectGrace>;
-  voiceSocketId: RefObject<string | undefined>;
+  mediaSocketId: RefObject<string | undefined>;
   inVoiceRef: RefObject<boolean>;
   joiningRef: RefObject<boolean>;
+  watchingScreenPeerRef: RefObject<string | null>;
+  watchingGeneration: RefObject<number | null>;
+  mediaGeneration: RefObject<number>;
   sendTransport: RefObject<Transport | null>;
   recvTransport: RefObject<Transport | null>;
   teardown: (notifyServer: boolean) => void;
@@ -21,7 +24,7 @@ interface MediaConnectionRecoveryDependencies {
 
 /** Socket and media deadlines are independent of native/RTP resource cleanup. */
 export function useMediaConnectionRecovery({
-  socket, roomId, connectionGrace, voiceSocketId, inVoiceRef, joiningRef,
+  socket, roomId, connectionGrace, mediaSocketId, inVoiceRef, joiningRef, watchingScreenPeerRef, watchingGeneration, mediaGeneration,
   sendTransport, recvTransport, teardown, setConnectionState, setError,
 }: MediaConnectionRecoveryDependencies) {
   useEffect(() => {
@@ -30,10 +33,10 @@ export function useMediaConnectionRecovery({
       readState: () => ({
         recovered: socket.recovered,
         socketId: socket.id,
-        mediaSocketId: voiceSocketId.current,
+        mediaSocketId: mediaSocketId.current,
         active: inVoiceRef.current || recvTransport.current !== null,
-        pending: joiningRef.current,
-        established: inVoiceRef.current,
+        pending: joiningRef.current || watchingGeneration.current === mediaGeneration.current,
+        established: inVoiceRef.current || watchingScreenPeerRef.current !== null,
         sendState: sendTransport.current?.connectionState ?? null,
         recvState: recvTransport.current?.connectionState ?? null,
       }),
@@ -51,7 +54,8 @@ export function useMediaConnectionRecovery({
       socket.off('connect', recovery.onConnect);
       recovery.dispose();
     };
-  }, [socket, roomId, connectionGrace, voiceSocketId, inVoiceRef, joiningRef,
+  }, [socket, roomId, connectionGrace, mediaSocketId, inVoiceRef, joiningRef,
+    watchingScreenPeerRef, watchingGeneration, mediaGeneration,
     sendTransport, recvTransport, teardown, setConnectionState, setError]);
 
   const checkTransport = useCallback(

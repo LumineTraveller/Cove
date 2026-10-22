@@ -13,6 +13,7 @@ const mockGetUserMedia = jest.fn(async () => {
   return stream;
 });
 const mockTransport = {
+  connectionState: undefined as string | undefined,
   on: jest.fn(), close: jest.fn(),
   produce: jest.fn(async () => ({ close: jest.fn(), pause: jest.fn(), resume: jest.fn(), replaceTrack: jest.fn(), paused: false, closed: false })),
   consume: jest.fn(async (params: any) => {
@@ -51,6 +52,7 @@ jest.mock('../src/features/media/microphone/microphoneNoise', () => ({
 
 import { PermissionsAndroid } from 'react-native';
 import { mediaDevices } from 'react-native-webrtc';
+import InCallManager from 'react-native-incall-manager';
 const application = (producerId: string, peerId = 'peer1') => ({ producerId, peerId, kind: 'audio', appData: { type: 'application-audio', label: 'Music' } });
 const microphone = (producerId: string, peerId = 'peer1') => ({ producerId, peerId, kind: 'audio', appData: { type: 'mic' } });
 let media: ReturnType<typeof useMobileMedia>;
@@ -60,9 +62,13 @@ let handlers: Map<string, (...args: any[]) => any>;
 let existing: any[];
 let delayedConsume: (() => void) | undefined;
 let holdConsume: boolean;
+let currentRoom: string;
+let Harness: () => null;
 
 beforeEach(async () => {
   jest.clearAllMocks(); mockConsumers.clear(); mockStreams.length = 0; mockNoiseMode = 'system'; existing = []; delayedConsume = undefined; holdConsume = false;
+  mockTransport.connectionState = undefined;
+  currentRoom = 'room';
   jest.spyOn(PermissionsAndroid, 'request').mockResolvedValue(PermissionsAndroid.RESULTS.GRANTED);
   handlers = new Map();
   socket = {
@@ -79,7 +85,7 @@ beforeEach(async () => {
       } else callback({});
     }),
   };
-  function Harness() { media = useMobileMedia(socket, 'room'); return null; }
+  Harness = () => { media = useMobileMedia(socket, currentRoom); return null; };
   await act(async () => { renderer = TestRenderer.create(<Harness />); });
 });
 afterEach(async () => { await act(async () => renderer.unmount()); jest.restoreAllMocks(); jest.useRealTimers(); });
@@ -292,6 +298,144 @@ test('leaving during microphone acquisition cannot resurrect the old join', asyn
   expect(media.inVoice).toBe(true);
 });
 
+test.each(['noise-status', 'output-route'] as const)('leaving during %s cancels the old join and releases its audio session', async stage => {
+  let release!: () => void;
+  if (stage === 'noise-status') {
+    const noise = jest.requireMock('../src/features/media/microphone/microphoneNoise');
+    noise.getNoiseStatus.mockImplementationOnce(() => new Promise(resolve => { release = () => resolve(mockNoiseStatus()); }));
+  } else {
+    const devices = jest.requireMock('../src/features/media/audio/audioDevices');
+    devices.setAudioOutputDevice.mockImplementationOnce(() => new Promise(resolve => { release = () => resolve('out-speaker'); }));
+  }
+  let pending!: Promise<void>;
+  await act(async () => { pending = media.joinVoice(); });
+  expect(release).toBeDefined();
+  await act(async () => media.leaveVoice());
+  if (stage === 'output-route') expect(InCallManager.stop).toHaveBeenCalledTimes(1);
+  socket.emit.mockClear();
+  await act(async () => { release(); await pending; });
+  expect(media.inVoice).toBe(false);
+  expect(media.joining).toBe(false);
+  expect(socket.emit).not.toHaveBeenCalledWith('voice:join', 'room');
+  expect(InCallManager.start).toHaveBeenCalledTimes(stage === 'output-route' ? 1 : 0);
+});
+
+test('a late route result cannot rejoin or stop the audio session of a newer join', async () => {
+  const devices = jest.requireMock('../src/features/media/audio/audioDevices');
+  let release!: () => void;
+  devices.setAudioOutputDevice.mockImplementationOnce(() => new Promise(resolve => { release = () => resolve('out-speaker'); }));
+  let oldJoin!: Promise<void>;
+  await act(async () => { oldJoin = media.joinVoice(); });
+  await act(async () => media.leaveVoice());
+  await act(async () => media.joinVoice());
+  const stops = jest.mocked(InCallManager.stop).mock.calls.length;
+  socket.emit.mockClear();
+  await act(async () => { release(); await oldJoin; });
+  expect(media.inVoice).toBe(true);
+  expect(InCallManager.stop).toHaveBeenCalledTimes(stops);
+  expect(socket.emit).not.toHaveBeenCalledWith('voice:join', 'room');
+});
+
+test('receiver-only media survives a recovered connection without publishing a microphone', async () => {
+  await act(async () => handlers.get('ms:new-producer')!({producerId: 'screen-video', peerId: 'desktop', kind: 'video', appData: {type: 'screen'}}));
+  await act(async () => media.watchScreen('desktop'));
+  const screen = media.remoteScreen;
+  await act(async () => { socket.connected = false; handlers.get('disconnect')!('transport close'); });
+  await act(async () => { socket.connected = true; socket.recovered = true; handlers.get('connect')!(); });
+  expect(media.remoteScreen).toBe(screen);
+  expect(media.isWatchingScreen).toBe(true);
+  expect(media.inVoice).toBe(false);
+  expect(mockTransport.close).not.toHaveBeenCalled();
+  expect(mockTransport.produce).not.toHaveBeenCalled();
+  expect(PermissionsAndroid.request).not.toHaveBeenCalled();
+  expect(socket.emit).not.toHaveBeenCalledWith('voice:leave', 'room');
+});
+
+test('a fresh server session cancels a pending receiver setup before its late capability ACK', async () => {
+  await act(async () => handlers.get('ms:new-producer')!({producerId: 'screen-video', peerId: 'desktop', kind: 'video', appData: {type: 'screen'}}));
+  const emit = socket.emit.getMockImplementation();
+  let release!: () => void;
+  socket.emit.mockImplementation((event: string, data: unknown, callback: (value: unknown) => void) => {
+    if (event === 'ms:capabilities') release = () => callback({});
+    else emit(event, data, callback);
+  });
+  let pending!: Promise<void>;
+  await act(async () => { pending = media.watchScreen('desktop'); });
+  await act(async () => { socket.connected = false; handlers.get('disconnect')!('transport close'); });
+  await act(async () => { socket.connected = true; socket.id = 'fresh-session'; socket.recovered = false; handlers.get('connect')!(); });
+  await act(async () => { release(); await pending; });
+  expect(media.isWatchingScreen).toBe(false);
+  expect(media.remoteScreen).toBeNull();
+  expect(socket.emit).not.toHaveBeenCalledWith('ms:create-transport', expect.anything(), expect.anything());
+  expect(mockTransport.produce).not.toHaveBeenCalled();
+});
+
+test('unmounting while native routing is pending releases its audio session and cancels late join effects', async () => {
+  const devices = jest.requireMock('../src/features/media/audio/audioDevices');
+  let release!: () => void;
+  devices.setAudioOutputDevice.mockImplementationOnce(() => new Promise(resolve => { release = () => resolve('out-speaker'); }));
+  let pending!: Promise<void>;
+  await act(async () => { pending = media.joinVoice(); });
+  await act(async () => renderer.unmount());
+  expect(InCallManager.stop).toHaveBeenCalledTimes(1);
+  socket.emit.mockClear();
+  await act(async () => { release(); await pending; });
+  expect(socket.emit).not.toHaveBeenCalledWith('voice:join', 'room');
+});
+
+
+test.each(['join', 'watch'] as const)('fresh reconnect can immediately %s without reusing a cancelled capability request', async action => {
+  let oldAck!: (response: unknown) => void;
+  const emit = socket.emit.getMockImplementation();
+  socket.emit.mockImplementation((event: string, data: unknown, callback: any) => {
+    if (event === 'ms:capabilities' && !oldAck) oldAck = callback;
+    else return emit(event, data, callback);
+  });
+  let oldWatch!: Promise<void>;
+  await act(async () => { oldWatch = media.watchScreen('desktop'); });
+  await act(async () => {
+    socket.id = 'new-session'; socket.recovered = false;
+    handlers.get('connect')!();
+  });
+  let next!: Promise<void>;
+  await act(async () => {
+    if (action === 'join') next = media.joinVoice();
+    else {
+      await handlers.get('ms:new-producer')!({ producerId: 'screen-new', peerId: 'desktop', kind: 'video', appData: { type: 'screen' } });
+      next = media.watchScreen('desktop');
+    }
+  });
+  // A new operation must settle before the old server ACK arrives.
+  expect(action === 'join' ? media.inVoice : media.isWatchingScreen).toBe(true);
+  const closes = mockTransport.close.mock.calls.length;
+  await act(async () => { oldAck({}); await oldWatch; await next; });
+  expect(action === 'join' ? media.inVoice : media.isWatchingScreen).toBe(true);
+  expect(mockTransport.close).toHaveBeenCalledTimes(closes);
+  expect(media.screenWatchingBusy).toBe(false);
+  expect(media.error).toBeNull();
+});
+
+test.each(['room', 'socket'] as const)('changing %s cancels a pending native route without disturbing a new join', async target => {
+  const devices = jest.requireMock('../src/features/media/audio/audioDevices');
+  let release!: () => void;
+  devices.setAudioOutputDevice.mockImplementationOnce(() => new Promise(resolve => { release = () => resolve('out-speaker'); }));
+  let oldJoin!: Promise<void>;
+  await act(async () => { oldJoin = media.joinVoice(); });
+  await act(async () => {
+    if (target === 'room') currentRoom = 'room-next';
+    else socket = { ...socket, id: 'socket-next', recovered: false };
+    renderer.update(<Harness />);
+  });
+  expect(media.inVoice).toBe(false);
+  expect(InCallManager.stop).toHaveBeenCalledTimes(1);
+  await act(async () => media.joinVoice());
+  const stops = jest.mocked(InCallManager.stop).mock.calls.length;
+  socket.emit.mockClear();
+  await act(async () => { release(); await oldJoin; });
+  expect(media.inVoice).toBe(true);
+  expect(InCallManager.stop).toHaveBeenCalledTimes(stops);
+  expect(socket.emit).not.toHaveBeenCalledWith('voice:join', expect.anything());
+});
 
 test('defaults to system noise suppression and allows RNNoise before joining', async () => {
   expect(media.noiseMode).toBe('system');

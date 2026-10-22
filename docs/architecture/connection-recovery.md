@@ -30,3 +30,20 @@ adding more signal listeners to the large producer/consumer event hook.
 
 No server protocol, grace period, `voice:join` acknowledgement requirement, screen
 capture or remote-control authorization changes are part of the refactor.
+
+## Resource cancellation
+
+Mobile teardown increments `mediaGeneration` before releasing resources and
+cancels the pending watch UI operation. Device initialization caches a Promise
+only within that generation; a new session cannot reuse cancelled work. The old
+Promise's finalizer can clear only its own cache entry. Watch finalizers likewise
+must own the current watch generation before changing busy state.
+
+Native voice audio has an explicit ownership flag separate from `inVoice`.
+Teardown can therefore stop an audio session while output routing is still
+pending. Every awaited native route/status result is checked against the media
+generation before committing UI/voice membership. The old operation cannot
+rejoin, publish or stop a newer session after leave, room/socket change or unmount.
+
+Receiver-only transports record the same socket owner as voice transports;
+recovery does not imply microphone permission or screen-capture permission.

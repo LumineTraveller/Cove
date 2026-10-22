@@ -59,6 +59,8 @@ export interface UseVoiceTeardownDependencies {
     Map<string, string>
   >;
   readonly inVoiceRef: import('react').RefObject<boolean>;
+  readonly voiceAudioSessionActive: import('react').RefObject<boolean>;
+  readonly cancelPendingWatch: () => void;
   readonly selfMutedRef: import('react').RefObject<boolean>;
   readonly setInVoice: import('react').Dispatch<
     import('react').SetStateAction<boolean>
@@ -107,6 +109,8 @@ export function useVoiceTeardown(deps: UseVoiceTeardownDependencies) {
     setApplicationAudioShares,
     pendingScreenAudioByPeer,
     inVoiceRef,
+    voiceAudioSessionActive,
+    cancelPendingWatch,
     selfMutedRef,
     setInVoice,
     setJoining,
@@ -124,6 +128,7 @@ export function useVoiceTeardown(deps: UseVoiceTeardownDependencies) {
     (notifyServer: boolean) => {
       stopScreenShare();
       mediaGeneration.current += 1;
+      cancelPendingWatch();
       joiningRef.current = false;
       connectionGrace.current.clear();
       if (notifyServer && socket.connected) socket.emit('voice:leave', roomId);
@@ -150,7 +155,8 @@ export function useVoiceTeardown(deps: UseVoiceTeardownDependencies) {
       setApplicationAudioShares([]);
       pendingScreenAudioByPeer.current.clear();
 
-      if (inVoiceRef.current) {
+      if (voiceAudioSessionActive.current) {
+        voiceAudioSessionActive.current = false;
         CoveNative?.setSpeakerphoneEnabled(false);
         InCallManager.setForceSpeakerphoneOn(null);
         InCallManager.stop();
@@ -188,6 +194,8 @@ export function useVoiceTeardown(deps: UseVoiceTeardownDependencies) {
       setApplicationAudioShares,
       pendingScreenAudioByPeer,
       inVoiceRef,
+      voiceAudioSessionActive,
+      cancelPendingWatch,
       selfMutedRef,
       setInVoice,
       setJoining,

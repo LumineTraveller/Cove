@@ -98,7 +98,14 @@ export function useMobileMedia(
   const closedProducers = useRef(new Set<string>());
   const mediaGeneration = useRef(0);
   const joiningRef = useRef(false);
-  const voiceSocketId = useRef<string | undefined>(undefined);
+  const mediaSocketId = useRef<string | undefined>(undefined);
+  const voiceAudioSessionActive = useRef(false);
+  const watchingGeneration = useRef<number | null>(null);
+  const [screenWatchingBusy, setScreenWatchingBusy] = useState(false);
+  const cancelPendingWatch = useCallback(() => {
+    watchingGeneration.current = null;
+    setScreenWatchingBusy(false);
+  }, []);
   const connectionGrace = useRef(new DisconnectGrace());
   const applicationAudioVolumes = useRef(new Map<string, number>());
   const memberVolumesRef = useRef(new Map<string, number>());
@@ -141,6 +148,8 @@ export function useMobileMedia(
     setApplicationAudioShares,
     pendingScreenAudioByPeer,
     inVoiceRef,
+    voiceAudioSessionActive,
+    cancelPendingWatch,
     selfMutedRef,
     setInVoice,
     setJoining,
@@ -154,7 +163,7 @@ export function useMobileMedia(
     setConnectionState,
   });
   const { checkTransport } = useMediaConnectionRecovery({
-    socket, roomId, connectionGrace, voiceSocketId, inVoiceRef, joiningRef,
+    socket, roomId, connectionGrace, mediaSocketId, inVoiceRef, joiningRef, watchingScreenPeerRef, watchingGeneration, mediaGeneration,
     sendTransport, recvTransport, teardown, setConnectionState, setError,
   });
   const { setupDevice, removeConsumer, consumeProducer } = useMediaTransports({
@@ -190,13 +199,12 @@ export function useMobileMedia(
     availableScreensRef,
     consumeProducer,
   });
-  const watchingBusy = useRef(false);
-  const [screenWatchingBusy, setScreenWatchingBusy] = useState(false);
   const watchScreen = useCallback(
     async (socketId?: string) => {
-      if (!roomReady || !socket.connected || watchingBusy.current) return;
+      if (!roomReady || !socket.connected || watchingGeneration.current === mediaGeneration.current) return;
       const generation = mediaGeneration.current;
-      watchingBusy.current = true;
+      mediaSocketId.current = socket.id;
+      watchingGeneration.current = generation;
       setScreenWatchingBusy(true);
       try {
         // Creating RTP transports does not open a microphone or screen capture.
@@ -207,8 +215,10 @@ export function useMobileMedia(
         if (generation === mediaGeneration.current)
           setError(cause instanceof Error ? cause.message : '无法观看共享屏幕');
       } finally {
-        watchingBusy.current = false;
-        setScreenWatchingBusy(false);
+        if (watchingGeneration.current === generation) {
+          watchingGeneration.current = null;
+          setScreenWatchingBusy(false);
+        }
       }
     },
     [consumeScreen, roomReady, setupDevice, socket],
@@ -407,7 +417,8 @@ export function useMobileMedia(
     joiningRef,
     socket,
     mediaGeneration,
-    voiceSocketId,
+    mediaSocketId,
+    voiceAudioSessionActive,
     setJoining,
     setConnectionState,
     setError,

@@ -36,7 +36,8 @@ export interface UseVoiceJoinDependencies {
     import('@socket.io/component-emitter/lib/cjs').DefaultEventsMap
   >;
   readonly mediaGeneration: import('react').RefObject<number>;
-  readonly voiceSocketId: import('react').RefObject<string | undefined>;
+  readonly mediaSocketId: import('react').RefObject<string | undefined>;
+  readonly voiceAudioSessionActive: import('react').RefObject<boolean>;
   readonly setJoining: import('react').Dispatch<
     import('react').SetStateAction<boolean>
   >;
@@ -87,7 +88,8 @@ export function useVoiceJoin(deps: UseVoiceJoinDependencies) {
     joiningRef,
     socket,
     mediaGeneration,
-    voiceSocketId,
+    mediaSocketId,
+    voiceAudioSessionActive,
     setJoining,
     setConnectionState,
     setError,
@@ -118,7 +120,7 @@ export function useVoiceJoin(deps: UseVoiceJoinDependencies) {
       if (generation !== mediaGeneration.current)
         throw new Error('语音加入已取消');
     };
-    voiceSocketId.current = socket.id;
+    mediaSocketId.current = socket.id;
     joiningRef.current = true;
     setJoining(true);
     setConnectionState('connecting');
@@ -175,6 +177,7 @@ export function useVoiceJoin(deps: UseVoiceJoinDependencies) {
       if (forceMutedRef.current) producer.pause();
 
       appliedNoise = await getNoiseStatus();
+      ensureCurrent();
       noiseModeRef.current = appliedNoise.effectiveMode;
       setNoiseMode(appliedNoise.effectiveMode);
       setNoiseError(
@@ -184,10 +187,13 @@ export function useVoiceJoin(deps: UseVoiceJoinDependencies) {
             : null),
       );
 
+      // Teardown owns this session even while routing is still pending.
+      voiceAudioSessionActive.current = true;
       startVoiceAudioSession();
       try {
         if (audioInputIdRef.current && audioInputIdRef.current !== 'default') {
           await setAudioInputDevice(audioInputIdRef.current);
+          ensureCurrent();
         }
         await setAudioOutputDevice(
           audioOutputIdRef.current || DEFAULT_OUTPUT_ID,
@@ -195,6 +201,7 @@ export function useVoiceJoin(deps: UseVoiceJoinDependencies) {
       } catch {
         // 路由失败不阻断入会；系统会按默认设备出声。
       }
+      ensureCurrent();
       void refreshAudioDevices();
       inVoiceRef.current = true;
       setInVoice(true);
@@ -277,7 +284,8 @@ export function useVoiceJoin(deps: UseVoiceJoinDependencies) {
     socket,
     storeAvailableScreen,
     teardown,
-    voiceSocketId,
+    mediaSocketId,
+    voiceAudioSessionActive,
   ]);
   return { joinVoice };
 }

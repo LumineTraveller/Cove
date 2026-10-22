@@ -62,7 +62,7 @@ export interface UseMediaTransportsDependencies {
 }
 
 export function useMediaTransports(deps: UseMediaTransportsDependencies) {
-  const deviceSetup = useRef<Promise<void> | null>(null);
+  const deviceSetup = useRef<{ generation: number; promise: Promise<void> } | null>(null);
   const {
     deviceRef,
     sendTransport,
@@ -171,13 +171,14 @@ export function useMediaTransports(deps: UseMediaTransportsDependencies) {
   ]);
 
   const setupDevice = useCallback(() => {
-    if (deviceSetup.current) return deviceSetup.current;
+    const generation = mediaGeneration.current;
+    if (deviceSetup.current?.generation === generation) return deviceSetup.current.promise;
     const pending = setupDeviceOnce().finally(() => {
-      if (deviceSetup.current === pending) deviceSetup.current = null;
+      if (deviceSetup.current?.promise === pending) deviceSetup.current = null;
     });
-    deviceSetup.current = pending;
+    deviceSetup.current = { generation, promise: pending };
     return pending;
-  }, [setupDeviceOnce]);
+  }, [mediaGeneration, setupDeviceOnce]);
 
   const removeConsumer = useCallback(
     (consumerId: string, notifyServer = false) => {
