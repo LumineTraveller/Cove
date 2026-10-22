@@ -23,7 +23,7 @@ timeout. Desktop starts a media failure deadline only for `failed`; mobile uses
 boundaries, not a reason to combine the transport timers with the signal timer.
 
 The shared recovery controller owns only its signal deadline. Disposing it
-cancels that deadline. Resource teardown owns generation invalidation and all
+cancels that deadline and invalidates captured late socket callbacks. Resource teardown owns generation invalidation and all
 transport timers. New recovery strategies belong in the shared policy with
 explicit platform opt-in; native setup/cleanup belongs in resource hooks. Avoid
 adding more signal listeners to the large producer/consumer event hook.
@@ -92,3 +92,13 @@ and mixed installed client/server versions still require device/network acceptan
 tests. Passing the logic, renderer and loopback tests is not a release-readiness
 claim. The server protocol and deployment are unchanged, so no new server feature
 is assumed available on an existing deployment.
+
+## Locating recovery decisions
+
+The shared adapter emits bounded event names through `onEvent`: signal connected/
+disconnected, signal timeout with media retained, media reset (explicit disconnect,
+signal timeout or fresh session), and cleanup of a recovered session after leave.
+Desktop retains its existing sink; mobile uses `[media-recovery]` console events.
+These events contain reason codes rather than account tokens, full socket payloads
+or ICE addresses. They locate a lifecycle decision; they are not proof of network
+quality or successful end-to-end media playback.

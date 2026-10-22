@@ -43,6 +43,21 @@ function fixture() {
   return { state, grace, resets, errors, events, recovery, resetVoice, disconnect, connect, leaves: () => leaves };
 }
 
+test('disposed recovery adapters ignore captured late events and cannot reset a newer media owner', t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture();
+  f.disconnect();
+  f.recovery.dispose();
+  const events = [...f.events];
+  // An emitter may already have captured its listener list before unsubscribe.
+  f.recovery.onDisconnect('io server disconnect');
+  f.connect('new-socket', false);
+  t.mock.timers.tick(20_000);
+  assert.deepEqual(f.resets, []);
+  assert.deepEqual(f.events, events);
+  assert.equal(f.leaves(), 0);
+});
+
 test('server recovery before its deadline preserves live voice even when the client connect event arrives after 5s', t => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const f = fixture();

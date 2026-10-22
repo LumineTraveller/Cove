@@ -41,6 +41,7 @@ export function useMediaConnectionRecovery({
         recvState: recvTransport.current?.connectionState ?? null,
       }),
       retainOnSignalTimeout: shouldRetainMediaOnSignalTimeout,
+      onEvent: (event, reason) => console.info('[media-recovery]', event, reason ?? ''),
       resetMedia: () => teardown(false),
       leaveRecoveredSession: () => { socket.emit('voice:leave', roomId); },
       onSignalLost: () => setConnectionState('connecting'),

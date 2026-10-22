@@ -38,40 +38,52 @@ interface MediaConnectionRecoveryOptions {
 
 /** Owns signal deadlines only. Native/RTP resources remain platform-owned. */
 export function createMediaConnectionRecovery(options: MediaConnectionRecoveryOptions) {
+  let disposed = false;
+  const reset = (reason: string) => {
+    options.onEvent?.('media-reset', reason);
+    options.resetMedia(reason);
+  };
   const onDisconnect = (reason: string) => {
+    if (disposed) return;
     options.onEvent?.('signal-disconnected', reason);
     if (reason === 'io client disconnect' || reason === 'io server disconnect') {
-      options.resetMedia(reason);
+      reset(reason);
       return;
     }
     const state = options.readState();
     if (!state.active && !state.pending) return;
     options.onSignalLost?.();
     options.grace.fail('signal', () => {
+      if (disposed) return;
       const latest = options.readState();
       if (!latest.active && !latest.pending) return;
       if (options.retainOnSignalTimeout(latest)) {
         options.onEvent?.('signal-timeout-media-retained');
         return;
       }
-      options.resetMedia('signal-timeout');
+      reset('signal-timeout');
       options.onSignalTimeout();
     });
   };
 
   const onConnect = () => {
+    if (disposed) return;
     options.grace.recover('signal');
     options.onEvent?.('signal-connected');
     const state = options.readState();
     if (!isRecoveredMediaSession(state)) {
-      if (state.active || state.pending) options.resetMedia('session-not-recovered');
+      if (state.active || state.pending) reset('session-not-recovered');
     } else if (!state.established && !state.pending) {
       // Explicit leave and media failure take priority over signal recovery.
+      options.onEvent?.('recovered-session-left');
       options.leaveRecoveredSession();
     } else {
       options.onRecovered?.(state);
     }
   };
 
-  return { onDisconnect, onConnect, dispose: () => options.grace.recover('signal') };
+  return { onDisconnect, onConnect, dispose: () => {
+    disposed = true;
+    options.grace.recover('signal');
+  } };
 }
