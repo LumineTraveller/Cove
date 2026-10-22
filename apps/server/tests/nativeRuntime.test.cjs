@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const fs = require('node:fs');
-const { pinnedVersion, isWithin, assertPrivateModuleDirectory, createPlan, parseArguments } = require('../scripts/native-runtime.cjs');
+const { pinnedVersion, isWithin, assertPrivateModuleDirectory, assertCandidateModuleDirectory, createPlan, parseArguments } = require('../scripts/native-runtime.cjs');
 
 test('native rebuild target follows the pinned server runtime, without npx or a shell', () => {
   const plan = createPlan();
@@ -38,4 +38,14 @@ test('runtime tool rejects missing and unknown arguments', () => {
   const probe = fs.readFileSync(path.join(__dirname, '../scripts/runtime-probe.cjs'), 'utf8');
   assert.doesNotMatch(probe, /require\([^\n]*(?:src\/index|dist\/index)|startServer\(/);
   assert.match(probe, /new Database\(':memory:'\)/);
+});
+
+test('candidate isolation checks physical paths, including a junction to this checkout node_modules', () => {
+  const root = path.resolve('checkout');
+  const runtime = path.join(root, 'runtime');
+  const candidate = path.join(runtime, 'candidate', 'better-sqlite3');
+  const live = path.join(root, 'node_modules', 'better-sqlite3');
+  assert.equal(assertCandidateModuleDirectory(root, candidate, value => value), candidate);
+  assert.throws(() => assertCandidateModuleDirectory(root, candidate, value => value === candidate ? live : value), /real isolated copy/);
+  assert.throws(() => assertCandidateModuleDirectory(root, candidate, value => value === runtime ? root : value), /real isolated copy/);
 });

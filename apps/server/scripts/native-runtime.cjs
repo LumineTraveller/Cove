@@ -25,6 +25,16 @@ function assertPrivateModuleDirectory(repositoryRoot, moduleDirectory, realpath 
   return realModule;
 }
 
+function assertCandidateModuleDirectory(repositoryRoot, moduleDirectory, realpath = fs.realpathSync) {
+  const realRoot = realpath(repositoryRoot);
+  const realModule = assertPrivateModuleDirectory(repositoryRoot, moduleDirectory, realpath);
+  const runtime = path.join(realRoot, 'runtime');
+  const realRuntime = realpath(runtime);
+  if (path.relative(runtime, realRuntime) !== '' || !isWithin(realRuntime, realModule))
+    throw new Error('Candidate native rebuilds must target a real isolated copy under runtime/, not linked application dependencies.');
+  return realModule;
+}
+
 function createPlan({ candidate = false, moduleDirectory, platform = process.platform, arch = process.arch } = {}) {
   const manifest = require('../package.json');
   const candidateManifest = require('../electron/runtime-candidate.json');
@@ -66,9 +76,8 @@ function run(args, spawn = spawnSync) {
     return 0;
   }
   if (options.command === 'rebuild') {
-    assertPrivateModuleDirectory(root, plan.moduleDirectory);
-    if (plan.candidate && !isWithin(path.join(root, 'runtime'), plan.moduleDirectory))
-      throw new Error('Candidate native rebuilds must target an isolated copy under runtime/');
+    if (plan.candidate) assertCandidateModuleDirectory(root, plan.moduleDirectory);
+    else assertPrivateModuleDirectory(root, plan.moduleDirectory);
     const result = spawn(plan.command, plan.args, { cwd: plan.moduleDirectory, stdio: 'inherit', shell: false });
     if (result.error) throw result.error;
     return result.status ?? 1;
@@ -91,7 +100,7 @@ function run(args, spawn = spawnSync) {
   return probe.ok && result.status === 0 ? 0 : 2;
 }
 
-module.exports = { pinnedVersion, isWithin, assertPrivateModuleDirectory, createPlan, parseArguments, run };
+module.exports = { pinnedVersion, isWithin, assertPrivateModuleDirectory, assertCandidateModuleDirectory, createPlan, parseArguments, run };
 if (require.main === module) {
   try { process.exitCode = run(process.argv.slice(2)); }
   catch (error) { console.error(error.message); process.exitCode = 1; }
