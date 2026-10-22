@@ -2,6 +2,9 @@ const {app,BrowserWindow,session}=require('electron');
 const {spawn}=require('node:child_process');const path=require('node:path');const fs=require('node:fs');const assert=require('node:assert/strict');
 const root=path.resolve(__dirname,'../../../..');
 if(!process.env.COVE_TEST_NODE)throw new Error('COVE_TEST_NODE must name the standalone Node runtime (not Electron).');
+const renderer=new URL(process.env.COVE_QA_RENDERER_URL||'http://127.0.0.1:55173');
+if(renderer.protocol!=='http:'||renderer.hostname!=='127.0.0.1'||renderer.username||renderer.password||renderer.pathname!=='/'||renderer.search||renderer.hash)
+  throw new Error('COVE_QA_RENDERER_URL must be a loopback HTTP origin');
 const temp=fs.mkdtempSync(path.join(root,'runtime','electron-media-'));app.setPath('userData',temp);
 app.commandLine.appendSwitch('use-fake-device-for-media-stream');app.commandLine.appendSwitch('use-fake-ui-for-media-stream');
 app.commandLine.appendSwitch('autoplay-policy','no-user-gesture-required');
@@ -26,25 +29,36 @@ app.whenReady().then(async()=>{
       const win=new BrowserWindow({show:false,webPreferences:{offscreen:true,backgroundThrottling:false}});windows.push(win);win.webContents.setAudioMuted(true);
       win.webContents.on('console-message',(_event,_level,message)=>{if(message.includes('Error')||message.includes('error'))console.log('[renderer]',message);});
       const query=new URLSearchParams({base:info.base,room:info.roomId,token:info.accounts[index].token,index:String(index)});
-      await win.loadURL('http://127.0.0.1:55173/tests/ui/media-integration.html?'+query);
+      await win.loadURL(renderer.origin+'/tests/ui/media-integration.html?'+query);
       await waitFor(win,'Boolean(window.coveMediaQA?.ready)');
       await win.webContents.executeJavaScript('window.coveMediaQA.rtc.joinVoice()');
       await waitFor(win,'Boolean(window.coveMediaQA.rtc.inVoice)');
     }
     for(const win of windows)await waitFor(win,'window.coveMediaQA.rtc.voiceMembers.length===2');
     const [sender,viewer]=windows;
-    await sender.webContents.executeJavaScript("window.coveMediaQA.rtc.startScreenShare('1080p',30,false,false,true)");
+    await sender.webContents.executeJavaScript("window.coveMediaQA.rtc.startScreenShare('1080p',30,false,false,true,true)");
     await waitFor(sender,'Boolean(window.coveMediaQA.rtc.localScreen)');
     await waitFor(viewer,'window.coveMediaQA.rtc.availableScreens.length===1');
     await viewer.webContents.executeJavaScript('window.coveMediaQA.rtc.watchScreen(window.coveMediaQA.rtc.availableScreens[0].socketId)');
     await waitFor(viewer,'document.querySelector("video").videoWidth===640&&document.querySelector("video").readyState>=2');
     const pixel=await viewer.webContents.executeJavaScript('(()=>{const c=document.createElement("canvas");c.width=1;c.height=1;c.getContext("2d").drawImage(document.querySelector("video"),0,0,1,1);return [...c.getContext("2d").getImageData(0,0,1,1).data]})()');
     assert.ok(pixel[0]+pixel[1]+pixel[2]>100,'remote frame must not be black');
+    await sender.webContents.executeJavaScript('window.coveMediaQA.rtc.toggleStats()');
+    await waitFor(sender,'window.coveMediaQA.rtc.stats.codec==="VP8"');
+    const recovery=await viewer.webContents.executeJavaScript(`new Promise((resolve,reject)=>{
+      const socket=window.coveMediaQA.socket;const id=socket.id;
+      const timer=setTimeout(()=>reject(new Error('Synthetic reconnect timed out')),8000);
+      socket.once('connect',()=>{clearTimeout(timer);resolve({sameId:socket.id===id,recovered:socket.recovered});});
+      socket.io.engine.close();
+    })`);
+    assert.equal(recovery.sameId,true,'short outage must retain the server session');
+    assert.equal(recovery.recovered,true,'loopback transport must report recovered session');
+    await waitFor(viewer,'window.coveMediaQA.rtc.inVoice&&Boolean(window.coveMediaQA.rtc.remoteScreen)&&document.querySelector("video").readyState>=2');
     await sender.webContents.executeJavaScript('window.coveMediaQA.rtc.stopScreenShare()');
     await waitFor(viewer,'!window.coveMediaQA.rtc.remoteScreen');
     for(const win of windows)assert.equal(await win.webContents.executeJavaScript('window.coveMediaQA.rtc.inVoice'),true,'stopping screen must preserve voice');
     for(const win of windows)await win.webContents.executeJavaScript('window.coveMediaQA.rtc.leaveVoice()');
-    console.log('PASS: two real Chromium/WebRTC peers, synthetic mic, screen publish/watch, non-black decoded frame and independent screen teardown.');
+    console.log('PASS: two real Chromium/WebRTC peers, synthetic mic/video, negotiated VP8, non-black decoded frame, short transport recovery and independent screen teardown.');
     clearTimeout(watchdog);await finish(0);
   }catch(error){console.error(error);clearTimeout(watchdog);await finish(1);}
 });

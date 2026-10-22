@@ -2,6 +2,7 @@ import {useEffect, useMemo, useRef, useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import {io} from 'socket.io-client';
 import {useWebRTC} from '../../src/features/media/useWebRTC';
+import {CLIENT_PROTOCOL_VERSION, CLIENT_RELEASE_VERSIONS} from '@cove/contracts';
 const params=new URLSearchParams(location.search);
 // Synthetic video, never capture the user's desktop or microphone.
 const canvas=document.createElement('canvas');canvas.width=640;canvas.height=360;
@@ -10,13 +11,13 @@ function draw(){ctx.fillStyle='#237bd8';ctx.fillRect(0,0,640,360);ctx.fillStyle=
 draw();
 navigator.mediaDevices.getDisplayMedia=async()=>canvas.captureStream(30);
 function Fixture(){
-  const socket=useMemo(()=>io(params.get('base')!,{auth:{clientProtocol:2},autoConnect:false}),[]);
+  const socket=useMemo(()=>io(params.get('base')!,{auth:{clientProtocol:CLIENT_PROTOCOL_VERSION,clientPlatform:'desktop',clientVersion:CLIENT_RELEASE_VERSIONS.desktop},autoConnect:false}),[]);
   const rtc=useWebRTC(socket,params.get('room')!);
   const [ready,setReady]=useState(false);const [error,setError]=useState('');
   const video=useRef<HTMLVideoElement>(null);
   useEffect(()=>{
     socket.on('connect',()=>{
-      socket.timeout(8000).emit('user:register',{username:'Refactor',avatarUrl:null,clientId:'renderer-'+params.get('index'),authToken:params.get('token'),platform:'desktop'},(cause:any,result:any)=>{
+      socket.timeout(8000).emit('user:register',{username:'Refactor',avatarUrl:null,clientId:'renderer-'+params.get('index'),authToken:params.get('token'),platform:'desktop',clientVersion:CLIENT_RELEASE_VERSIONS.desktop},(cause:any,result:any)=>{
         if(cause||!result?.ok){setError(cause?.message||result?.error);return;}
         socket.timeout(8000).emit('room:join',params.get('room'),(cause:any,result:any)=>cause||result?.error?setError(cause?.message||result.error):setReady(true));
       });
