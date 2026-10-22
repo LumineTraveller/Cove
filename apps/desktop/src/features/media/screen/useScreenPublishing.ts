@@ -80,7 +80,7 @@ export interface useScreenPublishingDependencies {
     maxFps: Fps,
     nativeResolution: boolean,
   ) => void;
-  readonly startScreenAudio: () => Promise<void>;
+  readonly startScreenAudio: (isCurrent?: () => boolean) => Promise<void>;
   readonly setIsSharing: import('react').Dispatch<import('react').SetStateAction<boolean>>;
   readonly clearScreenRampGuard: () => void;
   readonly screenAudioProducer: import('react').MutableRefObject<Producer | null>;
@@ -264,7 +264,7 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
         if (audio) {
           startupStage = '启动共享系统音频';
           try {
-            await deps.startScreenAudio();
+            await deps.startScreenAudio(isCurrent);
             ensureCurrent();
           } catch (e) {
             ensureCurrent();
@@ -295,18 +295,7 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
         console.error(`[screen share] ${startupStage}失败`, e);
         deps.stopScreenAnalysis();
         deps.clearScreenRampGuard();
-        if (deps.screenAudioProducer.current) {
-          deps.socket.emit('ms:close-producer', {
-            producerId: deps.screenAudioProducer.current.id,
-          });
-          deps.screenAudioProducer.current.close();
-          deps.screenAudioProducer.current = null;
-        }
-        deps.screenAudioUnsubscribe.current?.();
-        deps.screenAudioUnsubscribe.current = null;
-        deps.screenAudioPipeline.current?.close();
-        deps.screenAudioPipeline.current = null;
-        await window.coveScreenAudio?.stop();
+        deps.closeScreenAudio();
         if (deps.localScreenRef.current === acquiredStream) deps.localScreenRef.current = null;
         deps.setLocalScreen(null);
         deps.setIsSharing(false);
@@ -450,7 +439,7 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
         let hasScreenAudio = Boolean(deps.screenAudioProducer.current);
         if (audio && !hasScreenAudio) {
           try {
-            await deps.startScreenAudio();
+            await deps.startScreenAudio(isCurrent);
             ensureCurrent();
             hasScreenAudio = Boolean(deps.screenAudioProducer.current);
           } catch (error) {
@@ -514,18 +503,7 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
       deps.screenProducer.current.close();
       deps.screenProducer.current = null;
     }
-    if (deps.screenAudioProducer.current) {
-      deps.socket.emit('ms:close-producer', {
-        producerId: deps.screenAudioProducer.current.id,
-      });
-      deps.screenAudioProducer.current.close();
-      deps.screenAudioProducer.current = null;
-    }
-    deps.screenAudioUnsubscribe.current?.();
-    deps.screenAudioUnsubscribe.current = null;
-    deps.screenAudioPipeline.current?.close();
-    deps.screenAudioPipeline.current = null;
-    void window.coveScreenAudio?.stop();
+    deps.closeScreenAudio();
     deps.localScreenRef.current?.getTracks().forEach((track) => { track.onended = null; track.stop(); });
     deps.localScreenRef.current = null;
     deps.setLocalScreen(null);
