@@ -1,5 +1,9 @@
 # 2026-10-22 本地改进与统一验收
 
+本文记录 `d8eb548` 的交付基线。其后新增的 ICE restart 设计、行为、验证和回滚
+单独记录在 [ICE 恢复说明](../architecture/ice-restart.md)；下文“未引入 ICE restart”
+及测试计数描述该基线，不代表后续增量仍未实现。
+
 本次只交付本地源码和可运行测试入口，未推送、发布、部署或安装到设备。分支为
 `codex/connection-lifecycle-stability`，基于当前 main `a355579`，保留最初三个连接改进提交。
 用户常用的 `C:\Users\cyj06\Desktop\Projects\Cove` 未被改动；其中原有图标删除也未覆盖。

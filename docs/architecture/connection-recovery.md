@@ -7,6 +7,7 @@ have different lifetimes. Keep these responsibilities separate:
 | --- | --- | --- |
 | Registration | `packages/client-core/src/sessionRegistration.ts` | One current ACK/retry sequence; platform adapters interpret authentication errors |
 | Signal recovery | `packages/client-core/src/mediaRecovery.ts` | Re-read live state on timeout / CONNECT; qualify recovered socket ownership |
+| ICE strategy | `packages/client-core/src/transportIceRecovery.ts` | Bounded, per-owned-transport SFU restart; composed into signal recovery, with one failure deadline |
 | Platform recovery | Desktop `voiceConnectionRecovery.ts`, mobile `useMediaConnectionRecovery.ts` | Adapt refs, errors and existing platform deadlines; choose timeout policy |
 | Media resources | Desktop `useVoiceSession`, mobile `useVoiceTeardown` / `useMediaTransports` / `useVoiceJoin` | Invalidate async generations before closing native/RTP resources |
 | UI intent | Room controller / session hooks | Explicit room leave/switch, mute and watch selection; recovery never initiates capture or remote control |
@@ -16,11 +17,14 @@ room readiness or media recovery. A fresh server session must discard the old
 media resources. A recovered session may retain them; explicit leave wins over
 a late CONNECT and cleans up the retained server voice session.
 
-The first refactor preserves the existing platform policy: desktop retains
+The baseline refactor preserves the existing platform policy: desktop retains
 recoverable established media on a signal timeout; mobile has a 7.5 second signal
 timeout. Desktop starts a media failure deadline only for `failed`; mobile uses
 `failed` or `disconnected`. These differences are deliberate compatibility
-boundaries, not a reason to combine the transport timers with the signal timer.
+boundaries for legacy servers. Supporting server transports now opt into the
+[bounded ICE restart strategy](ice-restart.md), which claims its own failure
+deadline and cancels the corresponding legacy timer. A signal-only outage of
+healthy media never starts ICE restart.
 
 The shared recovery controller owns only its signal deadline. Disposing it
 cancels that deadline and invalidates captured late socket callbacks. Resource teardown owns generation invalidation and all
@@ -28,8 +32,11 @@ transport timers. New recovery strategies belong in the shared policy with
 explicit platform opt-in; native setup/cleanup belongs in resource hooks. Avoid
 adding more signal listeners to the large producer/consumer event hook.
 
-No server protocol, grace period, `voice:join` acknowledgement requirement, screen
-capture or remote-control authorization changes are part of the refactor.
+The original structural refactor changed no server protocol, grace period,
+`voice:join` acknowledgement requirement, capture or remote-control authorization.
+The subsequent optional ICE protocol and its separate bounded deadline are
+specified in [ICE restart](ice-restart.md); existing deployments are not assumed
+to provide it.
 
 ## Resource cancellation
 
@@ -70,8 +77,9 @@ Established media with a non-failed/non-closed transport is retained; unfinished
 operations or failed media are cleaned up. This neither extends the server's
 5 second peer grace nor recreates lost server resources. A fresh socket/session
 still resets the old resources immediately, including after a server restart.
-Media failure timers remain independent and retain each platform's original
-policy. No ICE restart or automatic rejoin/capture is introduced.
+Legacy media failure timers remain independent and retain each platform's original
+policy. The subsequent ICE strategy repairs only an existing supported transport;
+it never automatically rejoins or starts capture.
 
 Mute/watch intent is preserved while existing media is retained. Once a fresh
 session or media failure requires teardown, the user explicitly rejoins or watches
@@ -87,11 +95,17 @@ Promises. Local Socket.IO recovery and native SFU tests use loopback synthetic
 clients/media. Electron renderer checks use an isolated test profile and a fake
 signaling fixture; they do not establish an end-to-end production connection.
 
+The additional real Chromium/SFU ICE regression uses synthetic capture and a local
+TCP forwarding proxy: the browser detects a real media-path stall, ICE credentials
+change and decoded media must advance again. It does not simulate a state event
+as a substitute for the packet-path interruption. See the ICE document for exact
+audio/video evidence and limitations.
+
 Real Android audio routing, Wi-Fi/cellular handoff, OS suspend/resume, long calls
 and mixed installed client/server versions still require device/network acceptance
 tests. Passing the logic, renderer and loopback tests is not a release-readiness
-claim. The server protocol and deployment are unchanged, so no new server feature
-is assumed available on an existing deployment.
+claim. The new server protocol is optional and has not been deployed, so no new
+server feature is assumed available on an existing deployment.
 
 ## Locating recovery decisions
 

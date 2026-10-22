@@ -48,6 +48,7 @@ RTT 指客户端与 SFU 的往返时间；RTP jitter 指包到达时间变化。
 
 | 场景 | 操作 | 必须观察到的行为 | 自动覆盖 / 人工边界 |
 | --- | --- | --- | --- |
+| ICE 媒体恢复 | `node tooling/verify-ice-restart.cjs` 暂停自有本机 TCP 媒体转发；信令保持 | 浏览器实际报告断开，新 ICE 参数应用后原 transport/producer/consumer 和静音/观看保留；解码视频继续推进 | 真实双 Chromium/SFU、合成输入与受控转发；接收轨 PCM/样本与扬声器可听性分别记录，UDP/手机换网另验 |
 | 短信令中断 | 通话和观看时模拟信令 transport close，再恢复同 session | 不重复 produce/consume；静音、观看保持；远控权限撤销且不自动恢复 | loopback + hook；真实网络待验收 |
 | 延迟 CONNECT | 连续三轮断开，媒体仍健康，延后客户端 CONNECT | 信令超时不单独破坏健康媒体；媒体失败期限仍独立生效 | 虚拟时间 + 双 transport 失败测试 |
 | 服务端状态丢失 | 本地测试服务退出后由测试操作者重新启动 | fresh session 清理旧媒体；不自动重开麦克风或共享 | 客户端 fresh session 测试；双客户端整链路待验收 |

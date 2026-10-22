@@ -86,3 +86,78 @@ networks and long calls remain manual acceptance. No deployment is implied. The
 rollback boundary is `d8eb548`; ICE work is kept in separate commits and adds no
 database migration. Final commands, evidence and limitations are appended after
 implementation.
+
+## Local entry and observations
+
+```powershell
+npm run build:packages
+npm run build -w cove-server
+node tooling/verify-ice-restart.cjs
+node tooling/verify-media-recovery.cjs --repeat 3 --output runtime/recovery-ice-final.json
+```
+
+The browser command starts its own Vite on loopback 55193, a temporary SFU backend
+on media port 41020, hidden Chromium peers and a loopback TCP proxy. Occupied ports
+fail; it never stops other applications by port/name. Existing dependencies are
+required and no installation occurs. A 120-second external watchdog bounds the
+run. It uses public mediasoup APIs and test-only candidate routing; no production
+hook reaches private PeerConnection internals or test fault controls.
+
+The proxy stalls actual RTP/STUN forwarding until the browser naturally reports
+disconnected/failed and the recovery applies new credentials; this is a controlled
+ICE/TCP path fault, not an OS network switch. UDP-only routing was not established
+in the initial fixture and is not counted as validated. Chrome synthetic input
+and muted windows isolate the test from hardware capture and audible output.
+The fixture initially reported zero `totalAudioEnergy` even before fault injection.
+Diagnosis with deterministic synthetic WAV input and independent capture/producer/
+consumer PCM analyzers established nonzero decoded audio while that statistics
+field remained zero. The revised test uses the real consumer track's nonzero PCM,
+running analysis context and increasing received/non-concealed sample counters;
+it preserves the raw zero statistic rather than interpreting it as silence.
+Audio PCM recovery and video decoded-frame recovery are separate assertions.
+`speakerAudibilityMeasured` remains false, and no acoustic/speaker claim or
+end-to-end latency measurement follows.
+
+`runtime/ice-restart-integration-result.json` starts with a fresh runId and
+passed:false, and records completed/passed only after owned backend cleanup.
+`runtime/ice-restart-browser.log` contains bounded decision event names. Existing
+`[media-recovery]` logs identify `ice-restart-begin`, `request`, `retry`, `applied`,
+`connected`, `failed`, `cancelled` and `signal-wait`; details are key/attempt/fixed
+reason codes. An applied SDP promise alone is never called media recovery.
+
+Mobile explicit viewer-only cancellation during recovery uses the resource
+owner's teardown, preserving the room's available-share inventory. It invalidates
+the generation and closes idle transports before a late ACK can apply credentials;
+the next manual watch obtains fresh transports. Stopping a watch while in voice
+and internal watch switching preserve their shared voice transport behavior.
+
+Transport resource ownership uses mobile `transportGeneration`, independent from
+the operation `mediaGeneration`. Explicitly joining voice after viewer-only setup
+may reuse its send/receive transports; this must preserve the existing ICE owner
+and monotonically increasing sequence. Teardown invalidates both lifetimes. The
+regressions cover watch-to-voice reuse, a second pending recovery ended by a remote
+share stop, and later manual watching with fresh transports and isolated old ACKs.
+
+## Final local regression evidence
+
+| Check | Result / local evidence |
+| --- | --- |
+| Desktop CI | 436 TS + 85 CJS tests, shared builds, renderer/Electron type checks passed; `runtime/ci-desktop-ice-final.log` |
+| Mobile CI | 46 suites / 560 Jest tests and types passed; `runtime/ci-mobile-ice-final.log`; Android native boundaries mocked |
+| Server CI | 176 TS, 8 shared-core, 29 root-tool, 5 native guard tests and real SQLite/SFU smoke passed; `runtime/ci-server-ice-final.log` |
+| Production renderer build | Vite build passed, `runtime/desktop-build-ice-final.log`; bundle-size warning remains, no latency/size improvement claimed |
+| Recovery repetition | Three complete rounds / nine suite-rounds passed, no timeout/cancellation; `runtime/recovery-ice-final.json` |
+
+No Android device, Windows native screen/audio capture, Wi-Fi/cellular handoff,
+real weak-network deployment or long-call acceptance is implied. Old clients keep
+using normal transports on the new server; new clients see no optional capability
+on an old server and retain the legacy failure deadline. New wire identities,
+server birth-generation ownership, duplicate/late requests and fallback responses
+are covered deterministically and with local native worker requests; installed
+mixed-version device combinations still need acceptance.
+
+For rollback, keep the existing isolated checkout/branch and switch a separate
+clean test branch or copy to `d8eb548`, then rebuild shared packages and apps. The
+ICE implementation and review fixes are separate commits; reverting those does
+not require a database or credential migration. Do not hard-reset the user's
+regular checkout or switch a running deployment as part of this local test task.
