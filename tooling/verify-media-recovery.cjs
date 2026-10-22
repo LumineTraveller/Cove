@@ -4,7 +4,7 @@ const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const root = path.resolve(__dirname, '..');
 const suites = [
-  { name: 'desktop-recovery', cwd: 'apps/desktop', args: ['--import', 'tsx', '--test', '--test-concurrency=1', 'tests/connectionDeadline.test.ts', 'tests/sessionRegistration.test.ts', 'tests/voiceConnectionRecovery.test.ts'] },
+  { name: 'desktop-recovery', cwd: 'apps/desktop', args: ['--import', 'tsx', '--test', '--test-concurrency=1', 'tests/connectionDeadline.test.ts', 'tests/sessionRegistration.test.ts', 'tests/voiceConnectionRecovery.test.ts', 'tests/screenWatchRecovery.test.ts', 'tests/screenPublicationLifecycle.test.ts', 'tests/screenAudioLifecycle.test.ts', 'tests/screenCodecCompatibility.test.ts'] },
   { name: 'mobile-media', cwd: 'apps/mobile', args: ['node_modules/jest/bin/jest.js', '--runInBand', '--no-cache', '__tests__/useMobileMedia.test.tsx', '__tests__/useMobileScreenShare.test.tsx', '__tests__/sessionLoginFlow.test.tsx'] },
   { name: 'loopback-recovery', cwd: '.', args: ['--import', 'tsx', '--test', '--test-concurrency=1', 'apps/server/tests/connectionRecovery.test.ts', 'apps/server/tests/mobileRemoteControlRecovery.test.ts', 'apps/server/tests/mediaLifecycle.test.ts', 'apps/server/tests/mediaNativeIntegration.test.ts'] },
 ];
