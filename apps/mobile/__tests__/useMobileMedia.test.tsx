@@ -13,7 +13,9 @@ const mockGetUserMedia = jest.fn(async () => {
   return stream;
 });
 const mockTransport = {
+  id: 'voice-send', closed: false,
   connectionState: undefined as string | undefined,
+  restartIce: jest.fn(async (_options: unknown) => {}),
   on: jest.fn(), close: jest.fn(),
   produce: jest.fn(async () => ({ close: jest.fn(), pause: jest.fn(), resume: jest.fn(), replaceTrack: jest.fn(), paused: false, closed: false })),
   consume: jest.fn(async (params: any) => {
@@ -25,13 +27,16 @@ const mockTransport = {
 let mockSeparateTransports = false;
 const mockReceiveTransport = {
   ...mockTransport,
+  id: 'voice-receive', closed: false,
   connectionState: undefined as string | undefined,
+  restartIce: jest.fn(async (_options: unknown) => {}),
   on: jest.fn(), close: jest.fn(),
 };
+let mockNextTransports: { send: typeof mockTransport; receive: typeof mockReceiveTransport } | undefined;
 jest.mock('mediasoup-client', () => ({ Device: { factory: async () => ({
   load: async () => {}, rtpCapabilities: {},
-  createSendTransport: () => mockTransport,
-  createRecvTransport: () => mockSeparateTransports ? mockReceiveTransport : mockTransport,
+  createSendTransport: () => mockNextTransports?.send ?? mockTransport,
+  createRecvTransport: () => mockNextTransports?.receive ?? (mockSeparateTransports ? mockReceiveTransport : mockTransport),
 }) } }));
 jest.mock('react-native-incall-manager', () => ({ start: jest.fn(), stop: jest.fn(), setForceSpeakerphoneOn: jest.fn(), setSpeakerphoneOn: jest.fn(), stopProximitySensor: jest.fn(), turnScreenOn: jest.fn(), setKeepScreenOn: jest.fn() }));
 jest.mock('react-native-webrtc', () => ({
@@ -77,6 +82,11 @@ beforeEach(async () => {
   mockTransport.connectionState = undefined;
   mockReceiveTransport.connectionState = undefined;
   mockSeparateTransports = false;
+  mockNextTransports = undefined;
+  mockTransport.closed = false;
+  mockReceiveTransport.closed = false;
+  mockTransport.restartIce.mockReset().mockResolvedValue(undefined);
+  mockReceiveTransport.restartIce.mockReset().mockResolvedValue(undefined);
   currentRoom = 'room';
   jest.spyOn(PermissionsAndroid, 'request').mockResolvedValue(PermissionsAndroid.RESULTS.GRANTED);
   handlers = new Map();
@@ -714,4 +724,332 @@ test('leaving during a healthy-media signal outage wins over a later recovery', 
   expect(media.inVoice).toBe(false);
   expect(socket.emit).toHaveBeenCalledWith('voice:leave', 'room');
   expect(mockTransport.produce).toHaveBeenCalledTimes(1);
+});
+
+function configureIceRecovery(supported = true) {
+  mockSeparateTransports = true;
+  const emit = socket.emit.getMockImplementation();
+  const requests: Array<{ payload: any; reply: (response: any) => void }> = [];
+  let respond = (payload: any, reply: (response: any) => void) => reply({
+    ok: true, version: 1, transportId: payload.transportId, sessionId: payload.sessionId,
+    sequence: payload.sequence, iceParameters: { usernameFragment: 'new-fragment', password: 'synthetic-password' },
+  });
+  socket.emit.mockImplementation((event: string, payload: any, reply: any) => {
+    if (event === 'ms:create-transport') reply({
+      id: payload.direction === 'send' ? (mockNextTransports?.send ?? mockTransport).id : (mockNextTransports?.receive ?? mockReceiveTransport).id,
+      ...(supported ? { iceRestart: { version: 1, sessionId: `owner-${payload.direction}` } } : {}),
+    });
+    else if (event === 'ms:restart-ice') { requests.push({ payload, reply }); respond(payload, reply); }
+    else emit(event, payload, reply);
+  });
+  const change = async (side: 'send' | 'receive', state: string) => {
+    const transport = side === 'send' ? mockTransport : mockReceiveTransport;
+    const changed = transport.on.mock.calls.find(([event]) => event === 'connectionstatechange')![1];
+    await act(async () => { transport.connectionState = state; changed(state); });
+  };
+  const recovered = (side: 'send' | 'receive') => {
+    const transport = side === 'send' ? mockTransport : mockReceiveTransport;
+    transport.restartIce.mockImplementation(async () => {
+      transport.connectionState = 'connected';
+      transport.on.mock.calls.find(([event]) => event === 'connectionstatechange')![1]('connected');
+    });
+  };
+  return { requests, change, recovered,
+    respond: (next: typeof respond) => { respond = next; } };
+}
+
+test.each(['send', 'receive'] as const)('supported %s ICE recovery retains mute and existing media without republishing', async side => {
+  jest.useFakeTimers();
+  const ice = configureIceRecovery();
+  await act(async () => media.joinVoice());
+  await act(async () => media.toggleMute());
+  await ice.change('send', 'connected'); await ice.change('receive', 'connected');
+  ice.recovered(side);
+  await ice.change(side, 'failed');
+  await act(async () => jest.advanceTimersByTime(0));
+  expect(ice.requests).toHaveLength(1);
+  expect((side === 'send' ? mockTransport : mockReceiveTransport).restartIce).toHaveBeenCalledTimes(1);
+  expect(media.inVoice).toBe(true);
+  expect(media.isMuted).toBe(true);
+  expect(mockTransport.produce).toHaveBeenCalledTimes(1);
+  expect(mockGetUserMedia).toHaveBeenCalledTimes(1);
+  expect(mockTransport.close).not.toHaveBeenCalled();
+});
+
+test('healthy media and a signal-only outage never issue an ICE request', async () => {
+  jest.useFakeTimers();
+  const ice = configureIceRecovery();
+  await act(async () => media.joinVoice());
+  await ice.change('send', 'connected'); await ice.change('receive', 'connected');
+  await act(async () => { socket.connected = false; handlers.get('disconnect')!('ping timeout'); });
+  await act(async () => jest.advanceTimersByTime(8000));
+  await act(async () => { socket.connected = true; socket.recovered = true; handlers.get('connect')!(); });
+  expect(ice.requests).toHaveLength(0);
+  expect(media.inVoice).toBe(true);
+});
+
+test.each(['old-server', 'missing-method'] as const)('%s retains the legacy 7.5 second failure deadline', async mode => {
+  jest.useFakeTimers();
+  const ice = configureIceRecovery(mode !== 'old-server');
+  const restart = mockTransport.restartIce;
+  if (mode === 'missing-method') (mockTransport as any).restartIce = undefined;
+  try {
+    await act(async () => media.joinVoice());
+    await ice.change('send', 'connected');
+    await ice.change('send', 'failed');
+    await act(async () => jest.advanceTimersByTime(7499));
+    expect(media.inVoice).toBe(true);
+    await act(async () => jest.advanceTimersByTime(1));
+    expect(media.inVoice).toBe(false);
+    expect(ice.requests).toHaveLength(0);
+  } finally { mockTransport.restartIce = restart; }
+});
+
+test('leaving cancels an in-flight ICE ACK before a new join and ignores its late reply', async () => {
+  jest.useFakeTimers();
+  const ice = configureIceRecovery();
+  ice.respond(() => {});
+  await act(async () => media.joinVoice());
+  await ice.change('send', 'connected'); await ice.change('send', 'failed');
+  await act(async () => jest.advanceTimersByTime(0));
+  expect(ice.requests).toHaveLength(1);
+  await act(async () => media.leaveVoice());
+  await act(async () => media.joinVoice());
+  const { payload, reply } = ice.requests[0];
+  await act(async () => reply({ ok: true, version: 1, ...payload, iceParameters: { usernameFragment: 'late', password: 'late-password' } }));
+  await act(async () => jest.advanceTimersByTime(22000));
+  expect(mockTransport.restartIce).not.toHaveBeenCalled();
+  expect(ice.requests).toHaveLength(1);
+  expect(media.inVoice).toBe(true);
+  expect(mockTransport.produce).toHaveBeenCalledTimes(2);
+});
+
+test('only a qualified recovered signal session resumes a pending media recovery', async () => {
+  jest.useFakeTimers();
+  const ice = configureIceRecovery();
+  ice.respond(() => {});
+  await act(async () => media.joinVoice());
+  await ice.change('send', 'connected'); await ice.change('receive', 'connected');
+  await ice.change('send', 'failed');
+  await act(async () => jest.advanceTimersByTime(0));
+  await act(async () => { socket.connected = false; handlers.get('disconnect')!('ping timeout'); });
+  const first = ice.requests[0];
+  await act(async () => first.reply({ ok: true, version: 1, ...first.payload, iceParameters: { usernameFragment: 'stale', password: 'stale-password' } }));
+  await act(async () => jest.advanceTimersByTime(8000));
+  expect(mockTransport.restartIce).not.toHaveBeenCalled();
+  expect(ice.requests).toHaveLength(1);
+  expect(media.inVoice).toBe(true);
+  ice.recovered('send');
+  ice.respond((payload, reply) => reply({ ok: true, version: 1, ...payload, iceParameters: { usernameFragment: 'current', password: 'current-password' } }));
+  await act(async () => { socket.connected = true; socket.recovered = true; handlers.get('connect')!(); });
+  await act(async () => jest.advanceTimersByTime(2000));
+  expect(ice.requests).toHaveLength(2);
+  expect(ice.requests[1].payload.sequence).toBe(first.payload.sequence);
+  expect(mockTransport.restartIce).toHaveBeenCalledTimes(1);
+  expect(media.inVoice).toBe(true);
+});
+
+test('a fresh signal session cancels media recovery and cannot apply an old ICE reply', async () => {
+  jest.useFakeTimers();
+  const ice = configureIceRecovery();
+  ice.respond(() => {});
+  await act(async () => media.joinVoice());
+  await ice.change('send', 'connected'); await ice.change('send', 'failed');
+  await act(async () => jest.advanceTimersByTime(0));
+  const first = ice.requests[0];
+  await act(async () => { socket.connected = false; handlers.get('disconnect')!('ping timeout'); });
+  await act(async () => { socket.connected = true; socket.id = 'fresh-session'; socket.recovered = false; handlers.get('connect')!(); });
+  await act(async () => first.reply({ ok: true, version: 1, ...first.payload, iceParameters: { usernameFragment: 'late', password: 'late-password' } }));
+  await act(async () => jest.advanceTimersByTime(22000));
+  expect(media.inVoice).toBe(false);
+  expect(mockTransport.restartIce).not.toHaveBeenCalled();
+  expect(ice.requests).toHaveLength(1);
+});
+
+test('receiver-only ICE recovery keeps the selected screen and does not acquire a microphone', async () => {
+  jest.useFakeTimers();
+  const ice = configureIceRecovery();
+  await act(async () => handlers.get('ms:new-producer')!({ producerId: 'screen', peerId: 'desktop', kind: 'video', appData: { type: 'screen' } }));
+  await act(async () => media.watchScreen('desktop'));
+  const screen = media.remoteScreen;
+  await ice.change('receive', 'connected');
+  ice.recovered('receive');
+  await ice.change('receive', 'failed');
+  await act(async () => jest.advanceTimersByTime(0));
+  expect(ice.requests).toHaveLength(1);
+  expect(media.remoteScreen).toBe(screen);
+  expect(media.isWatchingScreen).toBe(true);
+  expect(mockGetUserMedia).not.toHaveBeenCalled();
+  expect(mockTransport.produce).not.toHaveBeenCalled();
+});
+
+test('terminal ICE failure uses normal voice teardown without an automatic join', async () => {
+  jest.useFakeTimers();
+  const ice = configureIceRecovery();
+  ice.respond((_payload, reply) => reply({ ok: false, code: 'SESSION_NOT_CURRENT' }));
+  await act(async () => media.joinVoice());
+  await ice.change('send', 'connected'); await ice.change('send', 'failed');
+  await act(async () => jest.advanceTimersByTime(0));
+  expect(ice.requests).toHaveLength(1);
+  expect(media.inVoice).toBe(false);
+  expect(media.connectionState).toBe('failed');
+  expect(socket.emit).toHaveBeenCalledWith('voice:leave', 'room');
+  expect(mockTransport.produce).toHaveBeenCalledTimes(1);
+});
+
+test('another healthy transport and signal recovery do not mark an active ICE round connected', async () => {
+  jest.useFakeTimers();
+  const ice = configureIceRecovery();
+  ice.respond(() => {});
+  await act(async () => media.joinVoice());
+  await ice.change('send', 'connected'); await ice.change('receive', 'connected');
+  await ice.change('send', 'failed');
+  await act(async () => jest.advanceTimersByTime(0));
+  await ice.change('receive', 'connected');
+  expect(media.connectionState).toBe('connecting');
+  await act(async () => { socket.connected = false; handlers.get('disconnect')!('ping timeout'); });
+  await act(async () => { socket.connected = true; socket.recovered = true; handlers.get('connect')!(); });
+  expect(media.connectionState).toBe('connecting');
+  // Native connected may fire synchronously inside restartIce, before its
+  // promise settles. Only the completed round may clear the UI recovery state.
+  ice.recovered('send');
+  ice.respond((payload, reply) => reply({ ok: true, version: 1, ...payload, iceParameters: { usernameFragment: 'current', password: 'current-password' } }));
+  await act(async () => jest.advanceTimersByTime(2500));
+  await act(async () => jest.advanceTimersByTime(2000));
+  expect(mockTransport.restartIce).toHaveBeenCalledTimes(1);
+  expect(media.connectionState).toBe('connected');
+});
+
+test('a transport that naturally reconnects within the grace window needs no ICE request', async () => {
+  jest.useFakeTimers();
+  const ice = configureIceRecovery();
+  await act(async () => media.joinVoice());
+  await ice.change('send', 'connected'); await ice.change('send', 'disconnected');
+  await act(async () => jest.advanceTimersByTime(1499));
+  await ice.change('send', 'connected');
+  await act(async () => jest.advanceTimersByTime(22000));
+  expect(ice.requests).toHaveLength(0);
+  expect(media.inVoice).toBe(true);
+  expect(media.connectionState).toBe('connected');
+});
+
+test('an ICE recovery waiting for signal still expires at its 20 second deadline', async () => {
+  jest.useFakeTimers();
+  const ice = configureIceRecovery();
+  await act(async () => media.joinVoice());
+  await ice.change('send', 'connected'); await ice.change('receive', 'connected');
+  await act(async () => { socket.connected = false; handlers.get('disconnect')!('ping timeout'); });
+  await ice.change('send', 'failed');
+  await act(async () => jest.advanceTimersByTime(19999));
+  expect(media.inVoice).toBe(true);
+  expect(ice.requests).toHaveLength(0);
+  await act(async () => jest.advanceTimersByTime(1));
+  expect(media.inVoice).toBe(false);
+  expect(media.connectionState).toBe('failed');
+  expect(mockTransport.close).toHaveBeenCalledTimes(1);
+  expect(mockReceiveTransport.close).toHaveBeenCalledTimes(1);
+});
+
+test('changing rooms cancels an old ICE ACK without restarting transport or joining the new room', async () => {
+  jest.useFakeTimers();
+  const ice = configureIceRecovery();
+  ice.respond(() => {});
+  await act(async () => media.joinVoice());
+  await ice.change('send', 'connected'); await ice.change('send', 'failed');
+  await act(async () => jest.advanceTimersByTime(0));
+  const first = ice.requests[0];
+  await act(async () => { currentRoom = 'next-room'; renderer.update(<Harness />); });
+  await act(async () => first.reply({ ok: true, version: 1, ...first.payload, iceParameters: { usernameFragment: 'late', password: 'late-password' } }));
+  await act(async () => jest.advanceTimersByTime(22000));
+  expect(media.inVoice).toBe(false);
+  expect(ice.requests).toHaveLength(1);
+  expect(mockTransport.restartIce).not.toHaveBeenCalled();
+  expect(mockTransport.produce).toHaveBeenCalledTimes(1);
+  expect(socket.emit).not.toHaveBeenCalledWith('voice:join', 'next-room', expect.anything());
+});
+
+test('viewer-only explicit stop cancels ICE and releases transports while preserving available shares', async () => {
+  jest.useFakeTimers();
+  const ice = configureIceRecovery();
+  ice.respond(() => {});
+  await act(async () => handlers.get('ms:new-producer')!({ producerId: 'screen', peerId: 'desktop', kind: 'video', appData: { type: 'screen' } }));
+  await act(async () => media.watchScreen('desktop'));
+  const shares = media.availableScreens;
+  await ice.change('receive', 'connected'); await ice.change('receive', 'failed');
+  await act(async () => jest.advanceTimersByTime(0));
+  const old = ice.requests[0];
+  await act(async () => media.stopWatchingScreen());
+  expect(mockTransport.close).toHaveBeenCalledTimes(1);
+  expect(mockReceiveTransport.close).toHaveBeenCalledTimes(1);
+  expect(media.availableScreens).toBe(shares);
+  expect(media.isWatchingScreen).toBe(false);
+  expect(media.connectionState).toBe('idle');
+  await act(async () => old.reply({ ok: true, version: 1, ...old.payload, iceParameters: { usernameFragment: 'late', password: 'late-password' } }));
+  await act(async () => jest.advanceTimersByTime(22000));
+  expect(mockReceiveTransport.restartIce).not.toHaveBeenCalled();
+  expect(ice.requests).toHaveLength(1);
+  expect(media.error).toBeNull();
+  expect(media.isWatchingScreen).toBe(false);
+  expect(mockGetUserMedia).not.toHaveBeenCalled();
+});
+
+test('a manual watch after cancelling viewer-only ICE owns new transports and ignores the old ACK', async () => {
+  jest.useFakeTimers();
+  const ice = configureIceRecovery();
+  ice.respond(() => {});
+  await act(async () => handlers.get('ms:new-producer')!({ producerId: 'screen', peerId: 'desktop', kind: 'video', appData: { type: 'screen' } }));
+  await act(async () => media.watchScreen('desktop'));
+  await ice.change('receive', 'connected'); await ice.change('receive', 'failed');
+  await act(async () => jest.advanceTimersByTime(0));
+  const old = ice.requests[0];
+  await act(async () => media.stopWatchingScreen());
+  const nextSend = { ...mockTransport, id: 'next-send', on: jest.fn(), close: jest.fn(), restartIce: jest.fn(async (_options: unknown) => {}) };
+  const nextReceive = { ...mockReceiveTransport, id: 'next-receive', connectionState: 'connected', on: jest.fn(), close: jest.fn(), restartIce: jest.fn(async (_options: unknown) => {}) };
+  mockNextTransports = { send: nextSend, receive: nextReceive };
+  await act(async () => media.watchScreen('desktop'));
+  expect(nextReceive.on).toHaveBeenCalledWith('connectionstatechange', expect.any(Function));
+  await act(async () => old.reply({ ok: true, version: 1, ...old.payload, iceParameters: { usernameFragment: 'late', password: 'late-password' } }));
+  await act(async () => jest.advanceTimersByTime(22000));
+  expect(mockReceiveTransport.restartIce).not.toHaveBeenCalled();
+  expect(nextReceive.restartIce).not.toHaveBeenCalled();
+  expect(nextReceive.close).not.toHaveBeenCalled();
+  expect(media.remoteScreen?.socketId).toBe('desktop');
+  expect(media.isWatchingScreen).toBe(true);
+  expect(media.error).toBeNull();
+  expect(ice.requests).toHaveLength(1);
+  expect(mockGetUserMedia).not.toHaveBeenCalled();
+});
+
+test('explicit watch cancellation does not tear down voice while its ICE recovery is pending', async () => {
+  jest.useFakeTimers();
+  const ice = configureIceRecovery();
+  ice.respond(() => {});
+  await act(async () => media.joinVoice());
+  await act(async () => handlers.get('ms:new-producer')!({ producerId: 'screen', peerId: 'desktop', kind: 'video', appData: { type: 'screen' } }));
+  await act(async () => media.watchScreen('desktop'));
+  await ice.change('receive', 'connected'); await ice.change('receive', 'failed');
+  await act(async () => jest.advanceTimersByTime(0));
+  await act(async () => media.stopWatchingScreen());
+  expect(media.inVoice).toBe(true);
+  expect(media.isWatchingScreen).toBe(false);
+  expect(mockTransport.close).not.toHaveBeenCalled();
+  expect(mockReceiveTransport.close).not.toHaveBeenCalled();
+  expect(mockGetUserMedia).toHaveBeenCalledTimes(1);
+});
+
+test('internal viewer switching keeps its transport ownership during an ICE recovery', async () => {
+  jest.useFakeTimers();
+  const ice = configureIceRecovery();
+  ice.respond(() => {});
+  for (const peerId of ['desktop', 'other'])
+    await act(async () => handlers.get('ms:new-producer')!({ producerId: `screen-${peerId}`, peerId, kind: 'video', appData: { type: 'screen' } }));
+  await act(async () => media.watchScreen('desktop'));
+  await ice.change('receive', 'connected'); await ice.change('receive', 'failed');
+  await act(async () => jest.advanceTimersByTime(0));
+  await act(async () => media.watchScreen('other'));
+  expect(media.remoteScreen?.socketId).toBe('other');
+  expect(media.isWatchingScreen).toBe(true);
+  expect(mockTransport.close).not.toHaveBeenCalled();
+  expect(mockReceiveTransport.close).not.toHaveBeenCalled();
+  expect(mockGetUserMedia).not.toHaveBeenCalled();
 });

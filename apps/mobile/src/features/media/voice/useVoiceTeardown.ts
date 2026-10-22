@@ -7,6 +7,7 @@ import { MediaStream } from 'react-native-webrtc';
 import type { VoiceMember } from '../../../types';
 
 import { DisconnectGrace } from '../../connection/disconnectGrace';
+import type { TransportIceRecovery } from '@cove/client-core';
 
 import {
   Transport,
@@ -23,6 +24,7 @@ export interface UseVoiceTeardownDependencies {
   readonly mediaGeneration: import('react').RefObject<number>;
   readonly joiningRef: import('react').RefObject<boolean>;
   readonly connectionGrace: import('react').RefObject<DisconnectGrace>;
+  readonly iceRecovery: import('react').RefObject<TransportIceRecovery | null>;
   readonly socket: Socket<
     import('@socket.io/component-emitter/lib/cjs').DefaultEventsMap,
     import('@socket.io/component-emitter/lib/cjs').DefaultEventsMap
@@ -94,6 +96,7 @@ export function useVoiceTeardown(deps: UseVoiceTeardownDependencies) {
     mediaGeneration,
     joiningRef,
     connectionGrace,
+    iceRecovery,
     socket,
     roomId,
     audioProducer,
@@ -125,7 +128,8 @@ export function useVoiceTeardown(deps: UseVoiceTeardownDependencies) {
   } = deps;
 
   const teardown = useCallback(
-    (notifyServer: boolean) => {
+    (notifyServer: boolean, options: { preserveAvailableScreens?: boolean } = {}) => {
+      iceRecovery.current?.cancelAll();
       stopScreenShare();
       mediaGeneration.current += 1;
       cancelPendingWatch();
@@ -168,7 +172,7 @@ export function useVoiceTeardown(deps: UseVoiceTeardownDependencies) {
       setIsMuted(forceMutedRef.current);
       setVoiceMembers([]);
       setRemoteScreen(null);
-      clearAvailableScreens();
+      if (!options.preserveAvailableScreens) clearAvailableScreens();
       watchingScreenPeerRef.current = null;
       setIsWatchingScreen(false);
       setConnectionState('idle');
@@ -179,6 +183,7 @@ export function useVoiceTeardown(deps: UseVoiceTeardownDependencies) {
       mediaGeneration,
       joiningRef,
       connectionGrace,
+      iceRecovery,
       socket,
       roomId,
       audioProducer,

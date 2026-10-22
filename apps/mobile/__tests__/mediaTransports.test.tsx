@@ -69,6 +69,40 @@ test('send and receive transport RPCs are both outstanding before either ACK', a
   await f.dispose();
 });
 
+test('ICE registrations retain the creating socket and exact generation and transport ownership', async () => {
+  const f = await fixture();
+  f.deps.deviceRef.current = null;
+  f.deps.socket.id = 'creating-session';
+  const send = { id: 'send', on: jest.fn() };
+  const receive = { id: 'recv', on: jest.fn() };
+  jest.mocked(Device.factory).mockResolvedValue({
+    load: jest.fn(async () => {}),
+    createSendTransport: jest.fn(() => send), createRecvTransport: jest.fn(() => receive),
+  } as any);
+  request.mockImplementation((async (_socket: any, event: string, payload: any) => {
+    if (event === 'ms:capabilities') return {};
+    return { id: payload.direction, iceRestart: { version: 1, sessionId: `owner-${payload.direction}` } };
+  }) as any);
+  await f.api.setupDevice();
+  f.deps.socket.id = 'later-session';
+  const sent = send.on.mock.calls.find(([event]) => event === 'connectionstatechange')![1];
+  const received = receive.on.mock.calls.find(([event]) => event === 'connectionstatechange')![1];
+  sent('connected'); received('failed');
+  const sendRegistration = f.deps.checkTransport.mock.calls[0][2];
+  const recvRegistration = f.deps.checkTransport.mock.calls[1][2];
+  expect(sendRegistration).toMatchObject({ transport: send, capability: { version: 1, sessionId: 'owner-send' }, ownerSocketId: 'creating-session' });
+  expect(recvRegistration).toMatchObject({ transport: receive, capability: { version: 1, sessionId: 'owner-recv' }, ownerSocketId: 'creating-session' });
+  expect(sendRegistration.isCurrent()).toBe(true);
+  expect(recvRegistration.isCurrent()).toBe(true);
+  f.deps.sendTransport.current = { id: 'replacement' };
+  expect(sendRegistration.isCurrent()).toBe(false);
+  sent('failed');
+  expect(f.deps.checkTransport).toHaveBeenCalledTimes(2);
+  f.deps.mediaGeneration.current++;
+  expect(recvRegistration.isCurrent()).toBe(false);
+  await f.dispose();
+});
+
 test('mobile applies volume before resume instead of allowing first packets at default volume', async () => {
   const f = await fixture();
   request.mockImplementation((async (_socket: any, event: string) => {

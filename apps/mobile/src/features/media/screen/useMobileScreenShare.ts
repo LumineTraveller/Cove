@@ -7,6 +7,7 @@ import {
 } from 'react';
 import type { Socket } from 'socket.io-client';
 import type { Device, types as MsTypes } from 'mediasoup-client';
+import type { TransportIceRecovery } from '@cove/client-core';
 import { mediaDevices, type MediaStream } from 'react-native-webrtc';
 import {
   canShareMobileScreen,
@@ -157,6 +158,7 @@ export function useMobileScreenShare(
   socket: Socket,
   device: RefObject<Device | null>,
   inVoice: RefObject<boolean>,
+  iceRecovery?: RefObject<TransportIceRecovery | null>,
 ) {
   const [sharingScreen, setSharingScreen] = useState(false);
   const [screenSharingBusy, setBusy] = useState(false);
@@ -187,6 +189,7 @@ export function useMobileScreenShare(
   const closeAttempt = useCallback(
     (attempt: Attempt | undefined, replacing?: boolean) => {
       if (!attempt) return;
+      if (attempt.transport) iceRecovery?.current?.cancel('screen', attempt.transport);
       if (replacing !== undefined) attempt.replacing = replacing;
       attempt.closed = true;
       attempt.reject?.(new Error('共享已取消'));
@@ -218,7 +221,7 @@ export function useMobileScreenShare(
         attempt.serverTransportClosed = true;
       }
     },
-    [socket],
+    [socket, iceRecovery],
   );
 
   const stopScreenShare = useCallback(() => {
@@ -264,8 +267,8 @@ export function useMobileScreenShare(
       setBusy(true);
       setError(null);
       const generation = ++operation.current;
-      const current = () =>
-        generation === operation.current && inVoice.current && socket.connected;
+      const ownsPublication = () => generation === operation.current && inVoice.current;
+      const current = () => ownsPublication() && socket.connected;
       const ensureCurrent = () => {
         if (!current()) throw new Error('共享已取消');
       };
@@ -362,11 +365,12 @@ export function useMobileScreenShare(
               shareSessionId: capability.publicationContinuity === true ? prepared.sessionId : undefined,
             };
             context.attempt = attempt;
-            const active = () =>
-              current() &&
+            const ownsAttempt = () =>
+              ownsPublication() &&
               publication.current === context &&
               context.attempt === attempt &&
               !attempt.closed;
+            const active = () => ownsAttempt() && socket.connected;
             const ensureActive = () => {
               if (!active()) throw new Error('共享已取消');
             };
@@ -392,8 +396,9 @@ export function useMobileScreenShare(
             };
             let codecPhase = true;
             const build = async () => {
+              const ownerSocketId = socket.id;
               const params = await request<
-                MsTypes.TransportOptions & { purpose: string }
+                MsTypes.TransportOptions & { purpose: string; iceRestart?: unknown }
               >(socket, 'ms:create-transport', {
                 direction: 'send',
                 purpose: 'screen',
@@ -458,6 +463,18 @@ export function useMobileScreenShare(
                 },
               );
               outgoing.on('connectionstatechange', state => {
+                if (!ownsAttempt()) return;
+                if (iceRecovery?.current?.observe({
+                  key: 'screen', transport: outgoing, capability: params.iceRestart, ownerSocketId,
+                  isCurrent: () => ownsAttempt() && transport.current === outgoing && attempt.transport === outgoing,
+                  isActive: () => ownsAttempt() && capture.current !== null,
+                  onFailure: code => {
+                    if (!ownsAttempt()) return;
+                    console.info('[media-recovery]', 'screen-ice-safe-stop', { reason: code });
+                    setError('屏幕连接恢复失败，语音通话仍保留。');
+                    stopScreenShare();
+                  },
+                }, state)) return;
                 if (!active() || state !== 'failed') return;
                 setError('共享通道连接失败，语音通话仍保留');
                 stopScreenShare();
@@ -597,7 +614,7 @@ export function useMobileScreenShare(
         setBusy(false);
       }
     },
-    [device, inVoice, socket, stopScreenShare, closeAttempt],
+    [device, inVoice, socket, iceRecovery, stopScreenShare, closeAttempt],
   );
 
   useEffect(() => {

@@ -18,7 +18,7 @@ import {
   ConnectionState,
 } from './mobileMediaSupport';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { request, screenAudioMatchesPublication, screenPublicationMetadata } from '@cove/client-core';
+import { request, screenAudioMatchesPublication, screenPublicationMetadata, type TransportIceRecovery } from '@cove/client-core';
 
 import type { Socket } from 'socket.io-client';
 import { Device } from 'mediasoup-client';
@@ -107,6 +107,7 @@ export function useMobileMedia(
     setScreenWatchingBusy(false);
   }, []);
   const connectionGrace = useRef(new DisconnectGrace());
+  const iceRecovery = useRef<TransportIceRecovery | null>(null);
   const applicationAudioVolumes = useRef(new Map<string, number>());
   const memberVolumesRef = useRef(new Map<string, number>());
   const inVoiceRef = useRef(false);
@@ -121,7 +122,7 @@ export function useMobileMedia(
   const pendingScreenAudioByPeer = useRef(new Map<string, string>());
   const watchingScreenPeerRef = useRef<string | null>(null);
   const screenReceiveVolumeRef = useRef(1);
-  const screenShare = useMobileScreenShare(socket, deviceRef, inVoiceRef);
+  const screenShare = useMobileScreenShare(socket, deviceRef, inVoiceRef, iceRecovery);
   const stopScreenShare = screenShare.stopScreenShare;
   const { storeAvailableScreen, removeAvailableScreen, clearAvailableScreens } =
     useAvailableScreens({
@@ -133,6 +134,7 @@ export function useMobileMedia(
     mediaGeneration,
     joiningRef,
     connectionGrace,
+    iceRecovery,
     socket,
     roomId,
     audioProducer,
@@ -163,7 +165,7 @@ export function useMobileMedia(
     setConnectionState,
   });
   const { checkTransport } = useMediaConnectionRecovery({
-    socket, roomId, connectionGrace, mediaSocketId, inVoiceRef, joiningRef, watchingScreenPeerRef, watchingGeneration, mediaGeneration,
+    socket, roomId, connectionGrace, iceRecovery, mediaSocketId, inVoiceRef, joiningRef, watchingScreenPeerRef, watchingGeneration, mediaGeneration,
     sendTransport, recvTransport, teardown, setConnectionState, setError,
   });
   const { setupDevice, removeConsumer, consumeProducer } = useMediaTransports({
@@ -173,7 +175,6 @@ export function useMobileMedia(
     mediaGeneration,
     socket,
     checkTransport,
-    setConnectionState,
     consumers,
     consumerByProducer,
     applicationAudioVolumes,
@@ -201,6 +202,15 @@ export function useMobileMedia(
     availableScreensRef,
     consumeProducer,
   });
+  const stopWatchingScreenExplicitly = useCallback(() => {
+    const recovering = iceRecovery.current?.isRecovering() === true;
+    cancelPendingWatch();
+    stopWatchingScreen();
+    // A cancelled viewer must not hand a transport with an in-flight ICE
+    // credential rotation to the next manual watch. Keep source discovery.
+    if (recovering && !inVoiceRef.current && !joiningRef.current)
+      teardown(true, { preserveAvailableScreens: true });
+  }, [cancelPendingWatch, stopWatchingScreen, teardown]);
   const watchScreen = useCallback(
     async (socketId?: string) => {
       if (!roomReady || !socket.connected || watchingGeneration.current === mediaGeneration.current) return;
@@ -599,7 +609,7 @@ export function useMobileMedia(
     leaveVoice,
     toggleMute,
     watchScreen,
-    stopWatchingScreen,
+    stopWatchingScreen: stopWatchingScreenExplicitly,
     setScreenReceiveVolume,
     clearError: () => setError(null),
   };

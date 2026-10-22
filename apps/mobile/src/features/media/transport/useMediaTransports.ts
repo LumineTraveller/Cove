@@ -3,6 +3,7 @@ import { screenWatchError } from '../screen/screenWatchError';
 
 import type { Socket } from 'socket.io-client';
 import { Device } from 'mediasoup-client';
+import type { IceRecoveryRegistration } from '@cove/client-core';
 
 import { MediaStream, MediaStreamTrack } from 'react-native-webrtc';
 
@@ -12,7 +13,6 @@ import {
   RtpCapabilities,
   RemoteScreen,
   ApplicationAudioShare,
-  ConnectionState,
   emitAsync,
 } from '../mobileMediaSupport';
 
@@ -25,10 +25,8 @@ export interface UseMediaTransportsDependencies {
     import('@socket.io/component-emitter/lib/cjs').DefaultEventsMap,
     import('@socket.io/component-emitter/lib/cjs').DefaultEventsMap
   >;
-  readonly checkTransport: (key: string, state: string) => void;
-  readonly setConnectionState: import('react').Dispatch<
-    import('react').SetStateAction<ConnectionState>
-  >;
+  readonly checkTransport: (key: string, state: string,
+    context?: Pick<IceRecoveryRegistration, 'transport' | 'capability' | 'ownerSocketId' | 'isCurrent'>) => void;
   readonly consumers: import('react').RefObject<
     Map<
       string,
@@ -71,7 +69,6 @@ export function useMediaTransports(deps: UseMediaTransportsDependencies) {
     mediaGeneration,
     socket,
     checkTransport,
-    setConnectionState,
     consumers,
     consumerByProducer,
     applicationAudioVolumes,
@@ -89,6 +86,7 @@ export function useMediaTransports(deps: UseMediaTransportsDependencies) {
     if (deviceRef.current && sendTransport.current && recvTransport.current)
       return;
     const generation = mediaGeneration.current;
+    const ownerSocketId = socket.id;
     const ensureCurrent = () => {
       if (generation !== mediaGeneration.current)
         throw new Error('语音加入已取消');
@@ -138,9 +136,10 @@ export function useMediaTransports(deps: UseMediaTransportsDependencies) {
     );
     outgoing.on('connectionstatechange', state => {
       if (sendTransport.current !== outgoing) return;
-      checkTransport('send', state);
-      if (state === 'connecting') setConnectionState('connecting');
-      if (state === 'connected') setConnectionState('connected');
+      checkTransport('send', state, {
+        transport: outgoing, capability: sendParams.iceRestart, ownerSocketId,
+        isCurrent: () => generation === mediaGeneration.current && sendTransport.current === outgoing,
+      });
     });
     sendTransport.current = outgoing;
 
@@ -156,9 +155,10 @@ export function useMediaTransports(deps: UseMediaTransportsDependencies) {
     });
     incoming.on('connectionstatechange', state => {
       if (recvTransport.current !== incoming) return;
-      checkTransport('recv', state);
-      if (state === 'connecting') setConnectionState('connecting');
-      if (state === 'connected') setConnectionState('connected');
+      checkTransport('recv', state, {
+        transport: incoming, capability: recvParams.iceRestart, ownerSocketId,
+        isCurrent: () => generation === mediaGeneration.current && recvTransport.current === incoming,
+      });
     });
     recvTransport.current = incoming;
   }, [
@@ -168,7 +168,6 @@ export function useMediaTransports(deps: UseMediaTransportsDependencies) {
     mediaGeneration,
     socket,
     checkTransport,
-    setConnectionState,
   ]);
 
   const setupDevice = useCallback(() => {

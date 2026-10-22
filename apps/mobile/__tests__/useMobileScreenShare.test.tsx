@@ -1,4 +1,5 @@
 import TestRenderer, { act } from 'react-test-renderer';
+import { createTransportIceRecovery, type TransportIceRecovery } from '@cove/client-core';
 import {
   screenCodecCandidates,
   useMobileScreenShare,
@@ -51,11 +52,14 @@ let socket: any,
 let events: Map<string, any>, transportEvents: Map<string, any>;
 let producers: any[];
 let outgoings: any[];
+let iceRecovery: { current: TransportIceRecovery | null };
 function makeTransport(id: string, suffix = '') {
   const handlers = new Map();
   const value: any = {
     id,
     closed: false,
+    connectionState: 'new',
+    restartIce: jest.fn(async (_options: unknown) => {}),
     handlers,
     close: jest.fn(() => {
       value.closed = true;
@@ -96,6 +100,7 @@ beforeEach(async () => {
   transportEvents = new Map();
   producers = [];
   outgoings = [];
+  iceRecovery = { current: null };
   screen = {
     getVideoTracks: () => [{ readyState: 'live', onended: undefined }],
     release: jest.fn(),
@@ -157,7 +162,7 @@ beforeEach(async () => {
     }),
   };
   function Harness() {
-    share = useMobileScreenShare(socket, device, inVoice);
+    share = useMobileScreenShare(socket, device, inVoice, iceRecovery);
     return null;
   }
   await act(async () => {
@@ -166,6 +171,7 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   await act(async () => renderer.unmount());
+  iceRecovery.current?.dispose();
   jest.useRealTimers();
 });
 
@@ -194,6 +200,136 @@ test('video-only sharing has no audio capture and never reuses the microphone tr
     'voice:leave',
     expect.anything(),
   );
+});
+
+function enableScreenIce(supported = true) {
+  const manager = createTransportIceRecovery({ roomId: 'room', signal: socket });
+  iceRecovery.current = manager;
+  const emit = socket.emit.getMockImplementation();
+  const requests: Array<{ payload: any; reply: (response: any) => void }> = [];
+  let respond = (payload: any, reply: (response: any) => void) => reply({
+    ok: true, version: 1, transportId: payload.transportId, sessionId: payload.sessionId,
+    sequence: payload.sequence, iceParameters: { usernameFragment: 'screen-fragment', password: 'synthetic-password' },
+  });
+  socket.emit.mockImplementation((event: string, payload: any, reply: any) => {
+    if (event === 'ms:create-transport') emit(event, payload, (response: any) => reply({
+      ...response, ...(supported ? { iceRestart: { version: 1, sessionId: `owner-${response.id}` } } : {}),
+    }));
+    else if (event === 'ms:restart-ice') { requests.push({ payload, reply }); respond(payload, reply); }
+    else emit(event, payload, reply);
+  });
+  const change = async (value: any, state: string) => {
+    await act(async () => { value.connectionState = state; value.handlers.get('connectionstatechange')(state); });
+  };
+  const recovered = (value: any) => value.restartIce.mockImplementation(async () => {
+    value.connectionState = 'connected'; value.handlers.get('connectionstatechange')('connected');
+  });
+  return { manager, requests, change, recovered, respond: (next: typeof respond) => { respond = next; } };
+}
+
+test('dedicated screen ICE recovery preserves capture, producer identity and voice membership', async () => {
+  jest.useFakeTimers();
+  const ice = enableScreenIce();
+  await act(async () => { expect(await share.startScreenShare(true)).toBe(true); });
+  const producerId = share.screenProducerId;
+  await ice.change(outgoing, 'connected');
+  ice.recovered(outgoing);
+  await ice.change(outgoing, 'failed');
+  await act(async () => jest.advanceTimersByTime(0));
+  expect(ice.requests).toHaveLength(1);
+  expect(outgoing.restartIce).toHaveBeenCalledTimes(1);
+  expect(share.sharingScreen).toBe(true);
+  expect(share.screenProducerId).toBe(producerId);
+  expect(mockGetDisplayMedia).toHaveBeenCalledTimes(1);
+  expect(mockCreatePlayback).toHaveBeenCalledTimes(1);
+  expect(outgoing.produce).toHaveBeenCalledTimes(2);
+  expect(outgoing.close).not.toHaveBeenCalled();
+  expect(inVoice.current).toBe(true);
+});
+
+test('terminal screen ICE failure stops only sharing and never leaves voice', async () => {
+  jest.useFakeTimers();
+  const ice = enableScreenIce();
+  ice.respond((_payload, reply) => reply({ ok: false, code: 'TRANSPORT_NOT_CURRENT' }));
+  await act(async () => { await share.startScreenShare(false); });
+  await ice.change(outgoing, 'connected'); await ice.change(outgoing, 'failed');
+  await act(async () => jest.advanceTimersByTime(0));
+  expect(ice.requests).toHaveLength(1);
+  expect(share.sharingScreen).toBe(false);
+  expect(inVoice.current).toBe(true);
+  expect(screen.release).toHaveBeenCalledWith(true);
+  expect(socket.emit).not.toHaveBeenCalledWith('voice:leave', expect.anything());
+});
+
+test('explicit screen stop invalidates an ICE ACK without reopening capture or restarting the old transport', async () => {
+  jest.useFakeTimers();
+  const ice = enableScreenIce();
+  ice.respond(() => {});
+  await act(async () => { await share.startScreenShare(false); });
+  await ice.change(outgoing, 'connected'); await ice.change(outgoing, 'failed');
+  await act(async () => jest.advanceTimersByTime(0));
+  expect(ice.requests).toHaveLength(1);
+  await act(async () => share.stopScreenShare());
+  const { payload, reply } = ice.requests[0];
+  await act(async () => reply({ ok: true, version: 1, ...payload, iceParameters: { usernameFragment: 'late', password: 'late-password' } }));
+  await act(async () => jest.advanceTimersByTime(22000));
+  expect(outgoing.restartIce).not.toHaveBeenCalled();
+  expect(ice.requests).toHaveLength(1);
+  expect(share.sharingScreen).toBe(false);
+  expect(mockGetDisplayMedia).toHaveBeenCalledTimes(1);
+});
+
+test('codec fallback cancels the previous screen transport ICE attempt before publishing its replacement', async () => {
+  jest.useFakeTimers();
+  const ice = enableScreenIce();
+  ice.respond(() => {});
+  await act(async () => { await share.startScreenShare(false); });
+  await ice.change(outgoing, 'connected'); await ice.change(outgoing, 'failed');
+  await act(async () => jest.advanceTimersByTime(0));
+  expect(ice.requests).toHaveLength(1);
+  await act(async () => {
+    mockEncoderError({ sessionId: 'playback1', attemptId: 1, codec: 'H264', stage: 'encode', code: 'SYNTHETIC' });
+  });
+  const currentProducer = share.screenProducerId;
+  expect(outgoings).toHaveLength(2);
+  expect(share.sharingScreen).toBe(true);
+  const { payload, reply } = ice.requests[0];
+  await act(async () => reply({ ok: true, version: 1, ...payload, iceParameters: { usernameFragment: 'old', password: 'old-password' } }));
+  await act(async () => jest.advanceTimersByTime(22000));
+  expect(outgoing.restartIce).not.toHaveBeenCalled();
+  expect(outgoings[1].restartIce).not.toHaveBeenCalled();
+  expect(share.screenProducerId).toBe(currentProducer);
+  expect(share.sharingScreen).toBe(true);
+  expect(mockGetDisplayMedia).toHaveBeenCalledTimes(1);
+});
+
+test.each(['old-server', 'missing-method'] as const)('%s retains immediate legacy screen failure cleanup', async mode => {
+  jest.useFakeTimers();
+  const ice = enableScreenIce(mode !== 'old-server');
+  if (mode === 'missing-method') outgoing.restartIce = undefined;
+  await act(async () => { await share.startScreenShare(false); });
+  await ice.change(outgoing, 'connected'); await ice.change(outgoing, 'failed');
+  expect(ice.requests).toHaveLength(0);
+  expect(share.sharingScreen).toBe(false);
+  expect(inVoice.current).toBe(true);
+});
+
+test('screen media failure during signal loss waits for the qualified recovery without a second capture', async () => {
+  jest.useFakeTimers();
+  const ice = enableScreenIce();
+  await act(async () => { await share.startScreenShare(false); });
+  await ice.change(outgoing, 'connected');
+  await act(async () => { socket.connected = false; ice.manager.onSignalLost(); });
+  await ice.change(outgoing, 'failed');
+  await act(async () => jest.advanceTimersByTime(8000));
+  expect(ice.requests).toHaveLength(0);
+  expect(share.sharingScreen).toBe(true);
+  ice.recovered(outgoing);
+  await act(async () => { socket.connected = true; ice.manager.onSessionRecovered(); });
+  await act(async () => jest.advanceTimersByTime(0));
+  expect(ice.requests).toHaveLength(1);
+  expect(outgoing.restartIce).toHaveBeenCalledTimes(1);
+  expect(mockGetDisplayMedia).toHaveBeenCalledTimes(1);
 });
 
 test('an existing server without publication continuity keeps legacy producer payloads and explicit closes', async () => {
