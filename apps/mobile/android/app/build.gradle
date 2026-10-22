@@ -5,6 +5,7 @@ plugins {
 apply plugin: "com.android.application"
 apply plugin: "org.jetbrains.kotlin.android"
 apply plugin: "com.facebook.react"
+apply from: rootProject.file("signing-config.gradle")
 
 /**
  * This is the configuration block to customize your React Native Android app.
@@ -109,6 +110,14 @@ android {
             keyAlias 'androiddebugkey'
             keyPassword 'android'
         }
+        if (coveExternalSigning != null) {
+            external {
+                storeFile coveExternalSigning.storeFile
+                storePassword coveExternalSigning.storePassword
+                keyAlias coveExternalSigning.keyAlias
+                keyPassword coveExternalSigning.keyPassword
+            }
+        }
     }
     externalNativeBuild {
         cmake {
@@ -125,9 +134,9 @@ android {
             }
         }
         release {
-            // Caution! In production, you need to generate your own keystore file.
-            // see https://reactnative.dev/docs/signed-apk-android.
-            signingConfig signingConfigs.debug
+            // Default stays compatible with existing releases. External signing
+            // requires a separately approved key/upgrade migration and explicit env opt-in.
+            signingConfig(coveSigningMode == 'external' ? signingConfigs.external : signingConfigs.debug)
             minifyEnabled enableProguardInReleaseBuilds
             proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
         }

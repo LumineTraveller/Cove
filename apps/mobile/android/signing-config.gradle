@@ -1,0 +1,32 @@
+// Explicit preparation only: legacy builds keep the published signing identity.
+// Never put passwords or a keystore into this repository or Gradle properties.
+def signingMode = System.getenv('COVE_ANDROID_SIGNING_MODE') ?: 'legacy'
+if (!(signingMode in ['legacy', 'external'])) {
+    throw new GradleException('COVE_ANDROID_SIGNING_MODE must be legacy or external')
+}
+def externalSigning = null
+if (signingMode == 'external') {
+    def required = ['STORE_FILE', 'STORE_PASSWORD', 'KEY_ALIAS', 'KEY_PASSWORD', 'EXPECTED_SIGNER_SHA256']
+    def values = [:]
+    required.each { name ->
+        def value = System.getenv("COVE_ANDROID_${name}")
+        if (value == null || value.trim().isEmpty()) {
+            throw new GradleException("Missing COVE_ANDROID_${name} for external signing")
+        }
+        values[name] = value
+    }
+    def store = new File(values.STORE_FILE)
+    if (!store.isAbsolute() || !store.isFile()) {
+        throw new GradleException('External signing requires an existing absolute keystore file')
+    }
+    if (store.canonicalFile == rootProject.file('app/debug.keystore').canonicalFile) {
+        throw new GradleException('External signing cannot select the legacy debug keystore')
+    }
+    if (!(values.EXPECTED_SIGNER_SHA256 ==~ /(?i)[a-f0-9]{64}/)) {
+        throw new GradleException('COVE_ANDROID_EXPECTED_SIGNER_SHA256 must contain 64 hexadecimal characters')
+    }
+    externalSigning = [storeFile: store, storePassword: values.STORE_PASSWORD,
+        keyAlias: values.KEY_ALIAS, keyPassword: values.KEY_PASSWORD]
+}
+ext.coveSigningMode = signingMode
+ext.coveExternalSigning = externalSigning
