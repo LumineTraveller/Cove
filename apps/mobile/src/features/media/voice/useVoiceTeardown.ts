@@ -84,9 +84,6 @@ export interface UseVoiceTeardownDependencies {
   readonly setConnectionState: import('react').Dispatch<
     import('react').SetStateAction<ConnectionState>
   >;
-  readonly setError: import('react').Dispatch<
-    import('react').SetStateAction<string | null>
-  >;
 }
 
 export function useVoiceTeardown(deps: UseVoiceTeardownDependencies) {
@@ -121,7 +118,6 @@ export function useVoiceTeardown(deps: UseVoiceTeardownDependencies) {
     watchingScreenPeerRef,
     setIsWatchingScreen,
     setConnectionState,
-    setError,
   } = deps;
 
   const teardown = useCallback(
@@ -206,21 +202,5 @@ export function useVoiceTeardown(deps: UseVoiceTeardownDependencies) {
     ],
   );
 
-  const checkTransport = useCallback(
-    (key: string, state: string) => {
-      if (state === 'connected') connectionGrace.current.recover(key);
-      if (state === 'failed' || state === 'disconnected') {
-        setConnectionState('connecting');
-        connectionGrace.current.fail(key, () => {
-          teardown(true);
-          setConnectionState('failed');
-          setError(
-            '媒体连接中断超过 7.5 秒，可直接重新加入语音，无需重连服务器',
-          );
-        });
-      }
-    },
-    [connectionGrace, setConnectionState, setError, teardown],
-  );
-  return { teardown, checkTransport };
+  return { teardown };
 }

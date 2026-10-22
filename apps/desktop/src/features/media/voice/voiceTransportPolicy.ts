@@ -7,10 +7,4 @@ export function shouldResetVoiceForTransportState(state: string): boolean {
   return state === 'failed';
 }
 
-/**
- * Signalling may be down while media is still usable or recovering. Let the
- * media transports' own failure deadline decide when a voice reset is needed.
- */
-export function hasRecoverableMediaTransport(...states: Array<string | null>): boolean {
-  return states.some((state) => state !== null && state !== 'failed' && state !== 'closed');
-}
+export { hasRecoverableMediaTransport } from '@cove/client-core';

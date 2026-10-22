@@ -1,5 +1,5 @@
 import { DisconnectGrace } from '../../connection/disconnectGrace';
-import { hasRecoverableMediaTransport } from './voiceTransportPolicy';
+import { createMediaConnectionRecovery, shouldRetainMediaOnSignalTimeout } from '@cove/client-core';
 
 export interface VoiceConnectionState {
   connected: boolean;
@@ -21,43 +21,18 @@ interface VoiceConnectionRecoveryOptions {
   onEvent: (event: string, reason?: string) => void;
 }
 
-/** Signalling and WebRTC have independent connections and failure deadlines. */
+/** Desktop adapter: recovery policy does not own the voice resources. */
 export function createVoiceConnectionRecovery(options: VoiceConnectionRecoveryOptions) {
-  const onDisconnect = (reason: string) => {
-    options.onEvent('signal-disconnected', reason);
-    if (reason === 'io client disconnect' || reason === 'io server disconnect') {
-      options.resetVoice(reason);
-      return;
-    }
-    const state = options.readState();
-    if (!state.active && !state.joining) return;
-    options.grace.fail('signal', () => {
-      const latest = options.readState();
-      if (!latest.active && !latest.joining) return;
-      // The server and renderer do not observe recovery at the same instant.
-      // A late CONNECT packet must not make a signalling-only timeout destroy
-      // working WebRTC. Transport failures retain their own five-second timers;
-      // onConnect still rejects media belonging to a different server session.
-      if (latest.active && hasRecoverableMediaTransport(latest.sendState, latest.recvState)) {
-        options.onEvent('signal-timeout-media-retained');
-        return;
-      }
-      options.resetVoice('signal-timeout');
-      options.onError('服务器连接中断超过 5 秒，连接恢复后可直接加入语音');
-    });
-  };
-
-  const onConnect = () => {
-    options.grace.recover('signal');
-    options.onEvent('signal-connected');
-    const state = options.readState();
-    if (state.voiceSocketId !== state.socketId || !state.recovered) {
-      if (state.active || state.joining) options.resetVoice('session-not-recovered');
-    } else if (!state.active && !state.joining) {
-      // An explicit leave or failed media connection won the race with recovery.
-      options.leaveRecoveredVoice();
-    }
-  };
-
-  return { onDisconnect, onConnect, dispose: () => options.grace.recover('signal') };
+  return createMediaConnectionRecovery({
+    grace: options.grace,
+    readState: () => {
+      const state = options.readState();
+      return { ...state, mediaSocketId: state.voiceSocketId, pending: state.joining, established: state.active };
+    },
+    retainOnSignalTimeout: shouldRetainMediaOnSignalTimeout,
+    resetMedia: options.resetVoice,
+    leaveRecoveredSession: options.leaveRecoveredVoice,
+    onSignalTimeout: () => options.onError('服务器连接中断超过 5 秒，连接恢复后可直接加入语音'),
+    onEvent: options.onEvent,
+  });
 }

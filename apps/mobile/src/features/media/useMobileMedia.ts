@@ -1,4 +1,5 @@
 import { useAvailableScreens } from './screen/useAvailableScreens';
+import { useMediaConnectionRecovery } from './voice/useMediaConnectionRecovery';
 import { useVoiceTeardown } from './voice/useVoiceTeardown';
 import { useMediaTransports } from './transport/useMediaTransports';
 import { useScreenViewing } from './screen/useScreenViewing';
@@ -120,7 +121,7 @@ export function useMobileMedia(
       setAvailableScreens,
       availableScreensRef,
     });
-  const { teardown, checkTransport } = useVoiceTeardown({
+  const { teardown } = useVoiceTeardown({
     stopScreenShare,
     mediaGeneration,
     joiningRef,
@@ -151,7 +152,10 @@ export function useMobileMedia(
     watchingScreenPeerRef,
     setIsWatchingScreen,
     setConnectionState,
-    setError,
+  });
+  const { checkTransport } = useMediaConnectionRecovery({
+    socket, roomId, connectionGrace, voiceSocketId, inVoiceRef, joiningRef,
+    sendTransport, recvTransport, teardown, setConnectionState, setError,
   });
   const { setupDevice, removeConsumer, consumeProducer } = useMediaTransports({
     deviceRef,
@@ -357,34 +361,6 @@ export function useMobileMedia(
       else if (!selfMutedRef.current) audioProducer.current?.resume();
       setIsMuted(muted || selfMutedRef.current);
     };
-    const onDisconnect = (reason: string) => {
-      if (
-        reason === 'io client disconnect' ||
-        reason === 'io server disconnect'
-      ) {
-        teardown(false);
-        return;
-      }
-      if (!inVoiceRef.current && !joiningRef.current && !recvTransport.current)
-        return;
-      setConnectionState('connecting');
-      connectionGrace.current.fail('signal', () => {
-        teardown(false);
-        setError('服务器连接中断超过 7.5 秒，连接恢复后可直接加入语音');
-      });
-    };
-    const onConnect = () => {
-      connectionGrace.current.recover('signal');
-      if (voiceSocketId.current !== socket.id || !socket.recovered) {
-        if (inVoiceRef.current || joiningRef.current || recvTransport.current)
-          teardown(false);
-      } else if (!inVoiceRef.current && !joiningRef.current) {
-        socket.emit('voice:leave', roomId);
-      } else if (inVoiceRef.current) {
-        setConnectionState('connected');
-      }
-    };
-
     socket.on('voice:members-updated', onVoiceMembers);
     socket.on('ms:new-producer', onNewProducer);
     socket.on('ms:consumer-closed', onConsumerClosed);
@@ -392,8 +368,6 @@ export function useMobileMedia(
     socket.on('voice:presence', onVoicePresence);
     socket.on('voice:user-left', onUserLeft);
     socket.on('room:force-muted', onForcedMute);
-    socket.on('disconnect', onDisconnect);
-    socket.on('connect', onConnect);
     return () => {
       socket.off('voice:members-updated', onVoiceMembers);
       socket.off('ms:new-producer', onNewProducer);
@@ -402,8 +376,6 @@ export function useMobileMedia(
       socket.off('voice:presence', onVoicePresence);
       socket.off('voice:user-left', onUserLeft);
       socket.off('room:force-muted', onForcedMute);
-      socket.off('disconnect', onDisconnect);
-      socket.off('connect', onConnect);
     };
   }, [
     consumeProducer,
