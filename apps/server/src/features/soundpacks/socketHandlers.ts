@@ -111,11 +111,18 @@ export function registerSoundpacksSocketHandlers(deps: RegisterSoundpacksSocketH
 
   onRoomEvent('soundpack:reorder', (actor, request, cb) => {
     const orderedIds = request.orderedIds;
-    if (!Array.isArray(orderedIds) || orderedIds.length > 500 || !orderedIds.every((id) => typeof id === 'string'))
+    if (!Array.isArray(orderedIds))
       throw new SoundpackAccessError(400, 'INVALID_REQUEST', '无效的语音包顺序');
     const currentIds = (deps.stmtGetSoundpacks.all(actor.roomId) as SoundpackRecord[]).map((pack) => pack.id);
+    // The room's current list bounds the work, rather than an unrelated 500-item
+    // ceiling that makes a valid large room impossible to reorder. Reject an
+    // oversized/stale request before walking its IDs or allocating another set.
+    if (orderedIds.length !== currentIds.length)
+      throw new SoundpackAccessError(409, 'SOUNDPACK_LIST_CHANGED', '语音包列表已变化，请刷新后重试');
+    if (!orderedIds.every(id => typeof id === 'string' && id.length > 0 && id.length <= 128))
+      throw new SoundpackAccessError(400, 'INVALID_REQUEST', '无效的语音包顺序');
     const uniqueIds = new Set(orderedIds);
-    if (orderedIds.length !== currentIds.length || uniqueIds.size !== currentIds.length || currentIds.some((id) => !uniqueIds.has(id)))
+    if (uniqueIds.size !== currentIds.length || currentIds.some((id) => !uniqueIds.has(id)))
       throw new SoundpackAccessError(409, 'SOUNDPACK_LIST_CHANGED', '语音包列表已变化，请刷新后重试');
     deps.reorderSoundpacks(actor.roomId, orderedIds);
     deps.broadcastSoundpackEvent(actor.roomId, 'soundpack:reordered', { roomId: actor.roomId, orderedIds });

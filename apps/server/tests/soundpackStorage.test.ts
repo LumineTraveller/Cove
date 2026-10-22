@@ -103,6 +103,18 @@ test('soundpack storage preserves room ownership and quarantines historical glob
       assert.equal(repos.stmtGetSoundpack.get('pack-a', 'room-a').sortOrder, 0);
     });
 
+    await t.test('reorders more than 500 rows atomically without touching another room', () => {
+      database.db.prepare('INSERT INTO rooms (id, name, createdAt) VALUES (?, ?, ?)').run('room-large', 'Large', 3);
+      const ids = Array.from({ length: 501 }, (_, index) => `large-${index}`);
+      for (const [index, id] of ids.entries()) {
+        repos.stmtInsertSoundpack.run(id, id, `${id}.mp3`, `${id}.wav`, 'Uploader', 'account:a', index, index, 'room-large');
+      }
+      const ordered = [...ids].reverse();
+      repos.reorderSoundpacks('room-large', ordered);
+      assert.deepEqual(repos.stmtGetSoundpacks.all('room-large').map((pack: any) => pack.id), ordered);
+      assert.equal(repos.stmtGetSoundpack.get('pack-b', 'room-b').sortOrder, 20);
+    });
+
     await t.test('room bindings and historical quarantine survive reopening the database', () => {
       database.db.close();
       database = undefined;
