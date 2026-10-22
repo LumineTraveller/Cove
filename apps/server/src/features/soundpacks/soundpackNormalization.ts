@@ -1,8 +1,7 @@
-import { execFile } from 'child_process';
-import { promisify } from 'util';
-import fs from 'fs';
+import { runSoundpackFfmpeg as runFfmpeg } from './soundpackFfmpeg';
+import { soundpackWorkQueue } from './soundpackWorkQueue';
 
-const execFileAsync = promisify(execFile);
+export interface SoundpackNormalizationOptions { signal?: AbortSignal; }
 const TARGET_LUFS = -18;
 const TARGET_RMS_DBFS = -20;
 const MAX_TRUE_PEAK_DBTP = -1;
@@ -20,40 +19,12 @@ export function soundpackGainDb(levels: SoundpackLevels): number {
   return Math.min(target - levels.loudness, MAX_TRUE_PEAK_DBTP - levels.truePeak, MAX_BOOST_DB);
 }
 
-function ffmpegExecutable(): string {
-  const configured = process.env.COVE_FFMPEG_PATH?.trim();
-  const bundled = require('ffmpeg-static') as string | null;
-  const executable =
-    configured || bundled?.replace(/([\\/])app\.asar([\\/])/, '$1app.asar.unpacked$2');
-  if (!executable || !fs.existsSync(executable)) throw new Error('找不到 FFmpeg，无法处理语音包');
-  return executable;
-}
-
-async function runFfmpeg(args: string[]): Promise<string> {
-  try {
-    const { stderr } = await execFileAsync(
-      ffmpegExecutable(),
-      ['-hide_banner', '-nostdin', '-nostats', '-loglevel', 'info', ...args],
-      { windowsHide: true, timeout: 30_000, maxBuffer: 256 * 1024 },
-    );
-    return stderr;
-  } catch (cause) {
-    const error = cause as Error & { stderr?: string; killed?: boolean };
-    if (error.killed) throw new Error('语音包处理超时，请选择较短的片段');
-    throw new Error(
-      `语音包无法解码或处理：${
-        error.stderr?.split(/\r?\n/).filter(Boolean).at(-1) || error.message
-      }`,
-    );
-  }
-}
-
 function lastLevel(log: string, label: string): number {
   const values = [...log.matchAll(new RegExp(`${label}:\\s*(-?\\d+(?:\\.\\d+)?|-inf)`, 'g'))];
   return Number(values.at(-1)?.[1]);
 }
 
-export async function measureSoundpack(source: string): Promise<SoundpackLevels> {
+async function measureSoundpackNow(source: string, signal: AbortSignal): Promise<SoundpackLevels> {
   const report = await runFfmpeg([
     '-i',
     source,
@@ -64,7 +35,7 @@ export async function measureSoundpack(source: string): Promise<SoundpackLevels>
     '-f',
     'null',
     '-',
-  ]);
+  ], signal);
   const match = report.match(/\{\s*"input_i"[\s\S]*?\}/);
   if (!match) throw new Error('无法测量语音包响度');
   const levels = JSON.parse(match[0]) as { input_i: string; input_tp: string };
@@ -85,19 +56,24 @@ export async function measureSoundpack(source: string): Promise<SoundpackLevels>
     '-f',
     'null',
     '-',
-  ]);
+  ], signal);
   const rms = lastLevel(shortReport, 'RMS level dB');
   const peak = lastLevel(shortReport, 'Peak level dB');
   if (!Number.isFinite(rms) || !Number.isFinite(peak)) throw new Error('语音包没有可用的声音');
   return { loudness: rms, truePeak: peak, shortClip: true };
 }
 
+export function measureSoundpack(source: string, options: SoundpackNormalizationOptions = {}): Promise<SoundpackLevels> {
+  return soundpackWorkQueue.run(signal => measureSoundpackNow(source, signal), options);
+}
+
 /** Decode once for measurement and write a universally playable MP3 copy. */
-export async function normalizeSoundpack(
+async function normalizeSoundpackNow(
   source: string,
   destination: string,
+  signal: AbortSignal,
 ): Promise<SoundpackLevels & { gainDb: number }> {
-  const levels = await measureSoundpack(source);
+  const levels = await measureSoundpackNow(source, signal);
   const gainDb = soundpackGainDb(levels);
   await runFfmpeg([
     '-y',
@@ -115,7 +91,15 @@ export async function normalizeSoundpack(
     '192k',
     '-f',
     'mp3',
+    '-threads',
+    '1',
     destination,
-  ]);
+  ], signal);
   return { ...levels, gainDb };
+}
+
+export function normalizeSoundpack(
+  source: string, destination: string, options: SoundpackNormalizationOptions = {},
+): Promise<SoundpackLevels & { gainDb: number }> {
+  return soundpackWorkQueue.run(signal => normalizeSoundpackNow(source, destination, signal), options);
 }

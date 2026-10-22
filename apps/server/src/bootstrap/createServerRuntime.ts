@@ -240,6 +240,7 @@ export function createServerRuntime() {
   let legacyNormalizationPromise: Promise<void> | null = null;
 
   let legacyNormalizationStopped = false;
+  const soundpackProcessing = new AbortController();
 
   async function normalizeLegacySoundpacks(): Promise<void> {
     for (const pack of stmtGetLegacySoundpacks.all() as SoundpackRecord[]) {
@@ -255,7 +256,7 @@ export function createServerRuntime() {
         continue;
       }
       try {
-        await normalizeSoundpack(source, temporary);
+        await normalizeSoundpack(source, temporary, { signal: soundpackProcessing.signal });
         // Deletion may happen while FFmpeg is running. Leave the old file in
         // place and only switch the database after the new file is complete.
         const current = stmtGetSoundpack.get(pack.id, pack.roomId) as SoundpackRecord | undefined;
@@ -267,6 +268,7 @@ export function createServerRuntime() {
           roomId: pack.roomId, soundId: pack.id, filename, originalFilename,
         });
       } catch (error) {
+        if (legacyNormalizationStopped) break;
         console.warn(`[soundpack] 旧语音包 ${pack.id} 标准化失败，继续使用原文件`, error);
       } finally {
         try {
@@ -561,6 +563,7 @@ export function createServerRuntime() {
     },
   });
   registerSoundpacksRoutes({
+    processingSignal: soundpackProcessing.signal,
     get app() {
       return app;
     },
@@ -1476,6 +1479,7 @@ export function createServerRuntime() {
 
   async function stopServer(): Promise<void> {
     legacyNormalizationStopped = true;
+    soundpackProcessing.abort();
     clearInterval(recoveryCheckpoint);
     disconnectGrace.clear();
     await new Promise<void>((resolve) => io.close(() => resolve()));

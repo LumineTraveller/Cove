@@ -4,6 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import { randomUUID } from 'crypto';
 import { normalizeSoundpack } from './soundpackNormalization';
+import { SoundpackProcessingError } from './soundpackWorkQueue';
 import { SoundpackRecord, PublicSoundpack } from '../../models';
 import { SoundpackAccessError, soundpackErrorResponse, type SoundpackAccess } from './soundpackAccess';
 
@@ -17,6 +18,8 @@ export interface RegisterSoundpacksRoutesDependencies {
   readonly stmtGetNextSoundpackOrder: BetterSqlite3.Statement<unknown[], unknown>;
   readonly stmtInsertSoundpack: BetterSqlite3.Statement<unknown[], unknown>;
   readonly broadcastSoundpackAdded: (pack: SoundpackRecord) => void;
+  readonly processingSignal?: AbortSignal;
+  readonly normalize?: typeof normalizeSoundpack;
 }
 
 const privateResponse = (res: Response) => {
@@ -70,7 +73,15 @@ export function registerSoundpacksRoutes(deps: RegisterSoundpacksRoutesDependenc
     let files: string[] = [];
     let committed = false;
     let responseClosed = false;
-    res.once('close', () => { if (!res.writableFinished) responseClosed = true; });
+    const processing = new AbortController();
+    const cancel = () => processing.abort();
+    const responseClose = () => {
+      if (!res.writableFinished) { responseClosed = true; cancel(); }
+    };
+    res.once('close', responseClose);
+    req.once('aborted', cancel);
+    deps.processingSignal?.addEventListener('abort', cancel, { once: true });
+    if (deps.processingSignal?.aborted || req.aborted || res.destroyed) cancel();
     try {
       const body = req.body as { name?: unknown; data?: unknown; mimeType?: unknown; roomId?: unknown } | undefined;
       // Old socketId fields are ignored. Only the account token identifies
@@ -99,7 +110,7 @@ export function registerSoundpacksRoutes(deps: RegisterSoundpacksRoutesDependenc
       files = [originalPath, temporaryPath, playbackPath];
       try { fs.writeFileSync(originalFd, buf); }
       finally { fs.closeSync(originalFd); }
-      await normalizeSoundpack(originalPath, temporaryPath);
+      await (deps.normalize ?? normalizeSoundpack)(originalPath, temporaryPath, { signal: processing.signal });
       // Recheck after normalization: leaving, kicking, logout, takeover or
       // room deletion while it awaited must not commit a stale upload.
       deps.access.revalidateActor(actor);
@@ -125,12 +136,23 @@ export function registerSoundpacksRoutes(deps: RegisterSoundpacksRoutesDependenc
       }
       if (res.destroyed || responseClosed) return;
       if (error instanceof SoundpackAccessError) { soundpackErrorResponse(error, res); return; }
+      if (error instanceof SoundpackProcessingError) {
+        const busy = error.code === 'SOUNDPACK_QUEUE_FULL' || error.code === 'SOUNDPACK_QUEUE_TIMEOUT';
+        if (busy) res.setHeader('Retry-After', '2');
+        res.status(busy ? 503 : error.code === 'SOUNDPACK_CANCELLED' ? 409 : 408)
+          .json({ error: error.message, code: error.code });
+        return;
+      }
       const message = error instanceof Error ? error.message : '';
       if (message.startsWith('语音包') || message.includes('FFmpeg')) {
         res.status(400).json({ error: message, code: 'INVALID_AUDIO' });
         return;
       }
       soundpackErrorResponse(error, res);
+    } finally {
+      req.off('aborted', cancel);
+      res.off('close', responseClose);
+      deps.processingSignal?.removeEventListener('abort', cancel);
     }
   });
 }

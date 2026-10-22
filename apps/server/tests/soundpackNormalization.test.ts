@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { measureSoundpack, normalizeSoundpack, soundpackGainDb } from '../src/features/soundpacks/soundpackNormalization';
+import { createSoundpackFfmpegRunner } from '../src/features/soundpacks/soundpackFfmpeg';
 
 const ffmpeg = require('ffmpeg-static') as string;
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'cove-soundpack-normalization-'));
@@ -60,4 +61,22 @@ test('rejects digital silence and caps extreme boosts', async () => {
   await assert.rejects(normalizeSoundpack(silence, path.join(directory, 'silence.mp3')), /没有可用的声音/);
   assert.equal(soundpackGainDb({ loudness: -60, truePeak: -30, shortClip: false }), 10);
   assert.equal(soundpackGainDb({ loudness: -30, truePeak: -0.5, shortClip: false }), -0.5);
+});
+
+test('cancelling a real synthetic FFmpeg operation waits until its native child is closed', async () => {
+  const source = tone('cancel-source.wav', 2);
+  const original = fs.readFileSync(source);
+  let child!: ChildProcess;
+  const runner = createSoundpackFfmpegRunner({ spawnProcess: ((...args: Parameters<typeof spawn>) => {
+    child = spawn(...args); return child;
+  }) as typeof spawn });
+  const controller = new AbortController();
+  const result = runner(['-re', '-i', source, '-f', 'null', '-'], controller.signal);
+  const cancelled = assert.rejects(result, (error: any) => error.code === 'SOUNDPACK_CANCELLED');
+  const timer = setTimeout(() => controller.abort(), 30);
+  try {
+    await cancelled;
+    assert.ok(child.exitCode !== null || child.signalCode !== null, 'Promise must not settle with a live child');
+    assert.deepEqual(fs.readFileSync(source), original);
+  } finally { clearTimeout(timer); }
 });
