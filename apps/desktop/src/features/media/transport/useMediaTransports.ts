@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { Socket } from 'socket.io-client';
 import { Device } from 'mediasoup-client';
+import type { IceRecoveryRegistration } from '@cove/client-core';
 
 import {
   applyAudioElementOutput,
@@ -26,7 +27,7 @@ export interface useMediaTransportsDependencies {
     import('@socket.io/component-emitter/lib/cjs').DefaultEventsMap,
     import('@socket.io/component-emitter/lib/cjs').DefaultEventsMap
   >;
-  readonly checkTransport: (key: string, state: string) => void;
+  readonly checkTransport: (key: string, state: string, context?: Omit<IceRecoveryRegistration, 'key' | 'onFailure'>) => void;
   readonly consumerByProducer: import('react').MutableRefObject<Map<string, string>>;
   readonly pendingProducers: import('react').MutableRefObject<Set<string>>;
   readonly consumers: import('react').MutableRefObject<
@@ -104,6 +105,7 @@ export function useMediaTransports(deps: useMediaTransportsDependencies) {
     if (deps.deviceRef.current && deps.sendTransport.current && deps.recvTransport.current)
       return true;
     const generation = deps.mediaGeneration.current;
+    const ownerSocketId = deps.socket.id;
     const ensureCurrent = () => {
       if (generation !== deps.mediaGeneration.current) throw new Error('语音加入已取消');
     };
@@ -151,7 +153,10 @@ export function useMediaTransports(deps: useMediaTransportsDependencies) {
 
       st.on('connectionstatechange', (state) => {
         if (deps.sendTransport.current !== st) return;
-        deps.checkTransport('send', state);
+        deps.checkTransport('send', state, {
+          transport: st, capability: sendParams.iceRestart, ownerSocketId,
+          isCurrent: () => generation === deps.mediaGeneration.current && deps.sendTransport.current === st,
+        });
         console.log(`%c[ms-client] 发送通道(send): ${state}`, 'color:#3b82f6;font-weight:bold');
         if (state === 'connected')
           console.log('%c[ms-client] [OK] 发送通道已连通，麦克风/屏幕可以上行', 'color:#22c55e');
@@ -179,7 +184,10 @@ export function useMediaTransports(deps: useMediaTransportsDependencies) {
 
       rt.on('connectionstatechange', (state) => {
         if (deps.recvTransport.current !== rt) return;
-        deps.checkTransport('recv', state);
+        deps.checkTransport('recv', state, {
+          transport: rt, capability: recvParams.iceRestart, ownerSocketId,
+          isCurrent: () => generation === deps.mediaGeneration.current && deps.recvTransport.current === rt,
+        });
         console.log(`%c[ms-client] 接收通道(recv): ${state}`, 'color:#a855f7;font-weight:bold');
         if (state === 'connected')
           console.log('%c[ms-client] [OK] 接收通道已连通，可以收到别人的音视频', 'color:#22c55e');

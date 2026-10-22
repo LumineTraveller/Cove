@@ -1,5 +1,5 @@
 import { useEffect, useCallback } from 'react';
-import { screenPublicationMetadata } from '@cove/client-core';
+import { screenPublicationMetadata, type TransportIceRecovery } from '@cove/client-core';
 import { Socket } from 'socket.io-client';
 import { Device } from 'mediasoup-client';
 import { DisconnectGrace } from '../../connection/disconnectGrace';
@@ -26,6 +26,7 @@ import {
 } from '../desktopMediaSupport';
 
 export interface useVoiceSessionDependencies {
+  readonly iceRecovery?: import('react').MutableRefObject<TransportIceRecovery | null>;
   readonly voiceSessionActiveRef: import('react').MutableRefObject<boolean>;
   readonly joiningRef: import('react').MutableRefObject<boolean>;
   readonly socket: Socket<
@@ -426,6 +427,7 @@ export function useVoiceSession(deps: useVoiceSessionDependencies) {
           })}`,
         );
       }
+      deps.iceRecovery?.current?.cancelAll();
       deps.mediaGeneration.current += 1;
       deps.connectionGrace.current.clear();
       const shouldPlayLeaveTone = deps.voiceSessionActiveRef.current;
@@ -564,6 +566,12 @@ export function useVoiceSession(deps: useVoiceSessionDependencies) {
       recvState: deps.recvTransport.current?.connectionState ?? null,
     });
     const recovery = createVoiceConnectionRecovery({
+      transportRecovery: {
+        onSignalLost: () => deps.iceRecovery?.current?.onSignalLost(),
+        onSessionRecovered: () => deps.iceRecovery?.current?.onSessionRecovered(),
+        cancelAll: () => deps.iceRecovery?.current?.cancelAll(),
+        isRecovering: () => deps.iceRecovery?.current?.isRecovering() ?? false,
+      },
       grace: deps.connectionGrace.current,
       readState,
       resetVoice: (reason) => deps.resetVoiceRef.current(false, reason),

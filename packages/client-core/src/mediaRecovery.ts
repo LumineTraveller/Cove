@@ -1,4 +1,5 @@
 import type { DisconnectGrace } from './disconnectGrace';
+import type { TransportIceRecovery } from './transportIceRecovery';
 
 /** Live resource state, read again at every asynchronous boundary. */
 export interface MediaRecoveryState {
@@ -25,6 +26,7 @@ export function isRecoveredMediaSession(state: MediaRecoveryState): boolean {
 }
 
 interface MediaConnectionRecoveryOptions {
+  transportRecovery?: Pick<TransportIceRecovery, 'onSignalLost' | 'onSessionRecovered' | 'cancelAll' | 'isRecovering'>;
   grace: Pick<DisconnectGrace, 'fail' | 'recover'>;
   readState: () => MediaRecoveryState;
   retainOnSignalTimeout: (state: MediaRecoveryState) => boolean;
@@ -40,6 +42,7 @@ interface MediaConnectionRecoveryOptions {
 export function createMediaConnectionRecovery(options: MediaConnectionRecoveryOptions) {
   let disposed = false;
   const reset = (reason: string) => {
+    options.transportRecovery?.cancelAll();
     options.onEvent?.('media-reset', reason);
     options.resetMedia(reason);
   };
@@ -50,6 +53,7 @@ export function createMediaConnectionRecovery(options: MediaConnectionRecoveryOp
       reset(reason);
       return;
     }
+    options.transportRecovery?.onSignalLost();
     const state = options.readState();
     if (!state.active && !state.pending) return;
     options.onSignalLost?.();
@@ -57,7 +61,7 @@ export function createMediaConnectionRecovery(options: MediaConnectionRecoveryOp
       if (disposed) return;
       const latest = options.readState();
       if (!latest.active && !latest.pending) return;
-      if (options.retainOnSignalTimeout(latest)) {
+      if (options.retainOnSignalTimeout(latest) || options.transportRecovery?.isRecovering()) {
         options.onEvent?.('signal-timeout-media-retained');
         return;
       }
@@ -78,12 +82,14 @@ export function createMediaConnectionRecovery(options: MediaConnectionRecoveryOp
       options.onEvent?.('recovered-session-left');
       options.leaveRecoveredSession();
     } else {
+      options.transportRecovery?.onSessionRecovered();
       options.onRecovered?.(state);
     }
   };
 
   return { onDisconnect, onConnect, dispose: () => {
     disposed = true;
+    options.transportRecovery?.cancelAll();
     options.grace.recover('signal');
   } };
 }

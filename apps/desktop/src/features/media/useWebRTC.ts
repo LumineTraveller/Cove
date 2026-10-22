@@ -5,7 +5,7 @@ import { useMediaDiagnostics } from './diagnostics/useMediaDiagnostics';
 import { type diagnosticVideoCounters } from './diagnostics/mediaDiagnostics';
 import { useMediaTransports } from './transport/useMediaTransports';
 import { useScreenViewing } from './screen/useScreenViewing';
-import { screenAudioMatchesPublication, screenPublicationMetadata } from '@cove/client-core';
+import { createTransportIceRecovery, screenAudioMatchesPublication, screenPublicationMetadata, type IceRecoveryRegistration, type TransportIceRecovery } from '@cove/client-core';
 import { useMicrophoneControls } from './microphone/useMicrophoneControls';
 import { useVoiceSession } from './voice/useVoiceSession';
 import { useScreenAnalysis } from './screen/useScreenAnalysis';
@@ -164,8 +164,27 @@ export function useWebRTC(socket: Socket, roomId: string) {
   const connectionGrace = useRef(new DisconnectGrace());
   const resetVoiceRef = useRef<(notifyServer?: boolean, reason?: string) => void>(() => {});
   const voiceSocketId = useRef<string>();
+  const iceRecovery = useRef<TransportIceRecovery | null>(null);
+  useEffect(() => {
+    const recovery = createTransportIceRecovery({
+      roomId, signal: socket,
+      onEvent: (event, detail) => console.info('[media-recovery]', event, detail),
+    });
+    iceRecovery.current = recovery;
+    return () => { recovery.dispose(); if (iceRecovery.current === recovery) iceRecovery.current = null; };
+  }, [socket, roomId]);
 
-  const checkTransport = useCallback((key: string, state: string) => {
+  const checkTransport = useCallback((key: string, state: string, context?: Omit<IceRecoveryRegistration, 'key' | 'onFailure'>) => {
+    if (context && iceRecovery.current?.observe({
+      ...context, key, isActive: () => voiceSessionActiveRef.current,
+      onFailure: reason => {
+        resetVoiceRef.current(true, `ice-${key}-${reason}`);
+        setAudioDeviceError('媒体通路恢复失败，可重新加入语音，无需重连服务器');
+      },
+    }, state)) {
+      connectionGrace.current.recover(key);
+      return;
+    }
     if (state === 'connected') connectionGrace.current.recover(key);
     if (shouldResetVoiceForTransportState(state)) {
       connectionGrace.current.fail(key, () => {
@@ -1084,6 +1103,9 @@ export function useWebRTC(socket: Socket, roomId: string) {
     },
     get voiceSocketId() {
       return voiceSocketId;
+    },
+    get iceRecovery() {
+      return iceRecovery;
     },
     get setIsJoining() {
       return setIsJoining;

@@ -1,5 +1,6 @@
 import { DisconnectGrace } from '../../connection/disconnectGrace';
 import { createMediaConnectionRecovery, shouldRetainMediaOnSignalTimeout } from '@cove/client-core';
+import type { TransportIceRecovery } from '@cove/client-core';
 
 export interface VoiceConnectionState {
   connected: boolean;
@@ -13,6 +14,7 @@ export interface VoiceConnectionState {
 }
 
 interface VoiceConnectionRecoveryOptions {
+  transportRecovery?: Pick<TransportIceRecovery, 'onSignalLost' | 'onSessionRecovered' | 'cancelAll' | 'isRecovering'>;
   grace: DisconnectGrace;
   readState: () => VoiceConnectionState;
   resetVoice: (reason: string) => void;
@@ -24,6 +26,7 @@ interface VoiceConnectionRecoveryOptions {
 /** Desktop adapter: recovery policy does not own the voice resources. */
 export function createVoiceConnectionRecovery(options: VoiceConnectionRecoveryOptions) {
   return createMediaConnectionRecovery({
+    transportRecovery: options.transportRecovery,
     grace: options.grace,
     readState: () => {
       const state = options.readState();
