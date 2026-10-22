@@ -1,7 +1,7 @@
 import { useCallback, useEffect } from 'react';
 import type { Dispatch, RefObject, SetStateAction } from 'react';
 import type { Socket } from 'socket.io-client';
-import { createMediaConnectionRecovery } from '@cove/client-core';
+import { createMediaConnectionRecovery, shouldRetainMediaOnSignalTimeout } from '@cove/client-core';
 import type { DisconnectGrace } from '../../connection/disconnectGrace';
 import type { ConnectionState, Transport } from '../mobileMediaSupport';
 
@@ -40,7 +40,7 @@ export function useMediaConnectionRecovery({
         sendState: sendTransport.current?.connectionState ?? null,
         recvState: recvTransport.current?.connectionState ?? null,
       }),
-      retainOnSignalTimeout: () => false,
+      retainOnSignalTimeout: shouldRetainMediaOnSignalTimeout,
       resetMedia: () => teardown(false),
       leaveRecoveredSession: () => { socket.emit('voice:leave', roomId); },
       onSignalLost: () => setConnectionState('connecting'),

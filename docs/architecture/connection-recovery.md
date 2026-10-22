@@ -47,3 +47,48 @@ rejoin, publish or stop a newer session after leave, room/socket change or unmou
 
 Receiver-only transports record the same socket owner as voice transports;
 recovery does not imply microphone permission or screen-capture permission.
+
+## Recovery policy changes (separate from the structural refactor)
+
+Both registration adapters now use the shared ACK generation/retry controller.
+Missing or malformed ACKs are transient errors, not successful registration or
+authentication rejection. A connection gets at most six attempts with bounded
+backoff (500, 1000, 2000, 2500, 2500 ms). Success/rejection/exhaustion ends the
+round. Disconnect, effect cleanup or explicit manual retry invalidates callbacks
+and timers; manual retry starts a fresh round on the same socket and retains
+credentials. Authentication rejection retains each platform's existing behavior.
+
+Desktop's existing **initial 30 second connection deadline takes precedence**
+over that six-attempt budget. It is completed after first registration; subsequent
+recovery registration gets the bounded ACK budget. Slow initial ACKs can therefore
+stop before six attempts. The existing desktop `SESSION_IN_USE` backoff remains
+separate; mobile's existing session replacement/login behavior is preserved.
+
+Mobile now opts into the same established-media signal-timeout retention policy
+as desktop. At 7.5 seconds it re-reads live voice/watch intent and transport state.
+Established media with a non-failed/non-closed transport is retained; unfinished
+operations or failed media are cleaned up. This neither extends the server's
+5 second peer grace nor recreates lost server resources. A fresh socket/session
+still resets the old resources immediately, including after a server restart.
+Media failure timers remain independent and retain each platform's original
+policy. No ICE restart or automatic rejoin/capture is introduced.
+
+Mute/watch intent is preserved while existing media is retained. Once a fresh
+session or media failure requires teardown, the user explicitly rejoins or watches
+again; the patch does not silently reopen a microphone or screen share. Remote
+control still revokes authorization on every disconnect and never auto-restores.
+
+## Validation boundaries
+
+Deterministic tests cover stale ACKs, retry exhaustion/manual retry, native route
+cancellation, room/socket changes, viewer-only recovery, delayed CONNECT over
+multiple outages, independent send/receive failure deadlines and old setup
+Promises. Local Socket.IO recovery and native SFU tests use loopback synthetic
+clients/media. Electron renderer checks use an isolated test profile and a fake
+signaling fixture; they do not establish an end-to-end production connection.
+
+Real Android audio routing, Wi-Fi/cellular handoff, OS suspend/resume, long calls
+and mixed installed client/server versions still require device/network acceptance
+tests. Passing the logic, renderer and loopback tests is not a release-readiness
+claim. The server protocol and deployment are unchanged, so no new server feature
+is assumed available on an existing deployment.

@@ -22,9 +22,16 @@ const mockTransport = {
     return consumer;
   }),
 };
+let mockSeparateTransports = false;
+const mockReceiveTransport = {
+  ...mockTransport,
+  connectionState: undefined as string | undefined,
+  on: jest.fn(), close: jest.fn(),
+};
 jest.mock('mediasoup-client', () => ({ Device: { factory: async () => ({
   load: async () => {}, rtpCapabilities: {},
-  createSendTransport: () => mockTransport, createRecvTransport: () => mockTransport,
+  createSendTransport: () => mockTransport,
+  createRecvTransport: () => mockSeparateTransports ? mockReceiveTransport : mockTransport,
 }) } }));
 jest.mock('react-native-incall-manager', () => ({ start: jest.fn(), stop: jest.fn(), setForceSpeakerphoneOn: jest.fn(), setSpeakerphoneOn: jest.fn(), stopProximitySensor: jest.fn(), turnScreenOn: jest.fn(), setKeepScreenOn: jest.fn() }));
 jest.mock('react-native-webrtc', () => ({
@@ -68,6 +75,8 @@ let Harness: () => null;
 beforeEach(async () => {
   jest.clearAllMocks(); mockConsumers.clear(); mockStreams.length = 0; mockNoiseMode = 'system'; existing = []; delayedConsume = undefined; holdConsume = false;
   mockTransport.connectionState = undefined;
+  mockReceiveTransport.connectionState = undefined;
+  mockSeparateTransports = false;
   currentRoom = 'room';
   jest.spyOn(PermissionsAndroid, 'request').mockResolvedValue(PermissionsAndroid.RESULTS.GRANTED);
   handlers = new Map();
@@ -584,4 +593,75 @@ test('feature callbacks remain stable across unrelated state renders without lea
   expect(media.inVoice).toBe(true);
   expect(socket.emit).not.toHaveBeenCalledWith('voice:leave','room');
   expect(mockTransport.close).not.toHaveBeenCalled();
+});
+
+test('healthy media and mute survive a delayed CONNECT through multiple signal outages without republishing', async () => {
+  jest.useFakeTimers();
+  await act(async () => media.joinVoice());
+  await act(async () => media.toggleMute());
+  mockTransport.connectionState = 'connected';
+  const existingTimers = jest.getTimerCount();
+  for (let cycle = 0; cycle < 3; cycle++) {
+    await act(async () => { socket.connected = false; handlers.get('disconnect')!('transport close'); });
+    await act(async () => jest.advanceTimersByTime(8_000));
+    expect(media.inVoice).toBe(true);
+    expect(media.isMuted).toBe(true);
+    await act(async () => { socket.connected = true; socket.recovered = true; handlers.get('connect')!(); });
+    await act(async () => jest.advanceTimersByTime(8_000));
+  }
+  expect(mockTransport.produce).toHaveBeenCalledTimes(1);
+  expect(mockTransport.close).not.toHaveBeenCalled();
+  expect(jest.getTimerCount()).toBeLessThanOrEqual(existingTimers);
+});
+
+test('healthy receiver-only media survives a delayed CONNECT without starting capture', async () => {
+  jest.useFakeTimers();
+  await act(async () => handlers.get('ms:new-producer')!({producerId: 'screen-video', peerId: 'desktop', kind: 'video', appData: {type: 'screen'}}));
+  await act(async () => media.watchScreen('desktop'));
+  const screen = media.remoteScreen;
+  mockTransport.connectionState = 'connected';
+  await act(async () => { socket.connected = false; handlers.get('disconnect')!('transport close'); });
+  await act(async () => jest.advanceTimersByTime(8_000));
+  expect(media.remoteScreen).toBe(screen);
+  await act(async () => { socket.connected = true; socket.recovered = true; handlers.get('connect')!(); });
+  expect(media.isWatchingScreen).toBe(true);
+  expect(media.connectionState).toBe('connected');
+  expect(mockTransport.produce).not.toHaveBeenCalled();
+  expect(PermissionsAndroid.request).not.toHaveBeenCalled();
+});
+
+test.each(['send', 'receive'] as const)('retaining media for signal loss never cancels the independent %s failure deadline', async side => {
+  jest.useFakeTimers();
+  mockSeparateTransports = true;
+  mockTransport.connectionState = 'connected';
+  mockReceiveTransport.connectionState = 'connected';
+  await act(async () => media.joinVoice());
+  await act(async () => { socket.connected = false; handlers.get('disconnect')!('ping timeout'); });
+  await act(async () => jest.advanceTimersByTime(500));
+  const failed = side === 'send' ? mockTransport : mockReceiveTransport;
+  const changed = failed.on.mock.calls.find(([event]) => event === 'connectionstatechange')![1];
+  await act(async () => { failed.connectionState = 'failed'; changed('failed'); });
+  await act(async () => jest.advanceTimersByTime(7000));
+  expect(media.inVoice).toBe(true);
+  await act(async () => jest.advanceTimersByTime(499));
+  expect(media.inVoice).toBe(true);
+  await act(async () => jest.advanceTimersByTime(1));
+  expect(media.inVoice).toBe(false);
+  expect(media.connectionState).toBe('failed');
+  expect(mockTransport.close).toHaveBeenCalledTimes(1);
+  expect(mockReceiveTransport.close).toHaveBeenCalledTimes(1);
+  expect(InCallManager.stop).toHaveBeenCalledTimes(1);
+});
+
+test('leaving during a healthy-media signal outage wins over a later recovery', async () => {
+  jest.useFakeTimers();
+  await act(async () => media.joinVoice());
+  mockTransport.connectionState = 'connected';
+  await act(async () => { socket.connected = false; handlers.get('disconnect')!('transport close'); });
+  await act(async () => media.leaveVoice());
+  await act(async () => jest.advanceTimersByTime(8_000));
+  await act(async () => { socket.connected = true; socket.recovered = true; handlers.get('connect')!(); });
+  expect(media.inVoice).toBe(false);
+  expect(socket.emit).toHaveBeenCalledWith('voice:leave', 'room');
+  expect(mockTransport.produce).toHaveBeenCalledTimes(1);
 });

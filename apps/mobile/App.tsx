@@ -66,6 +66,8 @@ function CoveSession() {
     setSelectedRoom,
     handleChangeServer,
     connectionError,
+    registrationRetryAvailable,
+    retryRegistration,
     insets,
   } = useCoveSession();
   const selectUpdateServer = useMobileUpdateServerSelection();
@@ -175,6 +177,11 @@ function CoveSession() {
           <Text style={styles.connectionText} numberOfLines={2}>
             {connectionError}
           </Text>
+          {registrationRetryAvailable && (
+            <Pressable accessibilityRole="button" accessibilityLabel="重试账号登记" onPress={retryRegistration}>
+              <Text style={{ color: colors.blue }}>重试</Text>
+            </Pressable>
+          )}
         </View>
       )}
     </View>

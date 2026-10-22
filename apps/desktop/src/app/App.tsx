@@ -100,7 +100,7 @@ const DEFAULT_SERVER =
 // Engine.IO detects a half-open connection after its ping interval and timeout.
 // Keep retrying past that window and the server's 5s disconnect grace period.
 const SESSION_RETRY_LIMIT = 28;
-type ConnectionProblem = 'timeout' | 'registration' | 'session-in-use' | null;
+type ConnectionProblem = 'timeout' | 'registration' | 'registration-timeout' | 'session-in-use' | null;
 type ServerSecurityProbe =
   | { phase: 'idle' | 'checking' | 'invalid' | 'unavailable'; status?: undefined }
   | { phase: 'ready'; status: ServerSecurityStatus };
@@ -271,6 +271,7 @@ export default function App() {
   const [editingServer, setEditingServer] = useState(false);
   const [initialConnectionPending, setInitialConnectionPending] = useState(false);
   const [connectionProblem, setConnectionProblem] = useState<ConnectionProblem>(null);
+  const retryRegistrationRef = useRef<(() => void) | null>(null);
   const [connectionDiagnostic, setConnectionDiagnostic] = useState<string | null>(null);
   const [connectionRetryVersion, setConnectionRetryVersion] = useState(0);
   const [requiredUpgrades, setRequiredUpgrades] = useState<Record<string, ClientUpgradeRequirement>>({});
@@ -500,7 +501,10 @@ export default function App() {
       isConnected: () => active && socket.connected,
       // Keep the last transport failure visible while the replacement socket
       // is registering; clear it only after registration succeeds.
-      onPending: () => setConnected(null),
+      onPending: () => {
+        setConnected(null);
+        setConnectionProblem(current => current === 'registration-timeout' ? null : current);
+      },
       send: (acknowledge) => {
         const currentProfile = readAccountSession(serverURL)?.profile ?? readProfile();
         applyServerAccessToSocket(serverURL);
@@ -519,7 +523,14 @@ export default function App() {
       },
       onTransientError: (error) => {
         setConnectionDiagnostic(`已连接服务器，但登录登记确认未收到：${error.message}`);
-        console.warn('[connection] 登录登记确认暂未收到，将自动重试:', error.message);
+        console.warn('[connection] 登录登记确认暂未收到:', error.message);
+      },
+      onExhausted: (error) => {
+        deadline.complete();
+        setConnected(false);
+        setInitialConnectionPending(false);
+        setConnectionProblem('registration-timeout');
+        setConnectionDiagnostic(`登录登记确认重试已暂停：${error.message}。本机登录记录已保留，可再次尝试登记。`);
       },
       onSuccess: (response) => {
         setConnected(true);
@@ -583,6 +594,12 @@ export default function App() {
         setEditingServer(true);
       },
     });
+    const retryRegistration = () => {
+      if (!active || !socket.connected) return;
+      registration.cancel();
+      registration.start();
+    };
+    retryRegistrationRef.current = retryRegistration;
     const register = () => {
       lastConnectError = null;
       registration.start();
@@ -687,6 +704,7 @@ export default function App() {
     void connectToServer();
     return () => {
       active = false;
+      if (retryRegistrationRef.current === retryRegistration) retryRegistrationRef.current = null;
       registration.cancel();
       deadline.cancel();
       if (sessionRetryTimer) clearTimeout(sessionRetryTimer);
@@ -1483,6 +1501,8 @@ export default function App() {
                     ? `服务器要求 ${activeUpgrade.minimumClientVersion} 或更高版本。已暂停连接，请在更新窗口中完成下载并重启安装；本机登录记录已保留。`
                     : connectionProblem === 'session-in-use'
                     ? '服务器仍认为同一登录令牌对应的旧信令连接在线。Cove 会等待服务端完成旧连接超时检测；仍未恢复时会保留本机账号状态，不会误清登录凭据。'
+                    : connectionProblem === 'registration-timeout'
+                    ? '登录登记确认暂未收到，本轮重试已暂停。已建立的媒体连接和本机登录记录保留，你可以再次尝试登记。'
                     : initialConnectionPending
                     ? 'Cove 最多尝试 30 秒；你也可以立即取消并修改服务器地址。'
                     : 'Cove 会自动重连并恢复你所在的房间。'}
@@ -1500,8 +1520,8 @@ export default function App() {
                 <p className="cove-connection-server" title={serverURL}>
                   {serverURL}
                 </p>
-                {connectionProblem === 'session-in-use' && (
-                  <button className="cove-connection-primary" onClick={retryServerConnection}>
+                {(connectionProblem === 'session-in-use' || connectionProblem === 'registration-timeout') && (
+                  <button className="cove-connection-primary" onClick={connectionProblem === 'registration-timeout' ? () => retryRegistrationRef.current?.() : retryServerConnection}>
                     再次尝试连接
                   </button>
                 )}

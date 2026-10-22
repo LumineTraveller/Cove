@@ -164,6 +164,56 @@ test('domain DNS failure falls back to a host key without changing the connectio
   expect(session.sessionReady).toBe(true);
 });
 
+test('registration ignores an old connection rejection after a newer connection succeeds', async () => {
+  let oldReply!: (error: Error | null, response?: object) => void;
+  mockSocket.emit.mockImplementationOnce((_event, _payload, callback) => { oldReply = callback; });
+  await mount();
+  await submit();
+  expect(session.sessionReady).toBe(false);
+  await act(async () => { mockSocket.connected = false; mockListeners.get('disconnect')!(); });
+  await act(async () => { mockSocket.connected = true; mockListeners.get('connect')!(); });
+  expect(session.sessionReady).toBe(true);
+  await act(async () => oldReply(null, { ok: false, code: 'ACCOUNT_SESSION_INVALID', error: '登录已失效' }));
+  expect(session.sessionReady).toBe(true);
+  expect(session.config?.accountToken).toBe('synthetic-account-token');
+  expect(session.authError).toBeNull();
+});
+
+test('missing registration confirmation is retried on the same connection without clearing credentials', async () => {
+  jest.useFakeTimers();
+  try {
+    mockSocket.emit.mockImplementationOnce((_event, _payload, callback) => callback(null, undefined));
+    await mount();
+    await submit();
+    expect(session.sessionReady).toBe(false);
+    expect(session.config?.accountToken).toBe('synthetic-account-token');
+    await act(async () => jest.advanceTimersByTime(500));
+    expect(session.sessionReady).toBe(true);
+    expect(mockSocket.connect).toHaveBeenCalledTimes(1);
+    expect(mockSocket.disconnect).not.toHaveBeenCalled();
+  } finally { jest.useRealTimers(); }
+});
+
+test('registration exhaustion preserves the socket and credentials, and manual retry uses that connection', async () => {
+  jest.useFakeTimers();
+  const success = (_event: string, _payload: unknown, callback: (error: Error | null, response?: object) => void) => callback(null, {ok: true});
+  try {
+    mockSocket.emit.mockImplementation((_event, _payload, callback) => callback(new Error('lost ACK')));
+    await mount();
+    await submit();
+    for (let attempt = 0; attempt < 6; attempt++) await act(async () => jest.advanceTimersByTime(10_000));
+    expect(mockSocket.emit).toHaveBeenCalledTimes(6);
+    expect(session.registrationRetryAvailable).toBe(true);
+    expect(session.config?.accountToken).toBe('synthetic-account-token');
+    expect(mockSocket.disconnect).not.toHaveBeenCalled();
+    mockSocket.emit.mockImplementation(success);
+    await act(async () => session.retryRegistration());
+    expect(session.sessionReady).toBe(true);
+    expect(session.registrationRetryAvailable).toBe(false);
+    expect(mockSocket.connect).toHaveBeenCalledTimes(1);
+  } finally { mockSocket.emit.mockImplementation(success); jest.useRealTimers(); }
+});
+
 test('IP login bypasses native DNS', async () => {
   await mount();
   await submit({ serverURL: 'https://192.0.2.10' });

@@ -2,21 +2,24 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createSessionRegistration, type RegistrationResponse } from '../src/features/connection/sessionRegistration';
 
-function fixture() {
+function fixture(maxAttempts = 6) {
   let connected = true;
   const acknowledgements: Array<(error: Error | null, response?: RegistrationResponse) => void> = [];
   const successes: RegistrationResponse[] = [];
   const rejections: RegistrationResponse[] = [];
   const errors: Error[] = [];
+  const exhaustions: Error[] = [];
   const registration = createSessionRegistration({
+    maxAttempts,
     isConnected: () => connected,
     send: acknowledge => acknowledgements.push(acknowledge),
     onPending: () => {},
     onSuccess: response => successes.push(response),
     onRejected: response => rejections.push(response),
     onTransientError: error => errors.push(error),
+    onExhausted: error => exhaustions.push(error),
   });
-  return { registration, acknowledgements, successes, rejections, errors,
+  return { registration, acknowledgements, successes, rejections, errors, exhaustions,
     setConnected: (value: boolean) => { connected = value; } };
 }
 
@@ -112,4 +115,55 @@ test('missing confirmation is retried, never accepted as a successful login', t 
   t.mock.timers.tick(500);
   assert.equal(f.acknowledgements.length, 2);
   f.registration.cancel();
+});
+
+test('registration stops once after its bounded ACK budget and only explicit cancel starts a fresh round', t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture(3);
+  f.registration.start();
+  for (let attempt = 0; attempt < 3; attempt++) {
+    f.acknowledgements[attempt](new Error('lost acknowledgement'));
+    t.mock.timers.tick(10_000);
+  }
+  assert.equal(f.acknowledgements.length, 3);
+  assert.equal(f.exhaustions.length, 1);
+  assert.deepEqual(f.rejections, []);
+  f.registration.start();
+  t.mock.timers.tick(60_000);
+  assert.equal(f.acknowledgements.length, 3);
+  f.registration.cancel();
+  f.registration.start();
+  f.acknowledgements[3](null, { ok: true });
+  f.acknowledgements[2](null, { ok: false, error: 'stale rejection' });
+  assert.equal(f.successes.length, 1);
+  assert.deepEqual(f.rejections, []);
+});
+
+test('a successful connection registers once until disconnect cancels its generation', () => {
+  const f = fixture();
+  f.registration.start();
+  f.acknowledgements[0](null, { ok: true });
+  f.registration.start();
+  assert.equal(f.acknowledgements.length, 1);
+  f.registration.cancel();
+  f.registration.start();
+  assert.equal(f.acknowledgements.length, 2);
+  f.registration.cancel();
+});
+
+test('cancellation inside a transient-error callback cannot leave a stale retry timer blocking the next round', t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let sends = 0;
+  let acknowledge!: (error: Error | null) => void;
+  const registration = createSessionRegistration({
+    isConnected: () => true,
+    send: reply => { sends++; acknowledge = reply; },
+    onPending: () => {}, onSuccess: () => {}, onRejected: () => {},
+    onTransientError: () => registration.cancel(),
+  });
+  registration.start();
+  acknowledge(new Error('lost ACK'));
+  registration.start();
+  assert.equal(sends, 2);
+  registration.cancel();
 });

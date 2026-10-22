@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert } from 'react-native';
+import { createSessionRegistration } from '@cove/client-core';
 
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { Socket } from 'socket.io-client';
@@ -71,6 +72,9 @@ export function useCoveSession() {
   const [socket, setSocket] = useState<Socket | null>(null);
   const [sessionReady, setSessionReady] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [registrationRetryAvailable, setRegistrationRetryAvailable] = useState(false);
+  const retryRegistrationRef = useRef<(() => void) | null>(null);
+  const retryRegistration = useCallback(() => retryRegistrationRef.current?.(), []);
   const [selectedRoom, setSelectedRoom] = useState<Room | null>(null);
   const [lastServerURL, setLastServerURL] = useState<string | undefined>();
   const [resumeError, setResumeError] = useState<string | null>(null);
@@ -248,16 +252,20 @@ export function useCoveSession() {
     if (!config) {
       setSocket(null);
       setSessionReady(false);
+      setRegistrationRetryAvailable(false);
       return;
     }
 
     const nextSocket = createCoveSocket(config.serverURL);
     let active = true;
-    const register = () => {
-      if (!active) return;
-      setConnectionError(null);
-      setSessionReady(false);
-      nextSocket.timeout(8_000).emit(
+    const registration = createSessionRegistration({
+      isConnected: () => active && nextSocket.connected,
+      onPending: () => {
+        setConnectionError(null);
+        setSessionReady(false);
+        setRegistrationRetryAvailable(false);
+      },
+      send: acknowledge => nextSocket.timeout(8_000).emit(
         'user:register',
         {
           username: config.username,
@@ -269,70 +277,81 @@ export function useCoveSession() {
           remoteControlControllerSupported: true,
           clientVersion: MOBILE_RELEASE_VERSION,
         },
-        (
-          timeoutError: Error | null,
-          response?: { ok: boolean; error?: string; code?: string },
-        ) => {
-          if (!active) return;
-          if (timeoutError || response?.ok === false) {
-            if (response?.code === 'CLIENT_VERSION_TOO_OLD') {
-              requireClientUpgrade(response);
-              nextSocket.disconnect();
-              return;
-            }
-            if (
-              response?.error?.includes('登录已失效') ||
-              [
-                'ACCOUNT_SESSION_INVALID',
-                'ACCOUNT_AUTH_REQUIRED',
-                'ACCOUNT_SWITCH_FORBIDDEN',
-                'AUTH_REQUIRED',
-              ].includes(response?.code ?? '')
-            ) {
-              cancelPendingLogin();
-              setSavingConfig(true);
-              setSelectedRoom(null);
-              setConfig(null);
-              setAuthError(response?.error ?? '账号登录已失效，请重新登录。');
-              clearServerConfig()
-                .then(readRememberedServers)
-                .then(setRememberedServers)
-                .catch(() => {})
-                .finally(() => setSavingConfig(false));
-              return;
-            }
-            if (response?.code === 'SESSION_IN_USE') {
-              cancelPendingLogin();
-              setSavingConfig(true);
-              setSelectedRoom(null);
-              setConfig(null);
-              setAuthError(
-                response.error ?? '账号已在其他设备使用，请重新登录。',
-              );
-              nextSocket.disconnect();
-              clearServerConfig()
-                .then(readRememberedServers)
-                .then(setRememberedServers)
-                .catch(() => {})
-                .finally(() => setSavingConfig(false));
-              return;
-            }
-            setConnectionError(response?.error ?? '服务器身份注册超时');
-            setSessionReady(false);
-            return;
-          }
-          setConnectionError(null);
-          setSessionReady(true);
-        },
-      );
+        acknowledge,
+      ),
+      onTransientError: () => setConnectionError('服务器登录登记确认暂未收到，正在重试'),
+      onExhausted: () => {
+        setSessionReady(false);
+        setRegistrationRetryAvailable(true);
+        setConnectionError('登录登记重试已暂停，登录记录已保留。可点击重试登记。');
+      },
+      onRejected: response => {
+        if (response.code === 'CLIENT_VERSION_TOO_OLD') {
+          requireClientUpgrade(response);
+          nextSocket.disconnect();
+          return;
+        }
+        if (
+          response.error?.includes('登录已失效') ||
+          [
+            'ACCOUNT_SESSION_INVALID',
+            'ACCOUNT_AUTH_REQUIRED',
+            'ACCOUNT_SWITCH_FORBIDDEN',
+            'AUTH_REQUIRED',
+          ].includes(response.code ?? '')
+        ) {
+          cancelPendingLogin();
+          setSavingConfig(true);
+          setSelectedRoom(null);
+          setConfig(null);
+          setAuthError(response.error ?? '账号登录已失效，请重新登录。');
+          clearServerConfig()
+            .then(readRememberedServers)
+            .then(setRememberedServers)
+            .catch(() => {})
+            .finally(() => setSavingConfig(false));
+          return;
+        }
+        if (response.code === 'SESSION_IN_USE') {
+          cancelPendingLogin();
+          setSavingConfig(true);
+          setSelectedRoom(null);
+          setConfig(null);
+          setAuthError(response.error ?? '账号已在其他设备使用，请重新登录。');
+          nextSocket.disconnect();
+          clearServerConfig()
+            .then(readRememberedServers)
+            .then(setRememberedServers)
+            .catch(() => {})
+            .finally(() => setSavingConfig(false));
+          return;
+        }
+        setConnectionError(response.error ?? '服务器身份注册超时');
+        setSessionReady(false);
+      },
+      onSuccess: () => {
+        setConnectionError(null);
+        setSessionReady(true);
+        setRegistrationRetryAvailable(false);
+      },
+    });
+    const retryCurrentRegistration = () => {
+      if (!active || !nextSocket.connected) return;
+      registration.cancel();
+      registration.start();
     };
+    retryRegistrationRef.current = retryCurrentRegistration;
+    const register = () => registration.start();
     const disconnect = () => {
       if (!active) return;
+      registration.cancel();
+      setRegistrationRetryAvailable(false);
       setSessionReady(false);
       setConnectionError('服务器连接已中断，正在自动重试');
     };
     const requireServerUnlock = (message?: string) => {
       if (!active) return;
+      registration.cancel();
       cancelPendingLogin();
       setSessionReady(false);
       clearServerAccessToken(config.serverURL);
@@ -344,6 +363,7 @@ export function useCoveSession() {
     };
     const connectError = (cause: Error) => {
       if (!active) return;
+      registration.cancel();
       setSessionReady(false);
       const code = (cause as Error & { data?: { code?: string } }).data?.code;
       if (code === 'CLIENT_VERSION_TOO_OLD') {
@@ -366,6 +386,7 @@ export function useCoveSession() {
     };
     const sessionReplaced = () => {
       if (!active) return;
+      registration.cancel();
       cancelPendingLogin();
       setSavingConfig(true);
       setSelectedRoom(null);
@@ -415,6 +436,8 @@ export function useCoveSession() {
 
     return () => {
       active = false;
+      registration.cancel();
+      if (retryRegistrationRef.current === retryCurrentRegistration) retryRegistrationRef.current = null;
       nextSocket.off('connect', register);
       nextSocket.off('disconnect', disconnect);
       nextSocket.off('connect_error', connectError);
@@ -689,6 +712,8 @@ export function useCoveSession() {
     setSelectedRoom,
     handleChangeServer,
     connectionError,
+    registrationRetryAvailable,
+    retryRegistration,
     insets,
   };
 }
