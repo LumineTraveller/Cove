@@ -5,7 +5,7 @@ import { invalidateMediaSession } from '../src/features/media/mediaLifecycle';
 import { bindTransportIceRestart, restartTransportIce } from '../src/features/media/transportIceRestart';
 
 let fixtures = 0;
-function fixture(t: any, operation?: () => Promise<any>) {
+function fixture(t: any, operation?: () => Promise<any>, onRestart?: () => void) {
   const socket = { id: `ice-unit-${++fixtures}`, connected: true };
   const peer = createPeer(socket.id); peer.roomId = 'room';
   let rotations = 0;
@@ -21,7 +21,7 @@ function fixture(t: any, operation?: () => Promise<any>) {
   const capability = bindTransportIceRestart(peer, 'room', transport as any)!;
   const request = { transportId: transport.id, roomId: 'room', sessionId: capability.sessionId, sequence: 1 };
   const run = (sequence: number, changes: Record<string, unknown> = {}, caller = socket) =>
-    restartTransportIce(caller, { ...request, sequence, ...changes }, () => at);
+    restartTransportIce(caller, { ...request, sequence, ...changes }, () => at, onRestart);
   t.after(() => peers.delete(socket.id));
   return { socket, peer, transport, capability, request, run, rotations: () => rotations, setTime: (value: number) => { at = value; } };
 }
@@ -118,6 +118,41 @@ test('worker rejection is contained, cached per sequence and can be retried usin
   assert.equal(f.rotations(), 1);
   assert.deepEqual(await f.run(2), { ok: false, code: 'RESTART_FAILED' });
   assert.equal(f.rotations(), 2);
+});
+
+test('a throwing revocation callback fails closed and caches the failure without rotating', async t => {
+  let revocations = 0;
+  const f = fixture(t, undefined, () => { revocations++; throw new Error('revocation failed'); });
+  assert.deepEqual(await f.run(1), { ok: false, code: 'RESTART_FAILED' });
+  assert.deepEqual(await f.run(1), { ok: false, code: 'RESTART_FAILED' });
+  assert.equal(revocations, 1);
+  assert.equal(f.rotations(), 0);
+  assert.deepEqual(await f.run(2), { ok: false, code: 'RESTART_FAILED' });
+  assert.equal(revocations, 2);
+  assert.equal(f.rotations(), 0);
+});
+
+test('the latest promise exists before revocation callbacks can synchronously reenter', async t => {
+  let duplicate: ReturnType<typeof restartTransportIce> | undefined;
+  let revocations = 0;
+  const f = fixture(t, undefined, () => { revocations++; duplicate = f.run(1); });
+  const first = f.run(1);
+  assert.ok(duplicate);
+  assert.deepEqual(await duplicate, await first);
+  assert.equal((await first).ok, true);
+  assert.equal(revocations, 1);
+  assert.equal(f.rotations(), 1);
+});
+
+test('synchronous leave or disconnect during revocation cannot rotate a stale transport', async t => {
+  for (const transition of ['leave', 'disconnect']) {
+    const f = fixture(t, undefined, () => {
+      if (transition === 'leave') invalidateMediaSession(f.peer);
+      else f.socket.connected = false;
+    });
+    assert.deepEqual(await f.run(1), { ok: false, code: transition === 'leave' ? 'SESSION_EXPIRED' : 'NOT_CONNECTED' });
+    assert.equal(f.rotations(), 0);
+  }
 });
 
 test('unadvertised methods, malformed identities and missing resources never call the worker', async t => {

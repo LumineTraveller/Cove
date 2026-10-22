@@ -6,7 +6,7 @@ const root = path.resolve(__dirname, '..');
 const suites = [
   { name: 'desktop-recovery', cwd: 'apps/desktop', args: ['--import', 'tsx', '--test', '--test-concurrency=1', 'tests/connectionDeadline.test.ts', 'tests/sessionRegistration.test.ts', 'tests/voiceConnectionRecovery.test.ts', 'tests/transportIceRecovery.test.ts', 'tests/screenWatchRecovery.test.ts', 'tests/screenPublicationLifecycle.test.ts', 'tests/screenAudioLifecycle.test.ts', 'tests/screenCodecCompatibility.test.ts'] },
   { name: 'mobile-media', cwd: 'apps/mobile', args: ['node_modules/jest/bin/jest.js', '--runInBand', '--no-cache', '__tests__/useMobileMedia.test.tsx', '__tests__/useMobileScreenShare.test.tsx', '__tests__/sessionLoginFlow.test.tsx'] },
-  { name: 'loopback-recovery', cwd: '.', args: ['--import', 'tsx', '--test', '--test-concurrency=1', 'apps/server/tests/connectionRecovery.test.ts', 'apps/server/tests/mobileRemoteControlRecovery.test.ts', 'apps/server/tests/mediaLifecycle.test.ts', 'apps/server/tests/transportIceRestart.test.ts', 'apps/server/tests/transportIceRestartNative.test.ts', 'apps/server/tests/mediaNativeIntegration.test.ts'] },
+  { name: 'loopback-recovery', cwd: '.', args: ['--import', 'tsx', '--test', '--test-concurrency=1', 'apps/server/tests/connectionRecovery.test.ts', 'apps/server/tests/mobileRemoteControlRecovery.test.ts', 'apps/server/tests/mediaLifecycle.test.ts', 'apps/server/tests/transportIceRestart.test.ts', 'apps/server/tests/transportIceRestartNative.test.ts', 'apps/server/tests/transportIceRemoteControl.test.ts', 'apps/server/tests/mediaNativeIntegration.test.ts'] },
 ];
 async function runSuite(suite, timeoutMs = 180_000) {
   const started = performance.now();

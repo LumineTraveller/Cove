@@ -64,6 +64,7 @@ export async function restartTransportIce(
   socket: { id: string; connected: boolean },
   data: unknown,
   now: () => number = Date.now,
+  onRestart: () => void = () => {},
 ): Promise<IceRestartResponse> {
   const request = requestFrom(data);
   if (!request) return failure('BAD_REQUEST');
@@ -90,8 +91,17 @@ export async function restartTransportIce(
     state.recent.push(at);
     state.latestSequence = request.sequence;
     state.pending = true;
-    state.latest = (async (): Promise<IceRestartResponse> => {
+    // Publish the cache before revoking control: that callback can synchronously
+    // emit events or reenter this handler. Same-sequence ACKs never revoke twice.
+    let complete!: (response: IceRestartResponse) => void;
+    state.latest = new Promise(resolve => { complete = resolve; });
+    void (async (): Promise<IceRestartResponse> => {
       try {
+        onRestart();
+        // A revocation callback may synchronously leave/disconnect the peer.
+        if (!socket.connected) return failure('NOT_CONNECTED');
+        const invalidBefore = birthFailure(transport, state, socket.id);
+        if (invalidBefore) return failure(invalidBefore);
         const iceParameters = await transport.restartIce();
         const invalidAfter = birthFailure(transport, state, socket.id);
         if (invalidAfter) return failure(invalidAfter);
@@ -102,7 +112,7 @@ export async function restartTransportIce(
       } finally {
         state.pending = false;
       }
-    })();
+    })().then(complete);
   }
   const result = await state.latest!;
   if (!socket.connected) return failure('NOT_CONNECTED');

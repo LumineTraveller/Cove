@@ -213,7 +213,8 @@ export function registerMediaSocketHandlers(deps: RegisterMediaSocketHandlersDep
 
   deps.socket.on('ms:restart-ice', async (data: unknown, cb?: (result: unknown) => void) => {
     if (typeof cb !== 'function') return;
-    cb(await restartTransportIce(deps.socket, data));
+    cb(await restartTransportIce(deps.socket, data, Date.now, () =>
+      deps.stopRemoteControlForSocket(deps.socket.id, '媒体连接正在恢复')));
   });
 
   /** 3. 完成 DTLS 握手 */
