@@ -88,6 +88,32 @@ function presenceToneReleaseOverrides(evidence, originalHashes) {
   assert.equal(overrides.size,presenceToneReleaseAllowlist.size,'the single presence tone exception must be documented');
   return overrides;
 }
+const mobileUpdateCandidateAllowlist = new Map([
+  ['apps/mobile/android/app/src/main/java/com/covemobile/MobileUpdateModule.kt', {
+    baseSha256:'3a52b330bfccca607b75d5b7e0eb618ab74eb697399697a49dd6b033972df18b',
+    sha256:'564811cadda69f7ff3bfe22ccc752045538a88f07a11091c61c44cfc76f311b8',
+  }],
+  ['apps/mobile/android/app/src/test/java/com/covemobile/MobileUpdateNetworkTest.kt', {
+    baseSha256:'f4e2887fb375fade99062d38143edd1efeaf545166bd298c65851673b095cb2f',
+    sha256:'76a31c3bde68fbffd9b426f019b31fbd9a202d87b9026e8cca18c3fe4eee3a13',
+  }],
+]);
+function mobileUpdateCandidateOverrides(evidence, originalHashes) {
+  assert.equal(evidence?.baseCommit,'e31362ce07b316f15265daf6796730d947390b76');
+  assert.ok(Array.isArray(evidence.modifiedOriginal),'mobile updater exceptions must be an array');
+  const overrides=new Map();
+  for(const entry of evidence.modifiedOriginal){
+    const accepted=mobileUpdateCandidateAllowlist.get(entry.path);
+    assert.ok(accepted,'mobile updater exception is outside the reviewed allowlist: '+entry.path);
+    assert.ok(!overrides.has(entry.path),'duplicate mobile updater exception: '+entry.path);
+    assert.equal(originalHashes.get(entry.path),accepted.baseSha256,'original mobile updater baseline changed: '+entry.path);
+    for(const key of ['baseSha256','sha256'])assert.equal(entry[key],accepted[key],key+': '+entry.path);
+    assert.ok(typeof entry.reason==='string'&&entry.reason.trim(),'mobile updater exception requires a reviewable reason');
+    overrides.set(entry.path,entry.sha256);
+  }
+  assert.equal(overrides.size,mobileUpdateCandidateAllowlist.size,'both mobile updater exceptions must be documented');
+  return overrides;
+}
 function files(dir){return fs.readdirSync(dir,{withFileTypes:true}).flatMap(entry=>entry.isDirectory()?files(path.join(dir,entry.name)):[path.join(dir,entry.name)]);}
 function inventory(text){
   const source=ts.createSourceFile('source.ts',text,ts.ScriptTarget.Latest,true);
@@ -210,6 +236,7 @@ test('accepted native capture, DSP and Android code survives relocation',()=>{
     ...integratedCandidateOverrides(contracts.nativeExtensionEvidence.integratedCandidates,originalHashes),
     ...screenEncoderReleaseOverrides(evidence,originalHashes),
     ...presenceToneReleaseOverrides(contracts.nativeExtensionEvidence.presenceToneRelease,originalHashes),
+    ...mobileUpdateCandidateOverrides(contracts.nativeExtensionEvidence.mobileInAppUpdateCandidate,originalHashes),
   ]);
   for(const file of contracts.native){
     const buffer=fs.readFileSync(path.join(root,file.path));
@@ -248,6 +275,19 @@ test('presence tone exception rejects duplicates, other files and unreviewed has
     modifiedOriginal:[{...first,sha256:first.baseSha256}]},originalHashes),/sha256:/);
   assert.throws(()=>presenceToneReleaseOverrides({...evidence,
     modifiedOriginal:[{...first,baseSha256:first.sha256}]},originalHashes),/baseSha256:/);
+});
+test('mobile updater exceptions preserve the original hashes and reject unreviewed paths',()=>{
+  const evidence=contracts.nativeExtensionEvidence.mobileInAppUpdateCandidate;
+  const originalHashes=new Map(contracts.native.map(file=>[file.path,file.sha256]));
+  const first=evidence.modifiedOriginal[0];
+  assert.throws(()=>mobileUpdateCandidateOverrides({...evidence,
+    modifiedOriginal:[first,first]},originalHashes),/duplicate mobile updater exception/);
+  assert.throws(()=>mobileUpdateCandidateOverrides({...evidence,
+    modifiedOriginal:[{...first,path:'apps/mobile/android/app/src/main/java/com/covemobile/CoveNativeModule.kt'}]},originalHashes),/outside the reviewed allowlist/);
+  assert.throws(()=>mobileUpdateCandidateOverrides({...evidence,
+    modifiedOriginal:[{...first,sha256:first.baseSha256},evidence.modifiedOriginal[1]]},originalHashes),/sha256:/);
+  assert.throws(()=>mobileUpdateCandidateOverrides({...evidence,
+    modifiedOriginal:[{...first,baseSha256:first.sha256},evidence.modifiedOriginal[1]]},originalHashes),/baseSha256:/);
 });
 test('release identities match packages and both mobile feeds remain consistent',()=>{
   for(const [key,file] of [['root','package.json'],['desktop','apps/desktop/package.json'],['server','apps/server/package.json'],['mobile','apps/mobile/package.json']])

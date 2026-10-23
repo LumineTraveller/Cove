@@ -71,7 +71,7 @@ export function parseUpdateFeed(raw: string): AndroidRelease | null {
     r.versionCode <= 0 ||
     r.versionCode > 2100000000 ||
     !Number.isSafeInteger(r.minAndroidApi) ||
-    r.minAndroidApi < 23 ||
+    r.minAndroidApi < 24 ||
     r.minAndroidApi > 100 ||
     r.packageName !== 'com.cove.mobile' ||
     typeof r.tag !== 'string' ||
