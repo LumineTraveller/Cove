@@ -1,6 +1,7 @@
 import { useCallback } from 'react';
 
 import { applyAudioContextOutput } from './audioDevices';
+import { schedulePresenceTone } from './presenceTone';
 
 export interface useAudioMetersDependencies {
   readonly audioCtxRef: import('react').MutableRefObject<AudioContext | null>;
@@ -55,21 +56,7 @@ export function useAudioMeters(deps: useAudioMetersDependencies) {
       try {
         const context = ensureAudioCtx();
         context.resume().catch(() => {});
-        const frequencies = action === 'join' ? [523.25, 659.25] : [493.88, 392.0];
-        const start = context.currentTime;
-        frequencies.forEach((frequency, index) => {
-          const oscillator = context.createOscillator();
-          const gain = context.createGain();
-          const noteStart = start + index * 0.11;
-          oscillator.type = 'sine';
-          oscillator.frequency.value = frequency;
-          gain.gain.setValueAtTime(0.0001, noteStart);
-          gain.gain.exponentialRampToValueAtTime(0.13, noteStart + 0.012);
-          gain.gain.exponentialRampToValueAtTime(0.0001, noteStart + 0.13);
-          oscillator.connect(gain).connect(deps.masterOutputGain.current ?? context.destination);
-          oscillator.start(noteStart);
-          oscillator.stop(noteStart + 0.14);
-        });
+        schedulePresenceTone(context, deps.masterOutputGain.current ?? context.destination, action);
       } catch {
         /* 音效失败不影响语音 */
       }

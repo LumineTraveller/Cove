@@ -19,6 +19,7 @@
     "test:audio-devices": "tsx --test tests/audioDevices.test.ts tests/remoteAudioPlayback.test.ts tests/applicationAudio.test.ts tests/applicationAudioProcessor.test.ts tests/applicationAudioCapture.test.ts tests/applicationAudioSources.test.ts tests/microphoneProcessing.test.ts tests/microphoneEcho.test.ts",
     "test:microphone-echo": "electron tests/microphoneEcho.electron.cjs",
     "test:microphone": "electron tests/microphoneProcessing.electron.cjs",
+    "test:presence-tones": "electron tests/presenceTone.electron.cjs",
     "test:shared-audio-live": "electron tests/applicationAudio.electron.cjs",
     "test:rnnoise": "tsx --test tests/rnnoise.test.ts && electron tests/rnnoise.electron.cjs",
     "test:chat-images": "tsx --test tests/chatImages.test.ts",
