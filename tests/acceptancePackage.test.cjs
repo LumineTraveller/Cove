@@ -51,6 +51,29 @@ test('an exported CommonJS marker package.json cannot hide the actual package de
   assert.deepEqual(inventory.map(entry => entry.name).sort(), ['exported', 'fixture-private-dependency']);
   assert.equal(createRequire(path.join(target, 'package.json'))('exported'), 7);
 });
+for (const exportedManifest of [false, true]) {
+  test(`a same-name CommonJS marker without a version cannot hide the package owner (${exportedManifest ? 'exported' : 'hidden'} package.json)`, t => {
+    const directory = fixture(t); const source = path.join(directory, 'source'); const target = path.join(directory, 'portable');
+    pkg(source, 'fixture', {}, '');
+    const parser = path.join(source, 'node_modules/engine.io-parser');
+    pkg(parser, 'engine.io-parser', { 'fixture-parser-dependency': '*' }, '');
+    fs.writeFileSync(path.join(parser, 'package.json'), JSON.stringify({ name: 'engine.io-parser', version: '5.2.3',
+      exports: exportedManifest ? { '.': './build/cjs/index.js', './package.json': './build/cjs/package.json' } :
+        { import: './build/esm/index.js', require: './build/cjs/index.js' },
+      dependencies: { 'fixture-parser-dependency': '*' } }));
+    fs.mkdirSync(path.join(parser, 'build/cjs'), { recursive: true });
+    // engine.io-parser publishes this same-name format marker without a version.
+    fs.writeFileSync(path.join(parser, 'build/cjs/package.json'), JSON.stringify({ name: 'engine.io-parser', type: 'commonjs',
+      browser: { './encodePacket.js': './encodePacket.browser.js' } }));
+    fs.writeFileSync(path.join(parser, 'build/cjs/index.js'), "module.exports=require('fixture-parser-dependency');");
+    pkg(path.join(source, 'node_modules/fixture-parser-dependency'), 'fixture-parser-dependency', {}, 'module.exports=11;');
+    const inventory = copyDependencies(source, ['engine.io-parser'], path.join(target, 'node_modules'));
+    assert.deepEqual(inventory.map(entry => entry.name).sort(), ['engine.io-parser', 'fixture-parser-dependency']);
+    assert.equal(inventory.find(entry => entry.name === 'engine.io-parser').version, '5.2.3');
+    assert.equal(createRequire(path.join(target, 'package.json'))('engine.io-parser'), 11);
+  });
+}
+
 test('portable state and network configuration reject public addresses and invalid ports', t => {
   const directory = fixture(t);
   const config = { flavor: 'cove-acceptance-20261023', httpPort: 33991, mediaPort: 41990, announceAddress: '127.0.0.1', listenHost: '127.0.0.1' };

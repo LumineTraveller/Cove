@@ -24,17 +24,18 @@ function packageDirectory(requireFrom, name) {
     if (fs.existsSync(path.join(local, 'package.json'))) return local;
   }
   const localRequire = createRequire(path.join(requireFrom, 'package.json'));
-  try { return fs.realpathSync(path.dirname(localRequire.resolve(`${name}/package.json`))); }
-  catch {
-    let entry = path.dirname(localRequire.resolve(name));
-    // Export maps often hide package.json and resolve into build/cjs/, whose
-    // package.json only sets type=commonjs. Its parent is still the real package
-    // owner and carries the dependency graph that must accompany this runtime.
-    while (!fs.existsSync(path.join(entry, 'package.json')) ||
-        JSON.parse(fs.readFileSync(path.join(entry, 'package.json'), 'utf8')).name !== name) {
-      const parent = path.dirname(entry); if (entry === parent) throw new Error(`Cannot find package ${name}`); entry = parent;
+  let entry;
+  try { entry = path.dirname(localRequire.resolve(`${name}/package.json`)); }
+  catch { entry = path.dirname(localRequire.resolve(name)); }
+  // Both exports can point into build/cjs/. Its format marker may repeat the
+  // package name but omit the version and dependency graph of the actual owner.
+  while (true) {
+    const manifestFile = path.join(entry, 'package.json');
+    if (fs.existsSync(manifestFile)) {
+      const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
+      if (manifest.name === name && typeof manifest.version === 'string') return fs.realpathSync(entry);
     }
-    return fs.realpathSync(entry);
+    const parent = path.dirname(entry); if (entry === parent) throw new Error(`Cannot find package ${name}`); entry = parent;
   }
 }
 function copyTree(source, destination, extraFilter = () => true) {
