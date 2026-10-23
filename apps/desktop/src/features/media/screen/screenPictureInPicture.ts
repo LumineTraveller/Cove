@@ -11,6 +11,7 @@ interface PresentationRequest {
   epoch: number;
   returnOnClose: boolean;
   returned: boolean;
+  entered: boolean;
   cleanup?: Promise<void>;
 }
 
@@ -74,14 +75,18 @@ export function createScreenPictureInPicture({ document: page, getVideo, onState
     });
   };
   const onEnter = (event: Event) => {
+    if (disposed) return;
     const request = intent;
     if (!request || event.target !== request.video) return;
+    if (page.pictureInPictureElement !== request.video) return;
+    request.entered = true;
     if (current(request)) publish({ active: true });
     else void exitCancelled(request).catch(() => cancelledExitFailed(request));
   };
   const onLeave = (event: Event) => {
+    if (disposed) return;
     const request = intent;
-    if (!request || event.target !== request.video) return;
+    if (!request || !request.entered || event.target !== request.video) return;
     const programmatic = closing?.video === request.video;
     // Chromium clears pictureInPictureElement after dispatch. Deferring also
     // ignores an old leave event delivered after this element entered again.
@@ -93,8 +98,9 @@ export function createScreenPictureInPicture({ document: page, getVideo, onState
       if (userClosed) returnOnce(request);
     });
   };
-  page.addEventListener('enterpictureinpicture', onEnter);
-  page.addEventListener('leavepictureinpicture', onLeave);
+  // Capture also handles engines where these video events do not bubble.
+  page.addEventListener('enterpictureinpicture', onEnter, true);
+  page.addEventListener('leavepictureinpicture', onLeave, true);
   onState({ ...state });
 
   return {
@@ -130,7 +136,7 @@ export function createScreenPictureInPicture({ document: page, getVideo, onState
         return Promise.resolve();
       }
       if (page.pictureInPictureElement === video) return Promise.resolve();
-      const request = { video, source, epoch: ++epoch, returnOnClose: false, returned: false };
+      const request: PresentationRequest = { video, source, epoch: ++epoch, returnOnClose: false, returned: false, entered: false };
       intent = request;
       publish({ pending: true, error: null });
       let native: Promise<PictureInPictureWindow>;
@@ -138,6 +144,7 @@ export function createScreenPictureInPicture({ document: page, getVideo, onState
       try { native = video.requestPictureInPicture(); }
       catch (error) { native = Promise.reject(error); }
       const operation = native.then(async () => {
+        if (page.pictureInPictureElement === video) request.entered = true;
         if (!current(request)) await exitCancelled(request);
         else publish({ active: page.pictureInPictureElement === video });
       }).catch(() => {
@@ -181,8 +188,8 @@ export function createScreenPictureInPicture({ document: page, getVideo, onState
       disposed = true;
       epoch++;
       source = null;
-      page.removeEventListener('enterpictureinpicture', onEnter);
-      page.removeEventListener('leavepictureinpicture', onLeave);
+      page.removeEventListener('enterpictureinpicture', onEnter, true);
+      page.removeEventListener('leavepictureinpicture', onLeave, true);
       if (intent) {
         intent.returnOnClose = false;
         void exitOwned(intent.video).catch(() => {});

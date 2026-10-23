@@ -559,6 +559,47 @@ test('reusing the player for a new source cannot race an old exit or auto-open t
   h.document.exitResult = async () => { h.document.leave(h.video.element()); };
 });
 
+test('delayed native events from a closed window cannot affect a pending request on the same player', async t => {
+  for (const delayed of ['leave', 'enter', 'enter-then-leave'] as const) {
+    await t.test(delayed, async t => {
+      const h = harness(t);
+      await h.controller.open();
+      // Chromium may clear ownership and resolve exit before delivering leave.
+      h.document.exitResult = async () => { h.document.pictureInPictureElement = null; };
+      await h.controller.close();
+      assert.equal(h.returns(), 1);
+      assert.equal(h.document.exits, 1);
+      const nextMedia = stream();
+      h.video.srcObject = nextMedia.source;
+      h.controller.setSource(nextMedia.source);
+      const request = deferred<PictureInPictureWindow>();
+      h.video.requestResult = () => request.promise;
+      const opening = h.controller.open();
+      assert.equal(h.document.pictureInPictureElement, null);
+      assert.equal(h.state().active, false);
+      assert.equal(h.state().pending, true);
+      if (delayed !== 'leave') h.document.nativeEvent('enterpictureinpicture', h.video.element());
+      if (delayed !== 'enter') h.document.nativeEvent('leavepictureinpicture', h.video.element());
+      await flush();
+      assert.equal(h.state().active, false, 'old events cannot claim entry for a new pending request');
+      assert.equal(h.state().pending, true);
+      assert.equal(h.returns(), 1, 'the old leave must not return focus a second time');
+      h.document.enter(h.video.element());
+      request.resolve(pictureWindow);
+      await opening;
+      await flush();
+      assert.equal(h.document.pictureInPictureElement, h.video.element());
+      assert.equal(h.state().active, true);
+      assert.equal(h.state().pending, false);
+      assert.equal(h.state().error, null);
+      assert.equal(h.returns(), 1);
+      assert.equal(h.document.exits, 1, 'the valid replacement request must not be cancelled');
+      assert.equal(h.video.requests, 2);
+      h.document.exitResult = async () => { h.document.leave(h.video.element()); };
+    });
+  }
+});
+
 test('disposing during an in-flight exit suppresses both resolution and rejection callbacks', async t => {
   for (const result of ['success', 'failure'] as const) {
     await t.test(result, async t => {
