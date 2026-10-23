@@ -1,12 +1,12 @@
 import { Server, type Socket } from 'socket.io';
 
 import {
-  REMOTE_CONTROL_REQUEST_TTL_MS,
   RemoteControlRegistry,
   sanitizeRemoteControlInput,
   type RemoteControlRequest,
   type RemoteControlSession,
 } from './remoteControl';
+import { cancelRemoteRequestExpiration, scheduleRemoteRequestExpiration } from './requestExpiration';
 
 export interface RegisterRemoteControlSocketHandlersDependencies {
   readonly socket: Socket<
@@ -91,10 +91,8 @@ export function registerRemoteControlSocketHandlers(
         controllerUserId: deps.publicUserId(deps.socket.id),
         expiresAt: request.expiresAt,
       });
-      setTimeout(() => {
-        const expired = deps.remoteControls.expireRequest(request.requestId);
-        if (expired) deps.emitRemoteRequestCancelled(expired, '远程控制请求已超时');
-      }, REMOTE_CONTROL_REQUEST_TTL_MS + 50);
+      scheduleRemoteRequestExpiration(deps.remoteControls, request,
+        expired => deps.emitRemoteRequestCancelled(expired, '远程控制请求已超时'));
       cb?.({ ok: true, requestId: request.requestId, expiresAt: request.expiresAt });
     },
   );
@@ -114,6 +112,7 @@ export function registerRemoteControlSocketHandlers(
         cb?.({ ok: false, error: cancelled.error });
         return;
       }
+      cancelRemoteRequestExpiration(deps.remoteControls, requestId);
       deps.emitRemoteRequestCancelled(cancelled.value, '远程控制请求已取消');
       cb?.({ ok: true });
     },
@@ -137,8 +136,10 @@ export function registerRemoteControlSocketHandlers(
       const members = deps.roomMembers.get(pending.roomId);
       if (!deps.isRemoteControlAllowed(pending.roomId, pending.sharerSocketId)) {
         const cancelled = deps.remoteControls.respond(requestId, deps.socket.id, false);
-        if (cancelled.ok)
+        if (cancelled.ok) {
+          cancelRemoteRequestExpiration(deps.remoteControls, requestId);
           deps.emitRemoteRequestCancelled(cancelled.value.request, '共享者已关闭远程控制');
+        }
         cb?.({ ok: false, error: '共享者已关闭远程控制' });
         return;
       }
@@ -150,12 +151,15 @@ export function registerRemoteControlSocketHandlers(
         !deps.isSharingScreen(pending.sharerSocketId, pending.roomId)
       ) {
         const rejected = deps.remoteControls.respond(requestId, deps.socket.id, false);
-        if (rejected.ok)
+        if (rejected.ok) {
+          cancelRemoteRequestExpiration(deps.remoteControls, requestId);
           deps.emitRemoteRequestCancelled(rejected.value.request, '共享状态已变化，请重新申请');
+        }
         cb?.({ ok: false, error: '共享状态已变化，请重新申请' });
         return;
       }
       const response = deps.remoteControls.respond(requestId, deps.socket.id, accepted);
+      if (!deps.remoteControls.getRequest(requestId)) cancelRemoteRequestExpiration(deps.remoteControls, requestId);
       if (!response.ok) {
         cb?.({ ok: false, error: response.error });
         return;

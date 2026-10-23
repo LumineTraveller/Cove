@@ -1,4 +1,5 @@
 import { Server } from 'socket.io';
+import { cancelRemoteRequestExpiration } from './requestExpiration';
 
 import {
   RemoteControlRegistry,
@@ -24,6 +25,7 @@ export function createControlService(deps: CreateControlServiceDependencies) {
   }
 
   function emitRemoteRequestCancelled(request: RemoteControlRequest, reason: string) {
+    cancelRemoteRequestExpiration(deps.remoteControls, request.requestId);
     deps.io.to(request.controllerSocketId).emit('remote-control:request-result', {
       requestId: request.requestId,
       accepted: false,

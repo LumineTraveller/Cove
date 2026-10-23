@@ -104,9 +104,11 @@
  *   MEDIASOUP_PORT = WebRTC 媒体端口（默认 40000，需在 frp 里额外转发这个端口）
  */
 import * as mediasoup from 'mediasoup';
+import { readListenAddress } from '../../listenAddress';
 import type { types as T } from 'mediasoup';
 
 export const MS_IP = process.env.MEDIASOUP_IP ?? '127.0.0.1';
+export const MS_LISTEN_IP = readListenAddress(process.env.MEDIASOUP_LISTEN_IP, 'MEDIASOUP_LISTEN_IP');
 // mediasoup 监听端口。注意：mediasoup 的"对外公布端口"恒等于此监听端口
 // （本版本 TransportListenInfo 无 announcedPort），所以 frp 隧道的公网端口
 // 必须与此端口设为同一数字。
@@ -175,8 +177,8 @@ export async function initMediasoup() {
   try {
     webRtcServer = await worker.createWebRtcServer({
       listenInfos: [
-        { protocol: 'udp', ip: '0.0.0.0', announcedIp: MS_IP, port: MS_PORT },
-        { protocol: 'tcp', ip: '0.0.0.0', announcedIp: MS_IP, port: MS_PORT },
+        { protocol: 'udp', ip: MS_LISTEN_IP, announcedIp: MS_IP, port: MS_PORT },
+        { protocol: 'tcp', ip: MS_LISTEN_IP, announcedIp: MS_IP, port: MS_PORT },
       ],
     });
 

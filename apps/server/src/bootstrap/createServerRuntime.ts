@@ -1,4 +1,5 @@
 import { createDatabase } from '../features/storage/database';
+import { readListenAddress } from '../listenAddress';
 import { createSecurityServices } from '../features/security/securityStore';
 import { createRepositories } from '../features/storage/repositories';
 import { createAvatarService } from '../features/profiles/avatarService';
@@ -14,6 +15,7 @@ import { createVoiceService } from '../features/voice/voiceService';
 import { createMembershipService } from '../features/rooms/membershipService';
 import { createMuteService } from '../features/media/muteService';
 import { createControlService } from '../features/remote-control/controlService';
+import { clearRemoteRequestExpirations } from '../features/remote-control/requestExpiration';
 import { createPresenceService } from '../features/sessions/presenceService';
 import { createCleanupService } from '../features/sessions/cleanupService';
 import { registerSecurityRoutes } from '../features/security/httpRoutes';
@@ -56,6 +58,7 @@ import { DisconnectGrace, DISCONNECT_GRACE_MS } from '../features/sessions/disco
 import { StoredMessage, MessageHistoryCursor, SoundpackRecord } from '../models';
 
 export function createServerRuntime() {
+  const httpHost = readListenAddress(process.env.COVE_HTTP_HOST, 'COVE_HTTP_HOST');
   const app = express();
 
   const httpServer = createServer(app);
@@ -1462,7 +1465,7 @@ export function createServerRuntime() {
         // 显式绑定 0.0.0.0（所有 IPv4 接口），确保 frp 用 127.0.0.1 也能连上。
         // 不指定 host 时 Windows 默认只绑 IPv6(::)，导致 frp 拨 127.0.0.1 被拒绝。
         httpServer
-          .listen(port, '0.0.0.0', () => {
+          .listen(port, httpHost, () => {
             const address = httpServer.address();
             legacyNormalizationPromise = normalizeLegacySoundpacks().catch((error) => {
               console.warn('[soundpack] 旧语音包后台标准化中断，原文件保持可用', error);
@@ -1478,6 +1481,7 @@ export function createServerRuntime() {
   }
 
   async function stopServer(): Promise<void> {
+    clearRemoteRequestExpirations(remoteControls);
     legacyNormalizationStopped = true;
     soundpackProcessing.abort();
     clearInterval(recoveryCheckpoint);
