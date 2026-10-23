@@ -5,7 +5,7 @@ const test = require('node:test');
 const { configureAutoUpdater } = require('../dist-electron/updater-core.js');
 const { UPDATE_DOWNLOAD_BASE_URL } = require('../dist-electron/update-config.js');
 const { compareReleaseVersions, discoverUpdateSources } = require('../dist-electron/update-sources.js');
-const { formatTransferPercent, transferPercent, updateWaitWarning, updateStepIndex } = require('../dist-electron/update-state.js');
+const { formatTransferPercent, transferPercent, updateWaitWarning, updateStepIndex, updateDownloadNotice } = require('../dist-electron/update-state.js');
 
 const githubSource = {
   id: 'github', label: 'GitHub', version: '0.7.0',
@@ -95,6 +95,8 @@ class FakeUpdater extends EventEmitter {
   quitAndInstall(...args) {
     this.installCalls.push(args);
   }
+
+  setDownloadModeListener(listener) { this.downloadModeListener = listener; }
 }
 
 function createHarness(overrides = {}) {
@@ -404,6 +406,7 @@ test('Electron adapter waits for legacy startup cleanup before any update check'
     'electron-updater': { autoUpdater: updater },
     fs: { appendFileSync() {} },
     './updater-core': { configureAutoUpdater },
+    './stable-nsis-updater': { StableNsisUpdater: function () { return updater; } },
     './gitee-installer-cache': { createGiteeInstallerCache: options => {
       assert.equal(options.installedVersion, '0.8.3');
       return { cleanupInstalledUpdate: () => cleanup };
@@ -517,6 +520,28 @@ test('a differential download can fall back to a full transfer after 100%', () =
   assert.equal(h.controller.installNow(), false);
 });
 
+test('differential fallback resets transfer progress and keeps an explicit full-download reason after readiness', () => {
+  const h = createHarness();
+  h.updater.emit('update-available', { version: '2.1.2' });
+  h.updater.downloadModeListener({ downloadMode: 'differential', differentialOutcome: 'in-progress' });
+  h.updater.emit('download-progress', { percent: 100, transferred: 4, total: 4 });
+  h.updater.downloadModeListener({ downloadMode: 'full', differentialOutcome: 'fallback', fallbackCode: 'COVE_DIFFERENTIAL_CHECKSUM' });
+  assert.equal(h.controller.getState().status, 'available');
+  assert.equal(h.controller.getState().percent, 0);
+  assert.equal(h.controller.getState().transferred, undefined);
+  h.updater.emit('download-progress', { percent: 50, transferred: 6, total: 12 });
+  h.updater.emit('update-downloaded', { version: '2.1.2' });
+  const state = h.controller.getState();
+  assert.equal(state.status, 'downloaded');
+  assert.equal(state.downloadMode, 'full');
+  assert.equal(state.differentialOutcome, 'fallback');
+  assert.equal(state.fallbackCode, 'COVE_DIFFERENTIAL_CHECKSUM');
+  assert.match(updateDownloadNotice(state), /完整性校验未通过.*完整安装包/);
+  assert.doesNotMatch(updateDownloadNotice(state), /差分.*已完成/);
+  h.controller.dispose();
+  assert.equal(h.updater.downloadModeListener, null);
+});
+
 test('validation failure retains failed stage, transfer metrics and raw error', () => {
   const h = createHarness();
   h.updater.emit('update-available', { version: '0.8.1' });
@@ -531,6 +556,16 @@ test('validation failure retains failed stage, transfer metrics and raw error', 
   assert.equal(state.transferred, 1000);
   assert.equal(updateStepIndex(state), 3);
   assert.equal(h.controller.installNow(), false);
+});
+
+test('final errors keep diagnostic codes but redact signed URLs, local user paths and stacks in state and logs', () => {
+  const h = createHarness();
+  const error = Object.assign(new Error("Cannot download https://user:secret@example.test/a.exe?X-Amz-Signature=secret 'C:\\Users\\PrivateName\\cache.exe'\n hidden stack"), { code: 'ECONNRESET' });
+  h.updater.emit('error', error);
+  assert.equal(h.controller.getState().errorCode, 'ECONNRESET');
+  assert.doesNotMatch(h.controller.getState().errorDetail, /secret|PrivateName|Users|hidden stack|Signature/);
+  assert.doesNotMatch(JSON.stringify(h.logs), /secret|PrivateName|Users|hidden stack|Signature/);
+  h.controller.dispose();
 });
 
 test('installation exceptions and synchronous error events remain visible', () => {

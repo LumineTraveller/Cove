@@ -11,6 +11,7 @@ import {
 } from './updater-core';
 import { discoverUpdateSources } from './update-sources';
 import { createGiteeInstallerCache } from './gitee-installer-cache';
+import { StableNsisUpdater } from './stable-nsis-updater';
 
 function createLogger(): LoggerLike {
   const logPath = path.join(app.getPath('userData'), 'updater.log');
@@ -60,7 +61,7 @@ export function startAutoUpdater(isPackaged: boolean, isMaintenanceBusy: () => b
   }
   const cleanup = installerCache?.cleanupInstalledUpdate() ?? Promise.resolve();
   return configureAutoUpdater({
-    updater: autoUpdater,
+    updater: isPackaged && process.platform === 'win32' ? new StableNsisUpdater() : autoUpdater,
     isPackaged,
     getWindow: getMainWindow,
     publishState,

@@ -5,6 +5,7 @@ export {
   updateHasDetails,
   updateStepIndex,
   updateWaitWarning,
+  updateDownloadNotice,
 } from '../../../electron/update-state';
 export type { UpdateState, UpdateStatus } from '../../../electron/update-state';
 

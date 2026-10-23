@@ -1,5 +1,6 @@
-import { isUpdateBusy, transferPercent, type UpdateState } from './update-state';
+import { isUpdateBusy, transferPercent, type UpdateDownloadMode, type UpdateState } from './update-state';
 import { UPDATE_DOWNLOAD_BASE_URL } from './update-config';
+import { safeDownloadDiagnostic, safeUpdateError } from './update-diagnostics';
 export type { UpdateState, UpdateStatus } from './update-state';
 
 export interface UpdateInfoLike {
@@ -43,6 +44,7 @@ export interface UpdaterLike {
   setFeedURL?(options: any): void;
   checkForUpdates(): Promise<UpdateCheckResultLike | null | void>;
   quitAndInstall(isSilent?: boolean, isForceRunAfter?: boolean): void;
+  setDownloadModeListener?(listener: ((mode: UpdateDownloadMode) => void) | null): void;
 }
 
 export interface WindowLike {
@@ -211,6 +213,8 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
     const status = percent >= 100 ? 'finalizing' : 'downloading';
     setWindowProgress(getWindow, status === 'finalizing' ? 2 : percent / 100);
     setState(stateForSource({
+      downloadMode: state.downloadMode, differentialOutcome: state.differentialOutcome,
+      fallbackCode: state.fallbackCode,
       status, version: state.version, percent, transferred, total,
       bytesPerSecond: status === 'downloading' ? finite(progress.bytesPerSecond) : undefined,
       lastActivityAt: changed || status !== state.status ? now() : state.lastActivityAt,
@@ -225,6 +229,8 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
     logger.info(`[updater] 版本 ${info.version} 下载完成`);
     if (disposed) return;
     setState(stateForSource({ status: 'downloaded', version: info.version, percent: 100,
+      downloadMode: state.downloadMode, differentialOutcome: state.differentialOutcome,
+      fallbackCode: state.fallbackCode,
       transferred: state.transferred, total: state.total,
       message: '更新器已确认安装包就绪。可以立即重启安装，或退出 Cove 时安装。',
     }));
@@ -237,14 +243,14 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
   };
   const publishFinalError = (error: Error) => {
     checking = false;
-    logger.error('[updater] 自动更新失败', error);
+    logger.error('[updater] 自动更新失败', safeUpdateError(error));
     setWindowProgress(getWindow, -1);
     const code = (error as Error & { code?: string }).code;
     setState(stateForSource({ ...state, status: 'error', failedStage: state.status,
       message: state.status === 'finalizing' ? '传输结束，但校验或安装文件准备失败；请重试或手动下载。'
         : state.status === 'installing' ? '无法启动安装，请查看错误详情或手动下载安装。'
         : isDownloading() ? '更新下载失败，请重试或从发布页手动下载。' : '检查更新失败，请检查网络后重试。',
-      errorDetail: error.message || String(error), errorCode: typeof code === 'string' ? code : undefined,
+      errorDetail: safeDownloadDiagnostic(error.message || String(error)), errorCode: typeof code === 'string' ? code : undefined,
     }));
   };
   const retryDownloadFromFallback = async (initialError: Error) => {
@@ -260,7 +266,7 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
         return;
       } catch (cause) {
         lastError = cause instanceof Error ? cause : new Error(String(cause));
-        logger.warn(`[updater] ${activeSource!.label} 回退源失败`, lastError);
+        logger.warn(`[updater] ${activeSource!.label} 回退源失败`, safeUpdateError(lastError));
       }
     }
     retryingDownload = false;
@@ -271,7 +277,7 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
     if (disposed || handledError === error) return;
     if (probingSources || retryingDownload) {
       if (isDownloading()) deferredDownloadError = error;
-      logger.warn('[updater] 当前更新源失败，准备尝试备用源', error);
+      logger.warn('[updater] 当前更新源失败，准备尝试备用源', safeUpdateError(error));
       return;
     }
     handledError = error;
@@ -293,6 +299,15 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
     deferredDownloadError = null;
     if (error) onError(error);
   };
+
+  updater.setDownloadModeListener?.(mode => {
+    if (disposed || !isDownloading()) return;
+    const reset = mode.downloadMode === 'full' && mode.differentialOutcome === 'fallback';
+    if (reset) setWindowProgress(getWindow, 2);
+    setState(stateForSource({ ...state, ...mode, lastActivityAt: now(),
+      ...(reset ? { status: 'available', percent: 0, transferred: undefined, total: undefined, bytesPerSecond: undefined } : {}),
+    }));
+  });
 
   updater.on('checking-for-update', onChecking);
   updater.on('update-available', onAvailable);
@@ -325,7 +340,7 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
           break;
         } catch (cause) {
           lastError = cause instanceof Error ? cause : new Error(String(cause));
-          logger.warn(`[updater] ${activeSource!.label} 检查失败`, lastError);
+          logger.warn(`[updater] ${activeSource!.label} 检查失败`, safeUpdateError(lastError));
         }
       }
       if (lastError) throw lastError;
@@ -381,6 +396,7 @@ export function configureAutoUpdater(options: AutoUpdaterOptions): AutoUpdaterCo
     },
     dispose: () => {
       disposed = true;
+      updater.setDownloadModeListener?.(null);
       clearScheduled(startupTimer);
       clearScheduled(intervalTimer);
       if (updater.off) {

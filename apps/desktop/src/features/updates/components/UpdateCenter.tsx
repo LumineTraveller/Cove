@@ -27,6 +27,7 @@ import {
   updateHasDetails,
   updateStepIndex,
   updateWaitWarning,
+  updateDownloadNotice,
   type UpdateState,
 } from '../update';
 import '../../../styles/ui-v2.css';
@@ -134,6 +135,7 @@ function UpdateProgress({
 }) {
   const stepIndex = updateStepIndex(state);
   const warning = updateWaitWarning(state, clock);
+  const downloadNotice = updateDownloadNotice(state);
   const stageMs = clock - (state.stageStartedAt ?? clock);
   const sinceActivity = clock - (state.lastActivityAt ?? clock);
   const recentSpeed = sinceActivity < 5000 ? state.bytesPerSecond : undefined;
@@ -158,6 +160,7 @@ function UpdateProgress({
     if (!showTransfer && !indeterminate) return null;
     return (
       <div className="update-status-progress">
+        {downloadNotice && <p className="update-stage-time" role="status">{downloadNotice}</p>}
         <div
           className="update-progress-track"
           role="progressbar"
@@ -192,6 +195,8 @@ function UpdateProgress({
 
   return (
     <div className="update-details-progress">
+      {downloadNotice && <p className="update-warning" role="status">{downloadNotice}</p>}
+      {state.fallbackCode && <p className="update-stage-time">回退原因：{state.fallbackCode}</p>}
       {stepIndex >= 0 && (
         <ol className="update-step-list" aria-label="更新阶段">
           {UPDATE_STEPS.map((step, index) => {

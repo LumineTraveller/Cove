@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { createHash } from 'crypto';
 import type { LoggerLike } from './updater-core';
+import { acquireUpdateCacheLock } from './update-cache-safety';
 
 const MARKER = 'pending/cove-gitee-cleanup.json';
 const UPDATE_INFO = 'pending/update-info.json';
@@ -103,18 +104,14 @@ export function createGiteeInstallerCache(options: {
     const pendingInstaller = `pending/${record.fileName}`;
     const pendingHash = await hash(pendingInstaller);
     if (pendingHash !== null && pendingHash !== record.sha512) throw new Error('待清理安装包校验值已改变，保留文件');
-    const installedCacheHash = await hash('installer.exe');
     // Check again after asynchronous hashing. Never clear a newer pending update.
     const latestRecord = readJson(MARKER);
     const latestMetadata = readJson(UPDATE_INFO);
     if (JSON.stringify(latestRecord) !== JSON.stringify(record) ||
         (latestMetadata && !samePackage(latestMetadata, record))) return;
-    if (installedCacheHash === record.sha512) {
-      // NSIS keeps another copy for the next differential update. Gitee no longer
-      // needs that copy. A different (e.g. GitHub) baseline is left untouched.
-      remove('installer.exe');
-      remove('current.blockmap');
-    }
+    // installer.exe/current.blockmap belong to the installed version and are
+    // required by the next NSIS differential update, regardless of its mirror.
+    // Legacy Gitee markers may only remove their verified pending files.
     remove(pendingInstaller);
     remove('pending/current.blockmap');
     remove(UPDATE_INFO);
@@ -123,17 +120,23 @@ export function createGiteeInstallerCache(options: {
   }
 
   async function cleanupInstalledUpdate(): Promise<void> {
+    let release: (() => Promise<void>) | undefined;
+    try { if (!cacheExists()) return; release = await acquireUpdateCacheLock(cacheDir); }
+    catch (error) {
+      logger.warn('[updater] Legacy pending cleanup skipped while the cache is unavailable', error);
+      return;
+    }
     // The installer may still hold its own EXE briefly after starting Cove.
     // Keep the marker if locked so another startup can safely retry as well.
     const delay = options.delay ?? (ms => new Promise(resolve => setTimeout(resolve, ms)));
-    for (let attempt = 0; attempt < 3; attempt++) {
+    try { for (let attempt = 0; attempt < 3; attempt++) {
       try { await cleanupOnce(); return; }
       catch (error) {
         logger.warn('[updater] 安装包缓存暂未清理，保留任务以便重试', error);
         if (!['EBUSY', 'EPERM', 'EACCES'].includes((error as NodeJS.ErrnoException).code ?? '') || attempt === 2) return;
         await delay(1500);
       }
-    }
+    } } finally { await release(); }
   }
 
   return { cleanupInstalledUpdate };
