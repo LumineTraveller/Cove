@@ -4,7 +4,7 @@
 
 ## Result and production change
 
-The shared monitor-capture path is the main limit in this controlled test. On the same changing 240 Hz monitor, the selected 540p/120/VP8 profile improved from **54–56 captured/decoded FPS to 77–78 FPS** with Chromium's existing `ZeroCopyDesktopCapture` conversion path. Two independent process runs reproduced the improvement, approximately 39–42%. **120 FPS remains unachieved on the monitor path.** The generated-source and owned-window controls reached about 119 FPS; those controls are not evidence that desktop monitor capture reaches 120.
+The shared monitor-capture path is the main limit in this controlled test. On the same changing 240 Hz monitor, the selected 540p/120/VP8 profile improved from **54–56 captured/decoded FPS to 77–78 FPS** with Chromium's existing `ZeroCopyDesktopCapture` conversion path. Two independent process runs reproduced the improvement, approximately 39–42%. A separate pair with an actual **1728×1080 input/output** improved from **46.54 to 58.62 FPS**, approximately 26% in one comparison. **120 FPS remains unachieved on the monitor path.** The generated-source and owned-window controls reached about 119 FPS; those controls are not evidence that desktop monitor capture reaches 120.
 
 Production only merges `ZeroCopyDesktopCapture` into Windows startup for the measured Chromium major version 152. External `--disable-features` remains authoritative. Set `COVE_DISABLE_ZERO_COPY_DESKTOP_CAPTURE=1` before launching a new process to restore Chromium's legacy conversion branch. Existing feature choices are preserved; other operating systems and unvalidated Chromium majors retain their earlier defaults. The older `AllowWgcScreenCapturer` entry is preserved for compatibility but must not be interpreted as proof that WGC is selected.
 
@@ -27,16 +27,20 @@ All rows below are real **monitor** capture. “540p/1080p” is the selected pr
 
 | Run / profile | Capture pixels | Encoded pixels | Source FPS | Encode FPS | Send FPS | Decode FPS | Encode ms/frame |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| Baseline, 1080p VP8 | 1000×624 | 1000×624 | 54.29 | 54.29 | 54.29 | 54.29 | 3.71 |
+| Default constraints, 1080p selected, VP8 | 1000×624 | 1000×624 | 54.29 | 54.29 | 54.29 | 54.29 | 3.71 |
 | Baseline, 540p VP8 | 1000×624 | 865×540 | 56.35 | 56.35 | 56.35 | 56.47 | 3.67 |
 | Baseline, 540p AV1 | 1000×624 | 865×540 | 56.01 | 56.01 | 56.01 | 56.00 | 3.06 |
 | Zero-copy, 540p VP8 | 1000×624 | 865×540 | 78.44 | 78.57 | 78.57 | 78.44 | 3.03 |
 | Repeated baseline, 540p VP8 | 1000×624 | 865×540 | 54.23 | 54.35 | 54.35 | 54.23 | 3.78 |
 | Repeated zero-copy, 540p VP8 | 1000×624 | 865×540 | 76.87 | 76.87 | 76.87 | 76.75 | 3.45 |
+| Explicit 1080-height baseline, VP8 | 1728×1080 | 1728×1080 | 46.54 | 46.54 | 46.54 | 46.54 | 6.31 |
+| Explicit 1080-height zero-copy, VP8 | 1728×1080 | 1728×1080 | 58.62 | 58.75 | 58.75 | 58.62 | 6.44 |
 
 The repeated receiver presented-frame rates were 54.35 and 76.75 FPS. No artificial duplicate-frame producer or counter adjustment is used. Small sub-frame differences between stage rates follow sampling time and pipeline occupancy. VP8 was `libvpx`; AV1 was `libaom`, both software encoders. Those results show that the monitor source is the dominant common limit for this simple workload; they do not exclude encoder or shared CPU/GPU pressure with more complex content.
 
-The optional 960×540 capture cap actually yielded 864×540 for this 16:10 display: baseline source/send 59.11 FPS and zero-copy 81.04 FPS. That dimension-changing experiment is retained as an experiment only. **Zero-copy 1080p, zero-copy AV1, normal-mode activity analysis, physical viewer scan-out, WAN/network loss, long-duration thermal behavior, other GPUs/OS builds and end-to-end latency were not measured.** Do not extrapolate the 540p VP8 gain to those conditions.
+The explicit 1080-height comparison requests a 1920×1080 bound only in the test fixture and asserts actual capture, encoding, decoding and video intrinsic dimensions of 1728×1080, preserving this monitor's 16:10 ratio. Its baseline/zero-copy source ran at 239.64/239.83 FPS; receiver presented rates were 46.56/58.62 FPS and decode time 4.49/4.47 ms per frame. Both runs stopped their backends. These are one comparison at actual 1080 height, not the earlier preset-only 1000×624 rows or physical display scan-out.
+
+The optional 960×540 capture cap actually yielded 864×540 for this 16:10 display: baseline source/send 59.11 FPS and zero-copy 81.04 FPS. That dimension-changing experiment is retained as an experiment only. **Zero-copy AV1 throughput, normal-mode activity analysis, physical viewer scan-out, WAN/network loss, long-duration thermal behavior, other GPUs/OS builds and end-to-end latency were not measured.** Do not extrapolate the VP8 gains to those conditions.
 
 ## Why lowering the preset was insufficient
 
@@ -70,7 +74,7 @@ Six feature-policy tests cover platform/version guards, preserving external para
 
 Raw artifacts remain under `runtime/fps-candidate/` and are intentionally not committed. Each complete run has `source.json` hashes, `result.json`, `electron.log`, Vite logs, isolated database/profile and optional `native-capture.log`.
 
-Valid throughput runs: `screen-baseline-UmiuHi`, `screen-zero-copy-cgNxgD`, `screen-repeat-baseline-QoERGc`, `screen-repeat-zero-copy-5NqjbH`. Window-only control: `native-real-R0kqh9`. Final stability checks: `recovery-final-cOt6Ly`, `backend-disconnect-LOAEaR`. `measurement-validity.json` indexes all runs.
+Valid throughput runs: `screen-baseline-UmiuHi`, `screen-zero-copy-cgNxgD`, `screen-repeat-baseline-QoERGc`, `screen-repeat-zero-copy-5NqjbH`; actual 1080-height pair: `actual-1080-baseline-AH3YhA`, `actual-1080-zero-copy-9M0uXT`. Window-only control: `native-real-R0kqh9`. Final stability checks: `recovery-final-cOt6Ly`, `backend-disconnect-LOAEaR`, `av1-functional-yu5ktV`. `measurement-validity.json` indexes all runs.
 
 Earlier failed/calibration runs are preserved: `baseline-Yit24K` hit sandbox process creation limits; `baseline-wujz1n` hit an unclonable Socket cleanup return value; `baseline-ObClUu` used a Chromium fake-device flag; `native-baseline-X44wit` used a fake-UI flag which bypassed the intended display handler. Their native rows are excluded even if an earlier runner wrote `passed: true`. Generated-source rows are controls only. Preliminary stop/reacquire assertions in old runs were superseded by the receiver-bound final test above.
 

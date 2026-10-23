@@ -10,6 +10,9 @@ Cove 是面向朋友和小群体的自托管语音、聊天与屏幕共享应用
 
 [下载与项目主页](https://cove.luxe) · [GitHub Releases](https://github.com/LumineTraveller/Cove/releases) · [本版说明](RELEASE_NOTES.md) · [历史更新](CHANGELOG.md)
 
+当前开发分支正在验证 2.1.1 / 0.8.3 发布后的客户端改进，尚未更新正式下载和更新渠道。
+候选范围及验证记录见 [客户端候选验证](docs/testing/2026-10-23-client-improvements.md)。
+
 ## 开始使用
 
 1. 从官网下载 Windows 客户端，或在 GitHub Releases 下载 Android APK。Windows 服务端安装包供需要自建服务器的人使用，普通成员只需安装客户端。
@@ -29,12 +32,14 @@ Cove 是面向朋友和小群体的自托管语音、聊天与屏幕共享应用
 | 屏幕共享 | 发起与观看，分辨率／帧率预设，全屏与置顶小窗 | 发起与观看，采集缩放与画质设置 |
 | 共享音频 | 系统音频或单个应用音频，可独立调节共享声音 | 可选采集播放音频，受 Android 版本及被共享应用的录音策略限制 |
 | 远程控制 | 请求控制、授权、撤销与本地急停；Windows 可作为受控端 | 可请求控制支持远控的 Windows 共享端 |
-| 语音包 | 当前房间内上传、编辑、排序、收藏与同步播放 | 当前房间内管理与播放 |
-| 诊断与更新 | 媒体状态、手动导出诊断、更新中心 | 媒体状态、手动导出诊断、应用内更新检查 |
+| 语音包 | 当前房间内上传、编辑、个人排序、收藏与同步播放 | 当前房间内管理、个人排序与播放 |
+| 诊断与更新 | 媒体状态、手动导出诊断、更新中心 | 媒体状态、手动导出诊断、应用内检查与下载更新 |
 
 桌面端还支持共享画面批注、房间外观设置、个人备注、头像与明暗主题。远控和共享都需要相应权限；Windows 全局远控急停键为 `Ctrl+Alt+Shift+X`。
 
-语音包按房间隔离。升级保留已有记录和音频文件；历史上未归属房间的全局语音包不会被自动分配或广播到新房间。
+语音包内容按房间隔离，个人排序保存在当前设备，并按服务器、账号和房间分别保留；拖拽不会改变其他成员的顺序。首次使用沿用已有顺序，新增和删除内容继续同步。升级保留已有记录和音频文件；历史上未归属房间的全局语音包不会被自动分配或广播到新房间。
+
+桌面“设置 → 采集设置”集中输入输出设备和“兼容观看”开关。兼容模式在下一次开始共享时生效，共享进行中不能切换。手机使用对应的“采集设置”栏目，原生共享使用已有 VP8 路径，不提供重复的桌面编码兼容开关。
 
 ### 连接与恢复
 
@@ -160,7 +165,7 @@ MEDIASOUP_IP=203.0.113.10 node apps/server/dist/index.js
 - 不从聊天地址推导自动更新地址，也不自动补填官方域名。官方域名为 `cove.luxe`。
 - 桌面手动“从服务器下载”使用当前选择的聊天服务器地址；自建服务器需另外提供对应的 `/downloads/` 和 `/releases/` 文件。
 
-Android 更新由应用检查清单，再交给浏览器／系统安装器完成下载和用户确认安装。覆盖升级需要兼容的签名身份及递增的 `versionCode`；更换签名的边界见 [Android 签名迁移说明](docs/architecture/mobile-signing-migration.md)。
+Android 更新在应用内检查和下载，显示进度并支持取消、重试及已验证包复用。应用核对大小、SHA-256、包名、版本和已安装签名身份，安装前再次验证，然后打开 Android 系统安装界面，由用户最终确认；不会自动开启未知来源安装权限或静默安装。覆盖升级需要兼容的签名身份及递增的 `versionCode`；更换签名的边界见 [Android 签名迁移说明](docs/architecture/mobile-signing-migration.md)。
 
 桌面客户端与桌面服务端使用 `vX.Y.Z` 标签，手机使用独立的 `mobile-vX.Y.Z` 标签。发布先校验最终安装包，再公开 GitHub Release、镜像同一产物，最后公布更新清单。Android 清单需同时维护 `apps/mobile/update.json` 与兼容副本 `mobile/update.json`。Gitee 只同步源码、清单及标签，不创建 Release 或上传附件。完整操作与完成条件见 [AGENTS.md](AGENTS.md)。
 
@@ -170,6 +175,10 @@ Android 更新由应用检查清单，再交给浏览器／系统安装器完成
 - [屏幕发布与换流生命周期](docs/architecture/screen-publication-lifecycle.md)
 - [桌面与手机编码兼容](docs/architecture/screen-codec-compatibility.md)
 - [语音包处理队列与资源限制](docs/architecture/soundpack-processing.md)
+- [个人语音包排序](docs/architecture/personal-soundpack-ordering.md)
+- [Android 应用内更新](docs/architecture/mobile-in-app-update.md)
+- [Windows 差分更新基线与回退](docs/desktop-differential-update-reliability.md)
+- [屏幕采集性能测量与回退](docs/diagnostics/screen-capture-performance-20261023.md)
 - [桌面置顶观看小窗](docs/architecture/floating-viewer.md)
 - [Windows 服务端运行时维护](docs/architecture/runtime-maintenance.md)
 - [Android 构建与发布](apps/mobile/README.md)
