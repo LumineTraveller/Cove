@@ -1,5 +1,10 @@
 # Desktop differential update reliability
 
+The later [real published-asset verification](desktop-real-differential-validation.md)
+passed through the actual Electron HTTP executor on both HTTPS sources. It records
+the isolated-process scope separately from these synthetic tests and the earlier
+unsuccessful Node/TLS trials.
+
 This change applies to the Windows NSIS updater. It does not alter a release
 version, install an application, clear the running user's cache, or change server
 Range/TLS settings. Both configured HTTPS mirrors keep single-Range differential
