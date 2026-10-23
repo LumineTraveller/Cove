@@ -41,7 +41,7 @@
 ### 发布顺序与完成条件
 
 1. 先确认 GitHub 手机版 Release 已公开且 APK 附件可下载。Gitee 不创建、不编辑、不上传 Release 附件；Gitee 仅作为仓库同步目标。
-2. 执行 `scripts/publish-mobile-release-to-cloud.ps1`，把同一 APK 和更新清单上传到 SSH 别名 `Cove_server` 的 `/var/www/cove-download`，核验 `https://cove-cove.space/releases/mobile/update.json` 与 APK 公开地址可下载。服务器清单必须最后发布。
+2. 执行 `scripts/publish-mobile-release-to-cloud.ps1`，把同一 APK 和更新清单上传到 SSH 别名 `Cove_server` 的 `/var/www/cove-download`，核验 `https://cove.luxe/releases/mobile/update.json` 与 APK 公开地址可下载。服务器清单必须最后发布。
 3. 将源代码、必要的 Git 标签和更新清单推送到 GitHub 和 Gitee 的 `main` 后，分别核验两个 raw 地址返回的新版本。除非用户明确要求，不在 Gitee 创建或修改 Release。
 4. 只有 Android 版本号已递增、GitHub Release APK 元数据与清单一致、GitHub 和 Cove 服务器两处下载与清单一致，才算发布完成。Gitee 仓库不需要有对应的 Release 或附件。
 
@@ -54,7 +54,7 @@
 ## 桌面版发布镜像
 
 - 每次公开桌面版 GitHub Release 后，执行 `scripts/publish-release-to-cloud.ps1 -Tag vX.Y.Z`，将 Windows 客户端和服务端安装包、blockmap、`latest.yml` 上传到同一服务器，最后发布 `releases/latest.json`。
-- 逐一核验 `https://cove-cove.space/releases/vX.Y.Z/latest.yml` 与 `https://cove-cove.space/downloads/Cove-Setup.exe`、`Cove-Server-Setup.exe` 可公开下载；服务器镜像未完成时不把发布任务标为完成。GitHub 仍作为客户端更新备用源。
+- 逐一核验 `https://cove.luxe/releases/vX.Y.Z/latest.yml` 与 `https://cove.luxe/downloads/Cove-Setup.exe`、`Cove-Server-Setup.exe` 可公开下载；服务器镜像未完成时不把发布任务标为完成。GitHub 仍作为客户端更新备用源。
 - 桌面客户端手动“从服务器下载”使用用户当前填写的聊天服务器地址。桌面与手机自动更新使用各自独立配置的 `UPDATE_DOWNLOAD_BASE_URL`，默认必须留空；未配置时只检查 GitHub，不从聊天地址推导或用官方域名补填。配置后只允许 HTTPS，不依赖登录，保留 GitHub 备用源。官方域名为 `cove.luxe`，不要把历史 `cove-cove.space` 当作默认域名。自建下载服务器要提供相同的 `/downloads/` 和 `/releases/` 路径才能作为更新来源，不能因为 Cove 官方服务器已有镜像就假定它们也可下载。
 
 ## 其他约定
