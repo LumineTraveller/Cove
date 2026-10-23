@@ -2,10 +2,9 @@ import {
   MonitorPlay,
   PhoneDisconnect,
   SquaresFour,
-  PictureInPicture,
 } from '@phosphor-icons/react';
 import { VolumeControl } from '../components/VolumeControl';
-import { ShareOperationsMenu } from '../annotation/ShareOperationsMenu';
+import { ShareOperationsMenu, type SharePictureInPictureAction } from '../annotation/ShareOperationsMenu';
 import type { useScreenAnnotations } from '../annotation/useScreenAnnotations';
 
 export function ShareStatusBarV2({
@@ -43,14 +42,7 @@ export function ShareStatusBarV2({
   onAppFull: () => void;
   hasAudio: boolean;
   annotations: ReturnType<typeof useScreenAnnotations>;
-  pictureInPicture?: {
-    active: boolean;
-    pending: boolean;
-    disabled: boolean;
-    disabledReason?: string;
-    open(): Promise<void>;
-    close(): Promise<void>;
-  };
+  pictureInPicture?: SharePictureInPictureAction;
 }) {
   const appFullscreen = fullscreenMode === 'app';
   const floating = pictureInPicture?.active || pictureInPicture?.pending;
@@ -69,16 +61,9 @@ export function ShareStatusBarV2({
         )}
       </div>
       <div className="share-status-actions">
-        {!floating && <ShareOperationsMenu self={self} annotations={annotations} remoteState={remoteState}
-          cooldownSeconds={remoteCooldownSeconds} onRemote={onRemote} onStopRemote={onStopRemote} />}
-        {pictureInPicture && <button className="floating-view-toggle"
-          aria-pressed={pictureInPicture.active}
-          disabled={pictureInPicture.pending || (!pictureInPicture.active && pictureInPicture.disabled)}
-          title={pictureInPicture.active ? '关闭小窗并返回主窗口' : pictureInPicture.disabledReason}
-          onClick={() => { void (pictureInPicture.active ? pictureInPicture.close() : pictureInPicture.open()); }}>
-          <PictureInPicture size={17} />
-          {pictureInPicture.pending ? '正在切换…' : pictureInPicture.active ? '返回主窗口' : '置顶小窗'}
-        </button>}
+        <ShareOperationsMenu self={self} annotations={annotations} remoteState={remoteState}
+          cooldownSeconds={remoteCooldownSeconds} onRemote={onRemote} onStopRemote={onStopRemote}
+          pictureInPicture={pictureInPicture} />
         <div className="fullscreen-stack">
           <button disabled={floating} onClick={appFullscreen ? onAppFull : onFull}>
             <SquaresFour size={17} />

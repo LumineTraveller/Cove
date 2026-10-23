@@ -1,20 +1,31 @@
 import { useEffect, useId, useRef, useState } from 'react';
-import { CaretUp, Cursor, GearSix, PaintBrush, CircleNotch } from '@phosphor-icons/react';
+import { CaretUp, Cursor, GearSix, PaintBrush, CircleNotch, PictureInPicture } from '@phosphor-icons/react';
 import type { useScreenAnnotations } from './useScreenAnnotations';
 import './annotationUI.css';
 
-export function ShareOperationsMenu({ self, annotations, remoteState, cooldownSeconds, onRemote, onStopRemote }: {
+export interface SharePictureInPictureAction {
+  active: boolean;
+  pending: boolean;
+  disabled: boolean;
+  disabledReason?: string;
+  open(): Promise<void>;
+  close(): Promise<void>;
+}
+
+export function ShareOperationsMenu({ self, annotations, remoteState, cooldownSeconds, onRemote, onStopRemote, pictureInPicture }: {
   self: boolean;
   annotations: ReturnType<typeof useScreenAnnotations>;
   remoteState: 'available' | 'pending' | 'active' | 'unsupported';
   cooldownSeconds: number;
   onRemote: () => void;
   onStopRemote: () => void;
+  pictureInPicture?: SharePictureInPictureAction;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const menuId = useId();
+  const floating = pictureInPicture?.active || pictureInPicture?.pending;
   useEffect(() => { if (annotations.localActive) setOpen(false); }, [annotations.localActive]);
   useEffect(() => {
     if (!open) return;
@@ -59,6 +70,18 @@ export function ShareOperationsMenu({ self, annotations, remoteState, cooldownSe
       <CaretUp size={12} />
     </button>
     {open && <div className="share-operations-popover" id={menuId} aria-label={self ? '管理共享' : '共享操作'}>
+      {pictureInPicture && <button className="floating-view-toggle"
+        aria-pressed={pictureInPicture.active}
+        disabled={pictureInPicture.pending || (!pictureInPicture.active && pictureInPicture.disabled)}
+        title={pictureInPicture.active ? '关闭小窗并返回主窗口' : pictureInPicture.disabledReason}
+        onClick={() => {
+          setOpen(false);
+          void (pictureInPicture.active ? pictureInPicture.close() : pictureInPicture.open());
+        }}>
+        <PictureInPicture size={18} />
+        {pictureInPicture.pending ? '正在切换…' : pictureInPicture.active ? '返回主窗口' : '置顶小窗'}
+      </button>}
+      {!floating && <>
       {self ? <button className={!annotations.remoteControlAllowed ? 'remote-forbidden' : ''}
         disabled={!annotations.ready || Boolean(annotations.pendingAction)}
         aria-pressed={annotations.remoteControlAllowed}
@@ -81,6 +104,7 @@ export function ShareOperationsMenu({ self, annotations, remoteState, cooldownSe
         <PaintBrush size={18} />{annotations.isRequestPending ? '等待批注批准' : annotations.localActive ? '返回批注' : self && window.coveAnnotationOverlay ? '在共享屏幕绘画' : '开始批注'}
       </button>
       {annotations.error && <p className="annotation-menu-error" role="status">{annotations.error}</p>}
+      </>}
     </div>}
   </div>;
 }

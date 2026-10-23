@@ -119,18 +119,31 @@ app.whenReady().then(async () => {
     check('native main windows retain product backgroundThrottling=true', evidence.backgroundThrottling.every(Boolean));
     for (const win of windows) await waitFor(win, 'window.coveMediaQA.rtc.voiceMembers.length===2');
     async function publish() { await evaluate(sender, "window.coveMediaQA.rtc.startScreenShare('1080p',30,false,false,true,true)"); await waitFor(sender, 'Boolean(window.coveMediaQA.rtc.localScreen)'); await waitFor(viewer, 'window.coveMediaQA.rtc.availableScreens.length===1'); }
+    async function ensureMenuOpen() {
+      await waitFor(viewer, 'Boolean(document.querySelector(".share-operations-trigger"))');
+      await evaluate(viewer, '(()=>{const trigger=document.querySelector(".share-operations-trigger");if(trigger.getAttribute("aria-expanded")!=="true")trigger.click();})()', true);
+      await waitFor(viewer, 'Boolean(document.querySelector(".share-operations-popover .floating-view-toggle"))');
+    }
     async function watch() {
       await evaluate(viewer, 'window.coveMediaQA.rtc.watchScreen(window.coveMediaQA.rtc.availableScreens[0].socketId)');
-      await waitFor(viewer, 'Boolean(window.coveMediaQA.rtc.remoteScreen)&&document.querySelector(".share-view video")?.videoWidth===640&&document.querySelector(".share-view video").readyState>=2&&!document.querySelector(".floating-view-toggle").disabled');
+      await waitFor(viewer, 'Boolean(window.coveMediaQA.rtc.remoteScreen)&&document.querySelector(".share-view video")?.videoWidth===640&&document.querySelector(".share-view video").readyState>=2');
+      await ensureMenuOpen();
+      await waitFor(viewer, '!document.querySelector(".floating-view-toggle").disabled');
     }
     async function open() {
+      await ensureMenuOpen();
       await waitFor(viewer, 'Boolean(document.querySelector(".floating-view-toggle"))&&!window.coveFloatingQA.snapshot().floatingDisabled&&window.coveFloatingQA.snapshot().readyState>=2&&window.coveFloatingQA.snapshot().width>0');
       await evaluate(viewer, 'document.querySelector(".floating-view-toggle").click()', true);
+      await waitFor(viewer, '!document.querySelector(".share-operations-popover")');
+      await ensureMenuOpen();
       await waitFor(viewer, 'window.coveFloatingQA.snapshot().pictureElementIsVideo&&window.coveFloatingQA.snapshot().floatingPressed==="true"&&!window.coveFloatingQA.snapshot().floatingDisabled');
     }
     async function close() {
       const count = evidence.focusReturns;
+      await ensureMenuOpen();
       await evaluate(viewer, 'document.querySelector(".floating-view-toggle").click()', true);
+      await waitFor(viewer, '!document.querySelector(".share-operations-popover")');
+      await ensureMenuOpen();
       await waitFor(viewer, '!document.pictureInPictureElement&&window.coveFloatingQA.snapshot().floatingPressed==="false"&&!window.coveFloatingQA.snapshot().floatingDisabled');
       assert.equal(evidence.focusReturns, count + 1, 'return action invokes the narrow product focus bridge exactly once');
     }
@@ -139,6 +152,14 @@ app.whenReady().then(async () => {
     await waitFor(viewer, 'window.coveMediaQA.ice.audioDiagnostics().then(d=>d.taps.some(t=>t.label==="consumer"&&t.rms>1e-5))');
     const before = await mediaIdentity(); evidence.before = before;
     await screenshot('normal-main.png');
+    check('floating entry exists once inside the existing upward operations menu', await evaluate(viewer, 'document.querySelectorAll(".floating-view-toggle").length===1&&Boolean(document.querySelector(".share-operations-popover .floating-view-toggle"))&&!document.querySelector(".share-status-actions > .floating-view-toggle")'));
+    await evaluate(viewer, 'document.querySelector(".share-operations").dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true}))');
+    check('Escape closes menu and restores focus to its trigger', await evaluate(viewer, '!document.querySelector(".share-operations-popover")&&document.activeElement===document.querySelector(".share-operations-trigger")'));
+    await evaluate(viewer, 'document.querySelector(".share-operations-trigger").dispatchEvent(new KeyboardEvent("keydown",{key:"ArrowUp",bubbles:true}))');
+    await waitFor(viewer, 'document.activeElement===document.querySelector(".floating-view-toggle")');
+    check('ArrowUp opens the menu with keyboard focus on the floating action');
+    viewer.setSize(1280,800); await screenshot('operations-menu-wide.png'); viewer.setSize(860,650);
+    await ensureMenuOpen();
     evidence.audio.scope = 'actual synthetic voice consumer PCM and existing voice playback; system/screen audio capture is not invoked';
     evidence.audio.before = await evaluate(viewer, 'window.coveMediaQA.ice.audioDiagnostics()');
     const protocols = await evaluate(viewer, 'window.coveMediaQA.ice.selectedProtocols()');
@@ -154,20 +175,24 @@ app.whenReady().then(async () => {
     await evaluate(viewer, 'window.coveFloatingQA.setControl("available")');
     await waitFor(viewer, '!window.coveFloatingQA.snapshot().floatingDisabled');
     check('actual UI prevents entry while remote control is pending or active');
-    await evaluate(viewer, 'document.querySelector(".share-operations-trigger").click()', true);
+    await ensureMenuOpen();
     await waitFor(viewer, 'Boolean(document.querySelector(".share-operations-popover"))&&![...document.querySelectorAll(".share-operations-popover button")].at(-1).disabled');
     await evaluate(viewer, '[...document.querySelectorAll(".share-operations-popover button")].at(-1).click()', true);
-    await waitFor(viewer, 'Boolean(document.querySelector(".annotation-input-surface"))&&window.coveFloatingQA.snapshot().floatingDisabled');
+    await waitFor(viewer, 'Boolean(document.querySelector(".annotation-input-surface"))');
+    await ensureMenuOpen();
+    await waitFor(viewer, 'window.coveFloatingQA.snapshot().floatingDisabled');
     await evaluate(viewer, 'document.querySelector(".floating-view-toggle").click()', true);
     assert.equal(await evaluate(viewer, 'Boolean(document.pictureInPictureElement)'), false);
     await evaluate(viewer, 'document.querySelector(".screen-annotation-layer").dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true}))');
     await waitFor(viewer, '!document.querySelector(".annotation-input-surface")&&!window.coveFloatingQA.snapshot().floatingDisabled');
     check('real annotation UI blocks entry until drawing is exited');
     await evaluate(viewer, '(()=>{const b=document.querySelector(".floating-view-toggle");b.click();b.click();b.click();})()', true);
+    await waitFor(viewer, '!document.querySelector(".share-operations-popover")');
+    await ensureMenuOpen();
     await waitFor(viewer, 'window.coveFloatingQA.snapshot().pictureElementIsVideo&&!window.coveFloatingQA.snapshot().floatingDisabled');
     const floated = await evaluate(viewer, 'window.coveFloatingQA.snapshot()');
     check('repeated entry opens exactly one native picture and retains the same video/stream/tracks', floated.events.enter === 1 && floated.sameVideo && floated.sameStream && floated.sameTracks && floated.videos === 1);
-    check('floating view hides remote/annotation operations and disables fullscreen', floated.operations === 0 && floated.annotations === 0 && floated.fullscreenDisabled);
+    check('floating menu keeps only return action while remote/annotation operations stay hidden and fullscreen disabled', floated.operations === 0 && floated.operationMenus === 1 && floated.annotations === 0 && floated.fullscreenDisabled && await evaluate(viewer, 'document.querySelector(".share-operations-popover").textContent.includes("返回主窗口")&&Boolean(document.querySelector(".screen-floating-status button"))'));
     await evaluate(viewer, 'window.coveFloatingQA.setControl("active")');
     await waitFor(viewer, 'window.coveFloatingQA.snapshot().control==="active"');
     const inputCount = await evaluate(viewer, 'window.coveFloatingQA.snapshot().inputs');
@@ -240,7 +265,7 @@ app.whenReady().then(async () => {
     await waitFor(viewer, '!document.pictureInPictureElement&&!document.querySelector(".share-view")');
     check('unmount closes owned native presentation and leaves live SFU watch intact', await evaluate(viewer, 'Boolean(window.coveMediaQA.rtc.remoteScreen)&&window.coveMediaQA.rtc.inVoice'));
     await evaluate(viewer, 'window.coveFloatingQA.setMounted(true)');
-    await waitFor(viewer, 'Boolean(document.querySelector(".floating-view-toggle"))&&!document.querySelector(".floating-view-toggle").disabled');
+    await waitFor(viewer, 'Boolean(document.querySelector(".share-operations-trigger"))');
     await open(); await evaluate(viewer, 'window.coveMediaQA.rtc.leaveVoice()');
     await waitFor(viewer, '!document.pictureInPictureElement&&!window.coveMediaQA.rtc.inVoice');
     check('leaving voice closes the picture');
