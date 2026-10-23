@@ -1,10 +1,23 @@
-// Real Chromium/SFU regression with synthetic capture and an owned TCP proxy.
+// Real Chromium/SFU regression with synthetic capture and an owned TCP/UDP proxy.
 // Uses existing dependencies/builds. Never installs, publishes or touches devices.
 const fs = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { createRequire } = require('node:module');
 const { spawn, spawnSync } = require('node:child_process');
+const { randomUUID } = require('node:crypto');
+// Workspace package dist files can change while lockfile/config hashes stay the
+// same. A fresh Vite optimizer cache is therefore required for every invocation.
+function createIceRestartRunLayout(runtime, protocol, soakSeconds, fixtureRunId = randomUUID()) {
+  if (!path.isAbsolute(runtime) || !['tcp','udp'].includes(protocol) || !Number.isInteger(soakSeconds) || soakSeconds < 0 || soakSeconds > 3600)
+    throw new Error('Invalid ICE fixture layout');
+  if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(fixtureRunId))
+    throw new Error('Invalid ICE fixture run ID');
+  const prefix = `ice-${protocol}${soakSeconds?'-soak':''}-${fixtureRunId}`;
+  return { fixtureRunId, cacheDir: path.join(runtime, `${prefix}-vite-cache`), bootstrap: path.join(runtime, `${prefix}-vite-bootstrap.mjs`) };
+}
+module.exports = { createIceRestartRunLayout };
+function runCli() {
 const root = path.resolve(__dirname, '..');
 const protocol=process.argv.includes('--udp')?'udp':'tcp';
 const acceptance=process.argv.includes('--acceptance');
@@ -42,11 +55,11 @@ const env = { ...process.env, COVE_TEST_NODE: process.execPath,
   ...(acceptance?{COVE_QA_BACKEND_MODULE:path.join(root,'tooling/recovery-acceptance-backend.cjs')}:{}),
   COVE_TEST_SERVER_MODULE: path.join(root, 'apps/server/dist/index.js') };
 for (const key of ['ELECTRON_RUN_AS_NODE', 'COVE_BOOTSTRAP_TOKEN', 'COVE_BOOTSTRAP_TOKEN_FILE']) delete env[key];
-const bootstrap = path.join(runtime, `ice-${protocol}${soakSeconds?'-soak':''}-vite-bootstrap.mjs`);
+const { fixtureRunId, cacheDir, bootstrap } = createIceRestartRunLayout(runtime, protocol, soakSeconds);
 const vite = pathToFileURL(path.join(path.dirname(require.resolve('vite/package.json')), 'dist/node/index.js')).href;
 const dependencyRoot = path.dirname(path.dirname(require.resolve('react/package.json')));
 fs.writeFileSync(bootstrap, `import {createServer} from ${JSON.stringify(vite)};
-const server=await createServer({root:${JSON.stringify(path.join(root, 'apps/desktop'))},configFile:${JSON.stringify(path.join(root, 'apps/desktop/vite.config.ts'))},cacheDir:${JSON.stringify(path.join(runtime, `ice-${protocol}${soakSeconds?'-soak':''}-vite-cache`))},server:{host:'127.0.0.1',port:${rendererPort},strictPort:true,hmr:false,watch:null,fs:{allow:${JSON.stringify([root, dependencyRoot])}}}});
+const server=await createServer({root:${JSON.stringify(path.join(root, 'apps/desktop'))},configFile:${JSON.stringify(path.join(root, 'apps/desktop/vite.config.ts'))},cacheDir:${JSON.stringify(cacheDir)},server:{host:'127.0.0.1',port:${rendererPort},strictPort:true,hmr:false,watch:null,fs:{allow:${JSON.stringify([root, dependencyRoot])}}}});
 await server.listen();process.send?.({type:'ready'});
 process.on('message',async m=>{if(m?.type==='stop'){await server.close();process.disconnect?.();}});
 `);
@@ -60,7 +73,7 @@ function shutdown(code) {
 process.once('SIGINT', () => shutdown(130));
 process.once('SIGTERM', () => shutdown(143));
 async function main() {
-  fs.writeFileSync(resultPath, JSON.stringify({ passed: false, status: 'starting', startedAt: new Date(started).toISOString() }));
+  fs.writeFileSync(resultPath, JSON.stringify({ passed: false, status: 'starting', fixtureRunId, startedAt: new Date(started).toISOString() }));
   const renderer = launch(process.execPath, [bootstrap], env, true);
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('Owned Vite startup timed out')), 20_000);
@@ -74,13 +87,16 @@ async function main() {
   const browser = launch(electron, [path.join(root, 'apps/desktop/tests/ui/media-integration.electron.cjs'), '--ice-restart'], env);
   const code = await new Promise((resolve, reject) => { browser.once('error', reject); browser.once('close', resolve); });
   const result = JSON.parse(fs.readFileSync(resultPath, 'utf8'));
+  result.fixtureRunId = fixtureRunId;
+  result.fixtureCacheDir = path.relative(root, cacheDir);
+  fs.writeFileSync(resultPath, JSON.stringify(result, null, 2));
   const fresh = typeof result.runId === 'string' && Date.parse(result.startedAt) >= started && result.status === 'completed';
   if (code !== 0 || !fresh || !result.passed || !result.backendStopped ||
       !result.iceEvidence?.decodedFramesResumed || !result.iceEvidence?.syntheticAudioPacketsAndSamplesResumed ||
       !result.iceEvidence?.nonConcealedAudioSamplesResumed || !result.iceEvidence?.nonSilentAudioDecodeVerified)
     throw new Error('ICE integration failed or completion was not confirmed; see '+path.relative(root,logPath));
   if(soakSeconds&&(!result.soakEvidence||result.soakEvidence.elapsedMs<soakSeconds*1000||result.soakEvidence.cycles<1))throw new Error('Timed soak did not complete its requested duration');
-  console.log(JSON.stringify({ passed: true, runId: result.runId, ...result.iceEvidence,
+  console.log(JSON.stringify({ passed: true, runId: result.runId, fixtureRunId, fixtureCacheDir: result.fixtureCacheDir, ...result.iceEvidence,
     ...(result.soakEvidence?{soak:{requestedSeconds:result.soakEvidence.requestedSeconds,elapsedMs:result.soakEvidence.elapsedMs,cycles:result.soakEvidence.cycles,operations:result.soakEvidence.operations}}:{}),
     endToEndLatencyMeasured: false }, null, 2));
   if (renderer.connected) renderer.send({ type: 'stop' }, () => {});
@@ -88,3 +104,5 @@ async function main() {
   shutdown(0);
 }
 main().catch(error => { console.error(error.message); shutdown(1); });
+}
+if (require.main === module) runCli();
