@@ -71,13 +71,13 @@ test('disabled password mode still enforces the 2.0.0 minimum on REST and Socket
       tokenEpoch: 1,
       authorized: false,
       secureTransportRequired: false,
-      serverVersion: '2.1.0',
+      serverVersion: '2.1.1',
       clientPlatform: null,
-      releaseVersion: '2.1.0',
+      releaseVersion: '2.1.1',
       minimumClientVersion: '2.0.0',
       requiredClientProtocol: 3,
       upgradeRequired: true,
-      downloadUrl: 'https://github.com/LumineTraveller/Cove/releases/tag/v2.1.0',
+      downloadUrl: 'https://github.com/LumineTraveller/Cove/releases/tag/v2.1.1',
     });
     await assert.rejects(access(path.join(dataDir, 'bootstrap-token.txt')));
 

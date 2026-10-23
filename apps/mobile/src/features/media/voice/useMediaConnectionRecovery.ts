@@ -85,7 +85,7 @@ export function useMediaConnectionRecovery({
       if (context && transportRecovery?.observe({
         ...context, key,
         isActive: () => inVoiceRef.current || watchingScreenPeerRef.current !== null,
-        onFailure: code => {
+        onFailure: () => {
           teardown(true);
           setConnectionState('failed');
           setError('媒体连接恢复失败，可重新加入语音。');

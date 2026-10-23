@@ -1,5 +1,17 @@
 # Cove 项目工作准则
 
+## 用户“推送更新”的交付定义
+
+用户要求“推送更新”时，默认指完成本次涉及平台的以下交付，不是只推送候选分支或源码。以下是完成条件，执行顺序仍按后面的发布流程与验包门槛执行：
+
+1. 将最终源码、必要标签及更新清单同步到 **GitHub 和 Gitee** 的 `main`；保护用户修改，不强推覆盖远端历史。Gitee 仅同步 Git 内容，不创建 Release 或上传附件。
+2. 创建并公开对应的 **GitHub Release**，附上最终安装包、发布说明及对应更新／完整性附件，确认用户可以实际下载。
+3. 将同一批已核验的最新版安装包放到用户服务器的下载目录 `/var/www/cove-download`，维护版本目录及固定下载入口。桌面沿用 `scripts/publish-release-to-cloud.ps1`，手机沿用 `scripts/publish-mobile-release-to-cloud.ps1`。
+4. 用最终产物生成并同步完整性文件和更新元数据：桌面包括实际安装包对应的 `Cove-Integrity-<version>-win32-x64.json`、blockmap、`latest.yml` 与服务器 `releases/latest.json`；Android 包括由最终 APK 的真实版本、大小和 SHA-256 生成的 `update.json`，并同步两份仓库清单。不得复用旧包校验值或在产物未核验时提前宣布新版有效。
+5. 验证 GitHub、服务器下载入口及更新／完整性文件相互一致，再核对 GitHub、Gitee 的 raw 更新清单。任一渠道失败，应明确未完成项，不能把仅 push 成功当作发布完成。
+
+这项发布授权包含上传静态安装包与更新文件；不代表允许自动安装到用户设备、替换或重启正在运行的 Cove 业务服务，除非用户另外明确要求。
+
 ## 独立重构目录约定
 
 - 本目录的三端代码分别位于 `apps/desktop`、`apps/server`、`apps/mobile`；旧文档中的 `client`、`server`、`mobile` 源码路径应相应替换。
