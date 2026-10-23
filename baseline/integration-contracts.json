@@ -332,14 +332,14 @@
     }
   ],
   "versions": {
-    "root": "2.1.0",
-    "desktop": "2.1.0",
-    "server": "2.1.0",
-    "mobile": "0.8.2"
+    "root": "2.1.1",
+    "desktop": "2.1.1",
+    "server": "2.1.1",
+    "mobile": "0.8.3"
   },
   "mobileFeed": "{\n  \"schemaVersion\": 1,\n  \"platform\": \"android\",\n  \"release\": {\n    \"packageName\": \"com.cove.mobile\",\n    \"versionName\": \"0.7.0\",\n    \"versionCode\": 12,\n    \"minAndroidApi\": 24,\n    \"tag\": \"mobile-v0.7.0\",\n    \"filename\": \"Cove-Mobile-0.7.0.apk\",\n    \"size\": 55943498,\n    \"sha256\": \"d318c1aeaef36558a30dd7826075bb7a1d939ec8a2a82a236440f358a1753e61\",\n    \"notes\": \"# Cove Mobile v0.7.0\\n\\n发布日期：2026-09-28。Android versionCode：12。\\n\\n## 新增与修复\\n\\n- 新增手机屏幕共享，可选择是否同时共享应用播放音频；屏幕视频使用 AV1，不支持 AV1 的设备或服务器会明确提示，不回退到 H.264。共享音频采集需要 Android 10 及以上，并受应用录制策略限制。\\n- 修复手机麦克风降噪链路的失真问题，重新提供 RNNoise 选项；默认降噪模式改为系统降噪，每次冷启动恢复默认值。\\n- 调整 Android 原生音频处理与 React Native 模块构建/初始化路径，避免原生处理配置导致应用启动即闪退。\\n- 新增独立的 HTTPS 更新下载地址配置。默认留空时不访问预设服务器地址；启动更新检查仍可使用 GitHub，配置地址后才会同时检查对应下载服务器。\\n- 改进登录表单在软键盘弹出时的可视区域处理。\\n\\n## 安装说明\\n\\n下载 `Cove-Mobile-0.7.0.apk` 后覆盖安装。应用 ID 与签名保持不变。\\n正式分发包支持 ARM64 与 ARMv7，最低 Android 7.0；不包含 x86 模拟器架构。\"\n  }\n}\n",
-  "gradleVersion": "versionName \"0.8.2\"",
-  "gradleCode": "versionCode 15",
+  "gradleVersion": "versionName \"0.8.3\"",
+  "gradleCode": "versionCode 16",
   "dependencyVersions": {
     "node_modules/@alloc/quick-lru": "5.2.0",
     "node_modules/@babel/code-frame": "7.29.7",
@@ -1320,6 +1320,27 @@
         "These two changes already exist in the merged candidate commit; they are separate from the new screen encoder release changes",
         "Preserve all historical native hashes and historical extension records; accept only these fixed paths, commits and replacement hashes",
         "No additional Keystore, certificate, DNS, updater, manifest or capture implementation exception"
+      ]
+    },
+    "presenceToneRelease": {
+      "baseCommit": "805f4cfba3b7c52062959df9eee7c26a78c758ee",
+      "releaseVersion": "0.8.3",
+      "hashFormat": "SHA-256 of UTF-8 source after CRLF-to-LF normalization; original native relocation hashes remain immutable",
+      "modifiedOriginal": [
+        {
+          "path": "apps/mobile/android/app/src/main/java/com/covemobile/CoveNativeModule.kt",
+          "baseSha256": "456bb848f165d59393fe21e466428776c325ed46102a66fe0891fb10ea73591b",
+          "sha256": "b7d4f135447a5100085f1cba423205d683dd41285c5b18b980d152143b1664bd",
+          "reason": "Replace only the local join/leave ToneGenerator feedback with the approved shared WAV PresenceTonePlayer and close that player during native module invalidation; preserve voice, audio routing, DNS, capture and system-volume behavior"
+        }
+      ],
+      "newSources": [
+        "apps/mobile/android/app/src/main/java/com/covemobile/audio/PresenceTonePlayer.kt"
+      ],
+      "boundaries": [
+        "Only the single CoveNativeModule.kt path above may use this fixed replacement hash; all original native hashes and historical extension evidence remain unchanged",
+        "The selected F-refined-01 PCM is doubled identically for desktop and mobile local presence cues; do not change system or call volume, audio focus, capture, DSP, DNS, certificate or updater behavior",
+        "No Android manifest permission, application ID or signing identity change; current release metadata is 0.8.3 with versionCode 16"
       ]
     }
   }

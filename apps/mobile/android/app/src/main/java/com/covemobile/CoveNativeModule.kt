@@ -5,7 +5,6 @@ import android.content.Context
 import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
-import android.media.ToneGenerator
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -13,6 +12,7 @@ import java.net.InetAddress
 import java.util.concurrent.Executors
 import com.covemobile.audio.AudioRouteRuntime
 import com.covemobile.audio.MicrophoneNoiseRuntime
+import com.covemobile.audio.PresenceTonePlayer
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
@@ -23,6 +23,7 @@ class CoveNativeModule(private val reactContext: ReactApplicationContext) :
   ReactContextBaseJavaModule(reactContext) {
 
   private val mainHandler = Handler(Looper.getMainLooper())
+  private val presenceTones = PresenceTonePlayer(reactContext, mainHandler)
   private val dnsExecutor = Executors.newCachedThreadPool()
   private val audioManager = reactContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
   private var speakerphoneRequested = false
@@ -192,12 +193,7 @@ class CoveNativeModule(private val reactContext: ReactApplicationContext) :
 
   @ReactMethod
   fun playPresenceTone(action: String) {
-    Handler(Looper.getMainLooper()).post {
-      val tone = ToneGenerator(AudioManager.STREAM_MUSIC, 55)
-      val toneType = if (action == "join") ToneGenerator.TONE_PROP_ACK else ToneGenerator.TONE_PROP_NACK
-      tone.startTone(toneType, 180)
-      Handler(Looper.getMainLooper()).postDelayed({ tone.release() }, 260)
-    }
+    presenceTones.play(action)
   }
 
   private fun scheduleSpeakerphoneRoute() {
@@ -247,6 +243,7 @@ class CoveNativeModule(private val reactContext: ReactApplicationContext) :
   }
 
   override fun invalidate() {
+    presenceTones.close()
     speakerphoneRequested = false
     mainHandler.removeCallbacks(reapplySpeakerphone)
     unregisterAudioDeviceCallback()

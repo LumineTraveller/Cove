@@ -10,6 +10,12 @@ export default defineConfig({
     include: ['@cove/client-core', '@cove/contracts'],
   },
   build: {
+    // These tiny local cues must also decode in the packaged file:// renderer.
+    // Leave every other asset on Vite's existing default policy.
+    assetsInlineLimit(file) {
+      if (/[/\\]audio[/\\]assets[/\\]voice-(join|leave)\.wav$/.test(file)) return true;
+      return undefined;
+    },
     commonjsOptions: { include: [/node_modules/, /packages[\\/].*[\\/]dist[\\/]/] },
   },
   server: {

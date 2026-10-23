@@ -56,7 +56,7 @@ export function useAudioMeters(deps: useAudioMetersDependencies) {
       try {
         const context = ensureAudioCtx();
         context.resume().catch(() => {});
-        schedulePresenceTone(context, deps.masterOutputGain.current ?? context.destination, action);
+        void schedulePresenceTone(context, deps.masterOutputGain.current ?? context.destination, action);
       } catch {
         /* 音效失败不影响语音 */
       }

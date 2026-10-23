@@ -15,7 +15,7 @@ const policy = { minimumClientVersion: '2.0.0', serverVersion: '2.0.2', upgradeR
 
 test('the actual desktop identity matches its package and a supported patch never loops on upgrade flags', () => {
   assert.equal(CLIENT_VERSION, packageInfo.version);
-  assert.equal(COVE_RELEASE_VERSION, '2.1.0');
+  assert.equal(COVE_RELEASE_VERSION, packageInfo.version);
   assert.equal(CLIENT_VERSION, COVE_RELEASE_VERSION);
   assert.equal(isSupportedClientVersion(CLIENT_VERSION, COVE_RELEASE_VERSION), true);
   assert.equal(requiresClientUpgrade(policy), false);

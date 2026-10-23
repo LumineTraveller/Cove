@@ -1,86 +1,52 @@
 # Cove
 
-当前分支包含本地改进，尚未发布。模块边界和扩展约定见 [架构说明](docs/architecture/README.md)，连接生命周期与恢复边界见 [连接恢复说明](docs/architecture/connection-recovery.md)，历史重构记录见 [REFACTOR_STATUS.md](REFACTOR_STATUS.md)。版本号以各应用的 `package.json` 和发布清单为准。
+Cove 是面向朋友和小群体的自托管语音、聊天与屏幕共享应用。大家可以在同一个房间里聊天、通话、观看共享画面、播放语音包，也可以在获得授权后远程操作共享者的 Windows 桌面。
 
-2026-10-22 本地交付、独立测试启动入口、回归结果和统一人工验收步骤见 [本次改进验收说明](docs/testing/2026-10-22-improvements.md)。
+| 应用 | 当前源码版本 | 平台 |
+| --- | --- | --- |
+| 桌面客户端 | **2.1.1** | Windows |
+| 桌面服务端 | **2.1.1** | Windows 托盘；服务端也可独立运行在 Linux |
+| 手机客户端 | **0.8.3** | Android |
 
-Cove 是一个可自托管的实时语音与聊天应用。成员在房间内保持在线状态，随时加入语音、共享屏幕、播放语音包，并支持远程控制共享方的桌面。
+[下载与项目主页](https://cove.luxe) · [GitHub Releases](https://github.com/LumineTraveller/Cove/releases) · [本版说明](RELEASE_NOTES.md) · [历史更新](CHANGELOG.md)
 
-提供三个客户端形态，共用同一个服务器：
+## 开始使用
 
-- **Windows 桌面客户端** —— Electron + React，功能最完整（屏幕共享、系统/单应用音频共享、远程控制）
-- **Windows 桌面服务器** —— Electron 托盘程序，内嵌服务端，适合本机或小范围自托管
-- **Android 手机客户端** —— React Native，可创建或加入房间、加入语音、发起或观看屏幕共享、播放语音包，也可请求控制支持远控的桌面共享
+1. 从官网下载 Windows 客户端，或在 GitHub Releases 下载 Android APK。Windows 服务端安装包供需要自建服务器的人使用，普通成员只需安装客户端。
+2. 填写你要连接的服务器地址，使用自己的账号注册或登录。如果服务器启用了访问门禁，先输入管理员提供的服务器访问密码。
+3. 创建或加入房间，再加入语音、开始共享或观看朋友的共享。
 
-## 技术栈
+服务器访问密码、账号密码和房间密码各自独立。请向邀请你的人确认服务器地址和访问方式；自建服务器不会自动获得官方服务器上的账号与房间。
 
-| 层 | 技术 |
-|---|---|
-| 服务器 | Node.js + TypeScript、Express、Socket.IO（信令与聊天）、**mediasoup**（WebRTC SFU）、**better-sqlite3**（持久化） |
-| 桌面客户端 | React 18 + TypeScript + Vite + Tailwind CSS、mediasoup-client、socket.io-client、Electron |
-| 手机客户端 | React Native（bare workflow，New Architecture + Hermes）、react-native-webrtc、mediasoup-client、Kotlin 原生模块 |
+桌面观看时，打开共享底栏的 **“共享操作”上拉菜单 → “置顶小窗”**，即可把画面放到可拖动、缩放的置顶窗口中。关闭小窗或点击“返回主窗口”会回到原观看界面，语音继续。小窗只用于观看；进入前需要退出远控或批注。
 
-媒体走 SFU 架构：客户端与服务器建立 WebRTC 连接，由服务器转发。当前实现依赖可达的 SFU 候选地址，需要正确配置公网 IP 并放通 UDP/TCP 媒体端口；没有配置通用 TURN 中继，受限网络仍需单独验证。
+## 可以做什么
 
-## 仓库结构
+| 功能 | Windows 桌面端 | Android 手机端 |
+| --- | --- | --- |
+| 房间与聊天 | 房间密码、人数限制、文字、图片、动图、历史消息 | 创建／加入房间、聊天与图片消息 |
+| 语音 | 加入／退出、静音、成员独立音量、输入输出设备选择、降噪与回声消除 | 加入／退出、静音、音量与音频路由、原生降噪 |
+| 屏幕共享 | 发起与观看，分辨率／帧率预设，全屏与置顶小窗 | 发起与观看，采集缩放与画质设置 |
+| 共享音频 | 系统音频或单个应用音频，可独立调节共享声音 | 可选采集播放音频，受 Android 版本及被共享应用的录音策略限制 |
+| 远程控制 | 请求控制、授权、撤销与本地急停；Windows 可作为受控端 | 可请求控制支持远控的 Windows 共享端 |
+| 语音包 | 当前房间内上传、编辑、排序、收藏与同步播放 | 当前房间内管理与播放 |
+| 诊断与更新 | 媒体状态、手动导出诊断、更新中心 | 媒体状态、手动导出诊断、应用内更新检查 |
 
-```
-apps/
-  desktop/               Electron + React 桌面客户端
-    src/app/             应用组合与登录入口
-    src/features/        房间、聊天、媒体、账户、更新等功能模块
-    electron/            Windows 采集、远控、更新器和 IPC
-    tests/               单元、原生 helper 与真实 Chromium 回归
-  server/                Node 服务端与 Electron 托盘外壳
-    src/bootstrap/       运行时装配、启动和资源释放
-    src/features/        按业务拆分的服务、HTTP 与 Socket 处理器
-    src/features/media/  mediasoup worker/router/transport
-  mobile/                独立 React Native 包与 lockfile
-    src/features/        会话、房间、媒体、键盘、更新等功能模块
-    scripts/             APK 清单与发布校验
-    __tests__/           Jest 回归
-    android/             原生工程、RNNoise 与 WebRTC 插桩
-packages/
-  contracts/             共用数据协议与兼容字段
-  client-core/           ACK 请求、会话注册、断线宽限
-  media-core/            平台无关采集、处理和路由扩展接口
-  diagnostics/           结构化诊断与错误作用域接口
-tooling/                 隔离开发启动器、迁移工具与校验工具
-tests/                   跨端协议和模块边界回归
-baseline/                原工作区指纹和旧路径到新路径映射
-mobile/update.json       保留原 raw 更新清单 URL 的兼容副本
-scripts/                 发布脚本（镜像安装包到下载服务器）
-docs/                    技术实验记录
-.github/workflows/       PR/main 回归门禁、桌面与手机发布工作流
-AGENTS.md                发布流程与协作约定（发布前必读）
-CHANGELOG.md             历史版本记录
-RELEASE_NOTES.md         当前版本的发布说明
-start.ps1                Windows 一键启动开发环境（服务器 + Vite + Electron）
-```
+桌面端还支持共享画面批注、房间外观设置、个人备注、头像与明暗主题。远控和共享都需要相应权限；Windows 全局远控急停键为 `Ctrl+Alt+Shift+X`。
 
-`assets/branding/` 存放图标源文件；`design-audit/`、`design-qa/` 是设计走查截图。
+语音包按房间隔离。升级保留已有记录和音频文件；历史上未归属房间的全局语音包不会被自动分配或广播到新房间。
 
-## 架构概览
+### 连接与恢复
 
-```
-桌面客户端 ─┐
-            ├── Socket.IO ──▶ 服务器 ──▶ SQLite (~/.cove/cove.db)
-Android    ─┘                    │
-                                 └── mediasoup SFU（单 worker / 单 router）
-   音频·屏幕：客户端 ──WebRTC──▶ SFU ──WebRTC──▶ 同房间其他成员
-```
+Cove 分开处理信令连接与媒体连接：信令暂时中断时，健康的语音／观看媒体可以保留，不会仅因登记超时就立即被清理。支持该能力的客户端与服务端会对失败的既有媒体通道进行有限次数的 ICE restart；旧服务端使用兼容的恢复路径。
 
-- **信令与聊天**走 Socket.IO：登录注册、房间增删改、成员与语音状态、消息、语音包、远程控制协商。
-- **媒体**走 mediasoup：服务端只有一个全局 Router，房间隔离在应用层按 `roomId` 过滤完成。
-- 媒体源用 `appData.type` 区分四类：`mic`（麦克风）、`screen`（屏幕画面）、`screen-audio`（屏幕附带音频）、`application-audio`（单应用音频）。
-- 屏幕类媒体**按需推流**：没有观看者时，服务端暂停 SFU 端 Producer，并通过 `screen:demand` 通知发送端暂停本地 Producer，避免继续发送无用 RTP。
-- 服务端创建的每个 Consumer 初始都处于 paused 状态；接收端完成 Consumer 配置后，必须显式发送 `ms:resume-consumer` 才会开始接收媒体。这与屏幕无人观看时的 Producer 按需暂停是两套不同流程。
+恢复会保留仍有效的静音和观看意图，但不会自动打开麦克风、启动共享或恢复远控授权。主动离开、切房间和取消观看优先于恢复；服务器重启、会话失效或恢复耗尽时，会清理失效资源并提示重新加入。网络切换能否恢复仍取决于设备、网络和服务器地址可达性。
 
-直接启动服务端时 HTTP 默认 **3001**，可通过 `COVE_HTTP_PORT` 配置；媒体默认 **40000**，UDP 与 TCP 共用同号端口。隔离开发启动器单独使用 HTTP **3301**、媒体 **41000** 和 Vite **55173**。
+遇到偶发问题，可以手动导出媒体诊断，保留发生时间和操作步骤。导出包含有限的媒体数值及恢复阶段，不包含账号凭据、ICE 密码、完整 SDP 或聊天内容。RTT 表示往返时间，不是端到端画面／声音延迟。详见 [连接恢复](docs/architecture/connection-recovery.md)、[ICE restart](docs/architecture/ice-restart.md) 和 [恢复诊断](docs/architecture/recovery-diagnostics.md)。
 
-## 快速开始（开发）
+## 开发
 
-前提：Node.js 24、npm。Windows 桌面客户端的部分功能（系统音频、受控端远程输入）依赖 Windows。普通回归与服务端测试使用 Node 24 的 `node:sqlite`；手机包需要独立安装依赖。
+仓库使用 npm workspaces，手机端依赖独立安装。建议使用 Node.js **24**（与仓库回归 CI 一致）和 npm；Android 构建还需要 JDK **17**、Android SDK 与 NDK，具体版本见 [手机端说明](apps/mobile/README.md) 和原生工程配置。
 
 ```bash
 npm ci
@@ -88,193 +54,122 @@ npm --prefix apps/mobile ci
 npm run build:packages
 ```
 
-启动方式：
+启动本地开发环境：
 
 ```bash
-npm run dev          # 隔离服务器(:3301) 与 Vite(:55173)
-npm run dev:app      # 服务器 + Vite + Electron 桌面客户端（完整体验）
-npm run dev:server   # 仅启动 Node 服务端
-npm run dev:client   # 仅启动 Vite + Electron 客户端
-
-./start.ps1          # Windows：启动隔离全套，不清理其他应用的端口
+npm run dev          # 隔离服务端 + Vite，浏览器访问前端
+npm run dev:app      # 隔离服务端 + Vite + Electron 客户端
+npm run dev:server   # 仅隔离 Node 服务端
+npm run dev:client   # 仅 Vite + Electron，连接已有服务端
 ```
 
-浏览器访问 `http://127.0.0.1:55173`，或使用 Electron 窗口。本地隔离服务地址为 `http://127.0.0.1:3301`，数据库和桌面档案均放在本目录的 `runtime/`，不会读取原应用的账号或生产数据。
+Windows 也可运行 `./start.ps1` 启动完整开发环境。默认 HTTP 为 `3301`、媒体端口为 `41000`、Vite 为 `55173`；服务端数据和桌面开发档案放在仓库的 `runtime/` 下。启动器只管理自己创建的进程，端口冲突时不会关闭其他程序。
 
-客户端通过 `localStorage.cove_server_url` 记住服务器地址；开发环境可用 `VITE_COVE_DEFAULT_SERVER` 注入默认值。打包后的默认策略保持不变。
-
-### 手机端
-
-手机端是独立的 npm 包，需要单独安装依赖，并要求 JDK 17、Android SDK 与 NDK：
+手机开发与构建：
 
 ```bash
 cd apps/mobile
-npm ci
-npm run typecheck && npm run lint
-npm run android:apk    # 产物在 android/app/build/outputs/apk/release/
+npm start            # Metro
+npm run android      # 构建并运行到已连接的开发设备
+npm run android:apk  # 生成 Release APK
 ```
 
-详见 [手机端说明](apps/mobile/README.md)。测试用独立 Android 包可在 `apps/mobile/android` 运行 `gradlew.bat assembleDebug -PcoveRefactor -PreactNativeArchitectures=arm64-v8a`；包名为 `com.cove.mobile.refactor`，内置 JS/Hermes，不覆盖正式版。
+### 仓库结构
 
-## 构建
+```text
+apps/
+  desktop/           Electron + React 桌面客户端
+  server/            Node 服务端与 Windows 托盘外壳
+  mobile/            React Native Android 客户端，独立 lockfile
+packages/
+  contracts/         共用协议与兼容字段
+  client-core/       登记、请求、连接恢复与诊断策略
+  media-core/        平台无关媒体扩展接口
+  diagnostics/       结构化诊断接口
+tooling/             隔离开发、构建与回归工具
+tests/               跨端协议和模块边界回归
+scripts/             发布与下载镜像脚本
+docs/                架构、验证及维护说明
+mobile/update.json   旧 raw 更新地址的兼容清单
+```
+
+桌面端使用 React、TypeScript、Vite 和 Electron；手机端使用 React Native、Hermes 与 Kotlin 原生模块。Socket.IO 承载信令和聊天，mediasoup SFU 转发 WebRTC 媒体，SQLite 保存账号、房间、聊天和语音包记录。应用之间通过共享包协作，不直接导入另一端的源码。
+
+### 构建与检查
 
 ```bash
-npm run build:client            # apps/desktop/dist-app/
-npm run build:server            # apps/server/dist-app/
+npm run build:client            # Windows 客户端：apps/desktop/dist-app/
+npm run build:server            # Windows 服务端：apps/server/dist-app/
 npm run build -w cove-server    # 仅编译 Node 服务端
+npm run check                  # 类型、构建与架构检查
 ```
 
-## 部署与配置
-
-### 数据目录
-
-服务端所有状态都在一个数据目录里，默认 `~/.cove`，可用 `COVE_DATA_DIR` 覆盖：
-
-```
-cove.db                SQLite 数据库（WAL 模式）
-sounds/                语音包音频
-chat-images/<roomId>/  聊天图片
-server-config.json     桌面服务器的配置文件
-bootstrap-token.txt    启用访问门禁后首次启动生成的一次性凭据
-server.log             桌面服务器日志
-```
-
-数据库结构变更通过启动时的兼容性迁移完成，**不会删除已有账号、房间、聊天记录或语音包**。
-
-### 环境变量
-
-| 变量 | 说明 |
-|---|---|
-| `MEDIASOUP_IP` | 服务器对外的公网 IP。本地开发填 `127.0.0.1`；内网穿透填隧道的公网 IP |
-| `MEDIASOUP_PORT` | WebRTC 媒体端口，默认 `40000`。隧道的公网端口必须与之相同 |
-| `COVE_DATA_DIR` | 数据目录，默认 `~/.cove` |
-| `COVE_DOWNLOAD_DIR` | 安装包与更新清单的静态目录。Linux 默认 `/var/www/cove-download`，让服务器自身充当下载镜像 |
-| `COVE_SERVER_SECURITY_ENABLED` | 服务器访问门禁默认开启；显式设为 `false`、`0`、`no` 或 `off` 可关闭 |
-| `COVE_BOOTSTRAP_TOKEN` / `COVE_BOOTSTRAP_TOKEN_FILE` | 由部署系统提供一次性初始化凭据，代替自动生成的 `bootstrap-token.txt` |
-| `COVE_TRUST_PROXY` | 反向代理正确设置了 `X-Forwarded-Proto` 时设为 `true` |
-| `MEDIASOUP_WORKER_BIN` | mediasoup worker 可执行文件路径（打包后指向 `app.asar.unpacked`，通常无需手动设置） |
-
-桌面服务器也可以把这些写进 `~/.cove/server-config.json`，启动时会读入并转为环境变量：
-
-```json
-{
-  "mediasoupIp": "203.0.113.10",
-  "mediasoupPort": 40000,
-  "serverSecurityEnabled": true
-}
-```
-
-### Linux 服务器
-
-服务端编译产物是普通 Node 程序，可以用 systemd 托管：
+按受影响范围运行回归：
 
 ```bash
-npm ci && npm run build:packages
+node tooling/ci-regression.cjs desktop
+node tooling/ci-regression.cjs mobile
+node tooling/ci-regression.cjs server
+```
+
+[普通 PR／main 回归工作流](.github/workflows/regression.yml) 使用相同入口。逻辑测试、原生边界夹具和本机 SFU 测试不能替代真实设备的音频路由、弱网或长通话验收。更多入口见 [自动回归说明](docs/architecture/regression-ci.md) 和 [媒体恢复验证矩阵](docs/testing/media-recovery-matrix.md)。
+
+## 自建服务器
+
+Windows 可使用桌面服务端安装包，通过托盘配置运行。Linux 可直接构建和启动 Node 服务端：
+
+```bash
+npm ci
+npm run build:packages
 npm run build -w cove-server
-node apps/server/dist/index.js
+MEDIASOUP_IP=203.0.113.10 node apps/server/dist/index.js
 ```
 
-需要放通 3001（HTTP/Socket.IO）与 `MEDIASOUP_PORT`（媒体，UDP+TCP）。公网部署必须使用 HTTPS/WSS。
+示例中的 `203.0.113.10` 需替换成客户端能够访问的实际公网 IP。可用 systemd 等进程管理器托管 Node 服务。
 
-服务端在检测到同级的 `apps/desktop/dist` 时会一并托管前端静态文件，可以直接用服务器地址访问网页版客户端。部署必须同时带上所依赖的共享包和 workspace 运行依赖，不可只复制 `dist`。
+直接启动时，HTTP／Socket.IO 默认使用 **3001**，WebRTC 媒体默认使用 **40000（UDP 与 TCP）**。公网部署需要 HTTPS／WSS，并正确转发媒体端口；只代理 HTTP 无法保证媒体可达。当前没有配置通用 TURN 中继。
 
-## 服务器访问安全
+| 环境变量 | 用途 |
+| --- | --- |
+| `COVE_HTTP_PORT` | HTTP／Socket.IO 监听端口，默认 `3001` |
+| `MEDIASOUP_IP` | 对客户端公布的可达媒体地址，本机开发可用 `127.0.0.1` |
+| `MEDIASOUP_PORT` | 媒体端口，默认 `40000`，映射时需保持公布地址与端口正确 |
+| `COVE_DATA_DIR` | 数据目录，默认 `~/.cove` |
+| `COVE_DOWNLOAD_DIR` | 安装包和更新清单目录；Linux 默认 `/var/www/cove-download` |
+| `COVE_TRUST_PROXY` | 仅在可信反向代理正确设置转发头时设为 `true` |
+| `COVE_SERVER_SECURITY_ENABLED` | 访问门禁默认开启；显式设为 `false` 可关闭 |
+| `COVE_BOOTSTRAP_TOKEN` / `COVE_BOOTSTRAP_TOKEN_FILE` | 由部署环境提供一次性初始化凭据 |
 
-服务器访问密码能力**默认开启**，桌面端与移动端按服务器返回的状态显示密码输入并完成验证。显式关闭时沿用现有账号登录流程，新旧客户端都不需要服务器访问密码，也不会生成初始化凭据。未设置、空值或无法识别的开关值都保持开启，避免配置拼写错误绕过门禁。
+服务端默认数据目录包含 `cove.db`、`sounds/`、`chat-images/` 等内容。升级前备份完整数据目录；运行中备份数据库应使用 SQLite 在线备份，或先停止服务再备份。服务器重启会丢失内存中的在线／语音会话，持久化记录仍保留。
 
-通常无需设置启用开关；需要明确关闭时，在启动服务器前设置：
+桌面服务端将配置保存到数据目录中的 `server-config.json`；其中已有的显式配置会在启动时生效。普通 Node 服务端使用环境变量。部署时需带上共享包和 workspace 运行依赖，不能只复制 `apps/server/dist`。
 
-```powershell
-$env:COVE_SERVER_SECURITY_ENABLED = "false"
-```
+### 首次访问与安全
 
-打包服务器新建的 `~/.cove/server-config.json` 默认写入 `"serverSecurityEnabled": true`。已有配置不会自动改写：其中显式的布尔值会在启动时覆盖环境变量；已有 `false` 仍保持关闭，需要启用时由管理员改为 `true` 后重启。普通 Node 服务器直接使用环境变量开关，不读取这个打包配置文件。
+访问门禁开启的新服务器会生成一次性 `bootstrap-token.txt`，也可以使用上面的环境变量注入初始化凭据。管理员在客户端“服务器安全设置”中完成初始化，设置独立的服务器访问密码。源码没有默认访问密码。
 
-开启后的新服务器需要先初始化。首次启动沿用现有机制，在数据目录生成一次性管理员凭据 `bootstrap-token.txt`，也可以由部署系统通过 `COVE_BOOTSTRAP_TOKEN` 或 `COVE_BOOTSTRAP_TOKEN_FILE` 提供；服务器访问密码由管理员在客户端初始化时设置，源码不包含默认密码。尚未初始化时受保护的 REST 和 Socket.IO 请求会被拒绝。本次源码变更没有读取或设置实际凭据，也没有启用正在运行的服务器；真实凭据应在用户后续发布时本地配置。
+客户端在服务器要求时完成访问验证；账号登录和房间密码仍分别校验。门禁开启时，不支持所需协议的旧客户端可能需要先升级。公网连接应使用 HTTPS／WSS，避免在 URL、日志或共享截图里暴露访问凭据。
 
-客户端第一次连接新服务器时用这个凭据设置独立的“服务器访问密码”。**它与账号密码、房间密码是三套互不相同的凭据**，初始化成功后一次性凭据会被删除（使用环境变量时由外部密钥管理）。
+## 更新与发布
 
-`GET /api/security/status` 只用于检查服务器状态，不会主动弹出客户端初始化窗口。桌面端登录页在输入服务器地址后自动检查状态，并在地址下方显示“服务器安全设置”：新服务器填写一次性初始化凭据并设置至少 8 位的新密码；已初始化服务器只填写已有的服务器访问密码。
+官网下载地址和 GitHub Releases 提供分发入口；自动更新的下载来源与用户填写的聊天服务器地址独立：
 
-仅在服务器明确启用访问门禁后，未携带当前客户端协议标识的旧版客户端会收到“客户端版本过旧，无法登录，请升级到最新版本”的提示；服务器不会因此删除原有账号或聊天数据。
+- 桌面端配置：`apps/desktop/electron/update-config.ts`。
+- 手机端配置：`apps/mobile/src/features/updates/updateConfig.ts`。
+- 两端的 `UPDATE_DOWNLOAD_BASE_URL` 默认留空，此时只检查 GitHub。显式设置有效 HTTPS 下载地址并重新打包后，才检查该下载服务器，保留 GitHub 备用源。
+- 不从聊天地址推导自动更新地址，也不自动补填官方域名。官方域名为 `cove.luxe`。
+- 桌面手动“从服务器下载”使用当前选择的聊天服务器地址；自建服务器需另外提供对应的 `/downloads/` 和 `/releases/` 文件。
 
-### 凭据存储
+Android 更新由应用检查清单，再交给浏览器／系统安装器完成下载和用户确认安装。覆盖升级需要兼容的签名身份及递增的 `versionCode`；更换签名的边界见 [Android 签名迁移说明](docs/architecture/mobile-signing-migration.md)。
 
-服务器访问密码只在服务端以带盐哈希保存。客户端拿到的是有过期时间的访问令牌：桌面端令牌只保留在当前应用窗口的 sessionStorage/内存中，移动端只保留在当前进程内，**不会把服务器密码写入 URL、localStorage 或 AsyncStorage**。
+桌面客户端与桌面服务端使用 `vX.Y.Z` 标签，手机使用独立的 `mobile-vX.Y.Z` 标签。发布先校验最终安装包，再公开 GitHub Release、镜像同一产物，最后公布更新清单。Android 清单需同时维护 `apps/mobile/update.json` 与兼容副本 `mobile/update.json`。Gitee 只同步源码、清单及标签，不创建 Release 或上传附件。完整操作与完成条件见 [AGENTS.md](AGENTS.md)。
 
-公网连接的初始化、解锁、REST、静态音频/图片和 Socket.IO 均须使用 HTTPS/WSS；仅 loopback 的本地开发连接允许 HTTP。反向代理部署如能正确设置 `X-Forwarded-Proto`，可显式设置 `COVE_TRUST_PROXY=true`。
+## 进一步阅读
 
-客户端历史记录仍保存用户输入的服务器 URL 用于实际连接；DNS 解析得到的规范化 IPv4/IPv6 地址集合只用作历史记录键，因此同一服务器的域名和 IP 别名可以合并，不会把连接地址替换成解析后的 IP。
-
-## 主要功能
-
-**房间与聊天**
-- 创建/删除房间，房间密码、人数上限、房间头像与明暗主题渐变背景
-- 文字聊天、图片与动图（支持剪贴板粘贴 GIF）、链接解析、历史分页
-- 房主可禁言或移出成员
-
-**语音**
-- 随时加入/退出房间语音，独立调节每个成员的音量
-- 麦克风降噪（RNNoise）、回声消除、发送增益、输入设备选择
-- 信令与媒体分别判断断线：短暂信令中断可保留已有媒体和静音状态；新服务器会话或持续媒体失败会清理旧资源，需要重新加入
-- 支持的新服务端可对已有媒体通道进行有界 ICE restart：持续断开等待 1.5 秒自愈、失败立即尝试，最多 3 次请求、20 秒总期限；旧服务端保持原策略。不会自动打开采集或恢复远控授权，见 [ICE 恢复说明](docs/architecture/ice-restart.md)
-- 登录登记确认缺失时有限重试，耗尽后保留登录记录并允许手动重试；不将丢失 ACK 当成凭据失效
-
-**屏幕与音频共享**
-- 屏幕共享，多档分辨率与帧率预设，按画面活跃度自动调整帧率
-- 共享屏幕附带系统音频
-- Windows 独有：共享单个应用的音频（WASAPI 进程级采集，自动排除 Cove 自身）
-- Android：支持屏幕共享和采集缩放选项，目标为 30 FPS；可选播放音频受 Android 版本和被共享应用录音策略限制
-- 桌面可显式开启“兼容观看（VP8）”，默认关闭；不改变分辨率、帧率或码率上限，需停止后重新共享。详见 [编码兼容说明](docs/architecture/screen-codec-compatibility.md)，设备兼容性仍需真机验证
-
-**远程控制**
-- 请求控制他人的共享屏幕，支持指针、滚轮、按键与安全白名单
-- 本地用户活动时自动让位，`Ctrl+Alt+Shift+X` 全局急停
-- Android 可作为控制端；远控授权在断线后撤销，重连不会自动重新授权
-
-**语音包**
-- 上传音频、裁剪编辑、拖拽排序、重命名、向全房间播放、收藏
-
-**个人资料**
-- 头像裁剪（支持 GIF）、本地个人备注名、在线成员与平台标识
-
-**其他**
-- 明暗主题、聊天字号调节、自签名服务器证书例外
-- 桌面端内置更新中心，手机端启动时自动检查更新
-
-自动更新下载地址与聊天服务器独立：桌面端配置 `apps/desktop/electron/update-config.ts`、手机端配置 `apps/mobile/src/features/updates/updateConfig.ts` 中的 `UPDATE_DOWNLOAD_BASE_URL`，默认留空，只检查 GitHub，不从聊天服务器推导或补填下载地址。明确填写有效 HTTPS 下载地址后，启动时无需登录即可检查该服务器的更新，GitHub 保留为备用源；修改后需重新打包。官方域名为 `cove.luxe`，不预填到下载变量中。桌面端手动“从服务器下载”仍使用当前填写的聊天服务器地址。
-
-## 测试
-
-普通 PR 和 `main` 提交的自动门禁位于 [regression.yml](.github/workflows/regression.yml)，与本地使用同一入口。工作流只检查代码，不打包、发布或安装到设备：
-
-```bash
-node tooling/ci-regression.cjs server   # 共享包、服务端类型/单测、loopback 集成和真实 SQLite/SFU smoke
-node tooling/ci-regression.cjs desktop  # 桌面类型、独立进程 TS/CJS 测试；Windows 包含原生 helper 夹具
-node tooling/ci-regression.cjs mobile   # 手机类型与 Jest（原生边界使用 mock）
-node tooling/ci-regression.cjs server --plan  # 仅列出步骤，不执行
-```
-
-先按上文安装根目录和手机依赖。入口会构建共享包，遇到失败立即停止；服务端 smoke 只使用 `runtime/` 临时资料和本地端口。桌面测试必须使用桌面目录的 JSX 配置及每文件进程隔离，不能将全套测试改成 `--test-isolation=none`。
-
-这些门禁覆盖逻辑、原生边界夹具和本地集成，不等同于真机或真实网络验收。真实 Chromium 音频测试见 `apps/desktop/package.json` 的 `test:microphone`、`test:rnnoise` 等脚本。手机端 Kotlin 测试在 `apps/mobile/android` 执行 `gradlew.bat testDebugUnitTest -PcoveRefactor`。Android 路由、Wi-Fi/蜂窝切换、弱网、锁屏和长通话仍需统一验收；更多命令见 [自动回归说明](docs/architecture/regression-ci.md) 和 [媒体恢复验证矩阵](docs/testing/media-recovery-matrix.md)。
-
-离线诊断导出可用 `node tooling/analyze-media-diagnostics.cjs <诊断文件.json>` 汇总；`node tooling/verify-media-recovery.cjs --repeat 3` 可重复运行本地恢复回归。RTT 是往返时间，回归报告中的 testDuration 是测试耗时，二者都不是端到端媒体延迟，也不能据此宣称画面或声音延迟改善。
-
-## 发布
-
-桌面端与服务器共用版本号（tag `v*.*.*`），手机端独立编号（tag `mobile-v*.*.*`）。
-
-发布流程有严格的顺序与校验要求：**GitHub Release 先公开，下载服务器镜像最后发布**；更新清单中的版本号与 SHA-256 必须来自最终构建产物实算，不得手填。Gitee 只同步仓库代码与标签，不创建 Release、不上传附件。
-
-完整流程见 [`AGENTS.md`](AGENTS.md)；当前版本内容见 [`RELEASE_NOTES.md`](RELEASE_NOTES.md)，历史见 [`CHANGELOG.md`](CHANGELOG.md)。
-
-本次重构未发布任何更新。后续手机版发布应在核验最终 APK 和下载源之后，同时同步 `apps/mobile/update.json` 与根目录 `mobile/update.json`，保持旧客户端 raw URL 兼容。
-
-## 已知限制
-
-- 服务端成员与语音状态保存在内存中，重启服务器会使所有成员退出语音（房间、消息、账号、禁言记录不受影响）。
-- WASAPI 系统/单应用音频共享和远控受控端仅支持 Windows；Android 可作为远控控制端，其播放音频采集使用系统屏幕共享授权，受应用录音策略限制。
-- 手机端可发起屏幕共享并选择采集缩放；可选播放音频采集要求 Android 10 及以上且被共享应用允许录制，需要配套支持独立共享通道的服务端。实际帧率取决于画面、编码器和设备。
-- 手机端 Release APK 默认保留既有 debug keystore 签名；外部正式签名仅提供显式配置入口，不能直接切换现有用户的签名身份。确认、备份和覆盖安装边界见 [签名迁移说明](docs/architecture/mobile-signing-migration.md)。
-- Windows 服务端托盘仍保留现有 Electron 运行时；维护候选未通过原生 SQLite ABI 验证，未激活升级，详见 [运行时维护状态](docs/architecture/runtime-maintenance.md)。
+- [模块架构与扩展点](docs/architecture/README.md)
+- [屏幕发布与换流生命周期](docs/architecture/screen-publication-lifecycle.md)
+- [桌面与手机编码兼容](docs/architecture/screen-codec-compatibility.md)
+- [语音包处理队列与资源限制](docs/architecture/soundpack-processing.md)
+- [桌面置顶观看小窗](docs/architecture/floating-viewer.md)
+- [Windows 服务端运行时维护](docs/architecture/runtime-maintenance.md)
+- [Android 构建与发布](apps/mobile/README.md)

@@ -120,6 +120,8 @@ function playbackHarness() {
       };
       if (id.endsWith('/disconnectGrace')) return disconnectGrace;
       if (id === '@cove/client-core') return sharedCore;
+      // Match Vite's asset URL imports without treating binary audio as TS.
+      if (id.endsWith('?url')) return { default: new URL(id.slice(0, -4), moduleURL).href };
       if (id.startsWith('.')) return loadModule(new URL(id + '.ts', moduleURL));
       return {};
     },

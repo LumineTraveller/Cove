@@ -7,8 +7,8 @@ const ts = require('typescript');
 const root = path.resolve(__dirname,'..');
 const contracts = require('../baseline/integration-contracts.json');
 const read = file => fs.readFileSync(path.join(root,file),'utf8').replace(/\r\n/g,'\n');
-// The original relocation hashes remain immutable. Only this release's five
-// reviewed screen files may use a separately documented replacement hash.
+// The original relocation hashes remain immutable. Only fixed, reviewed
+// native extension allowlists may use separately documented replacement hashes.
 const screenEncoderReleaseAllowlist = new Map([
   ['apps/mobile/android/app/src/main/java/com/oney/WebRTCModule/CoveScreenModule.java','0e7b57f5ac626d2e87fe629c8bfddc5a002596091ee636b93e97b03353d2985d'],
   ['apps/mobile/android/app/src/main/java/com/oney/WebRTCModule/CoveScreenRuntime.java','05ca55a1a9c4e19a9cc45ea2f5d66f3610dbc83834dda1497e20278e2ad97de1'],
@@ -63,6 +63,29 @@ function integratedCandidateOverrides(evidence, originalHashes) {
     overrides.set(entry.path,entry.sha256);
   }
   assert.equal(overrides.size,integratedCandidateAllowlist.size);
+  return overrides;
+}
+const presenceToneReleaseAllowlist = new Map([
+  ['apps/mobile/android/app/src/main/java/com/covemobile/CoveNativeModule.kt', {
+    baseSha256:'456bb848f165d59393fe21e466428776c325ed46102a66fe0891fb10ea73591b',
+    sha256:'b7d4f135447a5100085f1cba423205d683dd41285c5b18b980d152143b1664bd',
+  }],
+]);
+function presenceToneReleaseOverrides(evidence, originalHashes) {
+  assert.equal(evidence?.baseCommit,'805f4cfba3b7c52062959df9eee7c26a78c758ee');
+  assert.equal(evidence.releaseVersion,'0.8.3');
+  assert.ok(Array.isArray(evidence.modifiedOriginal),'presence tone exceptions must be an array');
+  const overrides=new Map();
+  for(const entry of evidence.modifiedOriginal){
+    const accepted=presenceToneReleaseAllowlist.get(entry.path);
+    assert.ok(accepted,'presence tone exception is outside the reviewed allowlist: '+entry.path);
+    assert.ok(!overrides.has(entry.path),'duplicate presence tone exception: '+entry.path);
+    assert.equal(originalHashes.get(entry.path),accepted.baseSha256,'original presence tone baseline changed: '+entry.path);
+    for(const key of ['baseSha256','sha256'])assert.equal(entry[key],accepted[key],key+': '+entry.path);
+    assert.ok(typeof entry.reason==='string'&&entry.reason.trim(),'presence tone exception requires a reviewable reason');
+    overrides.set(entry.path,entry.sha256);
+  }
+  assert.equal(overrides.size,presenceToneReleaseAllowlist.size,'the single presence tone exception must be documented');
   return overrides;
 }
 function files(dir){return fs.readdirSync(dir,{withFileTypes:true}).flatMap(entry=>entry.isDirectory()?files(path.join(dir,entry.name)):[path.join(dir,entry.name)]);}
@@ -186,6 +209,7 @@ test('accepted native capture, DSP and Android code survives relocation',()=>{
   const overrides = new Map([
     ...integratedCandidateOverrides(contracts.nativeExtensionEvidence.integratedCandidates,originalHashes),
     ...screenEncoderReleaseOverrides(evidence,originalHashes),
+    ...presenceToneReleaseOverrides(contracts.nativeExtensionEvidence.presenceToneRelease,originalHashes),
   ]);
   for(const file of contracts.native){
     const buffer=fs.readFileSync(path.join(root,file.path));
@@ -211,6 +235,19 @@ test('native release exceptions reject duplicates and files outside the reviewed
   const first=evidence.modifiedOriginal[0];
   assert.throws(()=>screenEncoderReleaseOverrides({...evidence,
     modifiedOriginal:[{...first,baseSha256:first.sha256},...evidence.modifiedOriginal.slice(1)]},originalHashes),/does not preserve its original hash/);
+});
+test('presence tone exception rejects duplicates, other files and unreviewed hashes',()=>{
+  const evidence=contracts.nativeExtensionEvidence.presenceToneRelease;
+  const originalHashes=new Map(contracts.native.map(file=>[file.path,file.sha256]));
+  const first=evidence.modifiedOriginal[0];
+  assert.throws(()=>presenceToneReleaseOverrides({...evidence,
+    modifiedOriginal:[first,first]},originalHashes),/duplicate presence tone exception/);
+  assert.throws(()=>presenceToneReleaseOverrides({...evidence,
+    modifiedOriginal:[{...first,path:'apps/mobile/android/app/src/main/java/com/covemobile/ServerCertificateNetwork.kt'}]},originalHashes),/outside the reviewed allowlist/);
+  assert.throws(()=>presenceToneReleaseOverrides({...evidence,
+    modifiedOriginal:[{...first,sha256:first.baseSha256}]},originalHashes),/sha256:/);
+  assert.throws(()=>presenceToneReleaseOverrides({...evidence,
+    modifiedOriginal:[{...first,baseSha256:first.sha256}]},originalHashes),/baseSha256:/);
 });
 test('release identities match packages and both mobile feeds remain consistent',()=>{
   for(const [key,file] of [['root','package.json'],['desktop','apps/desktop/package.json'],['server','apps/server/package.json'],['mobile','apps/mobile/package.json']])
