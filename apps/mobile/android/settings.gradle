@@ -8,7 +8,16 @@ pluginManagement {
     includeBuild("build-logic")
 }
 plugins { id("com.facebook.react.settings") }
-extensions.configure(com.facebook.react.ReactSettingsExtension){ ex -> ex.autolinkLibrariesFromCommand() }
+extensions.configure(com.facebook.react.ReactSettingsExtension) { ex ->
+    if (gradle.startParameter.projectProperties.containsKey('coveRefactor')) {
+        // Acceptance builds use the installed CLI directly; npx must not fetch tools.
+        ex.autolinkLibrariesFromCommand([
+            'node', new File(settingsDir, '../node_modules/@react-native-community/cli/build/bin.js').absolutePath, 'config'
+        ])
+    } else {
+        ex.autolinkLibrariesFromCommand()
+    }
+}
 rootProject.name = 'CoveMobile'
 include ':app'
 includeBuild('../node_modules/@react-native/gradle-plugin')

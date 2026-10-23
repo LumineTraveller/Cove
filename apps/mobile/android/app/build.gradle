@@ -102,6 +102,7 @@ android {
         versionName "0.8.2"
         testInstrumentationRunner "com.covemobile.SoundpackCodecTestRunner"
         buildConfigField "String", "COVE_UPDATE_DOWNLOAD_BASE_URL", groovy.json.JsonOutput.toJson(updateDownloadBaseUrl)
+        buildConfigField "boolean", "COVE_ACCEPTANCE_BUILD", "false"
     }
     signingConfigs {
         debug {
@@ -131,6 +132,8 @@ android {
             // Side-by-side testing must not replace the installed Cove app.
             if (project.hasProperty('coveRefactor')) {
                 applicationIdSuffix ".refactor"
+                resValue "string", "app_name", "Cove 验收测试"
+                buildConfigField "boolean", "COVE_ACCEPTANCE_BUILD", "true"
             }
         }
         release {
