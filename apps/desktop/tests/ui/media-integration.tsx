@@ -5,6 +5,8 @@ import {useWebRTC} from '../../src/features/media/useWebRTC';
 import {CLIENT_PROTOCOL_VERSION, CLIENT_RELEASE_VERSIONS} from '@cove/contracts';
 import {Device, type types as MsTypes} from 'mediasoup-client';
 const params=new URLSearchParams(location.search);
+const floatingMode=params.get('floating')==='1';
+let floatingFixture:typeof import('./floating-viewer-fixture')|null=null;
 const proxyProtocol=params.get('iceProtocol')==='udp'?'udp':'tcp';
 const peerConnections=new Set<RTCPeerConnection>(),mediaTracks=new Set<MediaStreamTrack>();
 const NativePeerConnection=window.RTCPeerConnection;
@@ -96,11 +98,15 @@ const iceQA={
 // Synthetic video, never capture the user's desktop or microphone.
 const canvas=document.createElement('canvas');canvas.width=640;canvas.height=360;
 const ctx=canvas.getContext('2d')!;
-function draw(){ctx.fillStyle='#237bd8';ctx.fillRect(0,0,640,360);ctx.fillStyle='#ffb22a';ctx.fillRect((performance.now()/8)%500,90,120,180);requestAnimationFrame(draw);}
+function draw(){ctx.fillStyle='#237bd8';ctx.fillRect(0,0,640,360);ctx.fillStyle='#ffb22a';ctx.fillRect((performance.now()/8)%500,90,120,180);if(!floatingMode)requestAnimationFrame(draw);}
 draw();
+// A hidden publisher's requestAnimationFrame stops independently of received
+// PiP playback. Timed synthetic paint still changes frames under normal browser
+// timer throttling, without disabling the product's backgroundThrottling policy.
+const floatingPaint=floatingMode?window.setInterval(draw,33):null;
 navigator.mediaDevices.getDisplayMedia=async()=>{const stream=canvas.captureStream(30);stream.getTracks().forEach(track=>mediaTracks.add(track));return stream;};
 function Fixture(){
-  const socket=useMemo(()=>io(params.get('base')!,{auth:{clientProtocol:CLIENT_PROTOCOL_VERSION,clientPlatform:'desktop',clientVersion:CLIENT_RELEASE_VERSIONS.desktop},autoConnect:false}),[]);
+  const socket=useMemo(()=>floatingFixture?.fixtureSocket(params.get('base')!)??io(params.get('base')!,{auth:{clientProtocol:CLIENT_PROTOCOL_VERSION,clientPlatform:'desktop',clientVersion:CLIENT_RELEASE_VERSIONS.desktop},autoConnect:false}),[]);
   const rtc=useWebRTC(socket,params.get('room')!);
   const [ready,setReady]=useState(false);const [error,setError]=useState('');
   const registrationEpoch=useRef(0);
@@ -123,6 +129,8 @@ function Fixture(){
   },[socket]);
   useEffect(()=>{if(video.current){video.current.srcObject=rtc.remoteScreen?.stream||null;void video.current.play().catch(()=>{});}},[rtc.remoteScreen]);
   useEffect(()=>{(window as any).coveMediaQA={rtc,socket,ready,error,ice:iceQA,control:control.current,resources:()=>({...iceQA.resources(),socketListeners:Object.values((socket as any)._callbacks??{}).reduce((n:number,list:any)=>n+list.length,0)})};});
+  if(floatingFixture){const FloatingView=floatingFixture.FloatingView;return <><p>{ready?'Room ready':'Connecting'} {error}</p><FloatingView rtc={rtc} roomId={params.get('room')!}/></>;}
   return <><p>{ready?'Room ready':'Connecting'} {error}</p><video ref={video} autoPlay muted playsInline/><pre>{rtc.inVoice?'In voice':'Not in voice'}</pre></>;
 }
-createRoot(document.getElementById('root')!).render(<Fixture/>);
+if(floatingMode){localStorage.setItem('cove_server_url',params.get('base')!);void import('./floating-viewer-fixture').then(module=>{floatingFixture=module;const root=createRoot(document.getElementById('root')!);module.installFixtureUnmount(()=>{if(floatingPaint!==null)window.clearInterval(floatingPaint);root.unmount();});root.render(<Fixture/>);});}
+else createRoot(document.getElementById('root')!).render(<Fixture/>);

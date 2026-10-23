@@ -1,5 +1,32 @@
 # Room share-entry and navigation rendering regression
 
+## Native floating viewer with real local media
+
+From the repository root, after building the server and shared packages with the
+existing installed dependencies, run `node tooling/verify-floating-viewer.cjs`.
+Use `--repeat 2` for two independent runs. A desktop session supporting Electron
+video Picture-in-Picture and a standalone Node compatible with the installed
+SQLite native module are required; this is a native-window test.
+
+The launcher owns its Vite, Electron, local SFU, UDP proxy, synthetic canvas/WAV,
+silent audio sinks and private profile under `runtime/pip-20261023/integration-*`.
+It never captures a physical screen/microphone or changes installed app data.
+`integration-latest.json` points to the latest complete evidence. Each run keeps
+source SHA-256 values, runtime versions, normal/floating/returned screenshots,
+resource counts, real consumer identities, decoded frame growth and actual voice
+PCM measurements. System/screen audio capture and speaker audibility are outside
+this test's scope.
+
+The optional `media-integration.html?floating=1` mode mounts the actual
+`ShareViewV2` and its annotation/presentation hooks. The original fixture mode and
+`coveMediaQA` interface are retained. The new mode verifies singleton entry,
+remote/annotation entry restrictions, read-only floating input, fullscreen
+restrictions, original video/stream/track identity, unchanged media ownership,
+owner minimize/restore, native leave focus return, real UDP/ICE recovery, repeated
+open/close, source replacement, stop watching, share end, unmount and leave voice.
+Cleanup first checks the mounted hook's intentionally retained output context,
+then unmounts that owner and requires zero audio contexts and media resources.
+
 `share-entry-navigation.cjs` drives the real `ChatRoomV2`, room CSS, and media
 hook inside Electron. The fixture replaces only signaling, transport, capture,
 and account data; it does not access a live server, account, or microphone.
