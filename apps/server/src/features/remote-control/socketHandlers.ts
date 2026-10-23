@@ -136,8 +136,8 @@ export function registerRemoteControlSocketHandlers(
       const members = deps.roomMembers.get(pending.roomId);
       if (!deps.isRemoteControlAllowed(pending.roomId, pending.sharerSocketId)) {
         const cancelled = deps.remoteControls.respond(requestId, deps.socket.id, false);
+        if (!deps.remoteControls.getRequest(requestId)) cancelRemoteRequestExpiration(deps.remoteControls, requestId);
         if (cancelled.ok) {
-          cancelRemoteRequestExpiration(deps.remoteControls, requestId);
           deps.emitRemoteRequestCancelled(cancelled.value.request, '共享者已关闭远程控制');
         }
         cb?.({ ok: false, error: '共享者已关闭远程控制' });
@@ -151,8 +151,8 @@ export function registerRemoteControlSocketHandlers(
         !deps.isSharingScreen(pending.sharerSocketId, pending.roomId)
       ) {
         const rejected = deps.remoteControls.respond(requestId, deps.socket.id, false);
+        if (!deps.remoteControls.getRequest(requestId)) cancelRemoteRequestExpiration(deps.remoteControls, requestId);
         if (rejected.ok) {
-          cancelRemoteRequestExpiration(deps.remoteControls, requestId);
           deps.emitRemoteRequestCancelled(rejected.value.request, '共享状态已变化，请重新申请');
         }
         cb?.({ ok: false, error: '共享状态已变化，请重新申请' });

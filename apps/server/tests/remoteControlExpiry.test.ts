@@ -16,13 +16,14 @@ function fixture(t: TestContext) {
   const events: string[] = [];
   const io = { to: () => ({ emit: (event: string) => events.push(event) }) } as any;
   const controls = createControlService({ io, remoteControls: registry });
+  let allowed = true, sharing = true;
   const handlers = new Map<string, Map<string, (...args: any[]) => void>>();
   for (const id of ['controller', 'sharer']) {
     const list = new Map<string, (...args: any[]) => void>(); handlers.set(id, list);
     registerRemoteControlSocketHandlers({ socket: { id, on: (event: string, fn: any) => list.set(event, fn) } as any,
       io, remoteControls: registry, roomMembers: new Map([['room', new Set(['controller', 'sharer'])]]),
-      remoteControlCapabilities: new Set(['controller', 'sharer']), isSharingScreen: () => true,
-      isRemoteControlAllowed: () => true, userNames: new Map(), publicUserId: id => id, ...controls });
+      remoteControlCapabilities: new Set(['controller', 'sharer']), isSharingScreen: () => sharing,
+      isRemoteControlAllowed: () => allowed, userNames: new Map(), publicUserId: id => id, ...controls });
   }
   function emit(id: string, event: string, data: unknown) {
     let result: any; handlers.get(id)!.get(event)!(data, (value: unknown) => { result = value; }); return result;
@@ -31,7 +32,8 @@ function fixture(t: TestContext) {
     const result = emit('controller', 'remote-control:request', { roomId: 'room', sharerSocketId: 'sharer' });
     assert.equal(result.ok, true); assert.equal(timers.size, 1); return result.requestId as string;
   }
-  return { timers, registry, controls, events, emit, request };
+  return { timers, registry, controls, events, emit, request,
+    setAllowed: (value: boolean) => { allowed = value; }, setSharing: (value: boolean) => { sharing = value; } };
 }
 
 for (const accepted of [true, false]) test(`settling a remote request (accepted=${accepted}) releases its expiration timer`, t => {
@@ -75,4 +77,15 @@ test('a still-pending request expires once at its original deadline', t => {
   assert.equal(f.timers.size, 0);
   assert.equal(f.registry.getRequest(requestId), undefined);
   assert.equal(f.events.filter(event => event === 'remote-control:request-cancelled').length, 1);
+});
+
+for (const changed of ['permission', 'sharing']) test(`expired response after ${changed} changes releases the not-yet-fired timer`, t => {
+  let at = 1000;
+  t.mock.method(Date, 'now', () => at);
+  const f = fixture(t); const requestId = f.request();
+  if (changed === 'permission') f.setAllowed(false); else f.setSharing(false);
+  at += 30000;
+  assert.equal(f.emit('sharer', 'remote-control:respond', { requestId, accepted: true }).ok, false);
+  assert.equal(f.registry.getRequest(requestId), undefined);
+  assert.equal(f.timers.size, 0);
 });
