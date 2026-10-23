@@ -83,7 +83,7 @@ export function createTransportIceRecovery(options: Options) {
     clearRound(entry);
     entries.delete(entry.key);
     event(entry, 'ice-restart-failed', reason);
-    if (active) entry.onFailure(reason);
+    if (active) { event(entry, 'ice-restart-fallback', reason); entry.onFailure(reason); }
   };
   const connected = (entry: Entry) => {
     clearRound(entry);
@@ -124,6 +124,7 @@ export function createTransportIceRecovery(options: Options) {
     const sequence = entry.pendingSequence ?? ++entry.sequence;
     entry.pendingSequence = sequence;
     const epoch = signalEpoch;
+    let phase: 'request' | 'apply' = 'request';
     event(entry, 'ice-restart-request');
     try {
       const response = await requestRestart({
@@ -140,6 +141,8 @@ export function createTransportIceRecovery(options: Options) {
         return;
       }
       if (!validResponse(entry, response, sequence)) { fail(entry, 'INVALID_RESPONSE'); return; }
+      phase = 'apply';
+      event(entry, 'ice-restart-applying');
       // Once the worker has rotated credentials, synchronize the client even if
       // it briefly reports connected; dropping this ACK could leave stale ICE.
       await entry.transport.restartIce({ iceParameters: (response as Extract<IceRestartResponse, { ok: true }>).iceParameters });
@@ -150,7 +153,7 @@ export function createTransportIceRecovery(options: Options) {
     } catch {
       // ACK loss is ambiguous. Reuse the same sequence on retry, including after
       // signal recovery; a late response is ignored by the request's deadline.
-      if (current(entry) && entry.round === round) event(entry, 'ice-restart-retry', 'REQUEST_OR_APPLY_FAILED');
+      if (current(entry) && entry.round === round) event(entry, 'ice-restart-retry', phase === 'apply' ? 'APPLY_FAILED' : 'REQUEST_FAILED');
     } finally {
       entry.busy = false;
       if (current(entry) && entry.round === round) schedule(entry, 2_000);
@@ -189,7 +192,7 @@ export function createTransportIceRecovery(options: Options) {
         deadline: setTimeout(() => { if (owner.round === round) fail(owner, 'DEADLINE_EXCEEDED'); }, 20_000),
       };
       entry.round = round;
-      event(entry, 'ice-restart-begin');
+      event(entry, 'ice-restart-begin', state === 'failed' ? 'STATE_FAILED' : 'STATE_DISCONNECTED');
       schedule(entry, state === 'failed' ? 0 : 1_500);
     }
     return entry.round !== undefined;

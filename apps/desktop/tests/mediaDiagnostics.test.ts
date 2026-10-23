@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  diagnosticTrackSettings,
+  diagnosticSenderParameters,
   diagnosticPacketLoss,
   diagnosticVideoCounters,
   intervalLossPercent,
@@ -9,6 +11,21 @@ import {
   videoCounterRates,
   videoCounterSample,
 } from '../src/features/media/diagnostics/mediaDiagnostics';
+
+test('export metadata excludes device identifiers, RTCP identities and unbounded wire strings', () => {
+  const secret = 'private-device-token-SDP';
+  const track = diagnosticTrackSettings({ width: 640, height: 480, frameRate: 30,
+    deviceId: secret, groupId: secret, displaySurface: 'window', noiseSuppression: true });
+  const sender = diagnosticSenderParameters({ encodings: [{ active: true, maxBitrate: 1000, rid: secret }],
+    codecs: [{ mimeType: 'video/VP8', clockRate: 90000, sdpFmtpLine: secret, payloadType: 96 }],
+    rtcp: { cname: secret }, transactionId: secret, headerExtensions: [] } as any);
+  assert.equal(track?.width, 640);
+  assert.equal(sender?.encodings[0].maxBitrate, 1000);
+  assert.ok(!JSON.stringify({ track, sender }).includes(secret));
+  assert.equal(diagnosticTrackSettings({ width: NaN })?.width, undefined);
+  assert.equal(diagnosticTrackSettings({ displaySurface: { toString: () => 'window', deviceId: secret } } as any)?.displaySurface, undefined);
+  assert.equal(diagnosticTrackSettings({ displaySurface: new String('window') } as any)?.displaySurface, undefined);
+});
 
 test('diagnostic packet loss uses sender feedback without masking missing samples', () => {
   const stats = { role: 'sender' as const, loss: 0, remoteLoss: 4 };

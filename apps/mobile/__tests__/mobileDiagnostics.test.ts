@@ -5,6 +5,24 @@ import {
   videoDiagnosticSample,
   videoEncodingPerformance,
 } from '../src/features/media/diagnostics/mobileDiagnostics';
+import { createRecoveryDiagnostics } from '@cove/client-core';
+
+it('exports bounded anonymous recovery history without trusting extra wire fields', () => {
+  let at = 0;
+  const journal = createRecoveryDiagnostics({ now: () => at, capacity: 8 });
+  journal.record('ice-restart-begin', { key: 'send', reason: 'STATE_FAILED' });
+  at = 200; journal.record('ice-restart-request', { key: 'send', attempt: 1 });
+  at = 400; journal.record('ice-restart-connected', { key: 'send' });
+  const output = normalizeMobileDiagnostics({
+    stage: { inVoice: true, watching: false, sharing: false },
+    stats: { send: null, receive: null, screenSend: null }, server: null,
+    recovery: { ...journal.snapshot(), token: 'private-token', socketId: 'private-id' },
+  });
+  expect(output.recovery?.events.map(event => event.stage)).toEqual(['begin', 'request', 'connected']);
+  expect(output.recovery?.events[2].elapsedMs).toBe(400);
+  expect(output.recovery?.events[2].attempt).toBe(1);
+  expect(JSON.stringify(output)).not.toContain('private-');
+});
 const stage = { inVoice: false, watching: true, sharing: false };
 it('RTT uses the selected client/SFU pair, keeps seconds distinct from ms and never invents end-to-end delay', () => {
   const output = normalizeMobileDiagnostics({

@@ -1,5 +1,42 @@
 export type RtcStat = Record<string, unknown>;
 
+/** Track/device identifiers and RTCP CNAME/SDP extensions are not diagnostics. */
+export function diagnosticTrackSettings(value: MediaTrackSettings | null | undefined): MediaTrackSettings | null {
+  if (!value) return null;
+  const result: Record<string, unknown> = {};
+  for (const key of ['width', 'height', 'frameRate', 'aspectRatio', 'sampleRate', 'sampleSize', 'channelCount', 'latency']) {
+    const item = (value as Record<string, unknown>)[key];
+    if (typeof item === 'number' && Number.isFinite(item)) result[key] = item;
+  }
+  for (const key of ['autoGainControl', 'echoCancellation', 'noiseSuppression']) {
+    const item = (value as Record<string, unknown>)[key];
+    if (typeof item === 'boolean') result[key] = item;
+  }
+  if (typeof value.displaySurface === 'string' && ['browser', 'window', 'monitor'].includes(value.displaySurface))
+    result.displaySurface = value.displaySurface;
+  return result;
+}
+
+export function diagnosticSenderParameters(value: RTCRtpSendParameters | null | undefined) {
+  if (!value) return null;
+  return {
+    encodings: (value.encodings ?? []).slice(0, 8).map(encoding => {
+      const result: Record<string, number | boolean> = {};
+      for (const key of ['maxBitrate', 'maxFramerate', 'scaleResolutionDownBy']) {
+        const item = (encoding as unknown as Record<string, unknown>)[key];
+        if (typeof item === 'number' && Number.isFinite(item)) result[key] = item;
+      }
+      if (typeof encoding.active === 'boolean') result.active = encoding.active;
+      return result;
+    }),
+    codecs: (value.codecs ?? []).slice(0, 16).map(codec => ({
+      ...(typeof codec.mimeType === 'string' && /^(?:audio|video)\/[a-z\d.+-]{1,40}$/i.test(codec.mimeType) ? { mimeType: codec.mimeType } : {}),
+      ...(Number.isFinite(codec.clockRate) ? { clockRate: codec.clockRate } : {}),
+      ...(Number.isFinite(codec.channels) ? { channels: codec.channels } : {}),
+    })),
+  };
+}
+
 /** Sender feedback is remoteLoss; loss describes a received stream only. */
 export function diagnosticPacketLoss(stats: {
   role: 'sender' | 'receiver' | 'idle';

@@ -18,7 +18,7 @@ import {
   ConnectionState,
 } from './mobileMediaSupport';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { request, screenAudioMatchesPublication, screenPublicationMetadata, type TransportIceRecovery } from '@cove/client-core';
+import { createRecoveryDiagnostics, request, screenAudioMatchesPublication, screenPublicationMetadata, type TransportIceRecovery } from '@cove/client-core';
 
 import type { Socket } from 'socket.io-client';
 import { Device } from 'mediasoup-client';
@@ -111,6 +111,7 @@ export function useMobileMedia(
   }, []);
   const connectionGrace = useRef(new DisconnectGrace());
   const iceRecovery = useRef<TransportIceRecovery | null>(null);
+  const recoveryDiagnostics = useRef(createRecoveryDiagnostics());
   const applicationAudioVolumes = useRef(new Map<string, number>());
   const memberVolumesRef = useRef(new Map<string, number>());
   const inVoiceRef = useRef(false);
@@ -169,7 +170,7 @@ export function useMobileMedia(
     setConnectionState,
   });
   const { checkTransport } = useMediaConnectionRecovery({
-    socket, roomId, connectionGrace, iceRecovery, mediaSocketId, inVoiceRef, joiningRef, watchingScreenPeerRef, watchingGeneration, mediaGeneration,
+    socket, roomId, connectionGrace, iceRecovery, recoveryDiagnostics, mediaSocketId, inVoiceRef, joiningRef, watchingScreenPeerRef, watchingGeneration, mediaGeneration,
     sendTransport, recvTransport, teardown, setConnectionState, setError,
   });
   const { setupDevice, removeConsumer, consumeProducer } = useMediaTransports({
@@ -569,6 +570,7 @@ export function useMobileMedia(
       },
       stats: { send, receive, screenSend },
       screenEncoder: collectScreenEncodingDiagnostics(),
+      recovery: recoveryDiagnostics.current.snapshot(),
       server,
     };
   }, [

@@ -4,6 +4,8 @@ import { MEDIA_TIMING_DEFINITIONS, rtcSecondsToMilliseconds } from '@cove/client
 
 import {
   diagnosticVideoCounters,
+  diagnosticTrackSettings,
+  diagnosticSenderParameters,
   intervalLossPercent,
   mediaDiagnosticSessionKey,
   shouldAcceptMediaDiagnosticSample,
@@ -26,6 +28,7 @@ import {
 } from '../desktopMediaSupport';
 
 export interface useMediaDiagnosticsDependencies {
+  readonly recoveryDiagnostics?: import('react').MutableRefObject<import('@cove/client-core').RecoveryDiagnostics>;
   readonly statsCollecting: import('react').MutableRefObject<boolean>;
   readonly screenProducer: import('react').MutableRefObject<Producer | null>;
   readonly watchingScreenPeerRef: import('react').MutableRefObject<string | null>;
@@ -302,7 +305,7 @@ export function useMediaDiagnostics(deps: useMediaDiagnosticsDependencies) {
         return;
       }
 
-      const trackSettings = videoTrack?.getSettings() ?? null;
+      const trackSettings = diagnosticTrackSettings(videoTrack?.getSettings());
       const diagnosticEntry = {
         timestamp: new Date().toISOString(),
         stats: next,
@@ -351,9 +354,8 @@ export function useMediaDiagnostics(deps: useMediaDiagnosticsDependencies) {
     const payload = {
       exportedAt: new Date().toISOString(),
       metricDefinitions: MEDIA_TIMING_DEFINITIONS,
-      roomId: deps.roomId,
-      socketId: deps.socket.id ?? null,
-      userAgent: navigator.userAgent,
+      recovery: deps.recoveryDiagnostics?.current.snapshot(),
+      platform: 'desktop',
       screen: {
         preset: deps.screenPreset,
         requestedFps: deps.fps,
@@ -361,8 +363,8 @@ export function useMediaDiagnostics(deps: useMediaDiagnosticsDependencies) {
         nativeResolution: deps.screenNativeResolution,
         configuredMaxBitrate: SCREEN_MAX_BITRATE_BPS,
         encodingPlan: deps.screenEncodingPlan,
-        trackSettings: producer?.track?.getSettings() ?? null,
-        senderParameters: producer?.rtpSender?.getParameters() ?? null,
+        trackSettings: diagnosticTrackSettings(producer?.track?.getSettings()),
+        senderParameters: diagnosticSenderParameters(producer?.rtpSender?.getParameters()),
       },
       samples: deps.diagnosticHistory.current,
     };

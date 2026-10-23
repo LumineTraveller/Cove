@@ -27,6 +27,7 @@ import {
 
 export interface useVoiceSessionDependencies {
   readonly iceRecovery?: import('react').MutableRefObject<TransportIceRecovery | null>;
+  readonly recoveryDiagnostics?: import('react').MutableRefObject<import('@cove/client-core').RecoveryDiagnostics>;
   readonly voiceSessionActiveRef: import('react').MutableRefObject<boolean>;
   readonly joiningRef: import('react').MutableRefObject<boolean>;
   readonly socket: Socket<
@@ -577,16 +578,7 @@ export function useVoiceSession(deps: useVoiceSessionDependencies) {
       resetVoice: (reason) => deps.resetVoiceRef.current(false, reason),
       leaveRecoveredVoice: () => deps.socket.emit('voice:leave', deps.roomId),
       onError: deps.setAudioDeviceError,
-      onEvent: (event, reason) =>
-        console.info(
-          `[voice-recovery] ${JSON.stringify({
-            at: new Date().toISOString(),
-            event,
-            reason,
-            roomId: deps.roomId,
-            ...readState(),
-          })}`,
-        ),
+      onEvent: (event, reason) => deps.recoveryDiagnostics?.current.record(event, reason),
     });
     deps.socket.on('disconnect', recovery.onDisconnect);
     deps.socket.on('connect', recovery.onConnect);

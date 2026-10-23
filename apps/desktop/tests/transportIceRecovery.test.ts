@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
-import { createTransportIceRecovery, createMediaConnectionRecovery, DisconnectGrace } from '@cove/client-core';
+import { createRecoveryDiagnostics, createTransportIceRecovery, createMediaConnectionRecovery, DisconnectGrace } from '@cove/client-core';
 import type { IceRestartRequest, IceRestartResponse } from '@cove/contracts';
 
 const deferred = <T>() => {
@@ -17,6 +17,7 @@ function fixture(t: TestContext) {
   const applied: unknown[] = [];
   const failures: string[] = [];
   const events: string[] = [];
+  const diagnostics = createRecoveryDiagnostics({ now: () => time });
   let owned = true, active = true;
   const transport = {
     id: 'transport-a', closed: false, connectionState: 'connected',
@@ -30,7 +31,7 @@ function fixture(t: TestContext) {
   const recovery = createTransportIceRecovery({
     signal, roomId: 'room-a', now: () => time,
     requestRestart: payload => { calls.push(payload); return request(payload); },
-    onEvent: event => events.push(event),
+    onEvent: (event, detail) => { events.push(event); diagnostics.record(event, detail); },
   });
   const registration = {
     key: 'send', transport, capability: { version: 1, sessionId: 'ice-session-a' }, ownerSocketId: signal.id,
@@ -40,10 +41,26 @@ function fixture(t: TestContext) {
   const tick = async (ms: number) => { time += ms; t.mock.timers.tick(ms); await flush(); };
   observe('connected');
   t.after(() => recovery.dispose());
-  return { recovery, transport, registration, signal, calls, applied, failures, events, response, observe, tick,
+  return { recovery, transport, registration, signal, calls, applied, failures, events, diagnostics, response, observe, tick,
     request: (fn: typeof request) => { request = fn; },
     owned: (value: boolean) => { owned = value; }, active: (value: boolean) => { active = value; } };
 }
+
+test('real strategy events distinguish failed requests from failed native apply without exporting errors', async t => {
+  const f = fixture(t);
+  const privateError = 'secret-token-and-SDP';
+  f.request(async () => { throw new Error(privateError); });
+  f.observe('failed'); await f.tick(0);
+  assert.equal(f.diagnostics.snapshot().events.at(-1)?.reason, 'REQUEST_FAILED');
+  assert.equal(f.diagnostics.snapshot().events.some(event => event.stage === 'applying'), false);
+  f.request(async payload => f.response(payload));
+  f.transport.restartIce = async () => { throw new Error(privateError); };
+  await f.tick(2_000);
+  const report = f.diagnostics.snapshot();
+  assert.equal(report.events.at(-1)?.reason, 'APPLY_FAILED');
+  assert.ok(report.events.some(event => event.stage === 'applying'));
+  assert.ok(!JSON.stringify(report).includes(privateError));
+});
 
 test('legacy, unsupported-version and missing-native-method transports keep the legacy policy', async t => {
   const f = fixture(t);

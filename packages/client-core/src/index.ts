@@ -3,6 +3,7 @@ export * from './disconnectGrace';
 export * from './sessionRegistration';
 export * from './mediaRecovery';
 export * from './mediaMetrics';
+export * from './recoveryDiagnostics';
 export * from './screenWatchRecovery';
 export { createTransportIceRecovery, readIceRestartCapability } from './transportIceRecovery';
 export type { TransportIceRecovery, IceRecoveryRegistration } from './transportIceRecovery';

@@ -11,6 +11,7 @@ interface MediaConnectionRecoveryDependencies {
   roomId: string;
   connectionGrace: RefObject<DisconnectGrace>;
   iceRecovery: RefObject<TransportIceRecovery | null>;
+  recoveryDiagnostics?: RefObject<import('@cove/client-core').RecoveryDiagnostics>;
   mediaSocketId: RefObject<string | undefined>;
   inVoiceRef: RefObject<boolean>;
   joiningRef: RefObject<boolean>;
@@ -26,14 +27,14 @@ interface MediaConnectionRecoveryDependencies {
 
 /** Socket and media deadlines are independent of native/RTP resource cleanup. */
 export function useMediaConnectionRecovery({
-  socket, roomId, connectionGrace, iceRecovery, mediaSocketId, inVoiceRef, joiningRef, watchingScreenPeerRef, watchingGeneration, mediaGeneration,
+  socket, roomId, connectionGrace, iceRecovery, recoveryDiagnostics, mediaSocketId, inVoiceRef, joiningRef, watchingScreenPeerRef, watchingGeneration, mediaGeneration,
   sendTransport, recvTransport, teardown, setConnectionState, setError,
 }: MediaConnectionRecoveryDependencies) {
   useEffect(() => {
     const transportRecovery: TransportIceRecovery = createTransportIceRecovery({
       roomId, signal: socket,
       onEvent: (event, detail) => {
-        console.info('[media-recovery]', event, detail);
+        recoveryDiagnostics?.current.record(event, detail);
         if (event === 'ice-restart-connected' && !transportRecovery.isRecovering() &&
             socket.connected && (inVoiceRef.current || watchingScreenPeerRef.current !== null))
           setConnectionState('connected');
@@ -54,7 +55,7 @@ export function useMediaConnectionRecovery({
         recvState: recvTransport.current?.connectionState ?? null,
       }),
       retainOnSignalTimeout: shouldRetainMediaOnSignalTimeout,
-      onEvent: (event, reason) => console.info('[media-recovery]', event, reason ?? ''),
+      onEvent: (event, reason) => recoveryDiagnostics?.current.record(event, reason),
       resetMedia: () => teardown(false),
       leaveRecoveredSession: () => { socket.emit('voice:leave', roomId); },
       onSignalLost: () => setConnectionState('connecting'),
@@ -73,7 +74,7 @@ export function useMediaConnectionRecovery({
       transportRecovery.dispose();
       if (iceRecovery.current === transportRecovery) iceRecovery.current = null;
     };
-  }, [socket, roomId, connectionGrace, iceRecovery, mediaSocketId, inVoiceRef, joiningRef,
+  }, [socket, roomId, connectionGrace, iceRecovery, recoveryDiagnostics, mediaSocketId, inVoiceRef, joiningRef,
     watchingScreenPeerRef, watchingGeneration, mediaGeneration,
     sendTransport, recvTransport, teardown, setConnectionState, setError]);
 
@@ -85,7 +86,6 @@ export function useMediaConnectionRecovery({
         ...context, key,
         isActive: () => inVoiceRef.current || watchingScreenPeerRef.current !== null,
         onFailure: code => {
-          console.info('[media-recovery]', 'ice-safe-teardown', { key, reason: code });
           teardown(true);
           setConnectionState('failed');
           setError('媒体连接恢复失败，可重新加入语音。');
@@ -101,11 +101,15 @@ export function useMediaConnectionRecovery({
       if (state === 'connecting') setConnectionState('connecting');
       if (state === 'connected') {
         connectionGrace.current.recover(key);
+        recoveryDiagnostics?.current.record('legacy-transport-connected', { key });
         setConnectionState(transportRecovery?.isRecovering() ? 'connecting' : 'connected');
       }
       if (state === 'failed' || state === 'disconnected') {
+        recoveryDiagnostics?.current.record('legacy-transport-failed', { key,
+          reason: state === 'failed' ? 'STATE_FAILED' : 'STATE_DISCONNECTED' });
         setConnectionState('connecting');
         connectionGrace.current.fail(key, () => {
+          recoveryDiagnostics?.current.record('legacy-transport-fallback', { key, reason: 'MEDIA_TIMEOUT' });
           teardown(true);
           setConnectionState('failed');
           setError(
@@ -114,7 +118,7 @@ export function useMediaConnectionRecovery({
         });
       }
     },
-    [connectionGrace, iceRecovery, inVoiceRef, watchingScreenPeerRef, setConnectionState, setError, teardown],
+    [connectionGrace, iceRecovery, recoveryDiagnostics, inVoiceRef, watchingScreenPeerRef, setConnectionState, setError, teardown],
   );
   return { checkTransport };
 }

@@ -1,11 +1,12 @@
 import type { ScreenEncodingDiagnostics } from '../screen/screenSharing';
-import { MEDIA_TIMING_DEFINITIONS, diagnosticRoundTripTimeMs } from '@cove/client-core';
+import { MEDIA_TIMING_DEFINITIONS, diagnosticRoundTripTimeMs, normalizeRecoveryDiagnostics, type RecoveryDiagnosticReport } from '@cove/client-core';
 
 export interface MobileDiagnosticsInput {
   stage: { inVoice: boolean; watching: boolean; sharing: boolean };
   stats: { send: unknown; receive: unknown; screenSend: unknown };
   server: unknown;
   screenEncoder?: unknown;
+  recovery?: unknown;
 }
 export interface DiagnosticSample {
   transport: 'send' | 'receive' | 'screenSend';
@@ -27,6 +28,7 @@ export interface MobileDiagnosticReport {
   server: unknown;
   screenEncoder?: ScreenEncodingDiagnostics;
   metricDefinitions?: typeof MEDIA_TIMING_DEFINITIONS;
+  recovery?: RecoveryDiagnosticReport;
 }
 const numericKeys = new Set([
   'timestamp',
@@ -317,6 +319,7 @@ export function normalizeMobileDiagnostics(
     },
     samples,
     server: safeServer(input.server),
+    ...(input.recovery ? { recovery: normalizeRecoveryDiagnostics(input.recovery) } : {}),
     ...(safeScreenEncoder(input.screenEncoder)
       ? { screenEncoder: safeScreenEncoder(input.screenEncoder) }
       : {}),

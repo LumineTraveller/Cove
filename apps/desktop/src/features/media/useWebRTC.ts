@@ -5,7 +5,7 @@ import { useMediaDiagnostics } from './diagnostics/useMediaDiagnostics';
 import { type diagnosticVideoCounters } from './diagnostics/mediaDiagnostics';
 import { useMediaTransports } from './transport/useMediaTransports';
 import { useScreenViewing } from './screen/useScreenViewing';
-import { createTransportIceRecovery, screenAudioMatchesPublication, screenPublicationMetadata, type IceRecoveryRegistration, type TransportIceRecovery } from '@cove/client-core';
+import { createRecoveryDiagnostics, createTransportIceRecovery, screenAudioMatchesPublication, screenPublicationMetadata, type IceRecoveryRegistration, type TransportIceRecovery } from '@cove/client-core';
 import { useMicrophoneControls } from './microphone/useMicrophoneControls';
 import { useVoiceSession } from './voice/useVoiceSession';
 import { useScreenAnalysis } from './screen/useScreenAnalysis';
@@ -165,10 +165,11 @@ export function useWebRTC(socket: Socket, roomId: string) {
   const resetVoiceRef = useRef<(notifyServer?: boolean, reason?: string) => void>(() => {});
   const voiceSocketId = useRef<string>();
   const iceRecovery = useRef<TransportIceRecovery | null>(null);
+  const recoveryDiagnostics = useRef(createRecoveryDiagnostics());
   useEffect(() => {
     const recovery = createTransportIceRecovery({
       roomId, signal: socket,
-      onEvent: (event, detail) => console.info('[media-recovery]', event, detail),
+      onEvent: (event, detail) => recoveryDiagnostics.current.record(event, detail),
     });
     iceRecovery.current = recovery;
     return () => { recovery.dispose(); if (iceRecovery.current === recovery) iceRecovery.current = null; };
@@ -185,13 +186,19 @@ export function useWebRTC(socket: Socket, roomId: string) {
       connectionGrace.current.recover(key);
       return;
     }
-    if (state === 'connected') connectionGrace.current.recover(key);
+    if (state === 'connected') {
+      connectionGrace.current.recover(key);
+      recoveryDiagnostics.current.record('legacy-transport-connected', { key });
+    }
     if (shouldResetVoiceForTransportState(state)) {
+      recoveryDiagnostics.current.record('legacy-transport-failed', { key, reason: 'STATE_FAILED' });
       connectionGrace.current.fail(key, () => {
+        recoveryDiagnostics.current.record('legacy-transport-fallback', { key, reason: 'MEDIA_TIMEOUT' });
         resetVoiceRef.current(true, `media-${key}-timeout`);
         setAudioDeviceError('语音连接中断超过 5 秒，可直接重新加入语音，无需重连服务器');
       });
     } else {
+      if (state !== 'connected') recoveryDiagnostics.current.record('legacy-transport-cancelled', { key });
       // A disconnected ICE/DTLS path may recover by itself. Cancel any stale
       // failure timer instead of ejecting the user after a brief network flap.
       connectionGrace.current.recover(key);
@@ -516,6 +523,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
     get diagnosticHistory() {
       return diagnosticHistory;
     },
+    get recoveryDiagnostics() { return recoveryDiagnostics; },
     get setStatsEnabled() {
       return setStatsEnabled;
     },
@@ -1107,6 +1115,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
     get iceRecovery() {
       return iceRecovery;
     },
+    get recoveryDiagnostics() { return recoveryDiagnostics; },
     get setIsJoining() {
       return setIsJoining;
     },
