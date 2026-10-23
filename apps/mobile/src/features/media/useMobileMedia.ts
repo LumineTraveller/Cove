@@ -140,6 +140,7 @@ export function useMobileMedia(
     joiningRef,
     connectionGrace,
     iceRecovery,
+    recoveryDiagnostics,
     socket,
     roomId,
     audioProducer,

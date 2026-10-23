@@ -21,7 +21,7 @@ const reasons = new Set(['BAD_REQUEST', 'NOT_CONNECTED', 'TRANSPORT_NOT_FOUND', 
   'STALE_SEQUENCE', 'INVALID_SEQUENCE', 'BUSY', 'RATE_LIMITED', 'RESTART_FAILED', 'UNSUPPORTED',
   'INVALID_RESPONSE', 'ATTEMPTS_EXHAUSTED', 'DEADLINE_EXCEEDED', 'REQUEST_OR_APPLY_FAILED',
   'STATE_FAILED', 'STATE_DISCONNECTED', 'SIGNAL_TIMEOUT', 'MEDIA_TIMEOUT', 'REQUEST_FAILED', 'APPLY_FAILED', 'SESSION_NOT_RECOVERED',
-  'CLIENT_DISCONNECT', 'SERVER_DISCONNECT', 'TRANSPORT_CLOSE', 'TRANSPORT_ERROR', 'PING_TIMEOUT', 'OTHER']);
+  'CLIENT_DISCONNECT', 'SERVER_DISCONNECT', 'TRANSPORT_CLOSE', 'TRANSPORT_ERROR', 'PING_TIMEOUT', 'OWNER_TEARDOWN', 'OTHER']);
 const reasonNames: Record<string, string> = {
   'io client disconnect': 'CLIENT_DISCONNECT', 'io server disconnect': 'SERVER_DISCONNECT',
   'transport close': 'TRANSPORT_CLOSE', 'transport error': 'TRANSPORT_ERROR', 'ping timeout': 'PING_TIMEOUT',
@@ -36,6 +36,7 @@ const eventStages: Record<string, RecoveryDiagnosticEvent['stage']> = {
   'signal-timeout-media-retained': 'retained', 'media-reset': 'fallback', 'recovered-session-left': 'cancelled',
   'legacy-transport-failed': 'begin', 'legacy-transport-fallback': 'fallback',
   'legacy-transport-connected': 'connected', 'legacy-transport-cancelled': 'cancelled',
+  'owner-teardown': 'cancelled',
 };
 const bounded = (value: unknown, maximum = 86_400_000) =>
   typeof value === 'number' && Number.isFinite(value) ? Math.min(maximum, Math.max(0, Math.round(value))) : 0;
@@ -100,6 +101,15 @@ export function createRecoveryDiagnostics(options: { now?: () => number; capacit
     if (events.length > limit) { events.shift(); dropped++; }
     if (['connected', 'cancelled', 'failed', 'fallback'].includes(stage)) active.delete(channel);
   };
-  return { record, snapshot: (): RecoveryDiagnosticReport => normalizeRecoveryDiagnostics({ schemaVersion: 1, limit, dropped, events }) };
+  // Owners also retire legacy grace rounds, which have no ICE coordinator entry.
+  // Idle teardown is silent and cannot create a recovery or affect media policy.
+  const cancelActive = () => {
+    for (const channel of [...active.keys()]) {
+      record(channel === 'signal' ? 'owner-teardown' : 'legacy-transport-cancelled', {
+        key: channel === 'receive' ? 'recv' : channel, reason: 'OWNER_TEARDOWN',
+      });
+    }
+  };
+  return { record, cancelActive, snapshot: (): RecoveryDiagnosticReport => normalizeRecoveryDiagnostics({ schemaVersion: 1, limit, dropped, events }) };
 }
 export type RecoveryDiagnostics = ReturnType<typeof createRecoveryDiagnostics>;

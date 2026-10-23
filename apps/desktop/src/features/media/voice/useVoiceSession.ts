@@ -429,6 +429,7 @@ export function useVoiceSession(deps: useVoiceSessionDependencies) {
         );
       }
       deps.iceRecovery?.current?.cancelAll();
+      deps.recoveryDiagnostics?.current.cancelActive();
       deps.mediaGeneration.current += 1;
       deps.connectionGrace.current.clear();
       const shouldPlayLeaveTone = deps.voiceSessionActiveRef.current;

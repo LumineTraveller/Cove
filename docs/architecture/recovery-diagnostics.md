@@ -19,6 +19,10 @@ then `applied`, connected, retry, cancellation, failure and safe fallback.
 `REQUEST_FAILED` and `APPLY_FAILED` identify different failure boundaries.
 `SIGNAL_TIMEOUT` and `MEDIA_TIMEOUT` are separate causes. A retained healthy-media
 signal outage stays associated with its eventual signal connection or leave.
+Full owner teardown calls `cancelActive()` after ICE cancellation. This retires
+remaining legacy-grace and signal rounds with `OWNER_TEARDOWN`, so a manual
+leave or room change cannot attribute a later connection to the old recovery.
+Repeated teardown and teardown without an active recovery produce no entries.
 An applied native promise does not establish restored audio/video.
 
 The journal retains at most 256 entries and reports the number dropped. Repeated

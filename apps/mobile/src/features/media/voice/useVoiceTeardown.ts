@@ -26,6 +26,7 @@ export interface UseVoiceTeardownDependencies {
   readonly joiningRef: import('react').RefObject<boolean>;
   readonly connectionGrace: import('react').RefObject<DisconnectGrace>;
   readonly iceRecovery: import('react').RefObject<TransportIceRecovery | null>;
+  readonly recoveryDiagnostics?: import('react').RefObject<import('@cove/client-core').RecoveryDiagnostics>;
   readonly socket: Socket<
     import('@socket.io/component-emitter/lib/cjs').DefaultEventsMap,
     import('@socket.io/component-emitter/lib/cjs').DefaultEventsMap
@@ -99,6 +100,7 @@ export function useVoiceTeardown(deps: UseVoiceTeardownDependencies) {
     joiningRef,
     connectionGrace,
     iceRecovery,
+    recoveryDiagnostics,
     socket,
     roomId,
     audioProducer,
@@ -132,6 +134,7 @@ export function useVoiceTeardown(deps: UseVoiceTeardownDependencies) {
   const teardown = useCallback(
     (notifyServer: boolean, options: { preserveAvailableScreens?: boolean } = {}) => {
       iceRecovery.current?.cancelAll();
+      recoveryDiagnostics?.current.cancelActive();
       transportGeneration.current += 1;
       stopScreenShare();
       mediaGeneration.current += 1;
@@ -188,6 +191,7 @@ export function useVoiceTeardown(deps: UseVoiceTeardownDependencies) {
       joiningRef,
       connectionGrace,
       iceRecovery,
+      recoveryDiagnostics,
       socket,
       roomId,
       audioProducer,

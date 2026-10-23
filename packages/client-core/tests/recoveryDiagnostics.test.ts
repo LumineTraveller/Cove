@@ -105,3 +105,21 @@ test('ACK wait and native apply have separate stages and controlled failure reas
   assert.equal(events.at(-1)?.attempt, 2);
   assert.equal(events[4].stage, 'applying');
 });
+
+test('owner teardown ends every active legacy and signal round once, without inventing idle recovery', () => {
+  const journal = createRecoveryDiagnostics();
+  journal.cancelActive();
+  assert.equal(journal.snapshot().events.length, 0);
+  journal.record('signal-disconnected', 'transport close');
+  for (const key of ['send', 'recv', 'screen']) journal.record('legacy-transport-failed', { key });
+  journal.cancelActive();
+  const ended = journal.snapshot().events;
+  assert.equal(ended.filter(event => event.stage === 'cancelled').length, 4);
+  assert.ok(ended.filter(event => event.stage === 'cancelled').every(event => event.reason === 'OWNER_TEARDOWN'));
+  journal.cancelActive();
+  journal.record('legacy-transport-connected', { key: 'send' });
+  journal.record('signal-connected');
+  assert.deepEqual(journal.snapshot().events, ended);
+  journal.record('legacy-transport-failed', { key: 'send' });
+  assert.notEqual(journal.snapshot().events.at(-1)?.recoveryId, ended.find(event => event.channel === 'send')?.recoveryId);
+});

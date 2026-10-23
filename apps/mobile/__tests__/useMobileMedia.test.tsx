@@ -109,6 +109,29 @@ beforeEach(async () => {
 });
 afterEach(async () => { await act(async () => renderer.unmount()); jest.restoreAllMocks(); jest.useRealTimers(); });
 
+test('manual leave closes legacy recovery diagnostics before a later join', async () => {
+  jest.useFakeTimers();
+  await act(async () => media.joinVoice());
+  const changed = mockTransport.on.mock.calls.find(([event]) => event === 'connectionstatechange')![1];
+  await act(async () => changed('failed'));
+  await act(async () => { socket.connected = false; handlers.get('disconnect')!('transport close'); });
+  const before = (await media.collectDiagnostics()).recovery!.events;
+  const pending = before.filter(event => event.stage === 'begin');
+  expect(pending.length).toBeGreaterThanOrEqual(2);
+  await act(async () => media.leaveVoice());
+  const ended = (await media.collectDiagnostics()).recovery!.events;
+  for (const event of pending) expect(ended).toContainEqual(expect.objectContaining({
+    recoveryId: event.recoveryId, channel: event.channel, stage: 'cancelled', reason: 'OWNER_TEARDOWN',
+  }));
+  await act(async () => { socket.connected = true; socket.recovered = true; handlers.get('connect')!(); });
+  await act(async () => media.joinVoice());
+  const nextChanged = mockTransport.on.mock.calls.filter(([event]) => event === 'connectionstatechange').at(-1)![1];
+  await act(async () => nextChanged('failed'));
+  const later = (await media.collectDiagnostics()).recovery!.events;
+  expect(later.at(-1)!.recoveryId).not.toBe(pending.find(event => event.channel === 'send')?.recoveryId);
+  expect(later.filter(event => event.stage === 'connected' && pending.some(old => old.recoveryId === event.recoveryId))).toEqual([]);
+});
+
 test('does not receive application audio before joining voice', async () => {
   await act(async () => { await handlers.get('ms:new-producer')!(application('app1')); });
   expect(mockConsumers.size).toBe(0);
