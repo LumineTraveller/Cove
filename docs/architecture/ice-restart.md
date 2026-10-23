@@ -130,10 +130,12 @@ end-to-end latency measurement follows.
 
 `runtime/ice-restart-integration-result.json` starts with a fresh runId and
 passed:false, and records completed/passed only after owned backend cleanup.
-`runtime/ice-restart-browser.log` contains bounded decision event names. Existing
-`[media-recovery]` logs identify `ice-restart-begin`, `request`, `retry`, `applied`,
-`connected`, `failed`, `cancelled` and `signal-wait`; details are key/attempt/fixed
-reason codes. An applied SDP promise alone is never called media recovery.
+`runtime/ice-restart-browser.log` contains bounded test decision event names.
+The existing media export now includes a bounded anonymous recovery timeline,
+with request/native-apply stages, attempts, relative timing and terminal outcomes;
+see [recovery diagnostics](recovery-diagnostics.md). Normal connection/cleanup
+does not produce recovery console traffic. An applied SDP promise alone is never
+called media recovery.
 
 Mobile explicit viewer-only cancellation during recovery uses the resource
 owner's teardown, preserving the room's available-share inventory. It invalidates
