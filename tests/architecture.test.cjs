@@ -189,7 +189,14 @@ test('accepted native capture, DSP and Android code survives relocation',()=>{
   ]);
   for(const file of contracts.native){
     const buffer=fs.readFileSync(path.join(root,file.path));
-    const content=file.path.endsWith('.wasm')?buffer:buffer.toString('utf8').replace(/\r\n/g,'\n');
+    let content=file.path.endsWith('.wasm')?buffer:buffer.toString('utf8').replace(/\r\n/g,'\n');
+    if(file.path==='apps/mobile/android/app/src/main/java/com/covemobile/MainApplication.kt') {
+      // The only new native entry behavior disables Metro in the separate
+      // acceptance build. Keep the original whole-file hash for everything else.
+      const acceptanceGuard='      useDevSupport = BuildConfig.DEBUG && !BuildConfig.COVE_ACCEPTANCE_BUILD,\n';
+      assert.equal(content.split(acceptanceGuard).length,2,'exactly one reviewed offline acceptance guard');
+      content=content.replace(acceptanceGuard,'');
+    }
     const sha=crypto.createHash('sha256').update(content).digest('hex');
     assert.equal(sha,overrides.get(file.path) ?? file.sha256,file.path);
   }
