@@ -6,10 +6,19 @@ const { pathToFileURL } = require('node:url');
 const { createRequire } = require('node:module');
 const { spawn, spawnSync } = require('node:child_process');
 const root = path.resolve(__dirname, '..');
-const runtime = path.join(root, 'runtime');
+const protocol=process.argv.includes('--udp')?'udp':'tcp';
+const acceptance=process.argv.includes('--acceptance');
+const extended=process.argv.includes('--extended');
+if(extended&&!acceptance)throw new Error('Extended cases require the isolated acceptance backend');
+const durationArg=process.argv.find(arg=>arg.startsWith('--soak-seconds='));
+const soakSeconds=durationArg?Number(durationArg.split('=')[1]):0;
+if(!Number.isInteger(soakSeconds)||soakSeconds<0||soakSeconds>3600)throw new Error('Invalid soak duration (0..3600 seconds)');
+function portFlag(name,fallback){const arg=process.argv.find(value=>value.startsWith(`--${name}=`));const port=arg?Number(arg.split('=')[1]):fallback;if(!Number.isInteger(port)||port<1024||port>65535)throw new Error('Invalid '+name);return port;}
+const rendererPort=portFlag('renderer-port',acceptance?55197:55193),mediaPort=portFlag('media-port',acceptance?41024:41020);
+const runtime = path.join(root, 'runtime',...(acceptance?['acceptance-20261023']:[]));
 fs.mkdirSync(runtime, { recursive: true });
-const resultPath = path.join(runtime, 'ice-restart-integration-result.json');
-const logPath = path.join(runtime, 'ice-restart-browser.log');
+const resultPath = !acceptance&&protocol==='tcp'&&!soakSeconds?path.join(runtime,'ice-restart-integration-result.json'):path.join(runtime, `ice-restart-${protocol}${soakSeconds?'-soak':''}${extended?'-extended':''}-result.json`);
+const logPath = !acceptance&&protocol==='tcp'&&!soakSeconds?path.join(runtime,'ice-restart-browser.log'):path.join(runtime, `ice-restart-${protocol}${soakSeconds?'-soak':''}${extended?'-extended':''}-browser.log`);
 const children = [];
 let stopping = false;
 const log = fs.openSync(logPath, 'w');
@@ -26,18 +35,22 @@ function launch(command, args, env, ipc = false) {
   return child;
 }
 const env = { ...process.env, COVE_TEST_NODE: process.execPath,
-  COVE_QA_RENDERER_URL: 'http://127.0.0.1:55193',
+  COVE_QA_RENDERER_URL: 'http://127.0.0.1:'+rendererPort,
+  COVE_QA_PROTOCOL:protocol,COVE_QA_SOAK_SECONDS:String(soakSeconds),COVE_QA_RESULT_PATH:resultPath,
+  COVE_QA_EXTENDED:String(extended),
+  COVE_QA_MEDIA_PORT:String(mediaPort),
+  ...(acceptance?{COVE_QA_BACKEND_MODULE:path.join(root,'tooling/recovery-acceptance-backend.cjs')}:{}),
   COVE_TEST_SERVER_MODULE: path.join(root, 'apps/server/dist/index.js') };
 for (const key of ['ELECTRON_RUN_AS_NODE', 'COVE_BOOTSTRAP_TOKEN', 'COVE_BOOTSTRAP_TOKEN_FILE']) delete env[key];
-const bootstrap = path.join(runtime, 'ice-vite-bootstrap.mjs');
+const bootstrap = path.join(runtime, `ice-${protocol}${soakSeconds?'-soak':''}-vite-bootstrap.mjs`);
 const vite = pathToFileURL(path.join(path.dirname(require.resolve('vite/package.json')), 'dist/node/index.js')).href;
 const dependencyRoot = path.dirname(path.dirname(require.resolve('react/package.json')));
 fs.writeFileSync(bootstrap, `import {createServer} from ${JSON.stringify(vite)};
-const server=await createServer({root:${JSON.stringify(path.join(root, 'apps/desktop'))},configFile:${JSON.stringify(path.join(root, 'apps/desktop/vite.config.ts'))},cacheDir:${JSON.stringify(path.join(runtime, 'ice-vite-cache'))},server:{host:'127.0.0.1',port:55193,strictPort:true,fs:{allow:${JSON.stringify([root, dependencyRoot])}}}});
+const server=await createServer({root:${JSON.stringify(path.join(root, 'apps/desktop'))},configFile:${JSON.stringify(path.join(root, 'apps/desktop/vite.config.ts'))},cacheDir:${JSON.stringify(path.join(runtime, `ice-${protocol}${soakSeconds?'-soak':''}-vite-cache`))},server:{host:'127.0.0.1',port:${rendererPort},strictPort:true,hmr:false,watch:null,fs:{allow:${JSON.stringify([root, dependencyRoot])}}}});
 await server.listen();process.send?.({type:'ready'});
 process.on('message',async m=>{if(m?.type==='stop'){await server.close();process.disconnect?.();}});
 `);
-const watchdog = setTimeout(() => { console.error('ICE browser regression exceeded 120 seconds'); shutdown(1); }, 120_000);
+const watchdog = setTimeout(() => { console.error('ICE browser regression exceeded its bounded duration'); shutdown(1); }, (soakSeconds+240)*1000);
 function shutdown(code) {
   if (stopping) return;
   stopping = true; clearTimeout(watchdog);
@@ -65,8 +78,11 @@ async function main() {
   if (code !== 0 || !fresh || !result.passed || !result.backendStopped ||
       !result.iceEvidence?.decodedFramesResumed || !result.iceEvidence?.syntheticAudioPacketsAndSamplesResumed ||
       !result.iceEvidence?.nonConcealedAudioSamplesResumed || !result.iceEvidence?.nonSilentAudioDecodeVerified)
-    throw new Error('ICE integration failed or completion was not confirmed; see runtime/ice-restart-browser.log');
-  console.log(JSON.stringify({ passed: true, runId: result.runId, ...result.iceEvidence, endToEndLatencyMeasured: false }, null, 2));
+    throw new Error('ICE integration failed or completion was not confirmed; see '+path.relative(root,logPath));
+  if(soakSeconds&&(!result.soakEvidence||result.soakEvidence.elapsedMs<soakSeconds*1000||result.soakEvidence.cycles<1))throw new Error('Timed soak did not complete its requested duration');
+  console.log(JSON.stringify({ passed: true, runId: result.runId, ...result.iceEvidence,
+    ...(result.soakEvidence?{soak:{requestedSeconds:result.soakEvidence.requestedSeconds,elapsedMs:result.soakEvidence.elapsedMs,cycles:result.soakEvidence.cycles,operations:result.soakEvidence.operations}}:{}),
+    endToEndLatencyMeasured: false }, null, 2));
   if (renderer.connected) renderer.send({ type: 'stop' }, () => {});
   await new Promise(resolve => { if (renderer.exitCode !== null) return resolve(); const timer = setTimeout(resolve, 5_000); renderer.once('close', () => { clearTimeout(timer); resolve(); }); });
   shutdown(0);
