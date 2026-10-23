@@ -1618,6 +1618,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
     screenGameMode,
     screenNativeResolution,
     screenCompatibilityMode,
+    setScreenCompatibilityMode,
     isApplicationAudioSharing,
     applicationAudioLabel,
     applicationAudioShareVolume,

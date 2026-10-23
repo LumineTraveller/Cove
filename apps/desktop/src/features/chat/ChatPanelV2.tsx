@@ -9,7 +9,6 @@ import {
   Info,
   PaperPlaneTilt,
   Radio,
-  TextAa,
   X,
 } from '@phosphor-icons/react';
 import {
@@ -31,7 +30,6 @@ import {
   getProfileDisplayName,
   type ProfileRemarks,
 } from '../profiles/profileRemarks';
-import { ChatFontMenu, ChatFontSize } from '../settings/ChatFontMenu';
 import { CHAT_IMAGE_MAX_BATCH, collectChatImageFiles, validateChatImageFile } from './chatImages';
 import { parseChatText } from './chatLinks';
 
@@ -52,8 +50,6 @@ export function ChatPanelV2({
   onDismissImageError,
   onImageError,
   compact,
-  fontSize,
-  onFontSizeChange,
   hasOlderMessages,
   loadingOlderMessages,
   historyLoadVersion,
@@ -76,8 +72,6 @@ export function ChatPanelV2({
   onImageError: (message: string | null) => void;
   compact: boolean;
   unread: number;
-  fontSize: ChatFontSize;
-  onFontSizeChange: (value: ChatFontSize) => void;
   hasOlderMessages: boolean;
   loadingOlderMessages: boolean;
   historyLoadVersion: number;
@@ -166,19 +160,6 @@ export function ChatPanelV2({
     lightboxDragRef.current = null;
     if (event.currentTarget.hasPointerCapture?.(event.pointerId))
       event.currentTarget.releasePointerCapture(event.pointerId);
-  };
-  const [fontMenuOpen, setFontMenuOpen] = useState(false);
-  const fontHoverTimerRef = useRef<number | null>(null);
-  const openFontMenuOnHover = () => {
-    if (fontHoverTimerRef.current !== null) window.clearTimeout(fontHoverTimerRef.current);
-    setFontMenuOpen(true);
-  };
-  const closeFontMenuOnHover = () => {
-    if (fontHoverTimerRef.current !== null) window.clearTimeout(fontHoverTimerRef.current);
-    fontHoverTimerRef.current = window.setTimeout(() => {
-      setFontMenuOpen(false);
-      fontHoverTimerRef.current = null;
-    }, 260);
   };
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [copyNotice, setCopyNotice] = useState<string | null>(null);
@@ -278,7 +259,6 @@ export function ChatPanelV2({
   }, [messages.length]);
   useEffect(() => {
     return () => {
-      if (fontHoverTimerRef.current !== null) window.clearTimeout(fontHoverTimerRef.current);
       if (copyResetTimerRef.current !== null) window.clearTimeout(copyResetTimerRef.current);
       if (copyNoticeTimerRef.current !== null) window.clearTimeout(copyNoticeTimerRef.current);
       if (programmaticScrollTimerRef.current !== null)
@@ -286,12 +266,9 @@ export function ChatPanelV2({
     };
   }, []);
   useEffect(() => {
-    if (!fontMenuOpen && !imageContextMenu) return;
+    if (!imageContextMenu) return;
     const handlePointerDown = (event: PointerEvent) => {
       const target = event.target;
-      if (fontMenuOpen && (!(target instanceof Element) || !target.closest('.chat-font-picker'))) {
-        setFontMenuOpen(false);
-      }
       if (
         imageContextMenu &&
         (!(target instanceof Node) || !imageMenuRef.current?.contains(target))
@@ -301,7 +278,6 @@ export function ChatPanelV2({
     };
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
-      setFontMenuOpen(false);
       setImageContextMenu(null);
     };
     document.addEventListener('pointerdown', handlePointerDown);
@@ -310,7 +286,7 @@ export function ChatPanelV2({
       document.removeEventListener('pointerdown', handlePointerDown);
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [fontMenuOpen, imageContextMenu]);
+  }, [imageContextMenu]);
   const imageUrl = (value: string) => {
     if (/^https?:\/\//i.test(value) || value.startsWith('data:')) return value;
     const target = `${serverURL.replace(/\/$/, '')}${value.startsWith('/') ? value : `/${value}`}`;
@@ -403,7 +379,7 @@ export function ChatPanelV2({
   };
   return (
     <aside
-      className={`chat-panel chat-font-${fontSize} ${compact ? 'compact' : ''} ${
+      className={`chat-panel ${compact ? 'compact' : ''} ${
         dragActive ? 'drag-active' : ''
       }`}
       onDragOver={(event) => {
@@ -422,38 +398,6 @@ export function ChatPanelV2({
         stageImages(event.dataTransfer.files);
       }}
     >
-      {!compact && (
-        <header>
-          <div className="chat-header-actions chat-header-actions-left">
-            <div
-              className="chat-font-picker"
-              onMouseEnter={openFontMenuOnHover}
-              onMouseLeave={closeFontMenuOnHover}
-              onFocus={openFontMenuOnHover}
-            >
-              <button
-                type="button"
-                className={`icon-btn chat-font-button ${fontMenuOpen ? 'active' : ''}`}
-                onClick={openFontMenuOnHover}
-                aria-label="调整聊天字号"
-                aria-expanded={fontMenuOpen}
-                title="调整聊天字号"
-              >
-                <TextAa size={18} />
-              </button>
-              {fontMenuOpen && (
-                <ChatFontMenu
-                  fontSize={fontSize}
-                  onFontSizeChange={onFontSizeChange}
-                  onClose={() => setFontMenuOpen(false)}
-                  onMouseEnter={openFontMenuOnHover}
-                  onMouseLeave={closeFontMenuOnHover}
-                />
-              )}
-            </div>
-          </div>
-        </header>
-      )}
       {copyNotice && (
         <div className="chat-copy-notice" role="status">
           {copyNotice}

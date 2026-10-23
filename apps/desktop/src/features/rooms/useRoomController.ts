@@ -33,11 +33,6 @@ import {
   ROOM_LIGHT_BOTTOM,
   colorLuminance,
 } from './appearance';
-import {
-  ChatFontSize,
-  readChatFontSize,
-  CHAT_FONT_SIZE_STORAGE_KEY,
-} from '../settings/ChatFontMenu';
 import { GlobalSettingsPage } from '../settings/components/GlobalSettingsV2';
 import { mergeChatMessages, readFileAsDataUrl } from '../chat/ChatPanelV2';
 
@@ -121,7 +116,6 @@ export function useRoomController({ profile, accountId, serverURL, sessionReady,
   const [input, setInput] = useState('');
   const [imageError, setImageError] = useState<string | null>(null);
   const [unread, setUnread] = useState(0);
-  const [chatFontSize, setChatFontSize] = useState<ChatFontSize>(readChatFontSize);
   const shareLayout = Boolean(rtc.localScreen || rtc.remoteScreen);
   const { chatOpen, animateShareChat, setChatOpen, sidebarOpen, setSidebarOpen, animateLayoutControls } =
     useShareLayout(shareLayout);
@@ -145,7 +139,6 @@ export function useRoomController({ profile, accountId, serverURL, sessionReady,
   const [pendingAudio, setPendingAudio] = useState(false);
   const [pendingGameMode, setPendingGameMode] = useState(false);
   const [pendingNativeResolution, setPendingNativeResolution] = useState(false);
-  const [pendingCompatibilityMode, setPendingCompatibilityMode] = useState(false);
   const [showAudioModal, setShowAudioModal] = useState(false);
   const [audioSources, setAudioSources] = useState<ApplicationAudioSource[]>([]);
   const [audioLoading, setAudioLoading] = useState(false);
@@ -186,14 +179,6 @@ export function useRoomController({ profile, accountId, serverURL, sessionReady,
   }, [roomId]);
   const outputVolume = rtc.masterOutputVolume * 100;
   const setOutputVolume = (value: number) => rtc.setMasterOutputVolume(value / 100);
-  const updateChatFontSize = (value: ChatFontSize) => {
-    setChatFontSize(value);
-    try {
-      window.localStorage.setItem(CHAT_FONT_SIZE_STORAGE_KEY, value);
-    } catch {
-      // 本地存储不可用时仍即时应用字号。
-    }
-  };
   const remoteLifecycleRef = useRef<RemoteControlLifecycle | null>(null);
   const roomSyncedRef = useRef(false);
   const joinPasswordRef = useRef('');
@@ -775,7 +760,6 @@ export function useRoomController({ profile, accountId, serverURL, sessionReady,
     setPendingAudio(rtc.shareAudio);
     setPendingGameMode(rtc.screenGameMode);
     setPendingNativeResolution(rtc.screenNativeResolution);
-    setPendingCompatibilityMode(rtc.screenCompatibilityMode);
     setShowScreenModal(true);
   };
   const createRoom = () => {
@@ -1040,8 +1024,6 @@ export function useRoomController({ profile, accountId, serverURL, sessionReady,
     imageError,
     setImageError,
     unread,
-    chatFontSize,
-    updateChatFontSize,
     hasOlderMessages,
     loadingOlderMessages,
     historyLoadVersion,
@@ -1092,8 +1074,6 @@ export function useRoomController({ profile, accountId, serverURL, sessionReady,
     pendingGameMode,
     pendingNativeResolution,
     setPendingNativeResolution,
-    pendingCompatibilityMode,
-    setPendingCompatibilityMode,
     editingScreen,
     setPendingPreset,
     setPendingFps,

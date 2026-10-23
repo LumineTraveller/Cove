@@ -601,7 +601,7 @@ export function RoomScreen({
             void media.refreshAudioDevices();
           }}
           accessibilityRole="button"
-          accessibilityLabel="音频设置"
+          accessibilityLabel="采集设置"
           accessibilityHint="设置麦克风降噪和输入输出设备"
         >
           <SlidersHorizontal
@@ -619,7 +619,7 @@ export function RoomScreen({
                 styles.toolbarConnectedText,
             ]}
           >
-            音频设置
+            采集设置
           </Text>
         </TouchableOpacity>
       </View>
@@ -1193,13 +1193,13 @@ export function RoomScreen({
               <Headphones size={19} color={colors.green} />
             </View>
             <View style={styles.headerCopy}>
-              <Text style={styles.toolTitle}>音频设置</Text>
+              <Text style={styles.toolTitle}>采集设置</Text>
               <Text style={styles.toolSubtitle}>降噪 · 麦克风 · 声音输出</Text>
             </View>
             <TouchableOpacity
               style={styles.iconButton}
               onPress={() => setAudioSettingsOpen(false)}
-              accessibilityLabel="关闭音频设置"
+              accessibilityLabel="关闭采集设置"
             >
               <X size={20} color={colors.textMuted} />
             </TouchableOpacity>
