@@ -78,6 +78,42 @@ function dependencyPlan(nodeModules) {
   return packages;
 }
 
+function metroConfiguration(plan) {
+  const watchFolders = [...new Set(plan.filter(item => !item.writable && !item.packageName.startsWith('@cove/'))
+    .map(item => {
+      const physical = fs.realpathSync(item.source);
+      let root = physical;
+      while (path.basename(root).toLowerCase() !== 'node_modules' && path.dirname(root) !== root)
+        root = path.dirname(root);
+      return path.basename(root).toLowerCase() === 'node_modules' ? root : physical;
+    }))];
+  const configPath = path.join(mobileRoot, 'metro.acceptance.config.cjs');
+  const initPath = path.join(toolsRoot, 'acceptance-metro.gradle');
+  const cacheDirectories = ['metro-transform-cache', 'metro-file-map'].map(name => path.join(toolsRoot, name));
+  const configSource = `// Generated acceptance-only configuration; borrowed dependencies stay read-only.
+const base = require('./metro.config.js');
+const { FileStore } = require('metro-cache');
+module.exports = {
+  ...base,
+  watchFolders: [...new Set([...(base.watchFolders || []), ...${JSON.stringify(watchFolders)}])],
+  cacheStores: [new FileStore({ root: ${JSON.stringify(cacheDirectories[0])} })],
+  fileMapCacheDirectory: ${JSON.stringify(cacheDirectories[1])},
+  maxWorkers: 2,
+};
+`;
+  const groovyConfigPath = configPath.replaceAll('\\', '/').replaceAll("'", "\\'");
+  const initSource = `// Apply only to the isolated acceptance invocation.
+gradle.beforeProject { project ->
+    if (project.path == ':app' && project.hasProperty('coveRefactor')) {
+        project.pluginManager.withPlugin('com.facebook.react') {
+            project.extensions.getByName('react').bundleConfig.set(new File('${groovyConfigPath}'))
+        }
+    }
+}
+`;
+  return { watchFolders, configPath, initPath, cacheDirectories, configSource, initSource };
+}
+
 function prepare() {
   const product = productState();
   const prepared = sourceMetadata({ head: git('rev-parse', 'HEAD'), expected: process.env.COVE_ACCEPTANCE_SOURCE_COMMIT,
@@ -112,13 +148,23 @@ function prepare() {
     fs.mkdirSync(path.dirname(target), { recursive: true });
     if (!fs.existsSync(target)) fs.symlinkSync(path.join(sourceRoot, 'packages', name), target, 'junction');
   }
+  const metro = metroConfiguration(plan);
+  for (const directory of metro.cacheDirectories) {
+    assertWritable(directory);
+    fs.mkdirSync(directory, { recursive: true });
+  }
+  for (const [target, source] of [[metro.configPath, metro.configSource], [metro.initPath, metro.initSource]]) {
+    assertWritable(target);
+    fs.writeFileSync(target, source);
+  }
   fs.writeFileSync(path.join(toolsRoot, 'dependency-isolation.json'), JSON.stringify({
     copied: plan.filter(item => item.writable).map(item => item.packageName),
     readonlyLinks: plan.filter(item => !item.writable).length,
   }, null, 2));
   assertSourceUnchanged(prepared, productState());
   fs.writeFileSync(path.join(sourceRoot, 'prepared-source.json'), JSON.stringify(prepared, null, 2));
-  return { mobileRoot, toolsRoot, ...prepared, copied: plan.filter(item => item.writable).map(item => item.packageName) };
+  return { mobileRoot, toolsRoot, ...prepared, metroInitScript: metro.initPath,
+    copied: plan.filter(item => item.writable).map(item => item.packageName) };
 }
 
 function buildEnvironment(sdk = process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT) {
@@ -146,14 +192,15 @@ function proxyArguments(environment) {
 }
 
 function runGradle(tasks) {
-  prepare();
+  const prepared = prepare();
   const gradleHome = path.join(toolsRoot, 'gradle-9.3.1');
   const classpath = path.join(gradleHome, 'lib/gradle-gradle-cli-main-9.3.1.jar');
   if (!fs.existsSync(classpath)) throw new Error('Download and verify official Gradle 9.3.1 into android-tools first');
   const java = path.join(jdkDirectory(process.env), 'bin/java.exe');
   const environment = buildEnvironment();
   const result = spawnSync(java, ['-Dfile.encoding=UTF-8', `-Djava.io.tmpdir=${environment.TMP}`, '-classpath', classpath,
-    'org.gradle.launcher.GradleMain', ...tasks, '--no-daemon', '--console=plain', '--stacktrace', '--max-workers=2',
+    'org.gradle.launcher.GradleMain', ...tasks, '--init-script', prepared.metroInitScript,
+    '--no-daemon', '--console=plain', '--stacktrace', '--max-workers=2',
     '-PcoveRefactor', '-PreactNativeArchitectures=armeabi-v7a,arm64-v8a',
     '-Pkotlin.compiler.execution.strategy=in-process',
     '-Dandroid.builder.sdkDownload=false', '-Dorg.gradle.java.installations.auto-download=false',
@@ -224,7 +271,7 @@ function collect() {
 }
 
 module.exports = { inside, assertWritable, dependencyPlan, prepare, buildEnvironment, proxyArguments,
-  sourceMetadata, assertSourceUnchanged, jdkDirectory, collect };
+  sourceMetadata, assertSourceUnchanged, jdkDirectory, metroConfiguration, collect };
 if (require.main === module) {
   const command = process.argv[2];
   if (command === 'prepare') console.log(JSON.stringify(prepare(), null, 2));

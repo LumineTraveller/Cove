@@ -2,8 +2,9 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const fs = require('node:fs');
 const path = require('node:path');
+const vm = require('node:vm');
 const { inside, assertWritable, dependencyPlan, buildEnvironment, proxyArguments,
-  sourceMetadata, assertSourceUnchanged, jdkDirectory } = require('./android-acceptance.cjs');
+  sourceMetadata, assertSourceUnchanged, jdkDirectory, metroConfiguration } = require('./android-acceptance.cjs');
 const toolsRoot = path.resolve(__dirname, '../runtime/acceptance-20261023/android-tools');
 
 test('build writes reject escaped paths and junctions into borrowed dependencies', () => {
@@ -28,6 +29,58 @@ test('all discovered native Gradle packages receive writable copies; ordinary JS
     assert.equal(plan.find(item => item.packageName === name)?.writable, true, name);
   assert.equal(plan.find(item => item.packageName === 'react')?.writable, false);
   assert.equal(plan.find(item => item.packageName === 'socket.io-client')?.writable, false);
+});
+
+test('Metro can see real Babel helpers behind borrowed per-package junctions', () => {
+  const plan = dependencyPlan(path.resolve(__dirname, '../apps/mobile/node_modules'));
+  const babel = plan.find(item => item.packageName === '@babel/runtime');
+  assert.ok(babel && !babel.writable);
+  const realBabel = fs.realpathSync(babel.source);
+  assert.ok(fs.existsSync(path.join(realBabel, 'helpers/interopRequireDefault.js')));
+  const configuration = metroConfiguration(plan);
+  assert.ok(configuration.watchFolders.includes(path.dirname(path.dirname(realBabel))));
+});
+
+test('Metro discovers and deduplicates every physical dependency root behind scoped and unscoped junctions', () => {
+  const fixture = path.join(toolsRoot, 'safety-test/metro-junctions');
+  const borrowed = path.join(fixture, 'borrowed/node_modules');
+  const roots = ['one', 'two', 'native'].map(name => path.join(fixture, name, 'node_modules'));
+  for (const [name, root] of [['@babel/runtime', roots[0]], ['@babel/helpers', roots[0]],
+    ['react', roots[1]], ['native-module', roots[2]]]) {
+    const source = path.join(root, name);
+    fs.mkdirSync(source, { recursive: true });
+    if (name === 'native-module') fs.mkdirSync(path.join(source, 'android'), { recursive: true });
+    const link = path.join(borrowed, name);
+    fs.mkdirSync(path.dirname(link), { recursive: true });
+    if (!fs.existsSync(link)) fs.symlinkSync(source, link, 'junction');
+  }
+  const configuration = metroConfiguration(dependencyPlan(borrowed));
+  assert.deepEqual(configuration.watchFolders.sort(), roots.slice(0, 2).sort());
+});
+
+test('acceptance Metro preserves product resolution and pins all caches plus Gradle configuration to isolation', () => {
+  const configuration = metroConfiguration([]);
+  const original = { projectRoot: 'product-root', watchFolders: ['shared-packages'],
+    resolver: { disableHierarchicalLookup: true }, transformer: { productOption: true } };
+  const context = { module: { exports: {} }, require(name) {
+    if (name === './metro.config.js') return original;
+    if (name === 'metro-cache') return { FileStore: class { constructor(options) { this.root = options.root; } } };
+    throw new Error(`Unexpected generated configuration import: ${name}`);
+  } };
+  vm.runInNewContext(configuration.configSource, context);
+  const configured = context.module.exports;
+  assert.equal(configured.projectRoot, original.projectRoot);
+  assert.equal(configured.resolver, original.resolver);
+  assert.equal(configured.transformer, original.transformer);
+  assert.deepEqual([...configured.watchFolders], original.watchFolders);
+  for (const target of [configuration.configPath, configuration.initPath,
+    configured.fileMapCacheDirectory, configured.cacheStores[0].root]) assert.equal(inside(toolsRoot, target), true);
+  assert.match(configuration.initSource, /hasProperty\('coveRefactor'\)/);
+  assert.match(configuration.initSource, /withPlugin\('com\.facebook\.react'\)/);
+  assert.match(configuration.initSource, /bundleConfig\.set\(new File\(/);
+  const source = fs.readFileSync(path.resolve(__dirname, './android-acceptance.cjs'), 'utf8');
+  assert.match(source, /const prepared = prepare\(\)/);
+  assert.match(source, /'--init-script', prepared\.metroInitScript/);
 });
 
 test('build caches and temporary outputs stay local and cannot select external signing', () => {
