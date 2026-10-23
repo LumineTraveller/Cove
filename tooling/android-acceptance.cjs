@@ -386,7 +386,8 @@ function collect() {
     throw new Error('Refusing to collect a non-isolated or ambiguous APK');
   const element = metadata.elements[0];
   const apk = path.join(output, element.outputFile);
-  const destination = path.join(artifactsRoot, `Cove-Mobile-${element.versionName}-acceptance-20261023.apk`);
+  const destination = path.join(artifactsRoot,
+    `Cove-Mobile-${element.versionName}-acceptance-20261023-${prepared.sourceCommit.slice(0, 12)}.apk`);
   assertWritable(destination, artifactsRoot);
   const sdk = process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT;
   if (!sdk) throw new Error('Set ANDROID_HOME to the existing read-only Android SDK');
@@ -424,7 +425,12 @@ function collect() {
   if (JSON.stringify(invocation.sharedDist) !== JSON.stringify(sharedDist))
     throw new Error('Shared dist changed during the Android build');
   fs.mkdirSync(artifactsRoot, { recursive: true });
-  fs.copyFileSync(apk, destination);
+  if (fs.existsSync(destination)) {
+    if (!fs.readFileSync(apk).equals(fs.readFileSync(destination)))
+      throw new Error('An acceptance APK already exists for this commit with different bytes; preserve it and use a new frozen commit');
+  } else {
+    fs.copyFileSync(apk, destination, fs.constants.COPYFILE_EXCL);
+  }
   const sha256 = createHash('sha256').update(fs.readFileSync(destination)).digest('hex');
   const report = { applicationId: metadata.applicationId, versionName: element.versionName,
     sourceCommit: prepared.sourceCommit, acceptanceId: prepared.acceptanceId,
