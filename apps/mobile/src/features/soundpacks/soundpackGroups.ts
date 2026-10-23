@@ -1,10 +1,11 @@
-/** Group boundaries are local preferences; flattened order uses the existing server protocol. */
+import {orderSoundpacks, reconcilePersonalSoundpackGroups} from '@cove/client-core';
+/** Groups and their order are personal preferences on this device. */
 export interface SoundpackGroup { id: string; soundIds: string[]; }
 export const DEFAULT_GROUP_ID = 'default';
 export const initialGroups = (): SoundpackGroup[] => [{ id: DEFAULT_GROUP_ID, soundIds: [] }];
 
 export function soundpackScope(serverURL: string, accountId: string, roomId: string) {
-  let server = serverURL.replace(/\/+$/, '');
+  let server = serverURL.trim().replace(/\/+$/, '');
   try { server = new URL(server).href.replace(/\/+$/, ''); } catch { /* Retain custom paths. */ }
   return `${encodeURIComponent(server)}:${encodeURIComponent(accountId)}:${encodeURIComponent(roomId)}`;
 }
@@ -33,18 +34,7 @@ export function readGroups(value: unknown): SoundpackGroup[] {
 }
 
 export function reconcileGroups(groups: readonly SoundpackGroup[], availableIds: readonly string[]) {
-  const available = new Set(availableIds);
-  const assigned = new Set<string>();
-  const next = (groups.length ? groups : initialGroups()).map(group => ({
-    id: group.id,
-    soundIds: group.soundIds.filter(id => {
-      if (!available.has(id) || assigned.has(id)) return false;
-      assigned.add(id);
-      return true;
-    }),
-  }));
-  next[0].soundIds = [...availableIds.filter(id => !assigned.has(id)), ...next[0].soundIds];
-  return next;
+  return reconcilePersonalSoundpackGroups(groups, availableIds);
 }
 export const flattenGroups = (groups: readonly SoundpackGroup[]) => groups.flatMap(group => group.soundIds);
 export const canAddGroup = (groups: readonly SoundpackGroup[]) => groups.length > 0 && groups.every(group => group.soundIds.length > 0);
@@ -67,17 +57,4 @@ export function swapGroups(groups: readonly SoundpackGroup[], sourceId: string, 
   if (source >= 0 && target >= 0) [next[source], next[target]] = [next[target], next[source]];
   return next;
 }
-export function applySoundpackOrder<T extends {id: string}>(packs: readonly T[], orderedIds: readonly string[]) {
-  const byId = new Map(packs.map(pack => [pack.id, pack]));
-  const next = orderedIds.flatMap(id => {
-    const pack = byId.get(id);
-    if (!pack) return [];
-    byId.delete(id);
-    return [pack];
-  });
-  return [...next, ...byId.values()];
-}
-export function orderedGroups(groups: readonly SoundpackGroup[], orderedIds: readonly string[]) {
-  const rank = new Map(orderedIds.map((id, index) => [id, index]));
-  return groups.map(group => ({...group, soundIds: [...group.soundIds].sort((a, b) => (rank.get(a) ?? Infinity) - (rank.get(b) ?? Infinity))}));
-}
+export const applySoundpackOrder = orderSoundpacks;

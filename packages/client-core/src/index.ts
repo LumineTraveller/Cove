@@ -1,4 +1,5 @@
 export * from './request';
+export * from './soundpackOrdering';
 export * from './disconnectGrace';
 export * from './sessionRegistration';
 export * from './mediaRecovery';

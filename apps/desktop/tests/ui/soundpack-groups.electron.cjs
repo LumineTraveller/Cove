@@ -20,7 +20,7 @@ const results = {
   passed: false,
   runtime: { electron: process.versions.electron, chrome: process.versions.chrome, node: process.versions.node, platform: process.platform, width, height, url },
   checks: [], flows: {}, screenshots: [], rendererErrors: [],
-  protocol: 'soundpack:reorder remains a flat {roomId, orderedIds} request with ACK and soundpack:reordered broadcast',
+  protocol: 'Personal order stays in device storage; no soundpack:reorder emission. Room content events remain shared.',
 };
 try { results.buildManifest = JSON.parse(fs.readFileSync(path.join(build, 'manifest.json'), 'utf8')); } catch { /* Optional for dev-server runs. */ }
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -200,7 +200,7 @@ app.whenReady().then(async () => {
       const committed = await snapshot();
       check(same(canonical(preview), canonical(committed)), name + ': preview equals committed group order');
       check(!committed.placeholder && !committed.groupPreview, name + ': all drag visuals clear after pointerup');
-      check(same(committed.serverOrder, expected), name + ': fixture ACK/broadcast retains the flat committed order');
+      check(same(committed.serverOrder, allIds) && committed.emissions.length === 0, name + ': personal drag leaves shared server order unchanged');
       await capture(name + '-committed');
       return { point, preview, committed };
     };
@@ -227,7 +227,7 @@ app.whenReady().then(async () => {
       const committed = await snapshot();
       const expected = allIds.slice(1); expected.splice(2, 0, 's1');
       check(same(committed.groups[0].soundIds, expected), 'rapid last move and pointerup use the final pointer coordinates', committed.groups[0].soundIds);
-      check(!committed.placeholder && same(committed.serverOrder, expected), 'rapid release clears preview and commits the final slot to the flat server protocol');
+      check(!committed.placeholder && same(committed.serverOrder, allIds) && committed.emissions.length === 0, 'rapid release clears preview and saves only the personal layout');
       await capture('rapid-final-pointerup');
       return { firstTarget, finalTarget, heldPreview, committed };
     });
@@ -281,7 +281,7 @@ app.whenReady().then(async () => {
       const committed = await snapshot();
       check(same(canonical(preview), canonical(committed)), 'divider group preview equals committed group order');
       check(committed.groups.every(group => same(group.soundIds, groups.find(original => original.id === group.id).soundIds)), 'group swap retains every group member');
-      check(same(committed.serverOrder, flat(canonical(committed))), 'group swap sends its flattened order using the existing server protocol');
+      check(same(committed.serverOrder, allIds) && committed.emissions.length === 0, 'group swap keeps shared room order untouched');
       await capture('divider-group-committed');
       return { groups, preview, committed, divider };
     });
@@ -306,7 +306,7 @@ app.whenReady().then(async () => {
 
     await test('initial-list-mutations-reload-snapshot', async () => {
       const evidence = {};
-      for (const kind of ['added', 'deleted', 'renamed', 'normalized', 'reordered']) {
+      for (const kind of ['added', 'deleted', 'renamed', 'normalized']) {
         await reset();
         await js('window.soundpackGroupsQa.reloadWithHeldFetch()');
         await wait('window.soundpackGroupsQa.snapshot().pendingFetch');
@@ -317,7 +317,8 @@ app.whenReady().then(async () => {
         await js('window.soundpackGroupsQa.releaseFetch()');
         await wait(`window.soundpackGroupsQa.snapshot().requests.length > ${pending.requests.length} && document.querySelectorAll('[data-soundpack-scroll] [data-soundpack-id]').length === ${expected.length}`);
         const loaded = await snapshot();
-        check(same(flat(loaded.groups), expected) && loaded.addDisabled === false, kind + ': the stale first snapshot is discarded and the reloaded room list is visible', { pending, expected, loaded });
+        const personalExpected = [...allIds.filter(id => expected.includes(id)), ...expected.filter(id => !allIds.includes(id))];
+        check(same(flat(loaded.groups), personalExpected) && loaded.addDisabled === false, kind + ': content reload retains personal rank and appends new sounds', { pending, personalExpected, loaded });
         if (kind === 'renamed') check(await js("document.querySelector('[data-soundpack-id=s1]')?.textContent.includes('Renamed while loading')"), 'rename during initial load is retained by the replacement snapshot');
         evidence[kind] = { pending, blocked, loaded };
       }
@@ -423,19 +424,16 @@ app.whenReady().then(async () => {
       return { before, scrolled, visible, target, preview, committed };
     });
 
-    await test('ack-failure-rollback', async () => {
+    await test('personal-order-never-calls-legacy-reorder-api', async () => {
       await reset([{ id: 'default', soundIds: ['s1'] }, { id: 'second', soundIds: allIds.slice(1) }]);
       const before = await snapshot();
       await js('window.soundpackGroupsQa.failNextReorder()');
       const r = await cardRect('s3');
       const target = { x: r.right - 1, y: r.top + r.height / 2 };
-      await lift(cardSelector('s1'), target);
-      await up(target);
+      await lift(cardSelector('s1'), target); await up(target);
       const after = await snapshot();
-      check(after.alerts.includes('Fixture reorder rejected'), 'fixture exercises a server reorder rejection');
-      check(same(canonical(after), canonical(before)), 'failed ACK restores the previous membership and order');
-      check(after.storage === before.storage && same(after.serverOrder, before.serverOrder), 'failed ACK restores persisted grouping and server order');
-      await capture('ack-failure-rollback');
+      check(!same(canonical(after), canonical(before)) && after.alerts.length === 0, 'personal drag commits without requesting a server acknowledgement');
+      check(after.storage !== before.storage && same(after.serverOrder, before.serverOrder) && after.emissions.length === 0, 'personal layout persists while shared order remains unchanged');
       return { before, after };
     });
 
@@ -457,30 +455,26 @@ app.whenReady().then(async () => {
       return { key, pending, loaded };
     });
 
-    await test('late-ack-after-account-switch', async () => {
+    await test('legacy-reorder-and-snapshot-after-account-switch', async () => {
       await reset();
-      await js('window.soundpackGroupsQa.holdNextReorder()');
       const target = center(await cardRect('s2'));
-      await lift(cardSelector('s1'), target);
-      await up(target);
+      await lift(cardSelector('s1'), target); await up(target);
       const source = await snapshot();
-      check(source.pendingReorder, 'source account has an in-flight reorder acknowledgement');
-      const sourceStorage = await js('localStorage.getItem(window.soundpackGroupsQa.groupsKey)');
+      check(!source.pendingReorder && source.emissions.length === 0, 'personal drag creates no pending shared acknowledgement');
+      const sourceStorage = source.storage;
       const destination = [{ id: 'destination', soundIds: allIds.slice().reverse() }];
-      await js(`window.soundpackGroupsQa.switchAccount('late-ack-account', ${JSON.stringify(destination)}, true)`);
+      await js(`window.soundpackGroupsQa.switchAccount('legacy-event-account', ${JSON.stringify(destination)}, true)`);
       await wait('window.soundpackGroupsQa.snapshot().pendingFetch');
-      await js('window.soundpackGroupsQa.releaseReorder(false)');
-      await delay(100);
+      await js(`window.soundpackGroupsQa.broadcast('soundpack:reordered', {roomId:'soundpack-fixture-room',orderedIds:${JSON.stringify(allIds)}})`);
       const pending = await snapshot();
-      check(pending.storage === JSON.stringify({ version: 1, groups: destination }), 'late rejected ACK cannot overwrite destination saved grouping');
-      check(await js('localStorage.getItem(window.soundpackGroupsQa.groupsKey)') === sourceStorage, 'late rejected ACK cannot roll back the departed account storage');
-      check(pending.alerts.length === 0, 'stale rejected ACK does not show an error for the new account');
+      check(pending.storage === JSON.stringify({ version: 1, groups: destination }), 'legacy reorder cannot overwrite the destination personal layout while loading');
+      check(await js('localStorage.getItem(window.soundpackGroupsQa.groupsKey)') === sourceStorage, 'legacy reorder cannot overwrite the departed account layout');
       await js('window.soundpackGroupsQa.releaseFetch()');
       await wait('!window.soundpackGroupsQa.snapshot().pendingFetch && document.querySelectorAll("[data-soundpack-scroll] [data-soundpack-id]").length === 12');
-      await delay(100);
       const loaded = await snapshot();
-      check(same(canonical(loaded), destination) && loaded.addDisabled === false, 'destination completes loading and unlocks its own reorder controls');
-      await capture('late-ack-after-account-switch');
+      check(same(canonical(loaded), destination), 'the late shared snapshot preserves destination personal rank');
+      await js(`window.soundpackGroupsQa.broadcast('soundpack:reordered', {roomId:'soundpack-fixture-room',orderedIds:${JSON.stringify(allIds)}})`);
+      check(same(canonical(await snapshot()), destination), 'legacy reorder after hydration also preserves personal rank');
       return { source, pending, loaded };
     });
 

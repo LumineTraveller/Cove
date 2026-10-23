@@ -72,7 +72,7 @@ export function Soundboard({controller: board, profileRemarks, showHeading = tru
         accessibilityRole="button" accessibilityLabel="添加语音包分组" accessibilityState={{disabled: !board.canManage || !board.canAddGroup}}
         disabled={!board.canManage || !board.canAddGroup} onPress={board.addSoundpackGroup}>
         <Plus size={16} color={colors.blue}/><Text style={styles.actionText}>添加分组</Text></TouchableOpacity></View>
-    <Text style={styles.hint}>分组和收藏仅保存在本机当前账号的当前房间；调整顺序只同步此房间。先填入空组，再添加下一组。</Text>
+    <Text style={styles.hint}>顺序、分组和收藏仅保存在本机当前账号的当前房间，不会改变其他成员的排序。先填入空组，再添加下一组。</Text>
     {board.favorites.length > 0 && <View style={styles.favorites}><Text style={styles.sectionTitle}>快捷收藏 · {board.favorites.length}/6</Text>
       <View style={styles.quickList}>{board.favorites.map(id => {
         const sound = packsById.get(id);
