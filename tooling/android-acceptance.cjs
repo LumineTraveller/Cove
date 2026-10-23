@@ -1,12 +1,16 @@
 // Local-only Android acceptance build. Does not install, publish, or create keys.
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
 const { spawnSync } = require('node:child_process');
-const { createHash } = require('node:crypto');
+const { createHash, randomUUID } = require('node:crypto');
 
 const repository = path.resolve(__dirname, '..');
 const toolsRoot = path.join(repository, 'runtime/acceptance-20261023/android-tools');
-const sourceRoot = path.join(toolsRoot, 'build-source');
+const layoutFile = path.join(toolsRoot, 'short-layout.json');
+const legacySourceRoot = path.join(toolsRoot, 'build-source');
+const ownedLayout = fs.existsSync(layoutFile) ? validateOwnedRoot(JSON.parse(fs.readFileSync(layoutFile, 'utf8'))) : null;
+const sourceRoot = ownedLayout ? path.join(ownedLayout.root, 's') : legacySourceRoot;
 const mobileRoot = path.join(sourceRoot, 'apps/mobile');
 const artifactsRoot = path.join(repository, 'runtime/acceptance-20261023/artifacts');
 const writableNativePackages = new Set(['react-native', '@react-native/gradle-plugin']);
@@ -50,7 +54,9 @@ function inside(root, target) {
   return relative !== '' && !relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative);
 }
 
-function assertWritable(target, root = toolsRoot) {
+function assertWritable(target, root) {
+  root ||= [toolsRoot, ownedLayout?.root].filter(Boolean).find(candidate => inside(candidate, path.resolve(target)));
+  if (!root) throw new Error(`Build write escaped isolation directory: ${target}`);
   if (!inside(root, path.resolve(target))) throw new Error(`Build write escaped isolation directory: ${target}`);
   for (let part = path.resolve(target); part === root || inside(root, part); part = path.dirname(part)) {
     if (fs.lstatSync(part, { throwIfNoEntry: false })?.isSymbolicLink())
@@ -58,10 +64,89 @@ function assertWritable(target, root = toolsRoot) {
   }
 }
 
-function copy(source, target) {
-  assertWritable(target);
+function copy(source, target, root) {
+  assertWritable(target, root);
   fs.cpSync(source, target, { recursive: true, dereference: true, filter: item =>
     !['node_modules', '.gradle', '.cxx', 'build', '.git'].includes(path.basename(item)) });
+}
+
+function temporaryRoot() {
+  return fs.realpathSync(process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Temp') : os.tmpdir());
+}
+
+function validateOwnedRoot(layout, temporaryDirectory = temporaryRoot()) {
+  const root = path.resolve(layout.root);
+  if (path.dirname(root) !== fs.realpathSync(temporaryDirectory) || !/^cva-[a-z\d]{6}$/i.test(path.basename(root)) ||
+    fs.lstatSync(root).isSymbolicLink() || fs.realpathSync(root) !== root)
+    throw new Error('Short Android root must be an owned, physical, unique directory directly in user Temp');
+  const marker = JSON.parse(fs.readFileSync(path.join(root, '.cove-android-owner.json'), 'utf8'));
+  if (marker.repository !== repository || marker.token !== layout.token ||
+    marker.acceptanceId !== 'cove-acceptance-20261023') throw new Error('Short Android root ownership does not match');
+  return { root, token: layout.token };
+}
+
+function createOwnedRoot(temporaryDirectory = temporaryRoot()) {
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(temporaryDirectory), 'cva-'));
+  const layout = { root, token: randomUUID() };
+  fs.writeFileSync(path.join(root, '.cove-android-owner.json'), JSON.stringify({
+    repository, token: layout.token, acceptanceId: 'cove-acceptance-20261023',
+  }, null, 2));
+  return validateOwnedRoot(layout, temporaryDirectory);
+}
+
+function assertSnapshotFiles(snapshot, files) {
+  for (const relative of files) {
+    const staged = path.resolve(snapshot, relative);
+    if (!inside(repository, path.resolve(repository, relative)) || !inside(snapshot, staged))
+      throw new Error('Snapshot file escaped product roots');
+    assertWritable(staged, snapshot);
+    if (!fs.readFileSync(staged).equals(fs.readFileSync(path.join(repository, relative))))
+      throw new Error(`Prepared snapshot differs from frozen product file: ${relative}`);
+  }
+}
+
+function assertSharedDist(snapshot, packagesRoot = path.join(repository, 'packages')) {
+  function manifest(directory) {
+    const files = [];
+    function visit(relative) {
+      for (const entry of fs.readdirSync(path.join(directory, relative), { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+        const name = path.join(relative, entry.name);
+        if (entry.isSymbolicLink()) throw new Error('Shared dist cannot contain borrowed links');
+        if (entry.isDirectory()) visit(name);
+        else files.push({ path: name.replaceAll('\\', '/'),
+          sha256: createHash('sha256').update(fs.readFileSync(path.join(directory, name))).digest('hex') });
+      }
+    }
+    visit('');
+    if (!files.some(file => file.path === 'index.js')) throw new Error('Build shared package dist before acceptance');
+    return { files, sha256: createHash('sha256').update(JSON.stringify(files)).digest('hex') };
+  }
+  const result = {};
+  for (const name of ['contracts', 'client-core']) {
+    const original = manifest(path.join(packagesRoot, name, 'dist'));
+    const staged = manifest(path.join(snapshot, 'packages', name, 'dist'));
+    if (JSON.stringify(original) !== JSON.stringify(staged)) throw new Error(`Prepared shared dist differs: ${name}`);
+    result[name] = staged;
+  }
+  return result;
+}
+
+function verifyPreparedSnapshot(snapshot) {
+  const prepared = JSON.parse(fs.readFileSync(path.join(snapshot, 'prepared-source.json'), 'utf8'));
+  if (!/^[a-f\d]{40}$/i.test(prepared.sourceCommit) ||
+    (process.env.COVE_ACCEPTANCE_SOURCE_COMMIT && process.env.COVE_ACCEPTANCE_SOURCE_COMMIT !== prepared.sourceCommit))
+    throw new Error('Prepared snapshot does not match the requested frozen source commit');
+  if (process.env.COVE_ACCEPTANCE_ID && process.env.COVE_ACCEPTANCE_ID !== prepared.acceptanceId)
+    throw new Error('Prepared snapshot does not match the requested acceptance ID');
+  assertSourceUnchanged(prepared, productState());
+  const frozenTrees = git('rev-parse', ...productPaths.map(name => `${prepared.sourceCommit}:${name}`)).split(/\r?\n/);
+  if (JSON.stringify(prepared.productTrees) !== JSON.stringify(frozenTrees))
+    throw new Error('Prepared snapshot product trees do not match its recorded commit');
+  assertSnapshotFiles(snapshot, git('ls-files', '-z', '--', ...productPaths).split('\0').filter(Boolean));
+  const sharedDist = assertSharedDist(snapshot);
+  if (prepared.sharedDist && JSON.stringify(prepared.sharedDist) !== JSON.stringify(sharedDist))
+    throw new Error('Prepared shared dist changed after its hash evidence was recorded');
+  return { ...prepared, sharedDist };
 }
 
 function dependencyPlan(nodeModules) {
@@ -78,7 +163,7 @@ function dependencyPlan(nodeModules) {
   return packages;
 }
 
-function metroConfiguration(plan) {
+function metroConfiguration(plan, destinationMobile = mobileRoot) {
   const watchFolders = [...new Set(plan.filter(item => !item.writable && !item.packageName.startsWith('@cove/'))
     .map(item => {
       const physical = fs.realpathSync(item.source);
@@ -87,7 +172,7 @@ function metroConfiguration(plan) {
         root = path.dirname(root);
       return path.basename(root).toLowerCase() === 'node_modules' ? root : physical;
     }))];
-  const configPath = path.join(mobileRoot, 'metro.acceptance.config.cjs');
+  const configPath = path.join(destinationMobile, 'metro.acceptance.config.cjs');
   const initPath = path.join(toolsRoot, 'acceptance-metro.gradle');
   const cacheDirectories = ['metro-transform-cache', 'metro-file-map'].map(name => path.join(toolsRoot, name));
   const configSource = `// Generated acceptance-only configuration; borrowed dependencies stay read-only.
@@ -114,6 +199,91 @@ gradle.beforeProject { project ->
   return { watchFolders, configPath, initPath, cacheDirectories, configSource, initSource };
 }
 
+function stageDependencies(plan, destinationSource = sourceRoot, root) {
+  const destinationMobile = path.join(destinationSource, 'apps/mobile');
+  for (const item of plan) {
+    if (item.packageName.startsWith('@cove/')) continue;
+    const target = path.join(destinationMobile, 'node_modules', item.packageName);
+    assertWritable(path.dirname(target), root);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    if (item.writable) copy(fs.realpathSync(item.source), target, root);
+    else if (!fs.existsSync(target)) {
+      assertWritable(target, root);
+      fs.symlinkSync(fs.realpathSync(item.source), target, 'junction');
+    } else if (fs.realpathSync(target) !== fs.realpathSync(item.source))
+      throw new Error(`Borrowed dependency target changed: ${item.packageName}`);
+  }
+  for (const name of ['contracts', 'client-core']) {
+    const target = path.join(destinationMobile, 'node_modules/@cove', name);
+    assertWritable(path.dirname(target), root);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    if (!fs.existsSync(target)) {
+      assertWritable(target, root);
+      fs.symlinkSync(path.join(destinationSource, 'packages', name), target, 'junction');
+    }
+  }
+}
+
+function writeMetroConfiguration(plan, destinationMobile = mobileRoot, root) {
+  const metro = metroConfiguration(plan, destinationMobile);
+  for (const directory of metro.cacheDirectories) {
+    assertWritable(directory);
+    fs.mkdirSync(directory, { recursive: true });
+  }
+  for (const [target, source] of [[metro.configPath, metro.configSource], [metro.initPath, metro.initSource]]) {
+    assertWritable(target, inside(toolsRoot, target) ? toolsRoot : root);
+    fs.writeFileSync(target, source);
+  }
+  return metro;
+}
+
+function copyGradleCache(source, layout) {
+  validateOwnedRoot(layout);
+  assertWritable(source, toolsRoot);
+  if (fs.realpathSync(source) !== path.resolve(source)) throw new Error('Gradle cache source must be physical');
+  const target = path.join(layout.root, 'g');
+  assertWritable(target, layout.root);
+  fs.cpSync(source, target, { recursive: true, dereference: false, filter: item => {
+    if (['daemon', '.tmp'].includes(path.basename(item)) || item.endsWith('.lock')) return false;
+    if (fs.lstatSync(item).isSymbolicLink()) throw new Error(`Borrowed link inside Gradle cache: ${item}`);
+    return true;
+  } });
+  return target;
+}
+
+function shortenPreparedSnapshot() {
+  if (ownedLayout) throw new Error('A short Android root already exists; resume it instead');
+  const prepared = verifyPreparedSnapshot(legacySourceRoot);
+  const layout = createOwnedRoot();
+  const destinationSource = path.join(layout.root, 's');
+  for (const name of productPaths) copy(path.join(legacySourceRoot, name), path.join(destinationSource, name), layout.root);
+  const plan = dependencyPlan(path.join(repository, 'apps/mobile/node_modules'));
+  stageDependencies(plan, destinationSource, layout.root);
+  const gradleHome = copyGradleCache(path.join(toolsRoot, 'gradle-user-home'), layout);
+  writeMetroConfiguration(plan, path.join(destinationSource, 'apps/mobile'), layout.root);
+  assertSnapshotFiles(destinationSource, git('ls-files', '-z', '--', ...productPaths).split('\0').filter(Boolean));
+  assertSharedDist(destinationSource);
+  assertSourceUnchanged(prepared, productState());
+  fs.writeFileSync(path.join(destinationSource, 'prepared-source.json'), JSON.stringify({ ...prepared,
+    relocatedFrom: legacySourceRoot, buildRoot: layout.root, nativeCacheMode: 'fresh-owned-cxx',
+  }, null, 2));
+  assertWritable(layoutFile, toolsRoot);
+  fs.writeFileSync(layoutFile, JSON.stringify(layout, null, 2));
+  return { ...prepared, sourceRoot: destinationSource, gradleUserHome: gradleHome,
+    nativeCacheMode: 'fresh-owned-cxx', ownershipMarker: path.join(layout.root, '.cove-android-owner.json') };
+}
+
+function resetOwnedNativeCache(plan, layout = ownedLayout, stagedSource = sourceRoot) {
+  if (!layout) return;
+  validateOwnedRoot(layout);
+  if (stagedSource !== path.join(layout.root, 's')) throw new Error('Native source root does not match owned layout');
+  const stagedMobile = path.join(stagedSource, 'apps/mobile');
+  const targets = [path.join(stagedMobile, 'android/app/.cxx'), ...plan.filter(item => item.writable)
+    .map(item => path.join(stagedMobile, 'node_modules', item.packageName, 'android/.cxx'))];
+  for (const target of targets) assertWritable(target, stagedSource);
+  for (const target of targets) fs.rmSync(target, { recursive: true, force: true });
+}
+
 function prepare() {
   const product = productState();
   const prepared = sourceMetadata({ head: git('rev-parse', 'HEAD'), expected: process.env.COVE_ACCEPTANCE_SOURCE_COMMIT,
@@ -136,27 +306,9 @@ function prepare() {
     copy(dist, path.join(destination, 'dist'));
   }
   const plan = dependencyPlan(path.join(originalMobile, 'node_modules'));
-  for (const item of plan) {
-    const target = path.join(mobileRoot, 'node_modules', item.packageName);
-    if (item.packageName.startsWith('@cove/')) continue;
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    if (item.writable) copy(fs.realpathSync(item.source), target);
-    else if (!fs.existsSync(target)) fs.symlinkSync(fs.realpathSync(item.source), target, 'junction');
-  }
-  for (const name of ['contracts', 'client-core']) {
-    const target = path.join(mobileRoot, 'node_modules/@cove', name);
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    if (!fs.existsSync(target)) fs.symlinkSync(path.join(sourceRoot, 'packages', name), target, 'junction');
-  }
-  const metro = metroConfiguration(plan);
-  for (const directory of metro.cacheDirectories) {
-    assertWritable(directory);
-    fs.mkdirSync(directory, { recursive: true });
-  }
-  for (const [target, source] of [[metro.configPath, metro.configSource], [metro.initPath, metro.initSource]]) {
-    assertWritable(target);
-    fs.writeFileSync(target, source);
-  }
+  stageDependencies(plan);
+  const metro = writeMetroConfiguration(plan);
+  prepared.sharedDist = assertSharedDist(sourceRoot);
   fs.writeFileSync(path.join(toolsRoot, 'dependency-isolation.json'), JSON.stringify({
     copied: plan.filter(item => item.writable).map(item => item.packageName),
     readonlyLinks: plan.filter(item => !item.writable).length,
@@ -167,15 +319,18 @@ function prepare() {
     copied: plan.filter(item => item.writable).map(item => item.packageName) };
 }
 
-function buildEnvironment(sdk = process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT) {
+function buildEnvironment(sdk = process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT, layout = ownedLayout) {
   if (!sdk || !fs.existsSync(path.join(sdk, 'platforms/android-36/android.jar')))
     throw new Error('An existing Android SDK 36 is required (read-only)');
   const environment = { ...process.env, CI: 'true', COVE_ANDROID_SIGNING_MODE: 'legacy',
-    GRADLE_USER_HOME: path.join(toolsRoot, 'gradle-user-home'),
+    GRADLE_USER_HOME: layout ? path.join(validateOwnedRoot(layout).root, 'g') : path.join(toolsRoot, 'gradle-user-home'),
     ANDROID_HOME: sdk, ANDROID_SDK_ROOT: sdk, ANDROID_USER_HOME: path.join(toolsRoot, 'android-user'),
     TMP: path.join(toolsRoot, 'tmp'), TEMP: path.join(toolsRoot, 'tmp'),
     npm_config_cache: path.join(toolsRoot, 'npm-cache'), npm_config_offline: 'true' };
-  for (const name of ['GRADLE_USER_HOME', 'ANDROID_USER_HOME', 'TMP']) fs.mkdirSync(environment[name], { recursive: true });
+  for (const name of ['GRADLE_USER_HOME', 'ANDROID_USER_HOME', 'TMP']) {
+    assertWritable(environment[name], layout && inside(layout.root, environment[name]) ? layout.root : toolsRoot);
+    fs.mkdirSync(environment[name], { recursive: true });
+  }
   return environment;
 }
 
@@ -191,13 +346,22 @@ function proxyArguments(environment) {
   return args;
 }
 
-function runGradle(tasks) {
-  const prepared = prepare();
+function runGradle(tasks, resume = false) {
+  if (resume && !ownedLayout) throw new Error('Create and verify a short snapshot with shorten before resuming');
+  const prepared = resume ? { ...verifyPreparedSnapshot(sourceRoot),
+    metroInitScript: writeMetroConfiguration(dependencyPlan(path.join(repository, 'apps/mobile/node_modules'))).initPath } : prepare();
   const gradleHome = path.join(toolsRoot, 'gradle-9.3.1');
   const classpath = path.join(gradleHome, 'lib/gradle-gradle-cli-main-9.3.1.jar');
   if (!fs.existsSync(classpath)) throw new Error('Download and verify official Gradle 9.3.1 into android-tools first');
   const java = path.join(jdkDirectory(process.env), 'bin/java.exe');
   const environment = buildEnvironment();
+  resetOwnedNativeCache(dependencyPlan(path.join(repository, 'apps/mobile/node_modules')));
+  const invocation = path.join(sourceRoot, 'build-invocation.json');
+  assertWritable(invocation);
+  fs.writeFileSync(invocation, JSON.stringify({ sourceCommit: prepared.sourceCommit, buildToolingCommit: git('rev-parse', 'HEAD'),
+    sourceRoot, gradleUserHome: environment.GRADLE_USER_HOME, nativeCacheMode: ownedLayout ? 'fresh-owned-cxx' : 'default',
+    sharedDist: prepared.sharedDist,
+  }, null, 2));
   const result = spawnSync(java, ['-Dfile.encoding=UTF-8', `-Djava.io.tmpdir=${environment.TMP}`, '-classpath', classpath,
     'org.gradle.launcher.GradleMain', ...tasks, '--init-script', prepared.metroInitScript,
     '--no-daemon', '--console=plain', '--stacktrace', '--max-workers=2',
@@ -254,11 +418,19 @@ function collect() {
   const signerSha256 = signature.match(/Signer #1 certificate SHA-256 digest: ([a-f\d]{64})/i)?.[1].toLowerCase();
   if (signerSha256 !== 'fac61745dc0903786fb9ede62a962b399f7348f0bb6f899b8332667591033b9c')
     throw new Error('APK signer differs from the checked-in debug identity; no artifact collected');
+  const invocation = JSON.parse(fs.readFileSync(path.join(sourceRoot, 'build-invocation.json'), 'utf8'));
+  if (invocation.sourceCommit !== prepared.sourceCommit) throw new Error('Build invocation source commit does not match');
+  const sharedDist = assertSharedDist(sourceRoot);
+  if (JSON.stringify(invocation.sharedDist) !== JSON.stringify(sharedDist))
+    throw new Error('Shared dist changed during the Android build');
   fs.mkdirSync(artifactsRoot, { recursive: true });
   fs.copyFileSync(apk, destination);
   const sha256 = createHash('sha256').update(fs.readFileSync(destination)).digest('hex');
   const report = { applicationId: metadata.applicationId, versionName: element.versionName,
     sourceCommit: prepared.sourceCommit, acceptanceId: prepared.acceptanceId,
+    buildToolingCommit: invocation.buildToolingCommit, buildSourceRoot: sourceRoot,
+    gradleUserHome: invocation.gradleUserHome, nativeCacheMode: invocation.nativeCacheMode,
+    sharedDist,
     sourceDirty: prepared.sourceDirty, sourceStatus: prepared.sourceStatus,
     versionCode: element.versionCode, filename: path.basename(destination), size: fs.statSync(destination).size,
     sha256, testSigning: true, signerSha256, abis,
@@ -271,12 +443,16 @@ function collect() {
 }
 
 module.exports = { inside, assertWritable, dependencyPlan, prepare, buildEnvironment, proxyArguments,
-  sourceMetadata, assertSourceUnchanged, jdkDirectory, metroConfiguration, collect };
+  sourceMetadata, assertSourceUnchanged, jdkDirectory, metroConfiguration, validateOwnedRoot, createOwnedRoot,
+  assertSnapshotFiles, assertSharedDist, verifyPreparedSnapshot, copyGradleCache,
+  shortenPreparedSnapshot, resetOwnedNativeCache, collect };
 if (require.main === module) {
   const command = process.argv[2];
   if (command === 'prepare') console.log(JSON.stringify(prepare(), null, 2));
   else if (command === 'probe') runGradle(['help']);
   else if (command === 'build') { runGradle([':app:assembleDebug', ':app:testDebugUnitTest']); console.log(JSON.stringify(collect(), null, 2)); }
+  else if (command === 'shorten') console.log(JSON.stringify(shortenPreparedSnapshot(), null, 2));
+  else if (command === 'resume') { runGradle([':app:assembleDebug', ':app:testDebugUnitTest'], true); console.log(JSON.stringify(collect(), null, 2)); }
   else if (command === 'collect') console.log(JSON.stringify(collect(), null, 2));
-  else throw new Error('Usage: node tooling/android-acceptance.cjs prepare|probe|build|collect');
+  else throw new Error('Usage: node tooling/android-acceptance.cjs prepare|probe|build|shorten|resume|collect');
 }

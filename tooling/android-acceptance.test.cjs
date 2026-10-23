@@ -4,7 +4,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const { inside, assertWritable, dependencyPlan, buildEnvironment, proxyArguments,
-  sourceMetadata, assertSourceUnchanged, jdkDirectory, metroConfiguration } = require('./android-acceptance.cjs');
+  sourceMetadata, assertSourceUnchanged, jdkDirectory, metroConfiguration, createOwnedRoot, validateOwnedRoot,
+  assertSnapshotFiles, assertSharedDist, resetOwnedNativeCache, copyGradleCache } = require('./android-acceptance.cjs');
 const toolsRoot = path.resolve(__dirname, '../runtime/acceptance-20261023/android-tools');
 
 test('build writes reject escaped paths and junctions into borrowed dependencies', () => {
@@ -59,7 +60,7 @@ test('Metro discovers and deduplicates every physical dependency root behind sco
 });
 
 test('acceptance Metro preserves product resolution and pins all caches plus Gradle configuration to isolation', () => {
-  const configuration = metroConfiguration([]);
+  const configuration = metroConfiguration([], path.join(toolsRoot, 'build-source/apps/mobile'));
   const original = { projectRoot: 'product-root', watchFolders: ['shared-packages'],
     resolver: { disableHierarchicalLookup: true }, transformer: { productOption: true } };
   const context = { module: { exports: {} }, require(name) {
@@ -79,7 +80,7 @@ test('acceptance Metro preserves product resolution and pins all caches plus Gra
   assert.match(configuration.initSource, /withPlugin\('com\.facebook\.react'\)/);
   assert.match(configuration.initSource, /bundleConfig\.set\(new File\(/);
   const source = fs.readFileSync(path.resolve(__dirname, './android-acceptance.cjs'), 'utf8');
-  assert.match(source, /const prepared = prepare\(\)/);
+  assert.match(source, /const prepared = resume \? \{ \.\.\.verifyPreparedSnapshot\(sourceRoot\)/);
   assert.match(source, /'--init-script', prepared\.metroInitScript/);
 });
 
@@ -87,7 +88,7 @@ test('build caches and temporary outputs stay local and cannot select external s
   const sdk = path.join(toolsRoot, 'safety-test/sdk');
   fs.mkdirSync(path.join(sdk, 'platforms/android-36'), { recursive: true });
   fs.writeFileSync(path.join(sdk, 'platforms/android-36/android.jar'), 'synthetic sdk marker');
-  const environment = buildEnvironment(sdk);
+  const environment = buildEnvironment(sdk, null);
   for (const name of ['GRADLE_USER_HOME', 'ANDROID_USER_HOME', 'TMP', 'TEMP', 'npm_config_cache'])
     assert.equal(inside(toolsRoot, environment[name]), true, name);
   assert.equal(environment.COVE_ANDROID_SIGNING_MODE, 'legacy');
@@ -137,4 +138,113 @@ test('collection preserves the prepared commit while rejecting product changes d
 test('missing JAVA_HOME reports a clear prerequisite before APK inspection', () => {
   assert.throws(() => jdkDirectory({}), /JAVA_HOME.*JDK 17/);
   assert.throws(() => jdkDirectory({ JAVA_HOME: path.join(toolsRoot, 'safety-test/missing-jdk') }), /JAVA_HOME.*JDK 17/);
+});
+
+test('short Android roots require physical unique Temp ownership and reject a mismatched marker or junction', () => {
+  const temporary = path.join(toolsRoot, 'safety-test/owned-temp');
+  fs.mkdirSync(temporary, { recursive: true });
+  const owned = createOwnedRoot(temporary);
+  assert.deepEqual(validateOwnedRoot(owned, temporary), owned);
+  assert.throws(() => validateOwnedRoot({ ...owned, token: 'different-owner' }, temporary), /ownership/);
+  assert.throws(() => validateOwnedRoot({ ...owned, root: toolsRoot }, temporary), /unique directory/);
+  const alias = path.join(temporary, 'cva-alias1');
+  if (!fs.existsSync(alias)) fs.symlinkSync(owned.root, alias, 'junction');
+  assert.throws(() => validateOwnedRoot({ ...owned, root: alias }, temporary), /physical/);
+  const borrowed = path.join(owned.root, 'borrowed');
+  fs.symlinkSync(path.resolve(__dirname), borrowed, 'junction');
+  assert.throws(() => assertWritable(path.join(borrowed, '.cxx'), owned.root), /borrowed/);
+});
+
+test('short Gradle cache stays in the owned root while other caches stay in project isolation', () => {
+  const sdk = path.join(toolsRoot, 'safety-test/sdk');
+  const owned = createOwnedRoot();
+  const environment = buildEnvironment(sdk, owned);
+  assert.equal(environment.GRADLE_USER_HOME, path.join(owned.root, 'g'));
+  for (const name of ['TMP', 'TEMP', 'ANDROID_USER_HOME', 'npm_config_cache'])
+    assert.equal(inside(toolsRoot, environment[name]), true);
+  const other = createOwnedRoot();
+  fs.symlinkSync(path.resolve(__dirname), path.join(other.root, 'g'), 'junction');
+  assert.throws(() => buildEnvironment(sdk, other), /borrowed/);
+});
+
+test('relocated snapshots compare every selected product file and reject mutation or path escape', () => {
+  const snapshot = path.join(toolsRoot, 'safety-test/snapshot');
+  const relative = 'apps/mobile/package.json';
+  const target = path.join(snapshot, relative);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.copyFileSync(path.resolve(__dirname, '..', relative), target);
+  assert.doesNotThrow(() => assertSnapshotFiles(snapshot, [relative]));
+  fs.appendFileSync(target, '\nmodified snapshot\n');
+  assert.throws(() => assertSnapshotFiles(snapshot, [relative]), /differs from frozen/);
+  assert.throws(() => assertSnapshotFiles(snapshot, ['../escaped']), /escaped/);
+  const source = fs.readFileSync(path.resolve(__dirname, './android-acceptance.cjs'), 'utf8');
+  assert.match(source, /prepared\.sourceCommit[\s\S]*?prepared\.productTrees[\s\S]*?assertSnapshotFiles/);
+  assert.match(source, /sourceCommit: prepared\.sourceCommit, buildToolingCommit: git\('rev-parse', 'HEAD'\)/);
+});
+
+test('shared untracked dist bytes and file sets are verified and hashed before reuse', () => {
+  const fixture = fs.mkdtempSync(path.join(toolsRoot, 'safety-test/dist-'));
+  const original = path.join(fixture, 'original');
+  const snapshot = path.join(fixture, 'snapshot');
+  for (const name of ['contracts', 'client-core']) {
+    const directory = path.join(original, name, 'dist');
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, 'index.js'), `module.exports = '${name}';\n`);
+    fs.mkdirSync(path.join(snapshot, 'packages'), { recursive: true });
+    fs.cpSync(path.join(original, name), path.join(snapshot, 'packages', name), { recursive: true });
+  }
+  const evidence = assertSharedDist(snapshot, original);
+  assert.equal(evidence['client-core'].files.length, 1);
+  assert.match(evidence.contracts.sha256, /^[a-f\d]{64}$/);
+  const staged = path.join(snapshot, 'packages/client-core/dist/index.js');
+  fs.appendFileSync(staged, 'stale output');
+  assert.throws(() => assertSharedDist(snapshot, original), /shared dist differs/);
+  fs.copyFileSync(path.join(original, 'client-core/dist/index.js'), staged);
+  fs.writeFileSync(path.join(snapshot, 'packages/client-core/dist/extra.js'), 'extra');
+  assert.throws(() => assertSharedDist(snapshot, original), /shared dist differs/);
+});
+
+test('native cache cleanup validates all targets before deleting and never follows a later borrowed junction', () => {
+  const owned = createOwnedRoot();
+  const source = path.join(owned.root, 's');
+  const mobile = path.join(source, 'apps/mobile');
+  const appCache = path.join(mobile, 'android/app/.cxx');
+  fs.mkdirSync(appCache, { recursive: true });
+  fs.writeFileSync(path.join(appCache, 'keep.txt'), 'first owned cache');
+  const borrowed = fs.mkdtempSync(path.join(toolsRoot, 'safety-test/native-borrowed-'));
+  fs.mkdirSync(path.join(borrowed, 'android/.cxx'), { recursive: true });
+  fs.writeFileSync(path.join(borrowed, 'android/.cxx/keep.txt'), 'borrowed cache');
+  fs.mkdirSync(path.join(mobile, 'node_modules'), { recursive: true });
+  fs.symlinkSync(borrowed, path.join(mobile, 'node_modules/unsafe'), 'junction');
+  assert.throws(() => resetOwnedNativeCache([{ packageName: 'unsafe', writable: true }], owned, source), /borrowed/);
+  assert.equal(fs.readFileSync(path.join(appCache, 'keep.txt'), 'utf8'), 'first owned cache');
+  const safeCache = path.join(mobile, 'node_modules/safe/android/.cxx');
+  fs.mkdirSync(safeCache, { recursive: true });
+  fs.writeFileSync(path.join(safeCache, 'remove.txt'), 'owned native cache');
+  resetOwnedNativeCache([{ packageName: 'safe', writable: true }], owned, source);
+  assert.equal(fs.existsSync(appCache), false);
+  assert.equal(fs.existsSync(safeCache), false);
+  assert.equal(fs.readFileSync(path.join(borrowed, 'android/.cxx/keep.txt'), 'utf8'), 'borrowed cache');
+});
+
+test('Gradle cache copies reject physical source aliases and included nested links before dereferencing', () => {
+  const fixture = fs.mkdtempSync(path.join(toolsRoot, 'safety-test/cache-'));
+  const source = path.join(fixture, 'source');
+  const outside = path.join(fixture, 'outside');
+  fs.mkdirSync(source, { recursive: true });
+  fs.mkdirSync(outside, { recursive: true });
+  fs.writeFileSync(path.join(outside, 'outside.txt'), 'must not be copied');
+  fs.symlinkSync(source, path.join(fixture, 'alias'), 'junction');
+  assert.throws(() => copyGradleCache(path.join(fixture, 'alias'), createOwnedRoot()), /borrowed/);
+  fs.symlinkSync(outside, path.join(source, 'included-link'), 'junction');
+  const rejected = createOwnedRoot();
+  assert.throws(() => copyGradleCache(source, rejected), /link inside Gradle cache/);
+  assert.equal(fs.existsSync(path.join(rejected.root, 'g/included-link/outside.txt')), false);
+  const safe = path.join(fixture, 'safe-source');
+  fs.mkdirSync(safe, { recursive: true });
+  fs.writeFileSync(path.join(safe, 'cache.bin'), 'cached bytes');
+  fs.symlinkSync(outside, path.join(safe, '.tmp'), 'junction');
+  const copied = copyGradleCache(safe, createOwnedRoot());
+  assert.equal(fs.readFileSync(path.join(copied, 'cache.bin'), 'utf8'), 'cached bytes');
+  assert.equal(fs.existsSync(path.join(copied, '.tmp')), false);
 });
