@@ -2,6 +2,7 @@ import { useRef, useState } from 'react';
 import { MonitorPlay, Cursor as MousePointer2, Radio, X } from '@phosphor-icons/react';
 import { useWebRTC } from '../useWebRTC';
 import { useScreenFullscreen } from './useScreenFullscreen';
+import { useScreenPictureInPicture } from './useScreenPictureInPicture';
 import { diagnosticPacketLoss } from '../diagnostics/mediaDiagnostics';
 import { type RemoteControlInput } from '../../remote-control/remoteControl';
 import { RemoteScreenVideo, LocalScreenVideo } from './ScreenVideo';
@@ -47,6 +48,8 @@ export function ShareViewV2({
   const local = Boolean(rtc.localScreen);
   const remote = rtc.remoteScreen;
   const videoHostRef = useRef<HTMLDivElement>(null);
+  const pictureInPicture = useScreenPictureInPicture(videoHostRef, remote?.stream ?? null);
+  const floating = pictureInPicture.active || pictureInPicture.pending;
   const displayedSelf = local && !remote;
   const ownAnnotations = useScreenAnnotations({ socket, roomId, sharerSocketId: rtc.localSocketId ?? '',
     sessionId: rtc.localScreenProducerId, self: true, active: local });
@@ -94,7 +97,7 @@ export function ShareViewV2({
           {remote ? (
             <RemoteScreenVideo
               stream={remote.stream}
-              controlling={remoteControl.state === 'active' && !annotations.localActive}
+              controlling={remoteControl.state === 'active' && !annotations.localActive && !floating}
               onInput={onInput}
             />
           ) : local ? (
@@ -110,8 +113,14 @@ export function ShareViewV2({
                 已进入共享屏幕绘画；窗口共享时请切到被共享窗口。Esc 退出。
                 <button onClick={annotations.exit}>退出绘画</button>
               </p>
-            : <ScreenAnnotationLayer annotations={annotations} self={displayedSelf} videoHostRef={videoHostRef} />}
+            : !floating && <ScreenAnnotationLayer annotations={annotations} self={displayedSelf} videoHostRef={videoHostRef} />}
           {overlayError && <p className="annotation-layer-status" role="status">{overlayError}</p>}
+          {pictureInPicture.active && <div className="screen-floating-status" role="status">
+            <MonitorPlay size={30} />
+            <span>正在置顶小窗中观看</span>
+            <button onClick={() => { void pictureInPicture.close(); }}>返回主窗口</button>
+          </div>}
+          {pictureInPicture.error && <p className="screen-floating-error" role="status">{pictureInPicture.error}</p>}
         </div>
         {debug && (
           <DiagnosticsOverlayV2
@@ -181,6 +190,14 @@ export function ShareViewV2({
         onEnd={end}
         fullscreenMode={nativeFullscreen ? 'full' : screenMaximized ? 'app' : null}
         onAppFull={toggleFullscreen}
+        pictureInPicture={remote ? {
+          ...pictureInPicture,
+          disabled: !pictureInPicture.supported || pictureInPicture.pending ||
+            remoteControl.state === 'active' || remoteControl.state === 'pending' || annotations.localActive,
+          disabledReason: remoteControl.state === 'active' || remoteControl.state === 'pending'
+            ? '请先停止远控或取消申请' : annotations.localActive ? '请先退出批注' :
+              !pictureInPicture.supported ? '当前环境暂不支持置顶小窗' : undefined,
+        } : undefined}
         hasAudio={
           local ? Boolean(rtc.localScreen?.getAudioTracks().length) : rtc.screenReceiveHasAudio
         }

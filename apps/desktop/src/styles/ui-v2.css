@@ -9283,6 +9283,38 @@ body:has(
   color: var(--room-fg);
 }
 
+.screen-floating-status {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--room-fg);
+  background: var(--room-top);
+  font-size: 12px;
+}
+.screen-floating-status button {
+  padding: 8px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+}
+.screen-floating-error {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  max-width: calc(100% - 32px);
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: 9px;
+  color: var(--room-fg);
+  background: var(--room-top);
+  font-size: 12px;
+  text-align: center;
+}
+
 /* The outer shell follows native window resize frames directly. Only its grid
    track transition is suppressed while the window is moving; intentional
    sidebar/chat actions and descendant motion keep their own transitions. */

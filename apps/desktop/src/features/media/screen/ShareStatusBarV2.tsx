@@ -2,6 +2,7 @@ import {
   MonitorPlay,
   PhoneDisconnect,
   SquaresFour,
+  PictureInPicture,
 } from '@phosphor-icons/react';
 import { VolumeControl } from '../components/VolumeControl';
 import { ShareOperationsMenu } from '../annotation/ShareOperationsMenu';
@@ -24,6 +25,7 @@ export function ShareStatusBarV2({
   onAppFull,
   hasAudio,
   annotations,
+  pictureInPicture,
 }: {
   self: boolean;
   sharer: string;
@@ -41,8 +43,17 @@ export function ShareStatusBarV2({
   onAppFull: () => void;
   hasAudio: boolean;
   annotations: ReturnType<typeof useScreenAnnotations>;
+  pictureInPicture?: {
+    active: boolean;
+    pending: boolean;
+    disabled: boolean;
+    disabledReason?: string;
+    open(): Promise<void>;
+    close(): Promise<void>;
+  };
 }) {
   const appFullscreen = fullscreenMode === 'app';
+  const floating = pictureInPicture?.active || pictureInPicture?.pending;
   return (
     <div className="share-status-bar">
       <div className="share-status-left">
@@ -58,15 +69,23 @@ export function ShareStatusBarV2({
         )}
       </div>
       <div className="share-status-actions">
-        <ShareOperationsMenu self={self} annotations={annotations} remoteState={remoteState}
-          cooldownSeconds={remoteCooldownSeconds} onRemote={onRemote} onStopRemote={onStopRemote} />
+        {!floating && <ShareOperationsMenu self={self} annotations={annotations} remoteState={remoteState}
+          cooldownSeconds={remoteCooldownSeconds} onRemote={onRemote} onStopRemote={onStopRemote} />}
+        {pictureInPicture && <button className="floating-view-toggle"
+          aria-pressed={pictureInPicture.active}
+          disabled={pictureInPicture.pending || (!pictureInPicture.active && pictureInPicture.disabled)}
+          title={pictureInPicture.active ? '关闭小窗并返回主窗口' : pictureInPicture.disabledReason}
+          onClick={() => { void (pictureInPicture.active ? pictureInPicture.close() : pictureInPicture.open()); }}>
+          <PictureInPicture size={17} />
+          {pictureInPicture.pending ? '正在切换…' : pictureInPicture.active ? '返回主窗口' : '置顶小窗'}
+        </button>}
         <div className="fullscreen-stack">
-          <button onClick={appFullscreen ? onAppFull : onFull}>
+          <button disabled={floating} onClick={appFullscreen ? onAppFull : onFull}>
             <SquaresFour size={17} />
             {appFullscreen ? '退出全屏' : '全屏'}
           </button>
           {!appFullscreen && (
-            <button className="application-fullscreen" onClick={onAppFull}>
+            <button className="application-fullscreen" disabled={floating} onClick={onAppFull}>
               <MonitorPlay size={17} />
               应用全屏
             </button>
