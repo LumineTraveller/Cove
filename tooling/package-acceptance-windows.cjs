@@ -27,7 +27,11 @@ function packageDirectory(requireFrom, name) {
   try { return fs.realpathSync(path.dirname(localRequire.resolve(`${name}/package.json`))); }
   catch {
     let entry = path.dirname(localRequire.resolve(name));
-    while (!fs.existsSync(path.join(entry, 'package.json'))) {
+    // Export maps often hide package.json and resolve into build/cjs/, whose
+    // package.json only sets type=commonjs. Its parent is still the real package
+    // owner and carries the dependency graph that must accompany this runtime.
+    while (!fs.existsSync(path.join(entry, 'package.json')) ||
+        JSON.parse(fs.readFileSync(path.join(entry, 'package.json'), 'utf8')).name !== name) {
       const parent = path.dirname(entry); if (entry === parent) throw new Error(`Cannot find package ${name}`); entry = parent;
     }
     return fs.realpathSync(entry);
@@ -47,6 +51,8 @@ function copyDependencies(requireFrom, names, destination) {
     if (copied.has(target)) throw new Error(`Conflicting dependency destination ${target}`);
     copied.set(target, source);
     const manifest = JSON.parse(fs.readFileSync(path.join(source, 'package.json'), 'utf8'));
+    if (manifest.name !== name || typeof manifest.version !== 'string')
+      throw new Error(`Dependency package metadata does not identify ${name}`);
     fs.mkdirSync(path.dirname(target), { recursive: true });
     copyTree(source, target, file => {
       const relative = path.relative(source, file).replaceAll('\\', '/');

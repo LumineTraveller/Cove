@@ -36,6 +36,21 @@ test('portable dependency copies execute from their own tree, including conflict
   assertPhysicalTree(target);
   assert.notEqual(fs.realpathSync(path.join(target, 'node_modules/alpha')), fs.realpathSync(path.join(source, 'node_modules/alpha')));
 });
+test('an exported CommonJS marker package.json cannot hide the actual package dependencies', t => {
+  const directory = fixture(t); const source = path.join(directory, 'source'); const target = path.join(directory, 'portable');
+  pkg(source, 'fixture', {}, '');
+  const exported = path.join(source, 'node_modules/exported');
+  pkg(exported, 'exported', { 'fixture-private-dependency': '*' }, '');
+  fs.writeFileSync(path.join(exported, 'package.json'), JSON.stringify({ name: 'exported', version: '1.0.0',
+    exports: { '.': './build/cjs/index.js' }, dependencies: { 'fixture-private-dependency': '*' } }));
+  fs.mkdirSync(path.join(exported, 'build/cjs'), { recursive: true });
+  fs.writeFileSync(path.join(exported, 'build/cjs/package.json'), JSON.stringify({ type: 'commonjs' }));
+  fs.writeFileSync(path.join(exported, 'build/cjs/index.js'), "module.exports=require('fixture-private-dependency');");
+  pkg(path.join(source, 'node_modules/fixture-private-dependency'), 'fixture-private-dependency', {}, 'module.exports=7;');
+  const inventory = copyDependencies(source, ['exported'], path.join(target, 'node_modules'));
+  assert.deepEqual(inventory.map(entry => entry.name).sort(), ['exported', 'fixture-private-dependency']);
+  assert.equal(createRequire(path.join(target, 'package.json'))('exported'), 7);
+});
 test('portable state and network configuration reject public addresses and invalid ports', t => {
   const directory = fixture(t);
   const config = { flavor: 'cove-acceptance-20261023', httpPort: 33991, mediaPort: 41990, announceAddress: '127.0.0.1', listenHost: '127.0.0.1' };
