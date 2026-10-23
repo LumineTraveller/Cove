@@ -19,10 +19,12 @@ async function stop(child){
 function logged(executable,args,env,file){const fd=fs.openSync(file,'w');const child=spawn(executable,args,{cwd:root,env,windowsHide:true,stdio:['ignore',fd,fd,'ipc']});child.once('close',()=>fs.closeSync(fd));return child;}
 async function port(){const socket=dgram.createSocket('udp4');await new Promise((resolve,reject)=>{socket.once('error',reject);socket.bind(0,'127.0.0.1',resolve);});const value=socket.address().port;await new Promise(resolve=>socket.close(resolve));return value<65000?value:port();}
 async function main(){
-  const runtime=path.join(root,'runtime/fps-candidate');fs.mkdirSync(runtime,{recursive:true});
+  const runtimeName=process.env.COVE_FPS_RUNTIME_NAME||'fps-candidate';
+  if(!/^fps-(?:candidate|validation-[a-z0-9-]{1,60})$/.test(runtimeName))throw Error('Invalid performance runtime namespace');
+  const runtime=path.join(root,'runtime',runtimeName);fs.mkdirSync(runtime,{recursive:true});
   const label=process.env.COVE_FPS_LABEL||'baseline';if(!/^[a-z0-9-]{1,60}$/.test(label))throw Error('Invalid performance label');
   const directory=fs.mkdtempSync(path.join(runtime,label+'-'));
-  const sources=['apps/desktop/src/features/media/screen/screenCapture.ts','apps/desktop/src/features/media/screen/useScreenPublishing.ts','apps/desktop/src/features/media/screen/useScreenAnalysis.ts','apps/desktop/tests/ui/media-integration.tsx','apps/desktop/tests/ui/screen-performance-fixture.ts','apps/desktop/tests/ui/screen-performance.electron.cjs','apps/desktop/tests/ui/screen-performance-backend.cjs','tooling/verify-screen-performance.cjs'];
+  const sources=['apps/desktop/src/features/media/screen/screenCapture.ts','apps/desktop/src/features/media/screen/useScreenPublishing.ts','apps/desktop/src/features/media/screen/useScreenAnalysis.ts','apps/desktop/tests/ui/media-integration.tsx','apps/desktop/tests/ui/screen-performance-fixture.ts','apps/desktop/tests/ui/screen-performance.electron.cjs','apps/desktop/tests/ui/screen-performance-backend.cjs','tooling/verify-screen-performance.cjs','tooling/screen-performance-config.cjs'];
   fs.writeFileSync(path.join(directory,'source.json'),JSON.stringify({startedAt:new Date().toISOString(),node:process.version,files:Object.fromEntries(sources.map(file=>[file,crypto.createHash('sha256').update(fs.readFileSync(path.join(root,file))).digest('hex')]))},null,2)+'\n');
   const env={...process.env,COVE_FPS_RUN_DIR:directory,COVE_TEST_NODE:process.execPath,COVE_QA_MEDIA_PORT:String(await port())};delete env.ELECTRON_RUN_AS_NODE;
   const dependencies=path.dirname(fs.realpathSync(path.join(root,'node_modules/vite')));

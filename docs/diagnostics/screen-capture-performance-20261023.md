@@ -1,5 +1,11 @@
 # Windows screen capture: measured throughput and scoped improvement
 
+See the [follow-up layer audit and current capture failure](screen-capture-limits-after-038ae81.md)
+for additional source/log evidence. In the tables below, "Capture pixels" means
+the browser-delivered track/media-source dimensions, not the original Windows
+desktop frame's capture area. The follow-up keeps unsuccessful measurements
+separate from these earlier valid comparisons.
+
 2026-10-23 UTC. Checkout baseline: `e31362c`; isolated local tests only. No installed client, live server, system security setting, encoder limit, capture lifecycle, resolution policy or release version was changed.
 
 ## Result and production change

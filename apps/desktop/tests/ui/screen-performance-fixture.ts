@@ -69,6 +69,41 @@ export function installScreenPerformanceFixture(
     mediaTime: number | null; processingDuration: number | null;
   }>();
   let disposed = false;
+  const analysisTiming = { drawCalls: 0, readCalls: 0, drawMs: 0, readMs: 0,
+    maxDrawMs: 0, maxReadMs: 0, errors: 0 };
+  const originalGetContext = HTMLCanvasElement.prototype.getContext;
+  const profiledContexts = new WeakSet<CanvasRenderingContext2D>();
+  const restoreAnalysisContexts: Array<() => void> = [];
+  // Observe only the product activity sampler's 160x90 canvas. This wrapper
+  // adds no pixels, extra readbacks, timers, or producer-side work to game mode.
+  const profiledGetContext = function(this: HTMLCanvasElement, ...args: unknown[]) {
+    const context = Reflect.apply(originalGetContext, this, args) as RenderingContext | null;
+    if (args[0] === '2d' && this.width === 160 && this.height === 90 && context &&
+        !profiledContexts.has(context as CanvasRenderingContext2D)) {
+      const measured = context as CanvasRenderingContext2D;
+      profiledContexts.add(measured);
+      const draw = measured.drawImage, read = measured.getImageData;
+      measured.drawImage = function(this: CanvasRenderingContext2D, ...values: unknown[]) {
+        const started = performance.now();
+        try { return Reflect.apply(draw, this, values); }
+        catch (error) { analysisTiming.errors++; throw error; }
+        finally { const duration = performance.now() - started;
+          analysisTiming.drawCalls++; analysisTiming.drawMs += duration;
+          analysisTiming.maxDrawMs = Math.max(analysisTiming.maxDrawMs, duration); }
+      } as CanvasRenderingContext2D['drawImage'];
+      measured.getImageData = function(this: CanvasRenderingContext2D, ...values: unknown[]) {
+        const started = performance.now();
+        try { return Reflect.apply(read, this, values) as ImageData; }
+        catch (error) { analysisTiming.errors++; throw error; }
+        finally { const duration = performance.now() - started;
+          analysisTiming.readCalls++; analysisTiming.readMs += duration;
+          analysisTiming.maxReadMs = Math.max(analysisTiming.maxReadMs, duration); }
+      } as CanvasRenderingContext2D['getImageData'];
+      restoreAnalysisContexts.push(() => { measured.drawImage = draw; measured.getImageData = read; });
+    }
+    return context;
+  } as typeof HTMLCanvasElement.prototype.getContext;
+  HTMLCanvasElement.prototype.getContext = profiledGetContext;
   const videoTrackTokens = new WeakMap<MediaStreamTrack, number>();
   let nextVideoTrackToken = 0;
   const originalUserMedia = navigator.mediaDevices.getUserMedia;
@@ -286,6 +321,17 @@ export function installScreenPerformanceFixture(
     }
     return {
       timestamp: performance.now(), configuration, supportsGenerator,
+      activityAnalysis: { ...analysisTiming },
+      product: (() => {
+        const rtc = (window as unknown as { coveMediaQA?: { rtc?: {
+          screenActivity?: string; screenEncodingPlan?: { fps: number; contentHint: string; degradationPreference: string };
+        } } }).coveMediaQA?.rtc;
+        return { activity: rtc?.screenActivity ?? null,
+          requestedSenderFps: rtc?.screenEncodingPlan?.fps ?? null,
+          plannedContentHint: rtc?.screenEncodingPlan?.contentHint ?? null,
+          degradationPreference: rtc?.screenEncodingPlan?.degradationPreference ?? null,
+          trackContentHint: sources.find(source => source.track.readyState === 'live')?.track.contentHint ?? null };
+      })(),
       sourceMeaning: sourceMode === 'native'
         ? 'Native getDisplayMedia: source production count is unavailable; use media-source counters.'
         : supportsGenerator
@@ -317,6 +363,8 @@ export function installScreenPerformanceFixture(
     if (disposed) return;
     disposed = true;
     mutationObserver.disconnect();
+    if (HTMLCanvasElement.prototype.getContext === profiledGetContext) HTMLCanvasElement.prototype.getContext = originalGetContext;
+    for (const restore of restoreAnalysisContexts) restore();
     for (const source of sources) source.stop();
     for (const { context, oscillator, track } of testAudio) { oscillator.stop(); track.stop(); void context.close().catch(() => {}); }
     if (navigator.mediaDevices.getUserMedia === syntheticUserMedia) navigator.mediaDevices.getUserMedia = originalUserMedia;

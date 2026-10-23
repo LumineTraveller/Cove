@@ -4,7 +4,10 @@
 const {app,BrowserWindow,session,desktopCapturer,screen}=require('electron');
 const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),{spawn}=require('node:child_process');
 const root=path.resolve(__dirname,'../../../..'),directory=path.resolve(process.env.COVE_FPS_RUN_DIR||'');
-const relative=path.relative(path.join(root,'runtime/fps-candidate'),directory);
+const {validatePerformanceCases}=require(path.join(root,'tooling/screen-performance-config.cjs'));
+const runtimeName=process.env.COVE_FPS_RUNTIME_NAME||'fps-candidate';
+if(!/^fps-(?:candidate|validation-[a-z0-9-]{1,60})$/.test(runtimeName))throw Error('Invalid performance runtime namespace');
+const relative=path.relative(path.join(root,'runtime',runtimeName),directory);
 if(!relative||path.isAbsolute(relative)||relative==='..'||relative.startsWith('..'+path.sep))throw Error('An isolated fps-candidate directory is required');
 const profile=path.join(directory,'profile');fs.mkdirSync(profile,{recursive:true});app.setPath('userData',profile);app.setPath('sessionData',profile);
 const captureFeatures=process.env.COVE_FPS_CAPTURE_FEATURES||'';
@@ -64,7 +67,7 @@ function summary(samples){
 app.whenReady().then(async()=>{
   try{
     console.log('[capture-features]',captureFeatures||'baseline defaults');
-    result.environment={versions:process.versions,os:{platform:os.platform(),release:os.release(),arch:os.arch(),cpu:os.cpus()[0]?.model,logicalProcessors:os.cpus().length,memoryGB:Math.round(os.totalmem()/1024**3)},displays:screen.getAllDisplays().map(d=>({size:d.size,bounds:d.bounds,scaleFactor:d.scaleFactor,displayFrequency:d.displayFrequency})),gpu:await app.getGPUInfo('basic'),gpuFeatureStatus:app.getGPUFeatureStatus()};
+    result.environment={versions:process.versions,logTimezoneOffsetMinutes:new Date().getTimezoneOffset(),os:{platform:os.platform(),release:os.release(),arch:os.arch(),cpu:os.cpus()[0]?.model,logicalProcessors:os.cpus().length,memoryGB:Math.round(os.totalmem()/1024**3)},displays:screen.getAllDisplays().map(d=>({size:d.size,bounds:d.bounds,scaleFactor:d.scaleFactor,displayFrequency:d.displayFrequency})),gpu:await app.getGPUInfo('basic'),gpuFeatureStatus:app.getGPUFeatureStatus()};
     backend=spawn(process.env.COVE_TEST_NODE,[path.join(__dirname,'screen-performance-backend.cjs')],{cwd:root,env:process.env,windowsHide:true,stdio:['ignore','inherit','inherit','ipc']});
     fs.writeFileSync(path.join(directory,'owned-processes.json'),JSON.stringify({electron:process.pid,backend:backend.pid},null,2));
     const info=await new Promise((resolve,reject)=>{backend.once('error',reject);backend.once('exit',code=>reject(Error('Backend exited '+code)));backend.on('message',m=>{if(m?.type==='ready')resolve(m);});});
@@ -75,7 +78,7 @@ app.whenReady().then(async()=>{
     await sourceWindow.loadURL('data:text/html;charset=utf-8,'+encodeURIComponent(source));
     session.defaultSession.setDisplayMediaRequestHandler(async(request,callback)=>{try{nativeRequests++;console.log('[capture] owned native request',nativeRequests,captureTarget);const sources=await desktopCapturer.getSources({types:[captureTarget],thumbnailSize:{width:0,height:0}});const owned=captureTarget==='screen'?sources.find(s=>s.display_id===String(screen.getPrimaryDisplay().id)):sources.find(s=>s.id===sourceWindow.getMediaSourceId());if(!owned)throw Error('Owned controlled source is unavailable');callback({video:owned});}catch(error){console.error(error);callback({});}});
     const cases=JSON.parse(process.env.COVE_FPS_CASES||JSON.stringify([{source:'generated',preset:'1080p',fps:120,game:true,compatibility:true},{source:'generated',preset:'540p',fps:120,game:true,compatibility:true},{source:'native',preset:'1080p',fps:120,game:true,compatibility:true},{source:'native',preset:'540p',fps:120,game:true,compatibility:true}]));
-    if(!Array.isArray(cases)||cases.length<1||cases.length>12||cases.some(c=>!['generated','native'].includes(c.source)||!['540p','720p','1080p','1440p'].includes(c.preset)||![30,60,120].includes(c.fps)))throw Error('Invalid bounded performance cases');
+    validatePerformanceCases(cases);
     const sampleSeconds=Number(process.env.COVE_FPS_SAMPLE_SECONDS||8),warmupMs=Number(process.env.COVE_FPS_WARMUP_MS||5000);
     if(!Number.isInteger(sampleSeconds)||sampleSeconds<1||sampleSeconds>30||!Number.isInteger(warmupMs)||warmupMs<0||warmupMs>30000)throw Error('Invalid bounded sample duration');
     for(let index=0;index<2;index++){const win=new BrowserWindow({width:1000,height:760,show:false,webPreferences:{offscreen:true,backgroundThrottling:false}});win.webContents.setFrameRate(144);win.webContents.setAudioMuted(true);peers.push(win);win.webContents.on('console-message',(_e,level,msg)=>{if(msg.includes('Error')||msg.includes('error'))console.log('[peer]',msg);});}
@@ -92,7 +95,24 @@ app.whenReady().then(async()=>{
       await js(viewer,'window.coveMediaQA.rtc.watchScreen(window.coveMediaQA.rtc.availableScreens[0].socketId)');await wait(viewer,'document.querySelector("video").readyState>=2');
       await delay(warmupMs);const samples=[];
       for(let n=0;n<=sampleSeconds;n++){const [send,receive]=await Promise.all(peers.map(win=>js(win,'window.coveScreenPerformance.sample()')));samples.push({at:Date.now(),sender:send,viewer:receive,nativeSourceFrames:await js(sourceWindow,'window.sourceFrames'),cpu:app.getAppMetrics().map(m=>({type:m.type,cpu:m.cpu,memory:m.memory}))});if(n<sampleSeconds)await delay(1000);}
-      const nativeSourceFrames=await js(sourceWindow,'window.sourceFrames');const measured={config,samples,summary:summary(samples),nativeSourceFrames,nativeRequests};result.cases.push(measured);save();console.log('[performance]',JSON.stringify({config,sourceFps:measured.summary.sourceFps,encodeFps:measured.summary.encodeFps,sendFps:measured.summary.sendFps,decodeFps:measured.summary.decodeFps,nativeRequests}));
+      const nativeSourceFrames=await js(sourceWindow,'window.sourceFrames');
+      const measured={config,samples,summary:summary(samples),nativeSourceFrames,nativeRequests,comparisonContract:{passed:false}};
+      result.cases.push(measured);save();
+      // Optional dimensional/codec contract for comparisons: a preset label or
+      // codec preference alone does not establish the actual measured path.
+      try{for(const sample of samples){
+        const capture=sample.sender.sources.find(source=>source.trackState==='live')?.settings;
+        const outgoing=sample.sender.reports.find(report=>report.type==='outbound-rtp'&&report.codec);
+        const incoming=sample.viewer.reports.find(report=>report.id===sample.viewer.currentVideo?.reportId);
+        const rendered=sample.viewer.presentation[0];
+        for(const [stage,width,height] of [['capture',capture?.width,capture?.height],['encoded',outgoing?.frameWidth,outgoing?.frameHeight],['decoded',incoming?.frameWidth,incoming?.frameHeight],['rendered',rendered?.width,rendered?.height]]){
+          const requiredWidth=stage==='capture'?(config.expectCaptureWidth??config.expectWidth):(config.expectEncodedWidth??config.expectWidth);
+          const requiredHeight=stage==='capture'?(config.expectCaptureHeight??config.expectHeight):(config.expectEncodedHeight??config.expectHeight);
+          if(requiredWidth&&requiredHeight&&(width!==requiredWidth||height!==requiredHeight))throw Error(`${stage} dimensions ${width}x${height} do not match required ${requiredWidth}x${requiredHeight}`);
+        }
+        if(config.expectCodec&&(outgoing?.codec!==config.expectCodec||incoming?.codec!==config.expectCodec))throw Error('Negotiated codec does not match required '+config.expectCodec);
+      }}catch(error){measured.comparisonContract.error=error.message;save();throw error;}
+      measured.comparisonContract.passed=true;save();console.log('[performance]',JSON.stringify({config,sourceFps:measured.summary.sourceFps,encodeFps:measured.summary.encodeFps,sendFps:measured.summary.sendFps,decodeFps:measured.summary.decodeFps,nativeRequests}));
       if(process.env.COVE_FPS_RECOVERY_CHECKS==='1'){
         const pixels=await js(viewer,'(()=>{const v=document.querySelector("video"),c=document.createElement("canvas");c.width=1;c.height=1;const x=c.getContext("2d");x.drawImage(v,v.videoWidth*.8,v.videoHeight*.1,1,1,0,0,1,1);return [...x.getImageData(0,0,1,1).data]})()');
         if(pixels[2]<30||pixels[3]!==255)throw Error('Controlled screen decoded black or transparent pixels');
