@@ -51,10 +51,14 @@ test('compiled updater exposes only the in-app IPC bridge and no OS notification
 
 test('compiled Electron main keeps WGC capture without diagnostic file logging', () => {
   const main = fs.readFileSync(require.resolve('../dist-electron/main.js'), 'utf8');
-  const wgc = main.indexOf("appendSwitch('enable-features', 'AllowWgcScreenCapturer')");
+  const policy = require('../dist-electron/screen-capture-features.js').screenCaptureFeaturePolicy({ platform: 'win32', chromiumVersion: '152.0.0.0' });
+  assert.ok(policy.enabledFeatures.split(',').includes('AllowWgcScreenCapturer'), 'Windows capture policy must retain WGC');
+  const wgc = main.indexOf('screen_capture_features_1.screenCaptureFeaturePolicy');
   const ready = main.search(/\.whenReady\(\)\.then/);
-  assert.ok(wgc >= 0, 'WGC desktop capture feature is missing');
+  assert.ok(wgc >= 0, 'Windows capture feature policy is missing');
   assert.ok(ready > wgc, 'WGC feature must be applied before app.whenReady()');
+  const apply = main.indexOf("appendSwitch('enable-features', features.enabledFeatures)");
+  assert.ok(apply > wgc && apply < ready, 'Computed capture features must be applied before app.whenReady()');
   assert.doesNotMatch(main, /webrtc-max-cpu-consumption-percentage/);
   assert.doesNotMatch(main, /enable-logging|log-file|vmodule|chromium-screen-capture|media-diagnostics|cove:diagnostics:/);
   const preload = fs.readFileSync(require.resolve('../dist-electron/preload.js'), 'utf8');

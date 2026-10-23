@@ -14,6 +14,7 @@ import {
 } from "electron";
 import path from "path";
 import { AccountPasswordStore } from './account-password-store';
+import { screenCaptureFeaturePolicy } from './screen-capture-features';
 import { registerAccountPasswordIpc } from './account-password-ipc';
 import { ServerAccessStore } from './server-access-store';
 import { registerServerAccessIpc } from './server-access-ipc';
@@ -50,12 +51,20 @@ for (const stream of [process.stdout, process.stderr]) {
   });
 }
 
-// Electron 29 / Chromium 122 在 Windows 上默认关闭 WGC 屏幕捕获，回退到
-// 较慢的 DXGI/GDI 抓屏路径。WGC 直接使用 Windows.Graphics.Capture 与
-// D3D11 图形链路；不受支持时 WebRTC 会安全回退到默认捕获器。
-// 该 Chromium Feature 必须在 app.whenReady() 之前启用。
+// Feature switches must precede app.whenReady(). Chromium 152 only selects WGC
+// for monitors on Windows 11 24H2+, irrespective of the older AllowWgc flag.
+// Its zero-copy conversion path also reduces copies on the DXGI fallback.
+// COVE_DISABLE_ZERO_COPY_DESKTOP_CAPTURE=1 restores Chromium's legacy path.
 if (process.platform === "win32") {
-  app.commandLine.appendSwitch('enable-features', 'AllowWgcScreenCapturer');
+  const features = screenCaptureFeaturePolicy({
+    platform: process.platform,
+    chromiumVersion: process.versions.chrome,
+    enabledFeatures: app.commandLine.getSwitchValue('enable-features'),
+    disabledFeatures: app.commandLine.getSwitchValue('disable-features'),
+    disableZeroCopy: process.env.COVE_DISABLE_ZERO_COPY_DESKTOP_CAPTURE === '1',
+  });
+  app.commandLine.appendSwitch('enable-features', features.enabledFeatures);
+  if (features.disabledFeatures) app.commandLine.appendSwitch('disable-features', features.disabledFeatures);
 }
 
 const isDev = !app.isPackaged;

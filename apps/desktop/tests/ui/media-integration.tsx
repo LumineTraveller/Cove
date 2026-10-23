@@ -4,8 +4,10 @@ import {io} from 'socket.io-client';
 import {useWebRTC} from '../../src/features/media/useWebRTC';
 import {CLIENT_PROTOCOL_VERSION, CLIENT_RELEASE_VERSIONS} from '@cove/contracts';
 import {Device, type types as MsTypes} from 'mediasoup-client';
+import {installScreenPerformanceFixture} from './screen-performance-fixture';
 const params=new URLSearchParams(location.search);
 const floatingMode=params.get('floating')==='1';
+const performanceMode=params.get('performance')==='1';
 let floatingFixture:typeof import('./floating-viewer-fixture')|null=null;
 const proxyProtocol=params.get('iceProtocol')==='udp'?'udp':'tcp';
 const peerConnections=new Set<RTCPeerConnection>(),mediaTracks=new Set<MediaStreamTrack>();
@@ -99,12 +101,13 @@ const iceQA={
 const canvas=document.createElement('canvas');canvas.width=640;canvas.height=360;
 const ctx=canvas.getContext('2d')!;
 function draw(){ctx.fillStyle='#237bd8';ctx.fillRect(0,0,640,360);ctx.fillStyle='#ffb22a';ctx.fillRect((performance.now()/8)%500,90,120,180);if(!floatingMode)requestAnimationFrame(draw);}
-draw();
+if(!performanceMode)draw();
 // A hidden publisher's requestAnimationFrame stops independently of received
 // PiP playback. Timed synthetic paint still changes frames under normal browser
 // timer throttling, without disabling the product's backgroundThrottling policy.
 const floatingPaint=floatingMode?window.setInterval(draw,33):null;
-navigator.mediaDevices.getDisplayMedia=async()=>{const stream=canvas.captureStream(30);stream.getTracks().forEach(track=>mediaTracks.add(track));return stream;};
+if(performanceMode)installScreenPerformanceFixture(params,peerConnections);
+else navigator.mediaDevices.getDisplayMedia=async()=>{const stream=canvas.captureStream(30);stream.getTracks().forEach(track=>mediaTracks.add(track));return stream;};
 function Fixture(){
   const socket=useMemo(()=>floatingFixture?.fixtureSocket(params.get('base')!)??io(params.get('base')!,{auth:{clientProtocol:CLIENT_PROTOCOL_VERSION,clientPlatform:'desktop',clientVersion:CLIENT_RELEASE_VERSIONS.desktop},autoConnect:false}),[]);
   const rtc=useWebRTC(socket,params.get('room')!);
