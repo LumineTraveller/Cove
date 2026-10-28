@@ -86,6 +86,43 @@ FPS；writer 平均等待 6.99 ms，忙时有界丢帧约 26.4 FPS。
 导入/颜色/吞吐验证，**没有进入候选版**。工具及明确失败说明位于
 `tooling/native-screen-capture/nv12-probe/`；不能把 Blt 提交成功算通过。
 
+## 主窗口最小化补验
+
+普通共享窗口从创建起使用默认 `backgroundThrottling:true`，真实 native
+接管后最小化；每次采样均确认窗口仍最小化、后台节流开启且页面为 hidden。
+进程未添加 `disable-renderer-backgrounding`。独立观看端使用 offscreen
+渲染且关闭它自己的节流，以继续校验真实动态像素；这不代表双方都最小化。
+
+`gpu-minimized-sender-final-zn5q0Y/result.json` 通过：预热 3 秒、采样 6.081 秒，
+七个样本的已知色块与动态序号均正确，native 轨道持续提交和解码，清理后
+renderer/backend/helper/import/引用/句柄计数全部归零。该次解码约 95.2 FPS；
+窗口与观察端配置不同，不能拿它与上表直接比较或据此保证最小化前后同帧率。
+它也不是长时间后台、后台首次启动或物理屏幕呈现的验收结论。
+
+复现时在前述单项 540p120/VP8 整屏测试上设置
+`COVE_FPS_PEER_RENDER_MODE=hidden`、`COVE_FPS_MINIMIZE_SENDER=1`，关闭
+trace、republish 和 recovery 注入。原始记录保存在同一
+`runtime/fps-validation-native-gpu-20261028/` 目录。
+
+早先双方最小化的尝试虽有编码/解码进展，但像素守卫未通过，**没有计为
+画面验收通过**。另有两次新增夹具的函数/API 错误，记录一并保留；以上尝试
+均完成正常清理，没有为测试更改产品逻辑或放宽像素守卫。
+
+## 本地独立便携包
+
+产品源码冻结于 `307981dab38630df8c1030aa5136c21350c197f4`，后续最小化补验
+只改变测试与本文档。`Cove-Native-Capture-Lab-20261028-307981d.zip`
+为 146,595,115 字节，完整 ZIP 测试与 43 个文件的 SHA-256 清单复核通过。
+包 SHA-256：
+
+`f4870b28aee285d49978d2d56d4f7a848fe76b3526fd42deaa8fd9a21afd79d1`
+
+本机位置为 `runtime/native-capture-lab-npqIn0/`。解压后通过
+`Start-Native.cmd` 启动独立数据目录的 Lab；关闭 Lab 后使用 `Start-Stock.cmd`
+可回到原采集路径。它没有正式签名、未安装、未发布，正式版与更新渠道未改。
+打包后的实际 asar/preload/addon/helper 离线冒烟通过；该冒烟不请求麦克风或
+屏幕权限，实际媒体验收由上面的真实双端测试提供。
+
 ## 验证与边界
 
 - 桌面完整 `npm test -w cove-client` 最终 622 项通过，包含新增原生生命周期单测；

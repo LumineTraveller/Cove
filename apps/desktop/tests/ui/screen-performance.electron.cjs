@@ -26,16 +26,20 @@ if(disabledCaptureFeatures&&!['DirectXCapturer'].includes(disabledCaptureFeature
 if(disabledCaptureFeatures)app.commandLine.appendSwitch('disable-features',disabledCaptureFeatures);
 const peerRenderMode=process.env.COVE_FPS_PEER_RENDER_MODE||'offscreen';
 if(!['offscreen','hidden'].includes(peerRenderMode))throw Error('Unsupported peer render mode');
+if(process.env.COVE_FPS_MINIMIZE_SENDER&&!['0','1'].includes(process.env.COVE_FPS_MINIMIZE_SENDER))throw Error('Invalid minimized-sender option');
+const minimizeSender=process.env.COVE_FPS_MINIMIZE_SENDER==='1';
+if(minimizeSender&&peerRenderMode!=='hidden')throw Error('Minimized-sender checks require an ordinary publisher window');
 const captureTraceEnabled=process.env.COVE_FPS_CONTENT_TRACE==='1';
 if(process.env.COVE_FPS_CONTENT_TRACE&&!['0','1'].includes(process.env.COVE_FPS_CONTENT_TRACE))throw Error('Invalid content trace option');
 if(process.env.COVE_FPS_CAPTURE_LOGS==='1'){app.commandLine.appendSwitch('enable-logging','file');app.commandLine.appendSwitch('log-file',path.join(directory,'native-capture.log'));app.commandLine.appendSwitch('vmodule','desktop_capture_device=2');}
-app.commandLine.appendSwitch('disable-renderer-backgrounding');
+if(!minimizeSender)app.commandLine.appendSwitch('disable-renderer-backgrounding');
 // Do not use --use-fake-device-for-media-stream: Chromium also replaces native
 // getDisplayMedia with a 1000x564 test source. The renderer supplies test audio.
 app.commandLine.appendSwitch('autoplay-policy','no-user-gesture-required');
 app.on('window-all-closed',()=>{});
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const result={passed:false,startedAt:new Date().toISOString(),captureFeatures,disabledCaptureFeatures,peerRenderMode,profilingOnly:captureTraceEnabled,
+  minimizedSenderRequested:minimizeSender,rendererBackgroundingDisabled:!minimizeSender,
   nativeGpu:{requested:process.env.COVE_FPS_NATIVE_GPU==='1',enabled:nativeGpuEnabled,startAttempts:[],snapshots:[],paths:nativePaths},
   nativeLifecycleRequested:nativeLifecycleEnabled,
   presentationMeaning:peerRenderMode==='hidden'?'Hidden regular windows may present zero frames; presentation is not a throughput or physical scan-out claim.':'Offscreen video/compositor counters are not physical display scan-out.',
@@ -417,6 +421,7 @@ app.whenReady().then(async()=>{
     });
     const cases=JSON.parse(process.env.COVE_FPS_CASES||JSON.stringify([{source:'generated',preset:'1080p',fps:120,game:true,compatibility:true},{source:'generated',preset:'540p',fps:120,game:true,compatibility:true},{source:'native',preset:'1080p',fps:120,game:true,compatibility:true},{source:'native',preset:'540p',fps:120,game:true,compatibility:true}]));
     validatePerformanceCases(cases);
+    if(minimizeSender&&(cases.length!==1||cases[0].source!=='native'||captureTraceEnabled||nativeLifecycleEnabled||process.env.COVE_FPS_REPUBLISH_CHECKS==='1'||process.env.COVE_FPS_RECOVERY_CHECKS==='1'))throw Error('Minimized-sender checks require one native case without trace, republish or recovery injection');
     if(nativeLifecycleEnabled){
       const primary=screen.getPrimaryDisplay();
       if(cases.length!==1||!nativeUpgradeRequired(cases[0],nativeGpuEnabled)||cases[0].preset!=='540p'||cases[0].fps!==120||
@@ -427,8 +432,9 @@ app.whenReady().then(async()=>{
     const sampleSeconds=Number(process.env.COVE_FPS_SAMPLE_SECONDS||8),warmupMs=Number(process.env.COVE_FPS_WARMUP_MS||5000);
     if(!Number.isInteger(sampleSeconds)||sampleSeconds<1||sampleSeconds>30||!Number.isInteger(warmupMs)||warmupMs<0||warmupMs>30000)throw Error('Invalid bounded sample duration');
     if(captureTraceEnabled&&(cases.length!==1||cases[0].source!=='native'||sampleSeconds>8||warmupMs>5000||process.env.COVE_FPS_RECOVERY_CHECKS==='1'))throw Error('Capture profiling requires one native case, at most 5s warmup/8s sample and no recovery injection');
-    for(let index=0;index<2;index++){const win=new BrowserWindow({width:1000,height:760,show:false,webPreferences:{offscreen:peerRenderMode==='offscreen',backgroundThrottling:false,
-      ...(nativeGpuEnabled?{preload:path.join(root,nativePaths.preload),additionalArguments:index===0?['--cove-native-gpu-capture=1']:[],contextIsolation:true,sandbox:true,nodeIntegration:false}:{})}});if(peerRenderMode==='offscreen')win.webContents.setFrameRate(144);win.webContents.setAudioMuted(true);peers.push(win);win.webContents.on('console-message',(_e,level,msg)=>{if(msg.includes('Error')||msg.includes('error'))console.log('[peer]',msg);});}
+    for(let index=0;index<2;index++){const offscreen=peerRenderMode==='offscreen'||(minimizeSender&&index===1);
+      const win=new BrowserWindow({width:1000,height:760,show:minimizeSender&&index===0,webPreferences:{offscreen,backgroundThrottling:minimizeSender&&index===0,
+      ...(nativeGpuEnabled?{preload:path.join(root,nativePaths.preload),additionalArguments:index===0?['--cove-native-gpu-capture=1']:[],contextIsolation:true,sandbox:true,nodeIntegration:false}:{})}});if(offscreen)win.webContents.setFrameRate(144);win.webContents.setAudioMuted(true);peers.push(win);win.webContents.on('console-message',(_e,level,msg)=>{if(msg.includes('Error')||msg.includes('error'))console.log('[peer]',msg);});}
     if(nativeController){
       const ownsEvent=event=>!peers[0].isDestroyed()&&event.sender===peers[0].webContents&&event.senderFrame===peers[0].webContents.mainFrame;
       // Product preload also exposes native audio cleanup. This video-only
@@ -493,12 +499,34 @@ app.whenReady().then(async()=>{
         comparisonContract:{passed:false},nativeBaseline:{required:config.source==='native',passed:false}};
       result.cases.push(measured);save();
       if(requiresNativeUpgrade)await waitNativeUpgrade(sender,viewer,measured,'initial-publication');
+      if(minimizeSender){
+        // Only the publisher uses a normal minimized window. The independent
+        // offscreen viewer keeps rendering so owned-pixel verification remains
+        // valid; minimizing both would stop presentation at the observer.
+        sender.minimize();
+        for(let attempt=0;attempt<60&&!sender.isMinimized();attempt++)await delay(50);
+        if(!sender.isMinimized())throw Error('Ordinary sender did not minimize within 3 seconds');
+        const visibilityDeadline=Date.now()+3000;
+        do{
+          measured.minimizedSender={offscreen:sender.webContents.isOffscreen(),
+            backgroundThrottling:sender.webContents.getBackgroundThrottling(),minimized:sender.isMinimized(),
+            visibilityState:await boundedJs(sender,'document.visibilityState',1000)};
+          if(measured.minimizedSender.visibilityState==='hidden')break;
+          await delay(50);
+        }while(Date.now()<visibilityDeadline);
+        const state=measured.minimizedSender;
+        measured.observerWindow={offscreen:viewer.webContents.isOffscreen(),backgroundThrottling:viewer.webContents.getBackgroundThrottling()};
+        if(state.offscreen||!state.backgroundThrottling||!state.minimized||state.visibilityState!=='hidden'||!measured.observerWindow.offscreen||measured.observerWindow.backgroundThrottling)throw Error('Minimized sender / independent rendering observer policy was not established');
+        sourceWindow.focus();sourceWindow.moveTop();save();
+      }
       await delay(warmupMs);
       if(config.source==='native')sourceWindow.moveTop();
       measured.sourceWindowBeforeSampling=sourceWindowState();
       for(let n=0;n<=sampleSeconds;n++){
-        const [send,receive]=await Promise.all(peers.map(win=>boundedJs(win,'window.coveScreenPerformance.sample()')));
+        const sampleCode=minimizeSender?'(async()=>{const sample=await window.coveScreenPerformance.sample();return {...sample,documentVisibilityState:document.visibilityState}})()':'window.coveScreenPerformance.sample()';
+        const [send,receive]=await Promise.all(peers.map(win=>boundedJs(win,sampleCode)));
         const nativeGpu=brokerSnapshot();
+        if(minimizeSender&&(!sender.isMinimized()||!sender.webContents.getBackgroundThrottling()||send.documentVisibilityState!=='hidden'))throw Error('Minimized background state changed during measurement');
         samples.push({at:Date.now(),sender:send,viewer:receive,nativeGpu,nativeSourceFrames:await js(sourceWindow,'window.sourceFrames'),sourceWindowState:sourceWindowState(),cpu:app.getAppMetrics().map(m=>({pid:m.pid,type:m.type,cpu:m.cpu,memory:m.memory}))});
         if(requiresNativeUpgrade&&!nativeUpgradeEvidence(send,nativeGpu).passed){
           measured.nativeUpgradeSucceeded=false;measured.nativeGpu.failureCode=nativeGpu?.failureCode??'upgraded_track_lost';save();
