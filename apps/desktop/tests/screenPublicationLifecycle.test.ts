@@ -39,6 +39,7 @@ function fixture(t: TestContext) {
     t.after(() => original ? Object.defineProperty(globalThis, name, original) : Reflect.deleteProperty(globalThis, name));
   };
   const alerts: string[] = [], events: any[] = [], produced: any[] = [];
+  const captureRequests: DisplayMediaStreamOptions[] = [];
   let sharing = false, captures = 0, sequence = 0;
   let capture = async () => stream();
   let startAudio = async (_isCurrent?: () => boolean) => {};
@@ -47,7 +48,9 @@ function fixture(t: TestContext) {
     value.track = options.track;
     return value;
   };
-  replace('navigator', { mediaDevices: { getDisplayMedia: () => { captures++; return capture(); } } });
+  replace('navigator', { mediaDevices: { getDisplayMedia: (options: DisplayMediaStreamOptions) => {
+    captureRequests.push(options); captures++; return capture();
+  } } });
   replace('window', { alert: (message: string) => alerts.push(message), coveScreenAudio: {} });
   replace('requestAnimationFrame', (callback: FrameRequestCallback) => { callback(0); return 0; });
   const ref = () => ({ current: null as any });
@@ -77,7 +80,7 @@ function fixture(t: TestContext) {
   let api!: ReturnType<typeof useScreenPublishing>;
   function Probe() { api = useScreenPublishing(deps); return null; }
   renderToStaticMarkup(createElement(Probe));
-  return { api, alerts, events, produced, settings, mediaGeneration, screenProducer, localScreenRef, sendTransport,
+  return { api, alerts, events, produced, captureRequests, settings, mediaGeneration, screenProducer, localScreenRef, sendTransport,
     captures: () => captures, sharing: () => sharing,
     capture: (next: typeof capture) => { capture = next; }, publish: (next: typeof publish) => { publish = next; },
     startAudio: (next: typeof startAudio) => { startAudio = next; } };
@@ -447,5 +450,21 @@ test('initial capture ending during audio startup closes its publication before 
   assert.equal(active.closed, false);
   assert.equal(current.track.stops, 0);
   assert.equal(f.sharing(), true);
+  assert.deepEqual(f.alerts, []);
+});
+
+test('publishing hooks bound preset capture dimensions and keep native capture unconstrained', async t => {
+  const f = fixture(t);
+  await f.api.startScreenShare('540p', 120, false, false, false);
+  await f.api.updateScreenShare('1080p', 120, false, false, false);
+  await f.api.updateScreenShare('1080p', 120, false, false, true);
+  f.api.stopScreenShare();
+  await f.api.startScreenShare('1080p', 60, false, false, false);
+  assert.deepEqual(f.captureRequests, [
+    { video: { frameRate: { ideal: 120, max: 120 }, width: { max: 960 }, height: { max: 540 } }, audio: false },
+    { video: { frameRate: { ideal: 120, max: 120 }, width: { max: 1920 }, height: { max: 1080 } }, audio: false },
+    { video: { frameRate: { ideal: 120, max: 120 } }, audio: false },
+    { video: { frameRate: { ideal: 60, max: 60 }, width: { max: 1920 }, height: { max: 1080 } }, audio: false },
+  ]);
   assert.deepEqual(f.alerts, []);
 });

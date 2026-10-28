@@ -106,7 +106,7 @@ test('real publishing hooks carry selected 120 through normal/game start and sou
   assert.deepEqual(activities[0], ['1080p', 120, 'active', true]);
   assert.deepEqual(analyses[0].slice(1), ['1080p', 120, true]);
   await publishing.updateScreenShare('1080p', 120, false, true, false);
-  assert.deepEqual(captures[1], { video: { frameRate: { ideal: 120, max: 120 } }, audio: false });
+  assert.deepEqual(captures[1], { video: { frameRate: { ideal: 120, max: 120 }, width: { max: 1920 }, height: { max: 1080 } }, audio: false });
   assert.equal(produced.length, 1);
   assert.equal(replacements, 1);
   assert.equal(state.fps, 120);

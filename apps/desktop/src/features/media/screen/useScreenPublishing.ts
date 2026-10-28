@@ -171,8 +171,9 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
         const negotiatedCodecs = device?.sendRtpCapabilities?.codecs ?? device?.rtpCapabilities.codecs ?? [];
         const codecCandidates = screenPublicationCodecCandidates(negotiatedCodecs, compatibilityMode);
         const stream = await navigator.mediaDevices.getDisplayMedia({
-          // 桌面源保持原始尺寸，720p/1080p 由 RTP 编码缩放统一控制。
-          video: screenCaptureVideoConstraints(currentFps),
+          // Bound capture before the RTP stage to avoid a second large-frame
+          // resize. Native mode retains the original FPS-only request.
+          video: screenCaptureVideoConstraints(currentFps, preset, nativeResolution),
           // The native Windows bridge supplies the filtered system audio as a
           // separate track. Chromium's global loopback track is never requested,
           // because it would include Cove's own playback.
@@ -405,7 +406,7 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
       const capture = (async (): Promise<{ stream: MediaStream | null; error?: unknown }> => {
         try {
           const stream = await navigator.mediaDevices.getDisplayMedia({
-            video: screenCaptureVideoConstraints(currentFps),
+            video: screenCaptureVideoConstraints(currentFps, preset, nativeResolution),
             audio: false,
           });
           if (!isCurrent()) {

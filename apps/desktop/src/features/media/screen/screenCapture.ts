@@ -22,9 +22,16 @@ export const SCREEN_RAMP_GRACE_MS = 5_000;
 export const SCREEN_MAX_BITRATE_BPS = 200_000_000;
 export const SCREEN_START_BITRATE_BPS = 10_000_000;
 
-/** Preferred/maximum capture cadence; a slower source remains usable. */
-export function screenCaptureVideoConstraints(maxFps: ScreenFps): MediaTrackConstraints {
-  return { frameRate: { ideal: maxFps, max: maxFps } };
+/** Preferred cadence and optional maximum dimensions, without requesting upscaling. */
+export function screenCaptureVideoConstraints(
+  maxFps: ScreenFps,
+  preset?: ScreenPreset,
+  nativeResolution = false,
+): MediaTrackConstraints {
+  const frameRate = { ideal: maxFps, max: maxFps };
+  if (!preset || nativeResolution) return { frameRate };
+  const { width, height } = SCREEN_PRESETS[preset];
+  return { frameRate, width: { max: width }, height: { max: height } };
 }
 
 export interface ScreenEncodingPlan {

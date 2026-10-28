@@ -105,6 +105,30 @@ test('120 FPS requests preferred/maximum capture cadence without a hard minimum'
   assert.equal(SCREEN_START_BITRATE_BPS, 10_000_000, 'the startup budget stays safe at every cadence');
 });
 
+test('capture preset dimensions are maximum envelopes at every supported frame rate', () => {
+  for (const preset of Object.keys(SCREEN_PRESETS) as ScreenPreset[]) {
+    for (const fps of SCREEN_FPS_OPTIONS) {
+      const { width, height } = SCREEN_PRESETS[preset];
+      assert.deepEqual(screenCaptureVideoConstraints(fps, preset), {
+        frameRate: { ideal: fps, max: fps },
+        width: { max: width },
+        height: { max: height },
+      }, `${preset}/${fps}: dimensions have no ideal, minimum or exact request`);
+    }
+  }
+});
+
+test('native and legacy capture requests retain only the existing FPS constraints', () => {
+  for (const fps of SCREEN_FPS_OPTIONS) {
+    const fpsOnly = { frameRate: { ideal: fps, max: fps } };
+    assert.deepEqual(screenCaptureVideoConstraints(fps), fpsOnly);
+    assert.deepEqual(screenCaptureVideoConstraints(fps, undefined, false), fpsOnly);
+    assert.deepEqual(screenCaptureVideoConstraints(fps, undefined, true), fpsOnly);
+    for (const preset of Object.keys(SCREEN_PRESETS) as ScreenPreset[])
+      assert.deepEqual(screenCaptureVideoConstraints(fps, preset, true), fpsOnly, `${preset}/${fps}`);
+  }
+});
+
 test('120 FPS changing content and game motion preserve resolution preferences and sender caps', () => {
   for (const preset of Object.keys(SCREEN_PRESETS) as ScreenPreset[]) {
     for (const nativeResolution of [false, true]) {
