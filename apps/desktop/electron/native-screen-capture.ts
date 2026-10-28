@@ -123,14 +123,14 @@ export class NativeScreenCaptureController {
   async start(target: WebContents, requestId: string, options: NativeScreenOptions): Promise<NativeScreenStartResult> {
     if (!validNativeScreenRequestId(requestId) || !validNativeScreenOptions(options))
       return { ok: false, reason: 'invalid_request' };
+    // GPU NV12 has not passed runtime qualification. Keep stock before loading
+    // the handle bridge, spawning a helper or consuming its source selection.
+    if (this.config.pixelFormat === 'nv12' && this.config.storage !== 'cpu')
+      return { ok: false, reason: 'unsupported_pixel_format' };
     // Unknown codecs cannot select a safe CPU YUV conversion. Reject before
     // loading/opening the handle bridge or consuming the stock selection.
     if (this.config.storage === 'cpu' && options.colorSpace === undefined)
       return { ok: false, reason: 'color_space_required' };
-    // Electron's GPU import path still has its established BT709 contract.
-    // A VP8/BT601 request must keep stock until CPU conversion is available.
-    if (this.config.pixelFormat === 'nv12' && this.config.storage !== 'cpu' && options.colorSpace === 'bt601-limited')
-      return { ok: false, reason: 'unsupported_color_space' };
     if (!this.config.enabled || this.disabledAfterFailure || process.platform !== 'win32' || process.arch !== 'x64' ||
       !/^44\./.test(process.versions.electron || '') || typeof sharedTexture?.importSharedTexture !== 'function' ||
       typeof sharedTexture?.sendSharedTexture !== 'function') return { ok: false, reason: 'unavailable' };
