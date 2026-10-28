@@ -99,7 +99,8 @@ function fixture(context: TestContext) {
 test('copy ownership releases the native source before send and final ACK releases only its main AB', context => {
   const f = fixture(context); const original = f.issue(1);
   original.serial = 99;
-  assert.equal(f.pipeline.snapshot().pendingFrames, 1); assert.equal(f.reads.length, 0);
+  assert.equal(f.pipeline.snapshot().readyFrames, 1); assert.equal(f.pipeline.snapshot().pendingFrames, 0);
+  assert.equal(f.reads.length, 0);
   f.run();
   assert.deepEqual(f.events, ['read:1', 'copied:1', 'send:1']);
   assert.deepEqual(f.sent[0].pixels, Array(12).fill(1));
@@ -138,6 +139,27 @@ test('one helper slot can feed three distinct main buffers before any old final 
   assert.equal(f.timers.size, 0); assert.deepEqual(f.failures, []);
 });
 
+for (const count of [2, 3]) {
+  test(`${count} frames received in one stdout task reserve available main buffers before the check phase`, context => {
+    const f = fixture(context);
+    for (let serial = 1; serial <= count; serial++) f.issue(serial, serial - 1);
+    assert.equal(f.reads.length, 0); assert.equal(f.immediates.size, 1);
+    assert.equal(f.pipeline.snapshot().sourceDiscarded, 0);
+    assert.equal(f.pipeline.snapshot().mainBuffersInUse, count);
+    assert.equal(f.pipeline.snapshot().readyFrames, count);
+    for (let serial = 1; serial <= count; serial++) f.run();
+    assert.deepEqual(f.sent.map(value => value.metadata.serial), Array.from({ length: count }, (_, index) => index + 1));
+    assert.equal(new Set(f.reads.map(value => value.target)).size, count);
+    assert.equal(f.pipeline.snapshot().sourceCopied, count);
+    assert.equal(f.pipeline.snapshot().sourceReleased, count);
+    assert.equal(f.pipeline.snapshot().pendingSuperseded, 0);
+    assert.equal(f.pipeline.snapshot().activeNativeLeases, 0);
+    for (const sent of f.sent) assert.equal(f.pipeline.acknowledge(sent.metadata), true);
+    assert.equal(f.pipeline.snapshot().mainBuffersInUse, 0);
+    assert.deepEqual(f.failures, []);
+  });
+}
+
 test('full main pool retains one latest source and independently expires it after two local frame periods', context => {
   const f = fixture(context);
   for (let serial = 1; serial <= 3; serial++) { f.issue(serial); f.run(); }
@@ -152,6 +174,69 @@ test('full main pool retains one latest source and independently expires it afte
   assert.equal(f.pipeline.snapshot().sourceReleased, 5); assert.equal(f.pipeline.snapshot().mainSent, 3);
   for (const immediate of f.allImmediates) immediate.callback();
   assert.equal(f.reads.length, 3); assert.deepEqual(f.failures, []);
+});
+
+test('ACK capacity reserves the latest waiting source before another arrival can replace it', context => {
+  const f = fixture(context);
+  for (let serial = 1; serial <= 3; serial++) { f.issue(serial); f.run(); }
+  f.issue(4, 0); f.issue(5, 1);
+  assert.equal(f.pipeline.snapshot().pendingSuperseded, 1);
+  assert.equal(f.pipeline.acknowledge(f.sent[0].metadata), true);
+  assert.equal(f.pipeline.snapshot().readyFrames, 1); assert.equal(f.pipeline.snapshot().pendingFrames, 0);
+  f.issue(6, 0);
+  assert.equal(f.pipeline.acknowledge(f.sent[1].metadata), true);
+  assert.equal(f.pipeline.snapshot().readyFrames, 2);
+  f.issue(7, 2);
+  assert.equal(f.pipeline.snapshot().pendingFrames, 1);
+  assert.equal(f.pipeline.snapshot().activeNativeLeases, 3);
+  assert.equal(f.pipeline.snapshot().mainBuffersInUse, 3);
+  f.run(); f.run();
+  assert.deepEqual(f.sent.map(value => value.metadata.serial), [1, 2, 3, 5, 6]);
+  assert.equal(f.pipeline.snapshot().pendingSuperseded, 1);
+  assert.equal(f.pipeline.acknowledge(f.sent[0].metadata), false);
+  assert.equal(new Uint8Array(f.sent[2].data)[0], 3);
+  assert.equal(f.pipeline.acknowledge(f.sent[2].metadata), true); f.run();
+  assert.equal(f.sent.at(-1)!.metadata.serial, 7); assert.deepEqual(f.failures, []);
+});
+
+test('reentrant arrival during final ACK cannot overtake an older source waiting for that main buffer', context => {
+  const f = fixture(context);
+  for (let serial = 1; serial <= 3; serial++) { f.issue(serial); f.run(); }
+  f.issue(4, 0);
+  f.hooks.counter = counter => {
+    if (counter !== 'finalAck') return;
+    f.hooks.counter = () => {}; f.issue(5, 1);
+  };
+  assert.equal(f.pipeline.acknowledge(f.sent[0].metadata), true); f.run();
+  assert.equal(f.sent.at(-1)!.metadata.serial, 4);
+  assert.equal(f.pipeline.acknowledge(f.sent[1].metadata), true); f.run();
+  assert.deepEqual(f.sent.map(value => value.metadata.serial), [1, 2, 3, 4, 5]);
+  assert.deepEqual(f.failures, []);
+});
+
+test('each reserved source retains its own freshness deadline and late timers cannot touch a reused slot', context => {
+  const f = fixture(context); f.issue(1, 0); const oldTimers = [...f.allTimers];
+  f.at(8); f.issue(2, 1);
+  f.at(17); oldTimers[1].callback();
+  assert.equal(f.pipeline.snapshot().pendingExpired, 1);
+  assert.equal(f.pipeline.snapshot().readyFrames, 1); assert.equal(f.pipeline.snapshot().mainBuffersInUse, 1);
+  f.issue(3, 0); oldTimers.forEach(value => value.callback());
+  f.run(); f.run();
+  assert.deepEqual(f.sent.map(value => value.metadata.serial), [2, 3]);
+  assert.equal(f.pipeline.snapshot().activeNativeLeases, 0);
+  assert.equal(f.pipeline.snapshot().sourceReleased, 3); assert.deepEqual(f.failures, []);
+});
+
+test('stop with all three reserved sources prevents every queued and late native read', context => {
+  const f = fixture(context);
+  for (let serial = 1; serial <= 3; serial++) f.issue(serial, serial - 1);
+  assert.equal(f.pipeline.snapshot().readyFrames, 3);
+  f.pipeline.stop();
+  f.allImmediates.forEach(value => value.callback()); f.allTimers.forEach(value => value.callback());
+  assert.equal(f.pipeline.snapshot().readyFrames, 0); assert.equal(f.pipeline.snapshot().mainBuffersInUse, 0);
+  assert.equal(f.pipeline.snapshot().activeNativeLeases, 0); assert.equal(f.pipeline.snapshot().allocatedBuffers, 0);
+  assert.equal(f.reads.length, 0); assert.equal(f.sent.length, 0); assert.equal(f.timers.size, 0);
+  assert.deepEqual(f.failures, []);
 });
 
 test('an overdue pending frame is never read even when its timer has not dispatched', context => {
@@ -170,9 +255,11 @@ test('a pending expiry delayed past the total watchdog deadline cannot bypass se
 });
 
 test('superseding an overdue pending source cannot clear its undispatched total watchdog', context => {
-  const f = fixture(context); f.issue(1); f.at(1500); f.issue(2, 1);
-  assert.equal(f.reads.length, 0); assert.equal(f.pipeline.snapshot().sourceDiscarded, 0);
-  assert.equal(f.pipeline.snapshot().sourceReleased, 0); assert.equal(f.pipeline.snapshot().activeNativeLeases, 0);
+  const f = fixture(context);
+  for (let serial = 1; serial <= 3; serial++) { f.issue(serial); f.run(); }
+  f.issue(4); f.at(1500); f.issue(5, 1);
+  assert.equal(f.reads.length, 3); assert.equal(f.pipeline.snapshot().sourceDiscarded, 0);
+  assert.equal(f.pipeline.snapshot().sourceReleased, 3); assert.equal(f.pipeline.snapshot().activeNativeLeases, 0);
   assert.equal(f.timers.size, 0); assert.equal(f.immediates.size, 0);
   assert.deepEqual(f.failures, ['cpu_ack_timeout']);
 });
@@ -187,11 +274,14 @@ test('a drain clock crossing 1500ms between deadline and freshness checks cannot
 });
 
 test('pending timer rechecks identity after a clock callback replaces its source', context => {
-  const f = fixture(context); f.issue(1); const old = f.allTimers[1];
-  f.at(17); f.hooks.clock = () => { f.hooks.clock = () => {}; f.issue(2, 1); };
+  const f = fixture(context);
+  for (let serial = 1; serial <= 3; serial++) { f.issue(serial); f.run(); }
+  f.issue(4); const old = f.allTimers.at(-1)!;
+  f.at(17); f.hooks.clock = () => { f.hooks.clock = () => {}; f.issue(5, 1); };
   old.callback();
   assert.equal(f.pipeline.snapshot().pendingFrames, 1); assert.equal(f.pipeline.snapshot().pendingExpired, 0);
-  f.run(); assert.equal(f.sent[0].metadata.serial, 2); assert.equal(f.reads.length, 1);
+  assert.equal(f.pipeline.acknowledge(f.sent[0].metadata), true);
+  f.run(); assert.equal(f.sent.at(-1)!.metadata.serial, 5); assert.equal(f.reads.length, 4);
   assert.deepEqual(f.failures, []);
 });
 
@@ -232,11 +322,13 @@ for (const failure of ['read throw', 'detached target', 'release false', 'releas
 }
 
 test('discard source command failure retires without reading the pending candidate', context => {
-  const f = fixture(context); f.issue(1); f.hooks.release = () => false; f.issue(2, 1);
-  assert.equal(f.pipeline.snapshot().sourceDiscarded, 1); assert.equal(f.pipeline.snapshot().sourceCopied, 0);
-  assert.equal(f.pipeline.snapshot().sourceReleased, 0); assert.equal(f.immediates.size, 0);
+  const f = fixture(context);
+  for (let serial = 1; serial <= 3; serial++) { f.issue(serial); f.run(); }
+  f.issue(4); f.hooks.release = () => false; f.issue(5, 1);
+  assert.equal(f.pipeline.snapshot().sourceDiscarded, 1); assert.equal(f.pipeline.snapshot().sourceCopied, 3);
+  assert.equal(f.pipeline.snapshot().sourceReleased, 3); assert.equal(f.immediates.size, 0);
   f.allImmediates.forEach(value => value.callback());
-  assert.equal(f.reads.length, 0); assert.deepEqual(f.failures, ['cpu_frame_failed']);
+  assert.equal(f.reads.length, 3); assert.deepEqual(f.failures, ['cpu_frame_failed']);
 });
 
 test('cached native slot rejects numeric handle reuse for a different section object before source credit', context => {

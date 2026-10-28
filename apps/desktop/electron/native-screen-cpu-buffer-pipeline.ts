@@ -32,6 +32,9 @@ export interface NativeCpuBufferPipelineSnapshot extends NativeCpuFrameDeliveryS
   activeNativeLeases: number;
   mainBuffersInUse: number;
   allocatedBuffers: number;
+  /** Waiting native sources with an independently reserved main buffer. */
+  readyFrames: number;
+  /** Latest source waiting only because every main buffer is reserved or sent. */
   pendingFrames: number;
 }
 export interface NativeCpuBufferPipeline extends NativeCpuFrameDelivery {
@@ -71,6 +74,7 @@ export function createNativeCpuBufferPipeline(options: NativeCpuBufferPipelineOp
   const native = new Map<number, FrameLease>();
   const main = new Map<number, FrameLease>();
   const buffers: MainBuffer[] = Array.from({ length: NATIVE_SCREEN_POOL_SIZE }, () => ({}));
+  const ready: FrameLease[] = [];
   const counters: NativeCpuPipelineCounters = { sourceCopied: 0, sourceDiscarded: 0, sourceReleased: 0,
     mainSent: 0, finalAck: 0, pendingSuperseded: 0, pendingExpired: 0 };
   let pending: FrameLease | undefined;
@@ -92,7 +96,7 @@ export function createNativeCpuBufferPipeline(options: NativeCpuBufferPipelineOp
     for (const lease of new Set([...native.values(), ...main.values()])) {
       clearTimeout(lease.timer); clearTimeout(lease.pendingTimer); eraseHandle(lease);
     }
-    native.clear(); main.clear(); pending = undefined;
+    native.clear(); main.clear(); ready.length = 0; pending = undefined;
     for (const buffer of buffers) { buffer.lease = undefined; buffer.data = undefined; }
   }
   function fail(code: NativeCpuFrameFailure): void {
@@ -129,6 +133,10 @@ export function createNativeCpuBufferPipeline(options: NativeCpuBufferPipelineOp
     if (pending === lease) pending = undefined;
     clearTimeout(lease.pendingTimer); lease.pendingTimer = undefined;
     if (disposition === 'discarded') {
+      const index = ready.indexOf(lease);
+      if (index !== -1) ready.splice(index, 1);
+      if (lease.buffer?.lease === lease) lease.buffer.lease = undefined;
+      lease.buffer = undefined;
       clearTimeout(lease.timer); lease.timer = undefined;
       count('sourceDiscarded');
       if (reason) count(reason === 'superseded' ? 'pendingSuperseded' : 'pendingExpired');
@@ -137,13 +145,17 @@ export function createNativeCpuBufferPipeline(options: NativeCpuBufferPipelineOp
     const accepted = options.releaseSource(lease.metadata, disposition);
     if (accepted) count('sourceReleased');
     else if (!stopped) fail('cpu_frame_failed');
+    if (disposition === 'discarded' && accepted && !stopped) scheduleNext();
     return accepted && !stopped;
   }
+  function waiting(lease: FrameLease): boolean {
+    return nativeLive(lease) && (pending === lease || ready.includes(lease));
+  }
   function expirePending(lease: FrameLease): void {
-    if (!nativeLive(lease) || pending !== lease) return;
+    if (!waiting(lease)) return;
     try {
       const age = now() - lease.createdAt;
-      if (!nativeLive(lease) || pending !== lease) return;
+      if (!waiting(lease)) return;
       if (age >= ACK_TIMEOUT_MS) { fail('cpu_ack_timeout'); return; }
       if (age < maxPendingAgeMs) {
         lease.pendingTimer = setTimeout(() => expirePending(lease), Math.max(1, Math.ceil(maxPendingAgeMs - age)));
@@ -157,18 +169,26 @@ export function createNativeCpuBufferPipeline(options: NativeCpuBufferPipelineOp
     const duration = now() - startedAt;
     if (!stopped) options.onTiming(stage, duration);
   }
+  function reserve(lease: FrameLease, buffer: MainBuffer): void {
+    if (pending === lease) pending = undefined;
+    buffer.lease = lease; lease.buffer = buffer; ready.push(lease);
+  }
+  function promotePending(): void {
+    const buffer = pending && buffers.find(value => !value.lease);
+    if (pending && buffer) reserve(pending, buffer);
+  }
   function drain(): void {
-    const lease = pending;
+    const lease = ready[0];
     if (!lease || !nativeLive(lease)) return;
-    if (!withinDeadline(lease) || !nativeLive(lease) || pending !== lease) return;
+    if (!withinDeadline(lease) || !nativeLive(lease) || ready[0] !== lease) return;
     const age = now() - lease.createdAt;
-    if (!nativeLive(lease) || pending !== lease) return;
+    if (!nativeLive(lease) || ready[0] !== lease) return;
     if (age >= maxPendingAgeMs) { releaseSource(lease, 'discarded', 'expired'); return; }
-    const buffer = buffers.find(value => !value.lease);
-    if (!buffer) return;
-    // Reserve independently of helper slot, before read/source commands/send can reenter.
-    pending = undefined; clearTimeout(lease.pendingTimer); lease.pendingTimer = undefined;
-    buffer.lease = lease; lease.buffer = buffer; main.set(lease.metadata.serial, lease);
+    const buffer = lease.buffer!;
+    // Arrival reserved this independent main slot before another frame in the
+    // same stdout task could supersede it. Exactly one copy/send still runs per turn.
+    ready.shift(); clearTimeout(lease.pendingTimer); lease.pendingTimer = undefined;
+    main.set(lease.metadata.serial, lease);
     const data = buffer.data ??= new ArrayBuffer(expectedBytes);
     if (data.byteLength !== expectedBytes) { fail('cpu_frame_failed'); return; }
     try { options.readFrame(lease.handle!, data, lease.metadata); }
@@ -190,7 +210,9 @@ export function createNativeCpuBufferPipeline(options: NativeCpuBufferPipelineOp
     recordTiming('transfer', startedAt);
   }
   function scheduleNext(): void {
-    if (stopped || draining || scheduled || !pending || !buffers.some(value => !value.lease)) return;
+    if (stopped) return;
+    promotePending();
+    if (draining || scheduled || ready.length === 0) return;
     const token: { handle?: ReturnType<typeof setImmediate> } = {};
     scheduled = token;
     try {
@@ -221,8 +243,17 @@ export function createNativeCpuBufferPipeline(options: NativeCpuBufferPipelineOp
         if (nativeLive(lease) || mainLive(lease)) fail('cpu_ack_timeout');
       }, ACK_TIMEOUT_MS); lease.timer.unref();
       lease.pendingTimer = setTimeout(() => expirePending(lease), Math.ceil(maxPendingAgeMs)); lease.pendingTimer.unref();
-      const previous = pending; pending = lease;
-      if (previous) releaseSource(previous, 'discarded', 'superseded');
+      // Frames arriving together may occupy all three existing main slots. Only
+      // genuine main-pool exhaustion invokes the separate one-latest policy.
+      // ACK callbacks may reenter before scheduleNext promotes an older source.
+      // Reserve that source first so ready serials remain in wire order.
+      promotePending();
+      const buffer = buffers.find(value => !value.lease);
+      if (buffer) reserve(lease, buffer);
+      else {
+        const previous = pending; pending = lease;
+        if (previous) releaseSource(previous, 'discarded', 'superseded');
+      }
       scheduleNext();
     } catch { fail('cpu_frame_failed'); }
   }
@@ -256,6 +287,6 @@ export function createNativeCpuBufferPipeline(options: NativeCpuBufferPipelineOp
   }
   return { deliver, acknowledge, stop, snapshot: () => ({ ownership: 'copy-complete', ...counters,
     inFlight: main.size, stopped, frames: counters.mainSent, released: counters.finalAck, expectedBytes,
-    activeNativeLeases: native.size, mainBuffersInUse: main.size,
-    allocatedBuffers: buffers.filter(value => value.data).length, pendingFrames: pending ? 1 : 0 }) };
+    activeNativeLeases: native.size, mainBuffersInUse: buffers.filter(value => value.lease).length,
+    allocatedBuffers: buffers.filter(value => value.data).length, readyFrames: ready.length, pendingFrames: pending ? 1 : 0 }) };
 }

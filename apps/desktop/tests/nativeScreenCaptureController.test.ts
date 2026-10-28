@@ -575,6 +575,30 @@ test('copy ownership reuses one helper slot with three independent main buffers 
   assert.equal(h.childHandles[0].closes, 1); assert.equal(h.timers.size, 0);
 });
 
+for (const count of [2, 3]) {
+  test(`copy ownership preserves ${count} frames parsed from one stdout chunk while main capacity is available`, async () => {
+    const h = harness({ pixelFormat: 'nv12', storage: 'cpu', cpuOwnership: 'copy-complete', supportsCachedCpuFramesInto: true });
+    const pending = h.start(); h.children[0].emitMessage(cpuReady); await pending;
+    const frames = Array.from({ length: count }, (_, index) => cpuFrame(index + 1, index));
+    h.children[0].stdout.emit('data', Buffer.from(frames.map(value => JSON.stringify(value) + '\n').join('')));
+    assert.equal(h.cpuReads.length, 0); assert.equal(h.immediates.size, 1);
+    assert.equal(h.controller.snapshot().mainBuffersInUse, count);
+    assert.equal(h.controller.snapshot().activeNativeLeases, count);
+    assert.equal(h.controller.snapshot().pendingSuperseded, 0);
+    for (let index = 0; index < count; index++) h.runImmediate();
+    const sent = h.sent.filter(value => value.channel === 'cove:native-screen:cpu-frame');
+    assert.deepEqual(sent.map(value => value.data.serial), Array.from({ length: count }, (_, index) => index + 1));
+    assert.equal(new Set(h.cpuReads.map(value => value.target)).size, count);
+    assert.equal(h.controller.snapshot().sourceCopied, count);
+    assert.equal(h.controller.snapshot().sourceReleased, count);
+    assert.equal(h.controller.snapshot().mainSent, count);
+    assert.equal(h.controller.snapshot().sourceDiscarded, 0);
+    for (const frame of sent) assert.equal(h.controller.acknowledgeCpuFrame(h.target as any, frame.data), true);
+    h.controller.reset(); h.children[0].close();
+    assert.equal(h.controller.snapshot().mainBuffersInUse, 0); assert.equal(h.timers.size, 0);
+  });
+}
+
 test('copy source credit is one write with ordered helper command lines across arbitrary pipe chunk boundaries', async () => {
   const h = harness({ pixelFormat: 'nv12', storage: 'cpu', cpuOwnership: 'copy-complete', supportsCachedCpuFramesInto: true });
   const pending = h.start(); h.children[0].emitMessage(cpuReady); await pending;
@@ -637,31 +661,35 @@ for (const disposition of ['copied', 'discarded'] as const) {
     test(`copy ownership ${disposition} ${failure} retires both pools without assuming atomic pipe delivery`, async () => {
       const h = harness({ pixelFormat: 'nv12', storage: 'cpu', cpuOwnership: 'copy-complete', supportsCachedCpuFramesInto: true });
       const pending = h.start(); h.children[0].emitMessage(cpuReady); await pending;
+      const baseline = disposition === 'discarded' ? 3 : 0;
+      for (let serial = 1; serial <= baseline; serial++) { h.children[0].emitMessage(cpuFrame(serial, 0)); h.runImmediate(); }
+      const serial = baseline + 1;
+      const expectedBatch = `imported 0 ${serial}\nreleased 0 ${serial}\n`;
       const write = h.children[0].stdin.write;
       const submitted: string[] = [];
       h.children[0].stdin.write = (batch: string) => {
         submitted.push(batch);
-        assert.equal(batch, 'imported 0 1\nreleased 0 1\n');
+        assert.equal(batch, expectedBatch);
         if (failure === 'batch write') throw Error('pipe failed');
         return write(batch);
       };
-      h.children[0].emitMessage(cpuFrame(1, 0));
-      if (disposition === 'copied') h.runImmediate(); else h.children[0].emitMessage(cpuFrame(2, 1));
+      h.children[0].emitMessage(cpuFrame(serial, 0));
+      if (disposition === 'copied') h.runImmediate(); else h.children[0].emitMessage(cpuFrame(serial + 1, 1));
       if (failure === 'later pipe error') {
         // Acceptance only queues bytes. The helper could have received just this prefix.
-        assert.equal(submitted[0].slice(0, submitted[0].indexOf('\n') + 1), 'imported 0 1\n');
+        assert.equal(submitted[0].slice(0, submitted[0].indexOf('\n') + 1), `imported 0 ${serial}\n`);
         h.children[0].stdin.emit('error', Error('pipe closed after a partial delivery'));
       }
       const snapshot = h.controller.snapshot();
       assert.equal(snapshot.failureCode, 'helper_failed');
-      assert.equal(snapshot.sourceReleased, failure === 'later pipe error' ? 1 : 0);
-      assert.equal(snapshot.sourceCopied, disposition === 'copied' ? 1 : 0);
+      assert.equal(snapshot.sourceReleased, baseline + (failure === 'later pipe error' ? 1 : 0));
+      assert.equal(snapshot.sourceCopied, baseline + (disposition === 'copied' ? 1 : 0));
       assert.equal(snapshot.sourceDiscarded, disposition === 'discarded' ? 1 : 0);
-      assert.equal(snapshot.mainSent, failure === 'later pipe error' && disposition === 'copied' ? 1 : 0);
+      assert.equal(snapshot.mainSent, baseline + (failure === 'later pipe error' && disposition === 'copied' ? 1 : 0));
       assert.equal(snapshot.finalAck, 0);
       assert.equal(snapshot.mainBuffersInUse, 0); assert.equal(snapshot.activeNativeLeases, 0); assert.equal(snapshot.pendingFrames, 0);
       assert.equal(submitted.length, 1);
-      assert.equal(h.children[0].writes.includes('imported 0 1\nreleased 0 1\n'), failure === 'later pipe error');
+      assert.equal(h.children[0].writes.includes(expectedBatch), failure === 'later pipe error');
       h.allImmediates.forEach(value => value.callback()); h.children[0].close();
       assert.equal(h.childHandles[0].closes, 1); assert.equal(h.timers.size, 0); assert.equal(h.immediates.size, 0);
     });
