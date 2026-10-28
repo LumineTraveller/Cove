@@ -7,6 +7,7 @@ import path from 'node:path';
 import ts from 'typescript';
 import * as protocol from '../electron/native-screen-capture-protocol';
 import type * as cpuDelivery from '../electron/native-screen-cpu-delivery';
+import type * as cpuPipeline from '../electron/native-screen-cpu-buffer-pipeline';
 import type { NativeScreenCaptureController } from '../electron/native-screen-capture';
 
 // Exercise the production broker, fake only Electron/GPU and the owned child pipes.
@@ -17,6 +18,9 @@ const compiled = ts.transpileModule(fs.readFileSync(new URL('../electron/native-
 const compiledCpuDelivery = ts.transpileModule(fs.readFileSync(new URL('../electron/native-screen-cpu-delivery.ts', import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
 }).outputText;
+const compiledCpuPipeline = ts.transpileModule(fs.readFileSync(new URL('../electron/native-screen-cpu-buffer-pipeline.ts', import.meta.url), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
+}).outputText;
 const options = { maxWidth: 1920, maxHeight: 1080, fps: 120 as const };
 const ready = { type: 'ready', protocol: 2, width: 1920, height: 1080, sourceWidth: 2560,
   sourceHeight: 1440, poolSize: 3, cursorSupported: true };
@@ -24,7 +28,7 @@ const frame = (serial = 1, slot = 0) => ({ type: 'frame', serial, slot, width: 1
   timestamp: serial * 1000, handle: '0xabcd', refresh: false });
 const flush = async () => { for (let n = 0; n < 6; n++) await Promise.resolve(); };
 
-function harness(overrides: { enabled?: boolean; platform?: string; electron?: string; missingBridge?: boolean; timing?: boolean; pixelFormat?: 'bgra' | 'nv12'; storage?: 'gpu' | 'cpu'; completion?: 'query' | 'fence'; cpuDeliveryScheduling?: cpuDelivery.NativeCpuDeliveryScheduling; supportsCpuFrames?: boolean; supportsCachedCpuFrames?: boolean; supportsCachedCpuFramesInto?: boolean } = {}) {
+function harness(overrides: { enabled?: boolean; platform?: string; electron?: string; missingBridge?: boolean; timing?: boolean; pixelFormat?: 'bgra' | 'nv12'; storage?: 'gpu' | 'cpu'; completion?: 'query' | 'fence'; cpuDeliveryScheduling?: cpuDelivery.NativeCpuDeliveryScheduling; cpuOwnership?: cpuPipeline.NativeCpuOwnership; supportsCpuFrames?: boolean; supportsCachedCpuFrames?: boolean; supportsCachedCpuFramesInto?: boolean; missingReadInto?: boolean } = {}) {
   let now = 100_000, uuid = 0, importError = false, sendError = false, sendThrows = false, sendFrameError = false;
   let duplicateError = false, closeError = false, openError = false;
   let cpuReadError = false;
@@ -64,13 +68,15 @@ function harness(overrides: { enabled?: boolean; platform?: string; electron?: s
       cpuReads.push({ source: Buffer.from(source), expectedBytes, cachedSlot: slot }); return new ArrayBuffer(expectedBytes);
     }, readFrameCachedInto(slot: number, source: Buffer, target: ArrayBuffer) {
       if (cpuReadError) throw Error('read failed');
+      new Uint8Array(target).fill(cpuReads.length + 1);
       cpuReads.push({ source: Buffer.from(source), expectedBytes: target.byteLength, cachedSlot: slot, target });
     }, duplicate(source: Buffer) {
     if (duplicateError) throw Error('duplicate failed');
     const owned = { pid, source: Buffer.from(source), handle: Buffer.alloc(8), closes: 0,
       close() { owned.closes++; if (closeError) throw Error('close failed'); } };
     owned.handle.writeBigUInt64LE(0xdef0n); duplicates.push(owned); return owned;
-    } }; childHandles.push(owner); return owner;
+    } }; if (overrides.missingReadInto) delete (owner as any).readFrameCachedInto;
+    childHandles.push(owner); return owner;
   } };
   const target = Object.assign(new EventEmitter(), { isDestroyed: () => false,
     mainFrame: { send(channel: string, data: unknown, binary?: ArrayBuffer) {
@@ -105,6 +111,16 @@ function harness(overrides: { enabled?: boolean; platform?: string; electron?: s
   };
   const module = { exports: {} as { NativeScreenCaptureController: typeof NativeScreenCaptureController } };
   const cpuModule = { exports: {} as typeof cpuDelivery };
+  const pipelineModule = { exports: {} as typeof cpuPipeline };
+  vm.runInNewContext(compiledCpuPipeline, { exports: pipelineModule.exports, Buffer, ArrayBuffer,
+    setTimeout: setTimer, clearTimeout: (id: any) => timers.delete(id),
+    setImmediate, clearImmediate: (id: any) => immediates.delete(id),
+    require(name: string) {
+      if (name === 'node:perf_hooks') return { performance: { now: () => now } };
+      if (name === './native-screen-capture-protocol') return protocol;
+      throw Error(`Unexpected CPU pipeline import ${name}`);
+    },
+  });
   vm.runInNewContext(compiledCpuDelivery, { exports: cpuModule.exports, Buffer, ArrayBuffer,
     setTimeout: setTimer, clearTimeout: (id: any) => timers.delete(id),
     setImmediate, clearImmediate: (id: any) => immediates.delete(id),
@@ -129,10 +145,11 @@ function harness(overrides: { enabled?: boolean; platform?: string; electron?: s
       }
       if (name === './native-screen-capture-protocol') return protocol;
       if (name === './native-screen-cpu-delivery') return cpuModule.exports;
+      if (name === './native-screen-cpu-buffer-pipeline') return pipelineModule.exports;
       throw Error(`Unexpected import ${name}`);
     },
   });
-  const controller = new module.exports.NativeScreenCaptureController({ enabled: overrides.enabled ?? true, helperPath: 'owned-helper.exe', timing: overrides.timing, pixelFormat: overrides.pixelFormat, storage: overrides.storage, completion: overrides.completion, cpuDeliveryScheduling: overrides.cpuDeliveryScheduling });
+  const controller = new module.exports.NativeScreenCaptureController({ enabled: overrides.enabled ?? true, helperPath: 'owned-helper.exe', timing: overrides.timing, pixelFormat: overrides.pixelFormat, storage: overrides.storage, completion: overrides.completion, cpuDeliveryScheduling: overrides.cpuDeliveryScheduling, cpuOwnership: overrides.cpuOwnership });
   const choose = (patch: Partial<protocol.NativeScreenSourceSelection> = {}) => controller.noteStockSelection({ sourceId: 'screen:0:0',
     displayId: '123', primaryDisplayId: '123', displayCount: 1, sourceWidth: 2560, sourceHeight: 1440, selectedAt: now, ...patch });
   const start = (requestId = 'request_01', requested: protocol.NativeScreenOptions = {
@@ -497,6 +514,216 @@ test('yield allows synchronous renderer ACK and stops queued reads when the chil
     assert.equal(h.childHandles[0].closes, 1);
     assert.equal(h.immediates.size, 0); assert.equal(h.timers.size, 0);
   }
+});
+
+test('copy ownership requires the bounded Into capability and leaves old CPU and GPU behavior explicit', async () => {
+  for (const supportsCachedCpuFramesInto of [undefined, false]) {
+    const h = harness({ pixelFormat: 'nv12', storage: 'cpu', cpuOwnership: 'copy-complete', supportsCachedCpuFramesInto });
+    assert.equal((await h.start()).ok, false); assert.equal(h.children.length, 0);
+  }
+  const missing = harness({ pixelFormat: 'nv12', storage: 'cpu', cpuOwnership: 'copy-complete', supportsCachedCpuFramesInto: true, missingReadInto: true });
+  assert.equal((await missing.start()).ok, false); assert.equal(missing.childHandles[0].closes, 1); missing.children[0].close();
+  for (const cpuOwnership of [undefined, 'final-ack'] as const) {
+    const h = harness({ pixelFormat: 'nv12', storage: 'cpu', cpuOwnership });
+    const pending = h.start(); h.children[0].emitMessage(cpuReady); await pending;
+    h.children[0].emitMessage(cpuFrame());
+    assert.equal(h.controller.snapshot().cpuOwnership, 'final-ack');
+    assert.equal(h.cpuReads.length, 1); assert.deepEqual(h.children[0].writes, ['imported 0 1\n']);
+    h.controller.reset(); h.children[0].close();
+  }
+  const gpu = harness({ cpuOwnership: 'copy-complete', supportsCachedCpuFramesInto: false });
+  const pending = gpu.start(); gpu.children[0].emitMessage(ready); await pending; gpu.children[0].emitMessage(frame());
+  assert.equal(gpu.controller.snapshot().cpuOwnership, 'final-ack'); assert.equal(gpu.imports.length, 1);
+  assert.equal(gpu.immediates.size, 0); assert.equal(gpu.cpuReads.length, 0);
+  gpu.transfers[0].resolve(); await flush(); gpu.imports[0].config.allReferencesReleased();
+  gpu.controller.reset(); gpu.children[0].close();
+});
+
+test('copy ownership reuses one helper slot with three independent main buffers and final ACK never re-releases source', async () => {
+  const h = harness({ pixelFormat: 'nv12', storage: 'cpu', cpuOwnership: 'copy-complete', supportsCachedCpuFramesInto: true });
+  const pending = h.start(); h.children[0].emitMessage(cpuReady); await pending;
+  assert.equal(h.controller.snapshot().cpuOwnership, 'copy-complete');
+  assert.equal(h.controller.snapshot().cpuDeliveryScheduling, 'yield');
+  assert.equal(h.children[0].args.some((value: string) => value.includes('ownership')), false);
+  for (let serial = 1; serial <= 3; serial++) {
+    h.children[0].emitMessage(cpuFrame(serial, 0)); h.runImmediate();
+    assert.equal(h.cpuReads[serial - 1].cachedSlot, 0);
+    assert.equal(h.cpuReads[serial - 1].source.readBigUInt64LE(), 0xabcdn);
+    assert.equal(h.children[0].writes.at(-1), `imported 0 ${serial}\nreleased 0 ${serial}\n`);
+    assert.equal(h.children[0].writes.length, serial);
+  }
+  let snapshot = h.controller.snapshot();
+  assert.equal(new Set(h.cpuReads.map(value => value.target)).size, 3);
+  assert.equal(snapshot.sourceCopied, 3); assert.equal(snapshot.sourceReleased, 3); assert.equal(snapshot.sourceDiscarded, 0);
+  assert.equal(snapshot.mainSent, 3); assert.equal(snapshot.finalAck, 0);
+  assert.equal(snapshot.activeNativeLeases, 0); assert.equal(snapshot.mainBuffersInUse, 3);
+  assert.equal(snapshot.cpuFramesInFlight, 3); assert.equal(snapshot.cpuFrameBuffers, 3);
+  const sent = h.sent.filter(value => value.channel === 'cove:native-screen:cpu-frame');
+  const writes = h.children[0].writes.length;
+  assert.equal(h.controller.acknowledgeCpuFrame(h.target as any, sent[0].data), true);
+  assert.equal(h.controller.snapshot().cpuFramesInFlight, 2);
+  assert.equal(h.children[0].writes.length, writes);
+  h.children[0].emitMessage(cpuFrame(4, 0)); h.runImmediate();
+  assert.equal(h.cpuReads[3].target, h.cpuReads[0].target);
+  assert.equal(h.controller.acknowledgeCpuFrame(h.target as any, sent[0].data), false);
+  assert.equal(h.controller.snapshot().mainBuffersInUse, 3);
+  h.controller.reset(); h.children[0].close();
+  snapshot = h.controller.snapshot();
+  assert.equal(snapshot.sourceCopied, 4); assert.equal(snapshot.sourceReleased, 4); assert.equal(snapshot.mainSent, 4);
+  assert.equal(snapshot.finalAck, 1); assert.equal(snapshot.cpuFrameBuffers, 0); assert.equal(snapshot.cpuFramesInFlight, 0);
+  assert.equal(snapshot.activeNativeLeases, 0); assert.equal(snapshot.mainBuffersInUse, 0); assert.equal(snapshot.pendingFrames, 0);
+  assert.equal(h.childHandles[0].closes, 1); assert.equal(h.timers.size, 0);
+});
+
+test('copy source credit is one write with ordered helper command lines across arbitrary pipe chunk boundaries', async () => {
+  const h = harness({ pixelFormat: 'nv12', storage: 'cpu', cpuOwnership: 'copy-complete', supportsCachedCpuFramesInto: true });
+  const pending = h.start(); h.children[0].emitMessage(cpuReady); await pending;
+  const send = h.target.mainFrame.send;
+  h.target.mainFrame.send = (channel, data, binary) => {
+    if (channel === 'cove:native-screen:cpu-frame')
+      assert.deepEqual(h.children[0].writes, ['imported 0 1\nreleased 0 1\n']);
+    send(channel, data, binary);
+  };
+  h.children[0].emitMessage(cpuFrame()); h.runImmediate();
+  assert.equal(h.children[0].writes.length, 1);
+  const batch = h.children[0].writes[0] as string;
+  // Model the existing helper Input::pump newline stream contract, not write atomicity.
+  const consume = (chunks: string[]) => {
+    let pendingBytes = '', imported = false, busy = true;
+    const commands: string[] = [];
+    for (const chunk of chunks) {
+      pendingBytes += chunk;
+      while (pendingBytes.includes('\n')) {
+        const end = pendingBytes.indexOf('\n');
+        const line = pendingBytes.slice(0, end); pendingBytes = pendingBytes.slice(end + 1);
+        commands.push(line);
+        const [verb, slot, serial] = line.split(' ');
+        assert.equal(slot, '0'); assert.equal(serial, '1'); assert.equal(busy, true);
+        if (verb === 'imported') { assert.equal(imported, false); imported = true; }
+        else { assert.equal(verb, 'released'); assert.equal(imported, true); busy = false; }
+      }
+    }
+    return { busy, imported, commands, pendingBytes };
+  };
+  for (let split = 0; split <= batch.length; split++) {
+    assert.deepEqual(consume([batch.slice(0, split), batch.slice(split)]), {
+      busy: false, imported: true, commands: ['imported 0 1', 'released 0 1'], pendingBytes: '',
+    });
+  }
+  assert.equal(consume(['imported 0 1\n']).busy, true, 'an incomplete pipe delivery has not released the section');
+  h.controller.reset(); h.children[0].close(); assert.equal(h.timers.size, 0);
+});
+
+test('copy ownership discard commands do not become copied, published or renderer-completed frames', async () => {
+  const h = harness({ pixelFormat: 'nv12', storage: 'cpu', cpuOwnership: 'copy-complete', supportsCachedCpuFramesInto: true });
+  const pending = h.start(); h.children[0].emitMessage(cpuReady); await pending;
+  for (let serial = 1; serial <= 3; serial++) { h.children[0].emitMessage(cpuFrame(serial, 0)); h.runImmediate(); }
+  h.children[0].emitMessage(cpuFrame(4, 0)); h.children[0].emitMessage(cpuFrame(5, 1));
+  assert.equal(h.controller.snapshot().pendingFrames, 1); assert.equal(h.controller.snapshot().activeNativeLeases, 1);
+  assert.equal(h.controller.snapshot().sourceDiscarded, 1); h.advance(17);
+  const snapshot = h.controller.snapshot();
+  assert.equal(snapshot.sourceCopied, 3); assert.equal(snapshot.sourceDiscarded, 2); assert.equal(snapshot.sourceReleased, 5);
+  assert.equal(snapshot.mainSent, 3); assert.equal(snapshot.frames, 3); assert.equal(snapshot.finalAck, 0);
+  assert.equal(snapshot.releasedFrames, 0); assert.equal(snapshot.transferredFrames, 0);
+  assert.equal(snapshot.pendingSuperseded, 1); assert.equal(snapshot.pendingExpired, 1);
+  assert.equal(snapshot.pendingFrames, 0); assert.equal(h.cpuReads.length, 3);
+  assert.equal(h.immediates.size, 0); assert.equal(h.children[0].writes.length, 5);
+  h.controller.reset(); h.children[0].close();
+  assert.equal(h.controller.snapshot().sourceDiscarded, 2); assert.equal(h.timers.size, 0);
+});
+
+for (const disposition of ['copied', 'discarded'] as const) {
+  for (const failure of ['batch write', 'later pipe error'] as const) {
+    test(`copy ownership ${disposition} ${failure} retires both pools without assuming atomic pipe delivery`, async () => {
+      const h = harness({ pixelFormat: 'nv12', storage: 'cpu', cpuOwnership: 'copy-complete', supportsCachedCpuFramesInto: true });
+      const pending = h.start(); h.children[0].emitMessage(cpuReady); await pending;
+      const write = h.children[0].stdin.write;
+      const submitted: string[] = [];
+      h.children[0].stdin.write = (batch: string) => {
+        submitted.push(batch);
+        assert.equal(batch, 'imported 0 1\nreleased 0 1\n');
+        if (failure === 'batch write') throw Error('pipe failed');
+        return write(batch);
+      };
+      h.children[0].emitMessage(cpuFrame(1, 0));
+      if (disposition === 'copied') h.runImmediate(); else h.children[0].emitMessage(cpuFrame(2, 1));
+      if (failure === 'later pipe error') {
+        // Acceptance only queues bytes. The helper could have received just this prefix.
+        assert.equal(submitted[0].slice(0, submitted[0].indexOf('\n') + 1), 'imported 0 1\n');
+        h.children[0].stdin.emit('error', Error('pipe closed after a partial delivery'));
+      }
+      const snapshot = h.controller.snapshot();
+      assert.equal(snapshot.failureCode, 'helper_failed');
+      assert.equal(snapshot.sourceReleased, failure === 'later pipe error' ? 1 : 0);
+      assert.equal(snapshot.sourceCopied, disposition === 'copied' ? 1 : 0);
+      assert.equal(snapshot.sourceDiscarded, disposition === 'discarded' ? 1 : 0);
+      assert.equal(snapshot.mainSent, failure === 'later pipe error' && disposition === 'copied' ? 1 : 0);
+      assert.equal(snapshot.finalAck, 0);
+      assert.equal(snapshot.mainBuffersInUse, 0); assert.equal(snapshot.activeNativeLeases, 0); assert.equal(snapshot.pendingFrames, 0);
+      assert.equal(submitted.length, 1);
+      assert.equal(h.children[0].writes.includes('imported 0 1\nreleased 0 1\n'), failure === 'later pipe error');
+      h.allImmediates.forEach(value => value.callback()); h.children[0].close();
+      assert.equal(h.childHandles[0].closes, 1); assert.equal(h.timers.size, 0); assert.equal(h.immediates.size, 0);
+    });
+  }
+}
+
+for (const failure of ['read', 'send'] as const) {
+  test(`copy ownership ${failure} failure never reports a published frame or final ACK`, async () => {
+    const h = harness({ pixelFormat: 'nv12', storage: 'cpu', cpuOwnership: 'copy-complete', supportsCachedCpuFramesInto: true });
+    const pending = h.start(); h.children[0].emitMessage(cpuReady); await pending;
+    if (failure === 'read') h.failCpuRead(); else h.failTargetSend();
+    h.children[0].emitMessage(cpuFrame()); h.runImmediate();
+    const snapshot = h.controller.snapshot();
+    assert.equal(snapshot.failureCode, 'cpu_frame_failed'); assert.equal(snapshot.mainSent, 0); assert.equal(snapshot.finalAck, 0);
+    assert.equal(snapshot.sourceCopied, failure === 'read' ? 0 : 1); assert.equal(snapshot.sourceReleased, failure === 'read' ? 0 : 1);
+    assert.equal(snapshot.cpuFrameBuffers, 0); assert.equal(snapshot.cpuFramesInFlight, 0);
+    h.children[0].close(); assert.equal(h.childHandles[0].closes, 1); assert.equal(h.timers.size, 0);
+  });
+}
+
+for (const stage of ['pending', 'read', 'source release', 'send'] as const) {
+  test(`copy ownership child close during ${stage} invalidates late read callbacks and retains cumulative counters`, async () => {
+    const h = harness({ pixelFormat: 'nv12', storage: 'cpu', cpuOwnership: 'copy-complete', supportsCachedCpuFramesInto: true });
+    const pending = h.start(); h.children[0].emitMessage(cpuReady); await pending;
+    if (stage === 'read') {
+      const read = h.childHandles[0].readFrameCachedInto;
+      h.childHandles[0].readFrameCachedInto = (...args: any[]) => { read(...args); h.children[0].close(); };
+    }
+    if (stage === 'source release') {
+      const write = h.children[0].stdin.write;
+      h.children[0].stdin.write = (line: string) => { const result = write(line); if (line.includes('\nreleased ')) h.children[0].close(); return result; };
+    }
+    if (stage === 'send') {
+      const send = h.target.mainFrame.send;
+      h.target.mainFrame.send = (channel, data, binary) => { send(channel, data, binary); if (channel === 'cove:native-screen:cpu-frame') h.children[0].close(); };
+    }
+    h.children[0].emitMessage(cpuFrame());
+    if (stage === 'pending') h.children[0].close(); else h.runImmediate();
+    const reads = h.cpuReads.length;
+    h.allImmediates.forEach(value => value.callback());
+    const snapshot = h.controller.snapshot();
+    assert.equal(h.cpuReads.length, reads); assert.equal(snapshot.sessions, 0);
+    assert.equal(snapshot.mainSent, stage === 'send' ? 1 : 0);
+    assert.equal(snapshot.sourceReleased, stage === 'source release' || stage === 'send' ? 1 : 0);
+    assert.equal(snapshot.activeNativeLeases, 0); assert.equal(snapshot.mainBuffersInUse, 0);
+    assert.equal(snapshot.cpuFramesInFlight, 0); assert.equal(snapshot.cpuFrameBuffers, 0);
+    assert.equal(h.childHandles[0].closes, 1); assert.equal(h.timers.size, 0); assert.equal(h.immediates.size, 0);
+  });
+}
+
+test('copy ownership final ACK deadline includes pre-copy waiting and never releases source a second time', async () => {
+  const h = harness({ pixelFormat: 'nv12', storage: 'cpu', cpuOwnership: 'copy-complete', supportsCachedCpuFramesInto: true });
+  const pending = h.start(); h.children[0].emitMessage(cpuReady); await pending;
+  h.children[0].emitMessage(cpuFrame()); h.advance(10); h.runImmediate();
+  assert.equal(h.controller.snapshot().sourceReleased, 1);
+  h.advance(1489); assert.equal(h.controller.snapshot().activeSessions, 1);
+  h.advance(1); assert.equal(h.controller.snapshot().failureCode, 'cpu_ack_timeout');
+  assert.equal(h.controller.snapshot().finalAck, 0);
+  assert.equal(h.children[0].writes.join('').split('\n').filter((line: string) => line.startsWith('released ')).length, 1);
+  const metadata = h.sent.find(value => value.channel === 'cove:native-screen:cpu-frame').data;
+  assert.equal(h.controller.acknowledgeCpuFrame(h.target as any, metadata), false);
+  h.children[0].close(); assert.equal(h.timers.size, 0);
 });
 
 test('startup timeout is bounded, disables native for this app session, and kills only its own child', async () => {
