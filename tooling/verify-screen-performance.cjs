@@ -5,7 +5,7 @@ const fs=require('node:fs'),path=require('node:path'),{pathToFileURL}=require('n
 const {spawn}=require('node:child_process'),dgram=require('node:dgram'),net=require('node:net');
 const crypto=require('node:crypto');
 const {cleanupOwnedTraceExports}=require('./analyze-screen-performance-trace.cjs');
-const {nativePerformanceEnabled,nativePerformancePaths}=require('./screen-performance-native.cjs');
+const {nativePerformanceEnabled,nativePerformancePaths,performanceDisplaySleepPrevention}=require('./screen-performance-native.cjs');
 const root=path.resolve(__dirname,'..');
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 async function stop(child){
@@ -24,12 +24,16 @@ async function port(){
   for(let attempt=0;attempt<32;attempt++){
     const udp=dgram.createSocket('udp4'),tcp=net.createServer();
     try{
-      await new Promise((resolve,reject)=>{udp.once('error',reject);udp.bind({port:0,address:'127.0.0.1',exclusive:true},resolve);});
-      const value=udp.address().port;
-      if(!Number.isInteger(value)||value<1||value>65535){lastCode='invalid_port';continue;}
-      // Windows can allow UDP while excluding the same TCP port. The SFU
-      // needs both protocols, so hold both loopback probes at once.
-      await new Promise((resolve,reject)=>{tcp.once('error',reject);tcp.listen({port:value,host:'127.0.0.1',exclusive:true},resolve);});
+      // Start with a TCP-assigned port: Windows can repeatedly allocate a UDP
+      // ephemeral port inside a TCP-excluded range. Probe the other protocol
+      // while holding the first, without changing exclusions or socket policy.
+      await new Promise((resolve,reject)=>{tcp.once('error',reject);tcp.listen({port:0,host:'127.0.0.1',exclusive:true},resolve);});
+      const value=tcp.address().port;
+      // The real SFU worker reserves the configured base + 1 through base +
+      // 200 (apps/server/src/features/media/ms.ts). A valid ephemeral base
+      // above 65335 would make createWorker reject its settings before capture.
+      if(!Number.isInteger(value)||value<1||value>65535-200){lastCode='invalid_worker_port_range';continue;}
+      await new Promise((resolve,reject)=>{udp.once('error',reject);udp.bind({port:value,address:'127.0.0.1',exclusive:true},resolve);});
       return value;
     }catch(error){lastCode=/^[A-Z0-9_]{1,40}$/.test(error?.code??'')?error.code:'bind_failed';}
     finally{
@@ -40,6 +44,9 @@ async function port(){
   throw Error('No loopback port available for both TCP and UDP after 32 probes ('+lastCode+')');
 }
 async function main(){
+  // Reject an incompatible minimize/sleep-control combination in Node, before
+  // creating an Electron process (whose bootstrap exception can leave a modal).
+  performanceDisplaySleepPrevention(process.env,null,process.env.COVE_FPS_MINIMIZE_SENDER==='1');
   const runtimeName=process.env.COVE_FPS_RUNTIME_NAME||'fps-candidate';
   if(!/^fps-(?:candidate|validation-[a-z0-9-]{1,60})$/.test(runtimeName))throw Error('Invalid performance runtime namespace');
   const baselineWriterFlag=process.env.COVE_FPS_BASELINE_FRAME_WRITER;
@@ -64,6 +71,7 @@ async function main(){
   const sources=['apps/desktop/src/features/media/screen/screenCapture.ts','apps/desktop/src/features/media/screen/useScreenPublishing.ts','apps/desktop/src/features/media/screen/useScreenAnalysis.ts','apps/desktop/tests/ui/media-integration.tsx','apps/desktop/tests/ui/screen-performance-fixture.ts','apps/desktop/tests/ui/screen-performance.electron.cjs','apps/desktop/tests/ui/screen-performance-backend.cjs','tooling/verify-screen-performance.cjs','tooling/screen-performance-config.cjs','tooling/screen-performance-native.cjs','tooling/screen-performance-source-age.cjs','tooling/analyze-screen-performance-trace.cjs',
     'apps/desktop/electron/native-screen-capture-protocol.ts','apps/desktop/electron/native-screen-capture-helper.cpp','apps/desktop/electron/native-screen-handles.cpp','apps/desktop/electron/build-native-screen-capture.cjs','apps/desktop/electron/native-screen-capture.ts','apps/desktop/electron/native-screen-cpu-delivery.ts','apps/desktop/electron/native-screen-cpu-buffer-pipeline.ts','apps/desktop/electron/preload.ts','apps/desktop/src/features/media/screen/nativeScreenCapture.ts','apps/desktop/src/features/media/screen/nativeFrameWriteQueue.ts','apps/desktop/src/features/media/screen/nativeScreenUpgrade.ts','apps/desktop/src/features/media/screen/nativeScreenColorPolicy.ts'];
   if(nativePaths)sources.push(...Object.values(nativePaths),'apps/desktop/dist-electron/native-screen-cpu-buffer-pipeline.js','apps/desktop/dist-electron/native-screen-cpu-delivery.js','apps/desktop/dist-electron/native-screen-capture-protocol.js');
+  if(process.env.COVE_FPS_NATIVE_FRAME_SINK==='canvas')sources.push('apps/desktop/src/features/media/screen/nativeCanvasFrameSink.ts');
   if(effectiveNativeHelperSource)sources.push(effectiveNativeHelperSource.path);
   if(baselineFrameWriterOverride)sources.push(effectiveNativeFrameWriterPath);
   fs.writeFileSync(path.join(directory,'source.json'),JSON.stringify({startedAt:new Date().toISOString(),node:process.version,nativeGpuEnabled,

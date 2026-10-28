@@ -16,17 +16,24 @@ function configuration(args,validateFiles=true) {
   const seen=new Set();
   for(let n=0;n<args.length;n++) {
     const key=args[n];need(!seen.has(key)&&n+1<args.length,'invalid_canvas_arguments');seen.add(key);const value=args[++n];
-    if(key==='--stage'){need(['mechanism','paced','bounded'].includes(value),'invalid_canvas_stage');result.stage=value;}
+    if(key==='--stage'){need(['mechanism','paced','bounded','product'].includes(value),'invalid_canvas_stage');result.stage=value;}
     else if(key==='--visibility'){need(['hidden','visible','visible-then-hidden','visible-then-minimized'].includes(value),'invalid_canvas_visibility');result.visibility=value;}
     else if(key==='--canvas-placement'){need(['attached','detached'].includes(value),'invalid_canvas_placement');result.canvasPlacement=value;}
     else if(key==='--bounded-sink'){need(['none','direct','cpu','timestamp'].includes(value),'invalid_canvas_bounded_sink');result.boundedSink=value;}
+    else if(key==='--product-source-start'){need(['after-prime','eager'].includes(value),'invalid_canvas_product_source_start');result.productSourceStart=value;}
     else if(key==='--helper'||key==='--addon')result[key.slice(2)]=path.resolve(value);
     else throw new Error('invalid_canvas_arguments');
   }
   Object.assign(result,result.stage==='mechanism'?{width:64,height:64,frames:24}:{width:1728,height:1080,frames:120});
   if(result.stage==='bounded')result.boundedSink??='direct';else need(result.boundedSink===undefined,'canvas_bounded_sink_requires_bounded_stage');
-  need(result.stage==='bounded'||!result.visibility.startsWith('visible-then-'),'canvas_visibility_transition_requires_bounded_stage');
-  need(result.stage==='bounded'||result.canvasPlacement==='attached','canvas_detached_requires_bounded_stage');
+  if(result.stage==='product'){
+    if(!seen.has('--canvas-placement'))result.canvasPlacement='detached';
+    need(result.canvasPlacement==='detached','canvas_product_uses_actual_detached_platform');
+    result.productSourceStart??='after-prime';
+    need(result.productSourceStart!=='eager'||!result.visibility.startsWith('visible-then-'),'canvas_product_eager_requires_stable_visibility');
+  }else need(result.productSourceStart===undefined,'canvas_product_source_start_requires_product_stage');
+  need(['bounded','product'].includes(result.stage)||!result.visibility.startsWith('visible-then-'),'canvas_visibility_transition_requires_bounded_stage');
+  need(['bounded','product'].includes(result.stage)||result.canvasPlacement==='attached','canvas_detached_requires_bounded_stage');
   Object.assign(result,{poolSize:3,targetFps:120,timeoutMs:23000});
   if(validateFiles){
     need(inside(path.join(root,'runtime/nv12-shader-probe'),result.helper)&&path.extname(result.helper)==='.exe'&&fs.statSync(result.helper).isFile(),'existing_readback_helper_required');
@@ -47,7 +54,7 @@ async function startServer(){
   return{url:`http://127.0.0.1:${server.address().port}${token}`,requests:()=>requests,
     close:()=>new Promise(resolve=>{server.close(resolve);server.closeAllConnections();})};
 }
-function stats(values){if(!values.length)return{count:0,meanMs:null,p50Ms:null,p95Ms:null,maxMs:null};const sorted=[...values].sort((a,b)=>a-b);
+function stats(values){values=values.filter(Number.isFinite);if(!values.length)return{count:0,meanMs:null,p50Ms:null,p95Ms:null,maxMs:null};const sorted=[...values].sort((a,b)=>a-b);
   return{count:values.length,meanMs:values.reduce((a,b)=>a+b,0)/values.length,p50Ms:sorted[Math.floor((sorted.length-1)*.5)],p95Ms:sorted[Math.floor((sorted.length-1)*.95)],maxMs:sorted.at(-1)};}
 function summarize(renderer){
   const inputs=renderer.inputs,outputs=renderer.outputs,serials=new Set(outputs.map(s=>s.serial));
@@ -61,13 +68,43 @@ function summarize(renderer){
     interpretation:'copyTo AB call latency is observational; format/latency alone do not prove mappability or GPU route. Unique finite synthetic frames are not Cove capture FPS.',
     productionEligible:false,productionBlocker:'Canvas has no public pending-capture bound; finite output/age/memory evidence does not establish safe continuous 1080p120 backpressure'};
 }
-function rendererFile(config){return path.join(__dirname,config.stage==='bounded'?'bounded-renderer.cjs':'renderer.cjs');}
+function rendererFile(config){return path.join(__dirname,config.stage==='product'?'product-renderer.cjs':config.stage==='bounded'?'bounded-renderer.cjs':'renderer.cjs');}
+const productModuleFile=path.join(root,'apps/desktop/src/features/media/screen/nativeCanvasFrameSink.ts');
+function compileProductModule(){
+  const ts=require(path.join(root,'node_modules/typescript')),source=fs.readFileSync(productModuleFile,'utf8');
+  const parsed=ts.createSourceFile(productModuleFile,source,ts.ScriptTarget.ES2022,true,ts.ScriptKind.TS);
+  need(!parsed.statements.some(s=>ts.isImportDeclaration(s)||ts.isImportEqualsDeclaration(s)||
+    (ts.isExportDeclaration(s)&&s.moduleSpecifier)),'canvas_product_module_must_be_self_contained');
+  const compiled=ts.transpileModule(source,{fileName:productModuleFile,reportDiagnostics:true,
+    compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,isolatedModules:true,sourceMap:false}});
+  need(!compiled.diagnostics?.some(d=>d.category===ts.DiagnosticCategory.Error),'canvas_product_transpile_failed');
+  need(!/\brequire\s*\(/.test(compiled.outputText),'canvas_product_runtime_import_disallowed');
+  return{sourceSha256:crypto.createHash('sha256').update(source).digest('hex'),
+    compiledSha256:crypto.createHash('sha256').update(compiled.outputText).digest('hex'),typescriptVersion:ts.version,
+    expression:'(()=>{const exports={};\n'+compiled.outputText+'\nreturn exports;})()'};
+}
 function dependencyHashes(config){return Object.fromEntries([['runner',__filename],['renderer',rendererFile(config)],
   ['helperSource',path.join(__dirname,'../nv12-shader-probe/readback-helper.cpp')],['includedShaderHelperSource',path.join(__dirname,'../nv12-shader-probe/helper.cpp')],
-  ['helper',config.helper],['preload',config.preload],['addon',config.addon],['pacer',pacerBinary],['pacerAdapter',path.join(__dirname,'../cpu-frame-socket-probe/pacer.cjs')]].map(([key,file])=>[key,digest(file)]));}
+  ['helper',config.helper],['preload',config.preload],['addon',config.addon],['pacer',pacerBinary],['pacerAdapter',path.join(__dirname,'../cpu-frame-socket-probe/pacer.cjs')],
+  ...(config.stage==='product'?[['productModule',productModuleFile]]:[])].map(([key,file])=>[key,digest(file)]));}
 function readyForNativeRelease(lease){return !lease.released&&lease.referencesReleased&&lease.transferComplete&&lease.mainReleased&&lease.importedAckSent&&lease.permitSent;}
 function boundedRendererDrained(renderer){const b=renderer?.bounded;return !!b?.primed&&!b.pendingAdmissionTask&&
   b.creditsGranted===renderer.inputs.length&&b.receipts.length===renderer.inputs.length+b.supersededSerials.length;}
+function productRendererDrained(renderer){const p=renderer?.product;return !!p?.primed&&p.pendingSubmissions===0&&
+  p.receipts.length===p.submissions.length&&p.onWritten.length===renderer.inputs.length&&renderer.outputs.length===renderer.inputs.length;}
+function waitForRendererPrime(config){return config.stage==='bounded'||(config.stage==='product'&&config.productSourceStart==='after-prime');}
+function productStartupTimeline(renderer,source){
+  const p=renderer?.product,s=p?.startup;
+  const epoch=(origin,value)=>Number.isFinite(origin)&&Number.isFinite(value)?origin+value:null;
+  return{sourceStart:p?.sourceStart??null,clock:'performance.timeOrigin + performance.now; approximate cross-process epoch milliseconds',
+    moduleCreateStartedEpochMs:epoch(s?.timeOriginMs,s?.moduleCreateStartedAtMs),moduleCreatedEpochMs:epoch(s?.timeOriginMs,s?.moduleCreatedAtMs),
+    sourceSpawnRequestedEpochMs:epoch(source?.timeOriginMs,source?.spawnRequestedAtMs),sourceSpawnedEpochMs:epoch(source?.timeOriginMs,source?.spawnedAtMs),
+    sourceReadyObservedEpochMs:epoch(source?.timeOriginMs,source?.readyObservedAtMs),pacerStartedEpochMs:epoch(source?.timeOriginMs,source?.pacerStartedAtMs),
+    firstSourceOfferEpochMs:epoch(source?.timeOriginMs,source?.firstOfferAtMs),primeReadyEpochMs:epoch(s?.timeOriginMs,s?.primeReadyAtMs),
+    firstNativeInputEpochMs:epoch(s?.timeOriginMs,s?.firstInputAtMs),firstInputBeforePrime:s?.firstInputBeforePrime??null,
+    inputsBeforePrime:s?.inputsBeforePrime??null,
+    interpretation:'eager removes the ready gate only; module creation still precedes helper spawn. No early-input overlap is claimed unless observed.'};
+}
 function cleanRuntimeEnvironment(input){const env={...input};for(const key of Object.keys(env))if(['NODE_OPTIONS','NODE_PATH','ELECTRON_RUN_AS_NODE'].includes(key.toUpperCase()))delete env[key];return env;}
 function entryMode({electron,isMain,args}){return electron?'electron':!isMain?'import':args[0]==='--check'?'check':'launch';}
 function boundedLogSink(write,limitBytes=65536){let bytesSeen=0,bytesKept=0;return{
@@ -147,10 +184,12 @@ async function runElectron(){
   const {app,BrowserWindow,ipcMain,sharedTexture}=require('electron');
   const directory=path.resolve(process.env.COVE_CANVAS_DIRECTORY||'');need(inside(runtime,directory),'invalid_canvas_output_directory');
   const supplied=JSON.parse(process.env.COVE_CANVAS_CONFIG||'{}'),config=configuration(['--stage',supplied.stage,'--helper',supplied.helper,'--addon',supplied.addon,'--visibility',supplied.visibility||'hidden','--canvas-placement',supplied.canvasPlacement||'attached',
-    ...(supplied.stage==='bounded'?['--bounded-sink',supplied.boundedSink||'direct']:[])]);
+    ...(supplied.stage==='bounded'?['--bounded-sink',supplied.boundedSink||'direct']:[]),
+    ...(supplied.stage==='product'?['--product-source-start',supplied.productSourceStart||'after-prime']:[])]);
   const profile=path.join(directory,'profile');fs.mkdirSync(profile,{recursive:true});app.setPath('userData',profile);app.setPath('sessionData',profile);app.on('window-all-closed',()=>{});
   const result={...(readJson(path.join(directory,'result.json'))||{}),...baseResult(),phase:'electron_configuration',electronMainPid:process.pid,config:{stage:config.stage,width:config.width,height:config.height,
-    frames:config.frames,poolSize:3,targetFps:120,timeoutMs:config.timeoutMs,visibility:config.visibility,canvasPlacement:config.canvasPlacement,...(config.stage==='bounded'?{boundedSink:config.boundedSink}:{})},hashes:dependencyHashes(config),
+    frames:config.frames,poolSize:3,targetFps:120,timeoutMs:config.timeoutMs,visibility:config.visibility,canvasPlacement:config.canvasPlacement,
+    ...(config.stage==='bounded'?{boundedSink:config.boundedSink}:{}),...(config.stage==='product'?{productSourceStart:config.productSourceStart}:{})},hashes:dependencyHashes(config),
     desktopCapture:false,productChanged:false,externalNetworkUsed:false,pixelsOrHandlesPersisted:false,traceCaptured:false,
     routeClaim:'finite CanvasCapture qualification only; no zero-copy or production backpressure claim',memorySamples:[]};
   const save=()=>fs.writeFileSync(path.join(directory,'result.json'),JSON.stringify(result,null,2)+'\n');
@@ -223,13 +262,24 @@ async function runElectron(){
     ipcMain.handle('cove:native-screen:stop',event=>{if(event.sender===window?.webContents)fail('canvas_preload_receiver_failed');return true;});
     await window.loadURL(owned.url);
     result.visibility.rendererAtLoad=await window.webContents.executeJavaScript('({visibilityState:document.visibilityState,hasFocus:document.hasFocus()})');
-    result.phase='configuring_renderer';save();result.rendererSetup=await window.webContents.executeJavaScript('('+require(rendererFile(config)).toString()+')('+JSON.stringify(requestId)+','+JSON.stringify(config)+')');
+    const product=config.stage==='product'?compileProductModule():null;
+    if(product)result.productModule={path:path.relative(root,productModuleFile),sourceSha256:product.sourceSha256,
+      compiledSha256:product.compiledSha256,typescriptVersion:product.typescriptVersion,actualDefaultPlatform:true,
+      constructorOptions:{width:config.width,height:config.height,fps:120},sourceStart:config.productSourceStart,
+      modulePrivateDrainObservable:false,validationAddsFullFrameCopy:true};
+    if(product)result.productSourceLifecycle={timeOriginMs:performance.timeOrigin,spawnRequestedAtMs:null,spawnedAtMs:null,
+      readyObservedAtMs:null,pacerStartedAtMs:null,firstOfferAtMs:null,waitedForPrime:waitForRendererPrime(config)};
+    result.phase='configuring_renderer';save();result.rendererSetup=await window.webContents.executeJavaScript('('+require(rendererFile(config)).toString()+')('+JSON.stringify(requestId)+','+JSON.stringify(config)+(product?','+product.expression:'')+')');
     need(result.rendererSetup.supported&&result.rendererSetup.crossOriginIsolated===false&&result.rendererSetup.nodeType==='undefined'&&result.rendererSetup.status!=='failed','canvas_secure_renderer_setup_failed');
-    if(config.stage==='bounded'){
+    // Eager changes only this ready gate. Record actual overlap instead of
+    // assuming native process startup beats the renderer's black prime.
+    if(waitForRendererPrime(config)){
       result.phase='priming_bounded_renderer';save();const primeDeadline=Date.now()+3000;
       while(true){need(!stopped,'canvas_cancelled');const state=await window.webContents.executeJavaScript('window.__coveCanvasRoute');
         need(state?.status!=='failed',state?.errorCode||'canvas_bounded_prime_failed');
-        if(state?.result?.bounded?.primed){result.rendererPrime={completedBeforeNativeSpawn:true,outputTimestampUs:state.result.bounded.primeOutputTimestampUs};break;}
+        const primeState=config.stage==='product'?state?.result?.product:state?.result?.bounded;
+        if(primeState?.primed){result.rendererPrime={completedBeforeNativeSpawn:true,outputTimestampUs:primeState.primeOutputTimestampUs??null,
+          ...(config.stage==='product'?{readyAtMs:primeState.primeReadyAtMs}:{} )};break;}
         need(Date.now()<primeDeadline,'canvas_bounded_prime_timeout');await sleep(5);}
       if(config.visibility.startsWith('visible-then-')){
         result.phase='transitioning_primed_owned_window';save();
@@ -245,18 +295,24 @@ async function runElectron(){
       }
     }
     result.visibility.beforeNativeSource={main:windowState(),renderer:await window.webContents.executeJavaScript('({visibilityState:document.visibilityState,hasFocus:document.hasFocus()})')};
-    result.phase='spawning_native_source';save();memorySample('before_source');helper=spawn(config.helper,['--owner-pid',String(process.pid),'--width',String(config.width),'--height',String(config.height),
+    result.phase='spawning_native_source';save();memorySample('before_source');
+    if(result.productSourceLifecycle)result.productSourceLifecycle.spawnRequestedAtMs=performance.now();
+    helper=spawn(config.helper,['--owner-pid',String(process.pid),'--width',String(config.width),'--height',String(config.height),
       '--pool-size','3','--frames',String(config.frames),'--pixel-format','bgra'],{cwd:directory,windowsHide:true,stdio:['pipe','pipe','pipe']});
     helper.stdin.on('error',()=>fail('canvas_native_stdin_failed'));helper.stderr.resume();helper.once('close',code=>{helperClosed=true;helperCode=code;});helper.once('error',()=>fail('canvas_native_spawn_failed'));
     await bounded(new Promise((resolve,reject)=>{helper.once('spawn',resolve);helper.once('error',()=>reject(new Error('canvas_native_spawn_failed')));}),1000,'canvas_native_spawn_timeout');
+    if(result.productSourceLifecycle)result.productSourceLifecycle.spawnedAtMs=performance.now();
     owner=bridge.openChild(helper.pid);lines=readline.createInterface({input:helper.stdout});lines.on('line',nativeLine);
     const deadline=Date.now()+config.timeoutMs;let nextMemory=performance.now()+250;
     while(!result.nativeReady||queue.length<3){need(!fault,fault);need(!stopped,'canvas_cancelled');need(Date.now()<deadline,'canvas_source_ready_timeout');await sleep(5);}
+    if(result.productSourceLifecycle)result.productSourceLifecycle.readyObservedAtMs=performance.now();
     result.phase='running_finite_capture';result.pacing={sourcePrefillFrames:3,gate:'one ready GPU source offered per real native120Hz timer I/O task; no burst catch-up',timer:'existing native high-resolution waitable timer',
       sourceNativeProductionRateClaimed:false,missedSourceTicks:0};
+    if(result.productSourceLifecycle)result.productSourceLifecycle.pacerStartedAtMs=performance.now();
     pacer=startPacer({seconds:5,check:()=>{need(!fault,fault);need(!stopped,'canvas_cancelled');},onTick:tick=>{
       if(offered>=config.frames)return;
       const next=queue.shift();if(!next){result.pacing.missedSourceTicks++;return;}
+      if(result.productSourceLifecycle?.firstOfferAtMs===null)result.productSourceLifecycle.firstOfferAtMs=performance.now();
       offered++;const task=accept(next.value,next.lease,tick).catch(error=>fail(safe(error)));tasks.add(task);task.finally(()=>tasks.delete(task));
       if(offered===config.frames)void pacer.stop();
     }});pacer.done.catch(error=>fail(safe(error)));
@@ -267,7 +323,7 @@ async function runElectron(){
       result.renderer=state.result;if(state.status==='failed')throw new Error(state.errorCode||'canvas_renderer_failed');
       if(state.result.outputs.length!==lastOutputCount){lastOutputCount=state.result.outputs.length;lastOutputChanged=performance.now();}
       if(performance.now()>=nextMemory){memorySample('during');save();nextMemory=performance.now()+250;}
-      const rendererDrained=config.stage!=='bounded'||boundedRendererDrained(state.result);
+      const rendererDrained=config.stage==='product'?productRendererDrained(state.result):config.stage!=='bounded'||boundedRendererDrained(state.result);
       if(offered===config.frames&&nativeDone&&helperClosed&&rendererDrained&&performance.now()-lastOutputChanged>=500)break;
       if(helperClosed&&!nativeDone)throw new Error('canvas_native_exited_before_release');await sleep(10);
     }
@@ -310,6 +366,24 @@ async function runElectron(){
         c?.admissionPortsClosed!==true||c?.writerClosed!==(config.boundedSink==='none'?null:true)){
         result.passed=false;result.errorCode||='canvas_bounded_contract_incomplete';}
     }
+    if(config.stage==='product'){
+      const p=result.renderer?.product,c=result.rendererCleanup;
+      result.productStartup=productStartupTimeline(result.renderer,result.productSourceLifecycle);
+      result.productSummary=p?{receivedNativeFrames:p.receipts.length,admittedCanvasFrames:result.renderer.inputs.length,
+        generatorWrittenFrames:p.writtenSerials.length,submitResults:p.submissions.reduce((a,s)=>(a[s.result]=(a[s.result]||0)+1,a),{}),
+        writer:stats(p.writes.map(w=>w.writeWallMs)),validation:stats(p.writes.map(w=>w.validationWallMs)),
+        validationAndWrite:stats(p.writes.map(w=>w.totalWallMs)),generatorSettings:p.generatorSettings,
+        maxWrites:p.maxWrites,maxPendingSubmissions:p.maxPendingSubmissions,moduleFailures:p.moduleFailures,
+        modulePrivateDrainObservable:false,productionEligible:false,
+        qualification:'actual product sink default browser platform with synthetic GPU inputs, extra CPU pixel inspection and real Generator; no DDA, encoder or RTP qualification'}:null;
+      const drawn=new Set(p?.submissions.filter(s=>s.result==='drawn').map(s=>s.serial));
+      if(!p||!p.primed||p.receipts.length!==config.frames||p.submissions.length!==config.frames||
+        p.submissions.some(s=>s.result==='stopped')||p.moduleFailures.length||p.maxWrites!==1||
+        p.writtenSerials.length!==drawn.size||p.writtenSerials.some(s=>!drawn.has(s))||p.onWritten.length!==drawn.size||
+        p.generatorSettings?.width!==config.width||p.generatorSettings?.height!==config.height||
+        c?.pendingInputFrames!==0||c?.pendingWrites!==0||c?.moduleStopCalled!==true||c?.writerClosed!==true){
+        result.passed=false;result.errorCode||='canvas_product_contract_incomplete';}
+    }
     await bounded(Promise.allSettled([...tasks]),500,'canvas_transfer_cleanup_timeout').catch(()=>{});
     for(const lease of leases.values())try{releaseMain(lease);}catch{result.passed=false;result.errorCode||='canvas_main_release_failed';}
     for(let n=0;n<10&&helper&&!helperClosed;n++)await sleep(50);
@@ -319,18 +393,20 @@ async function runElectron(){
       childHandleOwnerOpen:false,mainImportsRetained:[...leases.values()].filter(l=>l.imported&&!l.mainReleased).length,
       rendererWindowAlive:!!window&&!window.isDestroyed(),pendingTransfers:tasks.size,helperExitCode:helperCode};
     if(result.cleanup.helperAlive||result.cleanup.pacerAlive||temporaryHandles||result.cleanup.mainImportsRetained||result.cleanup.rendererWindowAlive||tasks.size||
-      result.rendererCleanup?.callbacks!==0||result.rendererCleanup?.pendingCopies!==0||result.rendererCleanup?.readerStopped!==true){result.passed=false;result.errorCode||='canvas_cleanup_incomplete';}
+      result.rendererCleanup?.callbacks!==0||result.rendererCleanup?.pendingCopies!==0||
+      (config.stage==='product'?result.rendererCleanup?.moduleStopCalled!==true:result.rendererCleanup?.readerStopped!==true)){result.passed=false;result.errorCode||='canvas_cleanup_incomplete';}
     // Clear transient handle strings in queued frames without persisting them.
     for(const item of queue)item.value.handle=undefined;queue.length=0;
     if(owned){result.ownedLoopbackRequests=owned.requests();await owned.close();}result.phase=result.passed?'completed':'failed';result.finishedAt=new Date().toISOString();save();app.exit(result.passed?0:2);
   }
 }
 const mode=entryMode({electron:process.versions.electron,isMain:require.main===module,args:process.argv.slice(2)});
-if(mode==='check'){try{const config=configuration(process.argv.slice(3));console.log(JSON.stringify({checked:true,gpuExecuted:false,config,hashes:dependencyHashes(config)},null,2));}catch(error){console.error(safe(error));process.exitCode=2;}}
+if(mode==='check'){try{const config=configuration(process.argv.slice(3)),product=config.stage==='product'?compileProductModule():null;
+  console.log(JSON.stringify({checked:true,gpuExecuted:false,config,hashes:dependencyHashes(config),...(product?{productModule:{sourceSha256:product.sourceSha256,compiledSha256:product.compiledSha256,typescriptVersion:product.typescriptVersion}}:{})},null,2));}catch(error){console.error(safe(error));process.exitCode=2;}}
 else if(mode!=='import'){
   (mode==='electron'?electronEntry():launch()).catch(error=>{
     console.error(JSON.stringify({type:'canvas-entry-failure',mode,errorCode:safe(error)}));process.exitCode=2;
     if(mode==='electron')require('electron').app.exit(2);
   });
 }
-module.exports={configuration,startServer,summarize,stats,inside,readyForNativeRelease,boundedRendererDrained,entryMode,cleanRuntimeEnvironment,boundedLogSink};
+module.exports={configuration,startServer,summarize,stats,inside,readyForNativeRelease,boundedRendererDrained,productRendererDrained,waitForRendererPrime,productStartupTimeline,compileProductModule,entryMode,cleanRuntimeEnvironment,boundedLogSink};

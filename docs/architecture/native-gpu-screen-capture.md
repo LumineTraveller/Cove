@@ -4,6 +4,12 @@ This increment starts from `f315aa5` on `codex/native-gpu-capture`. It keeps the
 existing codec policy, RTP parameters, SFU protocol, audio bridge and remote-control
 intent. The installed application and release channels are not changed.
 
+Current measured status and test boundaries are recorded in
+[the 2026-10-29 qualification](native-screen-capture-qualification-20261029.md).
+The selected acceptance path is direct GPU BGRA to the existing Generator.
+GPU NV12 is rejected before acquisition; Canvas remains a disabled research
+route. Historical experiments below are not release qualification.
+
 ## Availability and rollback
 
 The first integration is an isolated opt-in candidate. The existing Chromium
@@ -164,3 +170,111 @@ app ID/profile and disabled formal update/repair channels. `Start-Native.cmd`
 opts in; `Start-Stock.cmd` rolls back this launch after the lab is closed.
 Neither launcher installs anything or changes the formal Cove application.
 Source rollback is `f315aa5`; the branch has not been pushed or published.
+
+## Experimental renderer handoff (not a release qualification)
+
+Acquisition, imported-texture ownership, renderer conversion, and publication
+remain separate responsibilities. The helper/controller own the three native
+slots. Preload preserves transfer/release-permit/all-references barriers. The
+renderer frame sink owns only its conversion and writer work. The publisher
+still owns the stock-to-native replaceTrack transaction and stock retirement.
+No second Producer, encoder, audio output or remote-control grant is created.
+
+The explicitly opted-in Electron 44 Canvas experiment uses a private **detached**
+Canvas as a conversion surface. It is not a UI preview and must not be appended
+to the page. Actual finite tests found a substantial difference: an attached
+Canvas in a hidden/minimized test window stalled for about one second per
+admission; the otherwise identical detached surface delivered the fixed
+serial 11--110 window at 120.131 unique frames/s at 1728x1080. Native references
+and test processes drained. This identifies an avoidable Canvas/compositor
+coupling; it does not prove a specific Chromium internal defect or Cove FPS.
+
+The Canvas track connects only to its private Processor. Its initial black
+capture is consumed before native admission. One strictly newer output timestamp
+can complete one admitted draw; old/duplicate outputs cannot create credits.
+Only one Canvas request and one replaceable waiting input are retained. A
+MessageChannel task spends an existing admission credit; it is not a frame
+timer. Pixel sequence markers belong only to the synthetic fixture, never to
+product frames or product completion detection.
+
+Passing Canvas GPU-backed output straight into the generator is not qualified:
+the first actual Cove/SFU attempt (`1080-canvas-detached-av1-OUoWn7`) committed
+the source replacement but then hit a completion deadline. No performance pass
+or FPS result is attributed to that run. Independent CPU pixel storage before
+the writer has since been tested without enlarging native pools or weakening
+reference barriers. It does not alone resolve the observed capture stall.
+Timestamp-only `new VideoFrame(old, {timestamp})`
+changes Blink's handle timestamp in the pinned runtime; it does not retime the
+underlying native media frame. A CPU-buffer constructor gives that timestamp
+an independent native-frame representation.
+
+The experimental preload preference requires an exact launch flag, native
+support and Electron 44.0.0. The route additionally requires GPU BGRA input and
+the already-selected AV1/BT709 contract. CPU/VP8/BT601 and unknown contracts keep
+their existing writer. No security, cross-origin isolation, codec, bitrate,
+degradation or geometry policy is broadened. Unsupported startup still retains
+the published stock source; post-commit faults use the existing sharing teardown.
+Actual minimized-window, cancellation and end-to-end validation is required
+before this experiment can be considered for a test package.
+
+### Capture notification timing in the pinned browser
+
+The actual module, freshly transpiled by the isolated `product` control, wrote
+118 distinct, pixel-verified synthetic GPU inputs at about 120 output frames/s
+(`product-chXZpN`). This control has no desktop capture or SFU, starts its source
+after prime, and adds a separate CPU validation copy before the real Generator
+write. It is not a Cove throughput pass. The ordinary hidden Cove peer still
+failed (`1080-canvas-snapshot-av1-M5bjlq`): 17 native inputs, six Canvas draws,
+one prime plus five delivered outputs, five completed copies/writes, and no
+duplicate/regressed output. The sixth draw timed out waiting for capture.
+An unpublished stock clone retained only at stock retirement did not prevent
+the stall (`1080-canvas-stockalive-late-av1-HaPzzK`, six writes then timeout).
+All owned resources drained after these failed runs.
+
+Chromium 152.0.7977.54 has a specific notification gate:
+
+- [`limits.h:58`](https://github.com/chromium/chromium/blob/152.0.7977.54/media/base/limits.h#L58)
+  defines `kMaxFramesPerSecond=1000`.
+- [`AutoCanvasDrawListener`](https://github.com/chromium/chromium/blob/152.0.7977.54/third_party/blink/renderer/modules/mediacapturefromelement/auto_canvas_draw_listener.cc#L20)
+  records callback creation time, rejects a new request less than 1 ms later,
+  and implements `RequestFrame` as a flag assignment without a delayed retry.
+- `captureStream(0)` uses `OnRequestCanvasDrawListener`, which inherits that
+  gate. [`NotifyListenersCanvasChanged`](https://github.com/chromium/chromium/blob/152.0.7977.54/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc#L1012)
+  returns when no listener currently needs a frame.
+
+Consequently an output-credit-driven sink must not immediately draw a pending
+input merely because copy/write settled quickly: a skipped notification has no
+output to return its next credit. A browser-boundary admission gap of 2 ms from
+the previous actual Processor delivery (including prime), checked again against
+the monotonic clock at dispatch, is the focused control. It creates no frame,
+request or replacement credit, and must be canceled with the owned MessageChannel
+task/timer. The existing pending age and active completion deadline are retained.
+The 2 ms gap is below the requested 120 FPS period; it is not an FPS increase or
+a substitute for actual desktop/encoder/receiver measurements. This mechanism
+is established in source; matching the observed stall still requires the
+single-variable full-chain control.
+
+The first 2 ms-gap control (`1080-canvas-gap2-av1-pn8fc1`) still timed out
+after five writes. The gate therefore did not resolve the observed primary
+stall. A separate observer control, with that exact module unchanged, skipped
+the test runner's live `app.getGPUInfo('complete')` call immediately after the
+source replacement. `1080-canvas-no-live-gpu-info-av1-YIf8d8` then passed a
+12.349 s sample at 1728x1080, with the stock track stopped, no extra stock clone,
+no diagnostic pixel flush, valid owned pixels and zero cleanup resources.
+Its helper rate was 115.87/s, renderer receive 117.34/s, actual write 89.72/s,
+media-source/encode 89.57/s and decode 89.43/s. These are different measurement
+intervals/boundaries; this is not a 120 FPS result or an improvement over the
+already qualified CPU delivery route.
+
+Full GPU enumeration is an intrusive observer in this runtime: Electron's
+[`FetchCompleteInfo`](https://github.com/electron/electron/blob/v44.0.0/shell/browser/api/gpuinfo_manager.cc#L52)
+requests Dawn collection on the existing GPU service's main runner.
+[`CollectDawnInfo`](https://github.com/chromium/chromium/blob/152.0.7977.54/components/viz/service/gl/gpu_service_impl.cc#L1405)
+enumerates adapters and creates devices synchronously; Chromium explicitly
+pauses its watchdog because driver loading may be slow. It can delay both
+capture completion and release-fence callbacks. A returned enumeration promise
+does not establish that every requested GPU collection operation has drained.
+The fixture now keeps complete enumeration out of active measured capture by
+default; startup basic GPU metadata remains. `COVE_FPS_LIVE_GPU_INFO=1` preserves
+the explicit observer control. Earlier failed runs remain evidence of their
+exact configuration, not proof that the product route intrinsically stalls.

@@ -13,6 +13,14 @@ const {nativeHelperTimingSnapshot,nativeHelperTimingSummary}=require(path.join(r
 const nativeGpuEnabled=nativePerformanceEnabled(),nativePaths=nativeGpuEnabled?nativePerformancePaths(root):null;
 const nativePixelFormat=nativePerformancePixelFormat();
 const nativeStorage=nativePerformanceStorage(process.env,nativePixelFormat);
+const nativeFrameSink=process.env.COVE_FPS_NATIVE_FRAME_SINK??'generator';
+if(!['generator','canvas'].includes(nativeFrameSink))throw Error('Invalid native frame sink');
+if(nativeFrameSink==='canvas'&&(!nativeGpuEnabled||nativeStorage!=='gpu'||nativePixelFormat!=='bgra'))
+  throw Error('Canvas handoff requires explicit native GPU BGRA measurement');
+const stockCaptureKeepaliveFlag=process.env.COVE_FPS_STOCK_CAPTURE_KEEPALIVE??'0';
+if(!['0','1'].includes(stockCaptureKeepaliveFlag))throw Error('Invalid stock capture keepalive diagnostic');
+const stockCaptureKeepalive=stockCaptureKeepaliveFlag==='1';
+if(stockCaptureKeepalive&&nativeFrameSink!=='canvas')throw Error('Stock capture keepalive is only a Canvas upgrade diagnostic');
 const preloadFrameTimingFlag=process.env.COVE_FPS_PRELOAD_TIMING??'0';
 if(!['0','1'].includes(preloadFrameTimingFlag))throw Error('Invalid CPU preload timing option');
 const preloadFrameTiming=preloadFrameTimingFlag==='1';
@@ -66,16 +74,30 @@ if(!['offscreen','hidden'].includes(peerRenderMode))throw Error('Unsupported pee
 if(process.env.COVE_FPS_MINIMIZE_SENDER&&!['0','1'].includes(process.env.COVE_FPS_MINIMIZE_SENDER))throw Error('Invalid minimized-sender option');
 const minimizeSender=process.env.COVE_FPS_MINIMIZE_SENDER==='1';
 if(minimizeSender&&peerRenderMode!=='hidden')throw Error('Minimized-sender checks require an ordinary publisher window');
+const minimizedThrottlingFlag=process.env.COVE_FPS_MINIMIZED_THROTTLING??'1';
+if(!['0','1'].includes(minimizedThrottlingFlag))throw Error('Invalid minimized background policy diagnostic');
+const minimizedThrottling=minimizedThrottlingFlag==='1';
+const minimizedVisibilityMatches=value=>minimizedThrottling?value==='hidden':['hidden','visible'].includes(value);
+const minimizedViewerMode=process.env.COVE_FPS_MINIMIZED_VIEWER??'hidden';
+if(!['offscreen','hidden'].includes(minimizedViewerMode))throw Error('Invalid minimized observer mode');
 const preventDisplaySleep=performanceDisplaySleepPrevention(process.env,null,minimizeSender);
 const patternReadbackMode=process.env.COVE_FPS_PATTERN_READBACK??'full';
 if(!['full','roi'].includes(patternReadbackMode))throw Error('Invalid owned-pattern readback mode');
 if(process.env.COVE_FPS_LOW_OBSERVER!==undefined&&!['0','1'].includes(process.env.COVE_FPS_LOW_OBSERVER))throw Error('Invalid low-observer option');
 const lowObserverMode=process.env.COVE_FPS_LOW_OBSERVER==='1';
+// Full GPU enumeration can synchronously load drivers on the active GPU main
+// thread. Keep it out of measured capture; explicit opt-in is a diagnostic.
+const liveGpuInfoFlag=process.env.COVE_FPS_LIVE_GPU_INFO??'0';
+if(!['0','1'].includes(liveGpuInfoFlag))throw Error('Invalid live GPU info diagnostic');
+const liveGpuInfo=liveGpuInfoFlag==='1';
 const captureTraceEnabled=process.env.COVE_FPS_CONTENT_TRACE==='1';
 if(process.env.COVE_FPS_CONTENT_TRACE&&!['0','1'].includes(process.env.COVE_FPS_CONTENT_TRACE))throw Error('Invalid content trace option');
 const captureTracePhase=nativePerformanceTracePhase(process.env,nativeGpuEnabled);
 if(process.env.COVE_FPS_CAPTURE_LOGS==='1'){app.commandLine.appendSwitch('enable-logging','file');app.commandLine.appendSwitch('log-file',path.join(directory,'native-capture.log'));app.commandLine.appendSwitch('vmodule','desktop_capture_device=2');}
-if(!minimizeSender)app.commandLine.appendSwitch('disable-renderer-backgrounding');
+const rendererBackgroundingFlag=process.env.COVE_FPS_DISABLE_RENDERER_BACKGROUNDING;
+if(rendererBackgroundingFlag!==undefined&&!['0','1'].includes(rendererBackgroundingFlag))throw Error('Invalid renderer backgrounding diagnostic');
+const rendererBackgroundingDisabled=rendererBackgroundingFlag==='1';
+if(rendererBackgroundingDisabled)app.commandLine.appendSwitch('disable-renderer-backgrounding');
 // Do not use --use-fake-device-for-media-stream: Chromium also replaces native
 // getDisplayMedia with a 1000x564 test source. The renderer supplies test audio.
 app.commandLine.appendSwitch('autoplay-policy','no-user-gesture-required');
@@ -83,7 +105,11 @@ app.on('window-all-closed',()=>{});
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const result={passed:false,startedAt:new Date().toISOString(),captureFeatures,disabledCaptureFeatures,peerRenderMode,profilingOnly:captureTraceEnabled,captureTracePhase,
   generatedNv12Enabled,generatedNv12Meaning:generatedNv12Enabled?'Controlled generated CPU NV12 source: full coded dimensions with equal 1728x1080 active content, no desktop capture claim.':null,
-  minimizedSenderRequested:minimizeSender,rendererBackgroundingDisabled:!minimizeSender,
+  minimizedSenderRequested:minimizeSender,rendererBackgroundingDisabled:app.commandLine.hasSwitch('disable-renderer-backgrounding'),
+  minimizedSenderExpectedBackgroundThrottling:minimizeSender?minimizedThrottling:null,
+  minimizedViewerMode:minimizeSender?minimizedViewerMode:null,
+  stockCaptureKeepaliveDiagnostic:stockCaptureKeepalive,
+  liveGpuInfoRequested:liveGpuInfo,
   powerDiagnostics:{monitorAvailable:false,systemIdleTimeSeconds:null,events:{suspend:0,resume:0,lockScreen:0,unlockScreen:0}},
   displaySleepPrevention:{requested:preventDisplaySleep,started:false,activeAtStart:null,active:false,stopped:null},
   nativeGpu:{requested:process.env.COVE_FPS_NATIVE_GPU==='1',enabled:nativeGpuEnabled,requestedPixelFormat:nativePixelFormat,requestedStorage:nativeStorage,cpuDeliveryScheduling,cpuOwnership,preloadFrameTiming,nativeChunkTiming,requestedCompletion:nativeCompletion??null,variant:process.env.COVE_FPS_NATIVE_VARIANT??null,startAttempts:[],stopRequests:[],stopRequestsDropped:0,snapshots:[],paths:nativePaths,
@@ -188,8 +214,10 @@ function nativeEvidence(sample,broker){
   const boundedBuffers=nativeStorage!=='cpu'||cpuOwnership!=='copy-complete'||
     ['activeNativeLeases','mainBuffersInUse','cpuFrameBuffers','cpuFramesInFlight'].every(key=>Number.isSafeInteger(broker?.[key])&&broker[key]>=0&&broker[key]<=3)&&
     Number.isSafeInteger(broker?.pendingFrames)&&broker.pendingFrames>=0&&broker.pendingFrames<=1;
-  return {...evidence,completion,scheduling,ownership,boundedBuffers,
-    passed:evidence.passed&&completion.matched&&scheduling.matched&&ownership.matched&&boundedBuffers};
+  const frameSink={expected:nativeFrameSink,selected:sample?.nativeCaptureCounters?.frameSink??'generator'};
+  frameSink.matched=frameSink.expected===frameSink.selected;
+  return {...evidence,completion,scheduling,ownership,boundedBuffers,frameSink,
+    passed:evidence.passed&&completion.matched&&scheduling.matched&&ownership.matched&&boundedBuffers&&frameSink.matched};
 }
 let gpuAfterPublicationCaptured=false;
 async function captureGpuAfterPublication(){
@@ -198,6 +226,11 @@ async function captureGpuAfterPublication(){
     gpuFeatureStatusAfterPublication:null,hardwareAccelerationEnabled:null,
     gpuAfterPublicationCollectionStage:'First case after publication/native upgrade and before warmup; no diagnostic WebGL context created.',
     gpuCommandLineSwitches:Object.fromEntries(['disable-gpu','disable-gpu-compositing','in-process-gpu'].map(name=>[name,app.commandLine.hasSwitch(name)]))});save();
+  if(!liveGpuInfo){
+    result.environment.gpuAfterPublicationStatus='skipped-owned-control';
+    result.environment.gpuAfterPublicationCollectionStage='Explicit control skips GPU collection during live capture; startup basic GPU information is retained.';
+    save();return;
+  }
   try{result.environment.gpuAfterPublication=await traceOperation(app.getGPUInfo('complete'),5000,'Post-publication GPU info');
     result.environment.gpuAfterPublicationStatus='recorded';}
   catch{result.environment.gpuAfterPublicationStatus='unknown';}
@@ -597,6 +630,10 @@ function summary(samples){
     ?number((b.sender.nativeCaptureCounters[key]-a.sender.nativeCaptureCounters[key])/seconds):null;
   const nativeWritten=nativeCounterRate('framesWritten');
   const nativeWriteMs=nativeCounterRate('totalWriteMs');
+  const firstCanvas=a.sender.nativeCaptureCounters?.canvas,lastCanvas=b.sender.nativeCaptureCounters?.canvas;
+  const canvasDelta=key=>Number.isFinite(firstCanvas?.[key])&&Number.isFinite(lastCanvas?.[key])&&lastCanvas[key]>=firstCanvas[key]
+    ?lastCanvas[key]-firstCanvas[key]:null;
+  const canvasMean=(time,count)=>canvasDelta(count)>0&&canvasDelta(time)!==null?number(canvasDelta(time)/canvasDelta(count)):null;
   const firstGenerated=a.sender.sources.find(source=>source.isLiveSenderSource&&source.kind==='generated-cpu-nv12');
   const lastGenerated=b.sender.sources.find(source=>source.isLiveSenderSource&&source.kind==='generated-cpu-nv12');
   const generatedDelta=(key,detail=false)=>{
@@ -639,6 +676,13 @@ function summary(samples){
       receivedFps: nativeCounterRate('framesReceived'), refreshReceivedFps: nativeCounterRate('refreshFrames'),
       writtenFps: nativeWritten, droppedWhileBusyFps: nativeCounterRate('framesDroppedWhileBusy'),
       meanWriteWallMs: nativeWritten>0 ? number(nativeWriteMs/nativeWritten) : null,
+      canvasStages:firstCanvas&&lastCanvas?{
+        capturesPerSecond:canvasDelta('capturesCompleted')!==null?number(canvasDelta('capturesCompleted')/seconds):null,
+        copiesPerSecond:canvasDelta('copiesCompleted')!==null?number(canvasDelta('copiesCompleted')/seconds):null,
+        meanDrawMs:canvasMean('totalDrawMs','draws'),meanCaptureMs:canvasMean('totalCaptureMs','capturesCompleted'),
+        meanCopyMs:canvasMean('totalCopyMs','copiesCompleted'),
+        lifetimeMaxDrawMs:lastCanvas.maxDrawMs??null,lifetimeMaxCaptureMs:lastCanvas.maxCaptureMs??null,lifetimeMaxCopyMs:lastCanvas.maxCopyMs??null,
+        meaning:'Browser-local wall times: synchronous draw; admitted draw to actual new Processor output; prepare including CPU frame construction. Aggregate interval means and lifetime maxima, not GPU execution time. Prime excluded from capture/copy counts.'}:null,
       ...nativeProviderDiagnosticsDelta(a.sender.nativeCaptureCounters,b.sender.nativeCaptureCounters),
     } : null,
     sourceFps:number(sourceFps),encodeFps:number(encodeFps),
@@ -719,9 +763,9 @@ app.whenReady().then(async()=>{
     const sampleSeconds=Number(process.env.COVE_FPS_SAMPLE_SECONDS||8),warmupMs=Number(process.env.COVE_FPS_WARMUP_MS||5000);
     if(!Number.isInteger(sampleSeconds)||sampleSeconds<1||sampleSeconds>30||!Number.isInteger(warmupMs)||warmupMs<0||warmupMs>30000)throw Error('Invalid bounded sample duration');
     if(captureTraceEnabled&&(cases.length!==1||cases[0].source!=='native'||sampleSeconds>8||warmupMs>5000||process.env.COVE_FPS_RECOVERY_CHECKS==='1'))throw Error('Capture profiling requires one native case, at most 5s warmup/8s sample and no recovery injection');
-    for(let index=0;index<2;index++){const offscreen=peerRenderMode==='offscreen'||(minimizeSender&&index===1);
-      const win=new BrowserWindow({width:1000,height:760,show:minimizeSender&&index===0,webPreferences:{offscreen,backgroundThrottling:minimizeSender&&index===0,
-      ...(nativeGpuEnabled?{preload:path.join(root,nativePaths.preload),additionalArguments:index===0?['--cove-native-gpu-capture=1',...(preloadFrameTiming?['--cove-native-cpu-frame-timing=1']:[])]:[],contextIsolation:true,sandbox:true,nodeIntegration:false}:{})}});if(offscreen)win.webContents.setFrameRate(144);win.webContents.setAudioMuted(true);peers.push(win);observePeerLifecycle(win,index);win.webContents.on('console-message',(_e,level,msg)=>{if(msg.includes('Error')||msg.includes('error'))console.log('[peer]',msg);});}
+    for(let index=0;index<2;index++){const offscreen=peerRenderMode==='offscreen'||(minimizeSender&&index===1&&minimizedViewerMode==='offscreen');
+      const win=new BrowserWindow({width:1000,height:760,show:minimizeSender&&index===0,webPreferences:{offscreen,backgroundThrottling:minimizeSender&&index===0&&minimizedThrottling,
+      ...(nativeGpuEnabled?{preload:path.join(root,nativePaths.preload),additionalArguments:index===0?['--cove-native-gpu-capture=1',...(preloadFrameTiming?['--cove-native-cpu-frame-timing=1']:[]),...(nativeFrameSink==='canvas'?['--cove-native-frame-sink=canvas']:[])]:[],contextIsolation:true,sandbox:true,nodeIntegration:false}:{})}});if(offscreen)win.webContents.setFrameRate(144);win.webContents.setAudioMuted(true);peers.push(win);observePeerLifecycle(win,index);win.webContents.on('console-message',(_e,level,msg)=>{if(msg.includes('Error')||msg.includes('error'))console.log('[peer]',msg);});}
     if(nativeController){
       const ownsEvent=event=>!peers[0].isDestroyed()&&event.sender===peers[0].webContents&&event.senderFrame===peers[0].webContents.mainFrame;
       // Product preload also exposes native audio cleanup. This video-only
@@ -737,6 +781,7 @@ app.whenReady().then(async()=>{
       }
       ipcMain.handle('cove:native-screen:start',async(event,requestId,options)=>{
         if(!ownsEvent(event))return {ok:false,reason:'untrusted_frame'};
+        if(minimizeSender&&!minimizedThrottling)peers[0].webContents.setBackgroundThrottling(false);
         const started=Date.now(),monotonicStarted=process.hrtime.bigint();let response;
         try{const pending=nativeController.start(peers[0].webContents,requestId,options);attachNativeHelperTiming();response=await pending;attachNativeHelperTiming();}
         catch{response={ok:false,reason:'ipc_start_failed'};}
@@ -770,7 +815,7 @@ app.whenReady().then(async()=>{
         result.sourceSelections??=[];result.sourceSelections.push(sourceSelection);save();
       }
       for(let index=0;index<2;index++){
-        const query=new URLSearchParams({base:info.base,room:info.roomId,token:info.accounts[index].token,index:String(index),performance:'1',source:config.source,width:'1920',height:'1080',fps:String(config.fps),...(nativeGpuEnabled&&index===0?{nativeGpu:'1'}:{}),...(generatedNv12Enabled?{generatedNv12:'1'}:{}),...((config.source==='native'||generatedNv12Enabled)&&index===1?{ownedPattern:'1',ownedPatternReadback:patternReadbackMode,...(sourceAgeEnabled?{sourceAge:'1'}:{})}:{}),...(config.captureWidth?{captureWidth:String(config.captureWidth),captureHeight:String(config.captureHeight)}:{})});
+        const query=new URLSearchParams({base:info.base,room:info.roomId,token:info.accounts[index].token,index:String(index),performance:'1',source:config.source,width:'1920',height:'1080',fps:String(config.fps),...(nativeGpuEnabled&&index===0?{nativeGpu:'1',...(stockCaptureKeepalive?{stockCaptureKeepalive:'1'}:{})}:{}),...(generatedNv12Enabled?{generatedNv12:'1'}:{}),...((config.source==='native'||generatedNv12Enabled)&&index===1?{ownedPattern:'1',ownedPatternReadback:patternReadbackMode,...(sourceAgeEnabled?{sourceAge:'1'}:{})}:{}),...(config.captureWidth?{captureWidth:String(config.captureWidth),captureHeight:String(config.captureHeight)}:{})});
         await peers[index].loadURL(process.env.COVE_QA_RENDERER_URL+'/tests/ui/media-integration.html?'+query);await wait(peers[index],'Boolean(window.coveMediaQA?.ready)');await js(peers[index],"window.coveMediaQA.rtc.selectMicrophoneNoiseMode('system');window.coveMediaQA.rtc.joinVoice()");await wait(peers[index],'Boolean(window.coveMediaQA.rtc.inVoice)');
       }
       const [sender,viewer]=peers;
@@ -796,9 +841,9 @@ app.whenReady().then(async()=>{
       if(requiresNativeUpgrade)await waitNativeUpgrade(sender,viewer,measured,'initial-publication');
       await captureGpuAfterPublication();
       if(minimizeSender){
-        // Only the publisher uses a normal minimized window. The independent
-        // offscreen viewer keeps rendering so owned-pixel verification remains
-        // valid; minimizing both would stop presentation at the observer.
+        // Only the publisher minimizes. Keep the receiver at the same ordinary
+        // hidden mode as non-minimized measurements by default. Bitmap OSR is
+        // an explicit stress control because it adds compositor/readback work.
         sender.minimize();
         for(let attempt=0;attempt<60&&!sender.isMinimized();attempt++)await delay(50);
         if(!sender.isMinimized())throw Error('Ordinary sender did not minimize within 3 seconds');
@@ -807,12 +852,12 @@ app.whenReady().then(async()=>{
           measured.minimizedSender={offscreen:sender.webContents.isOffscreen(),
             backgroundThrottling:sender.webContents.getBackgroundThrottling(),minimized:sender.isMinimized(),
             visibilityState:await boundedJs(sender,'document.visibilityState',1000)};
-          if(measured.minimizedSender.visibilityState==='hidden')break;
+          if(minimizedVisibilityMatches(measured.minimizedSender.visibilityState))break;
           await delay(50);
         }while(Date.now()<visibilityDeadline);
         const state=measured.minimizedSender;
         measured.observerWindow={offscreen:viewer.webContents.isOffscreen(),backgroundThrottling:viewer.webContents.getBackgroundThrottling()};
-        if(state.offscreen||!state.backgroundThrottling||!state.minimized||state.visibilityState!=='hidden'||!measured.observerWindow.offscreen||measured.observerWindow.backgroundThrottling)throw Error('Minimized sender / independent rendering observer policy was not established');
+        if(state.offscreen||state.backgroundThrottling!==minimizedThrottling||!state.minimized||!minimizedVisibilityMatches(state.visibilityState)||measured.observerWindow.offscreen!==(minimizedViewerMode==='offscreen')||measured.observerWindow.backgroundThrottling)throw Error('Minimized sender / independent rendering observer policy was not established');
         sourceWindow.focus();sourceWindow.moveTop();save();
       }
       await delay(warmupMs);
@@ -840,7 +885,7 @@ app.whenReady().then(async()=>{
         const nativeGpu=brokerSnapshot();
         const nativeHelperTiming=currentNativeHelperTiming(nativeGpu);
         mainStages.brokerSnapshotMs=performance.now()-stageStarted;
-        if(minimizeSender&&(!sender.isMinimized()||!sender.webContents.getBackgroundThrottling()||send.documentVisibilityState!=='hidden'))throw Error('Minimized background state changed during measurement');
+        if(minimizeSender&&(!sender.isMinimized()||sender.webContents.getBackgroundThrottling()!==minimizedThrottling||!minimizedVisibilityMatches(send.documentVisibilityState)))throw Error('Minimized background state changed during measurement');
         const at=Date.now();stageStarted=performance.now();
         // Source counters remain per-sample: the owned-pixel nonfuture/lag guard needs them.
         const sequence=receive.ownedPattern?.capturedSequence,snapshotAt=receive.ownedPattern?.snapshotAt;

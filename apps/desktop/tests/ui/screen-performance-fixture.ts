@@ -123,6 +123,9 @@ export function installScreenPerformanceFixture(
   const sourceMode = params.get('source') === 'native' ? 'native' : 'generated';
   const generatedNv12Flag = params.get('generatedNv12');
   if (generatedNv12Flag !== null && !['0', '1'].includes(generatedNv12Flag)) throw new Error('Invalid generated NV12 option');
+  const stockCaptureKeepalive = params.get('stockCaptureKeepalive') === '1';
+  if (stockCaptureKeepalive && (sourceMode !== 'native' || params.get('nativeGpu') !== '1'))
+    throw new Error('Stock capture keepalive requires the isolated native upgrade experiment');
   const configuration = {
     source: sourceMode,
     width: Math.round(positiveParameter(params, 'width', 1920, 8192)),
@@ -132,6 +135,7 @@ export function installScreenPerformanceFixture(
     captureHeight: Math.round(positiveParameter(params, 'captureHeight', 0, 8192)),
     nativeGpuCapture: params.get('nativeGpu') === '1',
     generatedNv12: generatedNv12Flag === '1',
+    stockCaptureKeepalive,
   };
   if (configuration.generatedNv12 && (sourceMode !== 'generated' || configuration.nativeGpuCapture))
     throw new Error('Generated NV12 requires the generated source without native GPU capture');
@@ -152,6 +156,9 @@ export function installScreenPerformanceFixture(
     };
   }> = [];
   const generatedNv12Closures: Promise<void>[] = [];
+  // Diagnostic only: keep the underlying Chromium display capturer alive after
+  // the published stock track stops. Never attach these clones to any sender.
+  const stockCaptureKeepalives: MediaStreamTrack[] = [];
   const stockTrackJournal: Array<{ at: number; sourceIndex: number; event: 'js-stop' | 'natural-ended'; functions: string[] }> = [];
   let stockTrackJournalDropped = 0;
   const stockTrackObservers: Array<{ track: MediaStreamTrack; wrappedStop: MediaStreamTrack['stop']; restore: () => void; restored: boolean }> = [];
@@ -164,7 +171,15 @@ export function installScreenPerformanceFixture(
     }
     const journaledStockStop: MediaStreamTrack['stop'] = function(this: MediaStreamTrack) {
       recordStockTrackEvent('js-stop');
-      return Reflect.apply(previousStop, this, []);
+      // Clone only at retirement, after the stock geometry has settled. An
+      // early clone can change Chromium's provisional capture settings and
+      // invalidate the source-swap geometry guard before the experiment starts.
+      try {
+        if (stockCaptureKeepalive && !disposed && this === track && track.readyState === 'live')
+          stockCaptureKeepalives.push(track.clone());
+      } finally {
+        Reflect.apply(previousStop, this, []);
+      }
     };
     const ended = () => recordStockTrackEvent('natural-ended');
     track.stop = journaledStockStop;
@@ -744,6 +759,8 @@ export function installScreenPerformanceFixture(
       })(),
       unexpectedAlerts: [...unexpectedAlerts],
       stockTrackJournal: stockTrackJournalSnapshot(),
+      stockCaptureKeepalives: { requested: stockCaptureKeepalive,
+        created: stockCaptureKeepalives.length, live: stockCaptureKeepalives.filter(track => track.readyState === 'live').length },
       activityAnalysis: { ...analysisTiming },
       product: (() => {
         const rtc = (window as unknown as { coveMediaQA?: { rtc?: {
@@ -811,6 +828,7 @@ export function installScreenPerformanceFixture(
     for (const restore of restoreAnalysisContexts) restore();
     for (const observer of stockTrackObservers) observer.restore();
     for (const source of sources) source.stop();
+    for (const track of stockCaptureKeepalives) track.stop();
     const closingAudio = testAudio.map(async ({ context, oscillator, track }) => {
       oscillator.stop(); track.stop(); await context.close().catch(() => {});
     });
@@ -823,6 +841,7 @@ export function installScreenPerformanceFixture(
     if (navigator.mediaDevices.getDisplayMedia === capture) navigator.mediaDevices.getDisplayMedia = originalCapture;
     await Promise.all([...closingAudio, ...generatedNv12Closures]);
     const resources = { disposed, liveSourceTracks: sources.filter(source => source.track.readyState === 'live').length,
+      liveStockCaptureKeepalives: stockCaptureKeepalives.filter(track => track.readyState === 'live').length,
       liveSyntheticAudioTracks: testAudio.filter(audio => audio.track.readyState === 'live').length,
       openSyntheticAudioContexts: testAudio.filter(audio => audio.context.state !== 'closed').length,
       pendingPresentationCallbacks: [...presentations.values()].filter(state => state.callbackId !== null).length,
@@ -839,7 +858,7 @@ export function installScreenPerformanceFixture(
       userMediaRestored: navigator.mediaDevices.getUserMedia === originalUserMedia,
       enumerationRestored: navigator.mediaDevices.enumerateDevices === originalEnumeration,
       alertRestored: window.alert === originalAlert };
-    return { ...resources, passed: resources.liveSourceTracks === 0 && resources.liveSyntheticAudioTracks === 0 &&
+    return { ...resources, passed: resources.liveSourceTracks === 0 && resources.liveStockCaptureKeepalives === 0 && resources.liveSyntheticAudioTracks === 0 &&
       resources.openSyntheticAudioContexts === 0 && resources.pendingPresentationCallbacks === 0 &&
       resources.patternSnapshotResources.active === 0 && resources.patternSnapshotResources.created === resources.patternSnapshotResources.closed &&
       resources.stockTrackObserversRestored && resources.generatedNv12OpenWriters === 0 && resources.generatedNv12ActiveTimers === 0 &&

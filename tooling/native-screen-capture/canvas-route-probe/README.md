@@ -8,7 +8,7 @@ From the repository root, CPU-only checks:
 
 ```powershell
 node tooling/native-screen-capture/canvas-route-probe/run.cjs --check --stage mechanism
-node --test --test-isolation=none tooling/native-screen-capture/canvas-route-probe/probe.test.cjs tooling/native-screen-capture/canvas-route-probe/bootstrap.test.cjs tooling/native-screen-capture/canvas-route-probe/bounded.test.cjs
+node --test --test-isolation=none tooling/native-screen-capture/canvas-route-probe/probe.test.cjs tooling/native-screen-capture/canvas-route-probe/bootstrap.test.cjs tooling/native-screen-capture/canvas-route-probe/bounded.test.cjs tooling/native-screen-capture/canvas-route-probe/product.test.cjs
 ```
 
 Explicit GPU runs, serially after coordinating GPU ownership:
@@ -393,3 +393,90 @@ Optional later route evidence should keep only fixed trace event names/times:
 `D3DImageBacking::ReadbackToMemoryAsync`, and
 `D3DImageBacking::ReadbackFromStagingTexture`. A scope event by itself is not an
 asynchronous copy completion measurement.
+
+The detached hidden control `bounded-yPhdL7` subsequently produced 119 admitted,
+119 distinct, actually written frames from 120 receipts, with one startup
+supersede and no missing or duplicate admitted serials. Serial 11–110 contained
+100 outputs at 120.131 FPS; median/p95 receipt age was 2.9/4.3 ms. The native
+allRefs barriers and owned cleanup completed. This differs from the slow
+attached hidden control only by omitting the Canvas DOM append. It supports
+a display/compositor coupling explanation but does not identify an internal
+Chromium cause. The Canvas was detached, the native window was hidden and
+unfocused, and renderer visibility remained `visible` with background throttling
+disabled. These exact conditions matter.
+
+The real Cove experimental route has not passed. The original direct route
+`OUoWn7` stopped after startup; the CPU-output route `E1ax4L` reported the fixed
+`capture_timeout` code. Ordinary hidden peer `aGE0Wu` also reported
+`capture_timeout`. Neither a retained GPU output backing nor Electron OSR is a
+necessary cause established by these failures. They remain unchanged artifacts.
+Default bitmap OSR does not require a JavaScript paint-listener ACK: pinned
+[Electron 44's consumer](https://github.com/electron/electron/blob/v44.0.0/shell/browser/osr/osr_video_consumer.cc)
+and [host view](https://github.com/electron/electron/blob/v44.0.0/shell/browser/osr/osr_render_widget_host_view.cc)
+copy the captured bitmap before local bitmap destruction returns its callback.
+
+`product` is a separate finite control that executes the **current actual**
+`apps/desktop/src/features/media/screen/nativeCanvasFrameSink.ts`. It reads that
+fixed source path, uses existing TypeScript `transpileModule` to emit CommonJS,
+and installs the self-contained result with the same controlled
+`executeJavaScript` mechanism. Source and compiled text hashes and the compiler
+version are recorded. Runtime imports are rejected. Product source, CSP,
+permissions, preload and security settings are unchanged.
+
+```powershell
+node tooling/native-screen-capture/canvas-route-probe/run.cjs --check --stage product --helper runtime/nv12-shader-probe/readback-helper-hires.exe
+node tooling/native-screen-capture/canvas-route-probe/run.cjs --stage product --helper runtime/nv12-shader-probe/readback-helper-hires.exe
+```
+
+This stage uses the module's default detached browser platform, every-admission
+MessageChannel scheduling, one active admission, one replaceable pending input,
+private Processor and CPU preparer unchanged. No `createPlatform` override or
+Canvas monkey-patch is supplied. It waits for `sink.ready` before spawning the
+source (`productSourceStart:after-prime`), which remains the default. The explicit
+`--product-source-start eager` control skips only that ready gate. It retains the
+same actual module, detached Canvas, native source and prefill, 120 Hz pacer,
+validation copy, Generator, pool, deadlines, and resource barriers:
+
+```powershell
+node tooling/native-screen-capture/canvas-route-probe/run.cjs --check --stage product --product-source-start eager --helper runtime/nv12-shader-probe/readback-helper-hires.exe
+node tooling/native-screen-capture/canvas-route-probe/run.cjs --stage product --product-source-start eager --helper runtime/nv12-shader-probe/readback-helper-hires.exe
+```
+
+Eager accepts stable `hidden` or `visible` visibility only; transitions remain
+after-prime controls. No artificial prime delay, extra request/draw, module
+override, or synthetic admission credit forces an overlap. The module is still
+created before helper spawn in both modes. Real Cove starts its helper before
+creating this module after the start response. Native process startup and the
+pacer may allow the prime to finish even with the eager gate removed. Therefore
+an eager pass with no observed early inputs does **not** rule out Cove's startup
+interleaving, and this control does not reproduce the full real startup order.
+
+`product.startup` records renderer module creation start/return, ready observation,
+first native callback, the module phase at that callback, and the number of inputs
+before ready. `productSourceLifecycle` records main-process helper spawn
+request/observation, ready-plus-prefill observation, pacer start request and first
+source offer. `productStartup` aligns these using each process's
+`performance.timeOrigin + performance.now()` (approximate epoch milliseconds),
+and preserves `firstInputBeforePrime`/`inputsBeforePrime` observations. A source
+spawn timestamp alone is not evidence of a callback before prime. The prime
+timestamp is the tool's `sink.ready` observer, not an instrumented internal Canvas
+callback. Missing events remain null, including interrupted startup.
+
+Native callbacks call `submit` without a preceding await, then close the original
+frame in `finally` after actual submit settlement. They do not wait for output.
+The only downstream track is a real Generator. Its writer wrapper inspects the
+actual prepared frame's NV12/BT.709 metadata, native input timestamp and fixture
+serial/color bytes before awaiting the actual Generator write. That inspection
+adds another full-frame AB copy and delays the module credit; its cost is
+reported separately. Product marker logic is not modified or required. This is
+a module correctness/reproduction control, not an untouched product timing,
+desktop-capture, SFU, encoder or RTP result.
+
+Where available, the module's read-only `snapshot()` is recorded after creation,
+ready, first completed write, failure and cleanup. Counters are observations,
+not cancellation acknowledgments. The module exports no private prepare/read
+drain promise. Cleanup awaits all observed submit, validation and Generator-write
+operations, calls module stop and destroys the owned renderer; it reports
+`modulePrivateDrainObservable:false` and does not claim an observed internal
+reader/copy drain. The original native allRefs gate is still mandatory.
+All product-stage results retain `productionEligible:false`.
