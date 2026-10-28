@@ -15,6 +15,8 @@ import {
 } from './screenCapture';
 import { ApplicationAudioPipeline } from '../application-audio/applicationAudio';
 import { screenPublicationCodecCandidates } from './screenCodecPolicy';
+import { tryNativeScreenCapture, type NativeScreenBridge } from './nativeScreenCapture';
+import { canUpgradeScreenCapture, upgradePublishedScreenCapture } from './nativeScreenUpgrade';
 import {
   Transport,
   Producer,
@@ -119,6 +121,82 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
   const publicationGeneration = useRef(0);
   const pendingStart = useRef<{ operation: number; isCurrent: () => boolean } | null>(null);
   const updateQueue = useRef<ScreenUpdateQueue | null>(null);
+  const nativeUpgradeIntent = useRef(0);
+  const nativeUpgradeAbort = useRef<{ controller: AbortController; queue: ScreenUpdateQueue } | null>(null);
+
+  const cancelNativeUpgrade = () => {
+    nativeUpgradeIntent.current += 1;
+    nativeUpgradeAbort.current?.controller.abort();
+    nativeUpgradeAbort.current = null;
+    return nativeUpgradeIntent.current;
+  };
+
+  const ensureUpdateQueue = (producer: Producer, isCurrent: () => boolean): ScreenUpdateQueue => {
+    const existing = updateQueue.current;
+    if (existing?.isCurrent()) return existing;
+    existing?.release();
+    const candidates = new Set<MediaStream>();
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      producer.observer?.off('close', release);
+      // An old producer closing cannot cancel a newer publication's preparation.
+      if (nativeUpgradeAbort.current?.queue === queue) {
+        nativeUpgradeAbort.current.controller.abort();
+        nativeUpgradeAbort.current = null;
+      }
+      candidates.forEach(releaseScreenCaptureCandidate);
+      candidates.clear();
+    };
+    const queue: ScreenUpdateQueue = {
+      isCurrent: () => !released && isCurrent(), candidates, release, tail: Promise.resolve(),
+    };
+    updateQueue.current = queue;
+    producer.observer?.once('close', release);
+    return queue;
+  };
+
+  const beginNativeUpgrade = (
+    stream: MediaStream, producer: Producer, queue: ScreenUpdateQueue,
+    intent: number, plan: ScreenEncodingPlan, maxFps: Fps, gameMode: boolean,
+  ) => {
+    if (maxFps === 30) return;
+    // Most builds have no native bridge. Keep their original synchronous path.
+    const bridge = (window as Window & { coveNativeScreen?: NativeScreenBridge }).coveNativeScreen;
+    if (!bridge?.supported || nativeUpgradeIntent.current !== intent || !queue.isCurrent() ||
+        deps.localScreenRef.current !== stream || !canUpgradeScreenCapture(producer, plan)) return;
+    const controller = new AbortController();
+    nativeUpgradeAbort.current = { controller, queue };
+    void upgradePublishedScreenCapture({
+      stockStream: stream, stockPlan: plan, maxFps, producer, queue, signal: controller.signal,
+      isIntentCurrent: () => nativeUpgradeIntent.current === intent,
+      isPublicationCurrent: queue.isCurrent,
+      currentStream: () => deps.localScreenRef.current,
+      acquire: tryNativeScreenCapture,
+      onCommit: (nativeStream, _track, width, height) => {
+        deps.localScreenRef.current = nativeStream;
+        deps.setLocalScreen(nativeStream);
+        if (producer.appData && typeof producer.appData === 'object')
+          Object.assign(producer.appData, { sourceWidth: width, sourceHeight: height, outputWidth: width, outputHeight: height });
+        // Preserve the current activity's FPS and degradation settings. In
+        // particular, applyScreenActivity is an asynchronous sender mutation.
+        deps.setScreenEncodingPlan(current => ({
+          ...(current ?? plan), sourceWidth: width, sourceHeight: height,
+          outputWidth: width, outputHeight: height, scaleResolutionDownBy: 1,
+        }));
+        deps.videoCounterPrev.current = null;
+        deps.remoteLossPrev.current = null;
+        if (gameMode) deps.stopScreenAnalysis();
+        else deps.startScreenAnalysis(nativeStream, plan.preset, maxFps, false);
+      },
+      stopPublication: () => stopScreenShare(),
+    }).catch(error => {
+      console.warn('[screen share] native upgrade kept stock capture', error);
+    }).then(() => {
+      if (nativeUpgradeAbort.current?.controller === controller) nativeUpgradeAbort.current = null;
+    });
+  };
   const startScreenShare = useCallback(
     async (
       initPreset?: ScreenPreset,
@@ -152,6 +230,7 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
         return;
       }
 
+      const nativeIntent = cancelNativeUpgrade();
       const initialActivity: ScreenActivity = gameMode ? 'motion' : 'active';
       const operation = ++publicationGeneration.current;
       const generation = deps.mediaGeneration.current;
@@ -260,6 +339,9 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
         }
         if (!producer) throw lastProduceError ?? new Error('没有可用的屏幕共享视频编码器');
         deps.screenProducer.current = producer;
+        const publishedProducer = producer;
+        const queue = ensureUpdateQueue(publishedProducer, () => isCurrent() &&
+          deps.screenProducer.current === publishedProducer && !publishedProducer.closed);
         deps.localScreenRef.current = stream;
         // 用户在浏览器 UI 点"停止共享"
         videoTrack.onended = () => {
@@ -296,6 +378,7 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
         }
 
         deps.setIsSharing(true);
+        beginNativeUpgrade(stream, producer, queue, nativeIntent, initialPlan, currentFps, gameMode);
 
       } catch (e) {
         const current = isCurrent();
@@ -385,22 +468,10 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
         return;
       }
 
-      let queue = updateQueue.current;
-      if (!queue?.isCurrent()) {
-        queue?.release();
-        const candidates = new Set<MediaStream>();
-        const release = () => {
-          producer.observer?.off('close', release);
-          candidates.forEach(releaseScreenCaptureCandidate);
-          candidates.clear();
-        };
-        queue = { isCurrent, candidates, release, tail: Promise.resolve() };
-        updateQueue.current = queue;
-        // Leave/reset also closes the producer. Release ready captures even if
-        // an earlier picker or replaceTrack still keeps the commit queue busy.
-        producer.observer?.once('close', release);
-      }
-      const currentQueue = queue;
+      // A new user intent cancels native preparation immediately, while stock
+      // updates retain their existing ordered commit semantics.
+      const nativeIntent = cancelNativeUpgrade();
+      const currentQueue = ensureUpdateQueue(producer, isSessionCurrent);
       // Invoke capture in the click's turn to retain transient activation.
       // Consume rejection immediately, including while an earlier update waits.
       const capture = (async (): Promise<{ stream: MediaStream | null; error?: unknown }> => {
@@ -514,6 +585,7 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
             hasScreenAudio = false;
           }
           deps.setShareAudio(audio && hasScreenAudio);
+          beginNativeUpgrade(stream, producer, currentQueue, nativeIntent, plan, currentFps, gameMode);
           console.info('[screen share] 共享参数已更新', {
             preset,
             fps: currentFps,
@@ -557,6 +629,7 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
   );
 
   const stopScreenShare = useCallback(() => {
+    cancelNativeUpgrade();
     publicationGeneration.current += 1;
     pendingStart.current = null;
     updateQueue.current?.release();

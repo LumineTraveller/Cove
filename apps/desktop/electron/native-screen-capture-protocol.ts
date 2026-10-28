@@ -1,0 +1,48 @@
+/** Native helper wire data. No credentials, content bytes or arbitrary handles from renderers. */
+export interface NativeScreenOptions {
+  maxWidth: number;
+  maxHeight: number;
+  fps: 30 | 60 | 120;
+}
+
+export interface NativeScreenFrame {
+  requestId: string;
+  sessionId: string;
+  slot: number;
+  serial: number;
+  width: number;
+  height: number;
+  timestamp: number;
+  refresh: boolean;
+}
+
+export type NativeScreenStartResult =
+  | { ok: true; sessionId: string; width: number; height: number }
+  | { ok: false; reason: string };
+
+export interface NativeScreenSourceSelection {
+  sourceId: string;
+  displayId: string;
+  primaryDisplayId: string;
+  displayCount: number;
+  selectedAt: number;
+  /** Physical pixels observed by main when the stock display source was chosen. */
+  sourceWidth?: number;
+  sourceHeight?: number;
+}
+
+export const NATIVE_SCREEN_POOL_SIZE = 3;
+export const NATIVE_SCREEN_START_TIMEOUT_MS = 1_500;
+export const NATIVE_SCREEN_STOP_TIMEOUT_MS = 1_500;
+
+export function validNativeScreenRequestId(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{8,80}$/.test(value);
+}
+
+export function validNativeScreenOptions(value: unknown): value is NativeScreenOptions {
+  if (!value || typeof value !== 'object') return false;
+  const options = value as NativeScreenOptions;
+  return Number.isInteger(options.maxWidth) && Number.isInteger(options.maxHeight) &&
+    options.maxWidth >= 2 && options.maxWidth <= 4096 && options.maxHeight >= 2 && options.maxHeight <= 2560 &&
+    [30, 60, 120].includes(options.fps);
+}

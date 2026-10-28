@@ -11,10 +11,12 @@ import {
   ipcMain,
   shell,
   safeStorage,
+  screen,
 } from "electron";
 import path from "path";
 import { AccountPasswordStore } from './account-password-store';
 import { screenCaptureFeaturePolicy } from './screen-capture-features';
+import { NativeScreenCaptureController } from './native-screen-capture';
 import { registerAccountPasswordIpc } from './account-password-ipc';
 import { ServerAccessStore } from './server-access-store';
 import { registerServerAccessIpc } from './server-access-ipc';
@@ -82,11 +84,15 @@ function readPackagedBuildFlavor(): string | undefined {
   }
 }
 const buildFlavor = readPackagedBuildFlavor();
+const isNativeCaptureLabBuild = buildFlavor === 'native-capture-lab';
+const nativeCaptureEnabled = process.platform === 'win32' && process.arch === 'x64' &&
+  process.env.COVE_DISABLE_NATIVE_GPU_CAPTURE !== '1' &&
+  (isNativeCaptureLabBuild || process.env.COVE_NATIVE_GPU_CAPTURE === '1');
 const isAnnotationFixBuild = buildFlavor === 'annotation-fix';
 const isMediaFixBuild = buildFlavor === 'media-fix';
-const isNetworkLabBuild = buildFlavor === 'network-lab' || isAnnotationFixBuild || isMediaFixBuild;
+const isNetworkLabBuild = buildFlavor === 'network-lab' || isAnnotationFixBuild || isMediaFixBuild || isNativeCaptureLabBuild;
 if (isNetworkLabBuild) {
-  const labUserDataPath = path.join(app.getPath("appData"), isMediaFixBuild ? 'Cove Media Fix' : isAnnotationFixBuild ? 'Cove Annotation Fix' : "Cove Network Lab");
+  const labUserDataPath = path.join(app.getPath("appData"), isNativeCaptureLabBuild ? 'Cove Native Capture Lab' : isMediaFixBuild ? 'Cove Media Fix' : isAnnotationFixBuild ? 'Cove Annotation Fix' : "Cove Network Lab");
   const labSessionDataPath = path.join(labUserDataPath, "session");
   mkdirSync(labSessionDataPath, { recursive: true });
   app.setPath("userData", labUserDataPath);
@@ -100,6 +106,11 @@ const devRendererURL = process.env.COVE_DEV_RENDERER_URL || 'http://127.0.0.1:55
 let updaterController: AutoUpdaterController | null = null;
 let integrityController: ReturnType<typeof createInstallationIntegrityController> | null = null;
 let mainWindow: BrowserWindow | null = null;
+const nativeScreenCapture = new NativeScreenCaptureController({
+  enabled: nativeCaptureEnabled,
+  helperPath: app.isPackaged ? path.join(process.resourcesPath, 'native-screen-capture-helper.exe') :
+    path.join(__dirname, '../build/native-screen-capture-helper.exe'),
+});
 const annotationOverlay = new AnnotationOverlayController((token, reason) => {
   mainWindow?.webContents.send('cove:annotation-overlay:failure', { token, reason });
 }, (token, input) => {
@@ -169,17 +180,19 @@ function createWindow() {
       nodeIntegration: false,
       contextIsolation: true,
       preload: path.join(__dirname, "preload.js"),
+      additionalArguments: nativeCaptureEnabled ? ['--cove-native-gpu-capture=1'] : [],
     },
   });
   mainWindow = win;
   installNativeResizeState(win);
   win.on("closed", () => {
+    nativeScreenCapture.reset();
     annotationOverlay.setCaptureSource(null);
     if (mainWindow === win) mainWindow = null;
   });
-  win.webContents.on('render-process-gone', () => annotationOverlay.setCaptureSource(null));
+  win.webContents.on('render-process-gone', () => { nativeScreenCapture.reset(); annotationOverlay.setCaptureSource(null); });
   win.webContents.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => {
-    if (isMainFrame) annotationOverlay.setCaptureSource(null);
+    if (isMainFrame) { nativeScreenCapture.reset(); annotationOverlay.setCaptureSource(null); }
   });
   const notifyWindowState = () => {
     if (!win.isDestroyed()) win.webContents.send("cove:window-state", win.isMaximized());
@@ -298,6 +311,14 @@ function createWindow() {
         // process-loopback capture with Cove excluded when system audio is
         // requested, and the display stream itself remains video-only.
         annotationOverlay.setCaptureSource(source);
+        const primaryDisplay = screen.getPrimaryDisplay();
+        nativeScreenCapture.noteStockSelection({
+          sourceId: source.id, displayId: source.display_id,
+          primaryDisplayId: String(primaryDisplay.id), displayCount: screen.getAllDisplays().length,
+          sourceWidth: Math.round(primaryDisplay.size.width * primaryDisplay.scaleFactor),
+          sourceHeight: Math.round(primaryDisplay.size.height * primaryDisplay.scaleFactor),
+          selectedAt: Date.now(),
+        });
         callback({ video: source });
       })
       .catch((error) => {
@@ -310,6 +331,11 @@ function createWindow() {
 app.whenReady().then(() => {
   const integritySender = (event: Electron.IpcMainInvokeEvent) =>
     event.sender === mainWindow?.webContents && event.senderFrame === mainWindow?.webContents.mainFrame;
+  ipcMain.handle('cove:native-screen:start', (event, requestId, options) => integritySender(event)
+    ? nativeScreenCapture.start(event.sender, requestId, options)
+    : { ok: false, reason: 'untrusted_sender' });
+  ipcMain.handle('cove:native-screen:stop', (event, requestId, fault) => integritySender(event)
+    ? nativeScreenCapture.stop(event.sender, requestId, fault) : false);
   const unavailableIntegrityState: InstallationIntegrityState = {
     status: 'disabled', version: app.getVersion(), platform: process.platform, arch: process.arch,
     message: '安装完整性服务尚未就绪。',
@@ -651,6 +677,7 @@ app.whenReady().then(() => {
 });
 
 app.on("will-quit", () => {
+  nativeScreenCapture.reset();
   annotationOverlay.setCaptureSource(null);
   applicationAudioCapture.stop();
   screenAudioCapture.stop();

@@ -1,8 +1,100 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, sharedTexture } from "electron";
+import type { NativeScreenFrame, NativeScreenOptions, NativeScreenStartResult } from './native-screen-capture-protocol';
 import type { UpdateState } from "./updater-core";
 import type { RemoteControlActivation } from "./remote-control-activation";
 import type { RemoteControlInput } from "./remote-control";
 import type { InstallationIntegrityState } from './integrity-state';
+
+// Keep this bridge in the sandboxed preload: it may require Electron builtins,
+// but cannot require an unbundled local runtime module. Handles never cross the
+// context bridge. Each imported texture has its own transfer/release barrier.
+const nativeFrameListeners = new Map<string, (frame: unknown, metadata: NativeScreenFrame) => Promise<void>>();
+const nativeEndListeners = new Map<string, (reason: string) => void>();
+const nativeReleasePermits = new Map<string, () => void>();
+const nativeEarlyPermits = new Set<string>();
+const nativeRequestId = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9_-]{8,80}$/.test(value);
+const nativeEnabled = process.platform === 'win32' && process.argv.includes('--cove-native-gpu-capture=1') &&
+  typeof sharedTexture?.setSharedTextureReceiver === 'function';
+const nativePermitKey = (metadata: NativeScreenFrame) => `${metadata.sessionId}:${metadata.serial}`;
+const nativeFrameValid = (value: NativeScreenFrame): boolean => Boolean(value && nativeRequestId(value.requestId) &&
+  typeof value.sessionId === 'string' && /^[A-Za-z0-9-]{8,80}$/.test(value.sessionId) &&
+  Number.isSafeInteger(value.serial) && value.serial > 0 && Number.isInteger(value.slot) && value.slot >= 0 && value.slot < 3 &&
+  Number.isInteger(value.width) && value.width >= 2 && value.width <= 4096 &&
+  Number.isInteger(value.height) && value.height >= 2 && value.height <= 2560 &&
+  Number.isSafeInteger(value.timestamp) && value.timestamp >= 0 && typeof value.refresh === 'boolean');
+
+if (nativeEnabled) {
+  ipcRenderer.on('cove:native-screen:release-permit', (_event, metadata: NativeScreenFrame) => {
+    if (!nativeFrameValid(metadata)) return;
+    const key = nativePermitKey(metadata);
+    const release = nativeReleasePermits.get(key);
+    if (release) { nativeReleasePermits.delete(key); release(); }
+    else if (nativeEarlyPermits.size < 6) nativeEarlyPermits.add(key);
+  });
+  ipcRenderer.on('cove:native-screen:ended', (_event, event: { requestId: string; reason: string }) => {
+    if (!event || !nativeRequestId(event.requestId) || typeof event.reason !== 'string') return;
+    nativeEndListeners.get(event.requestId)?.(event.reason);
+  });
+  sharedTexture.setSharedTextureReceiver(async ({ importedSharedTexture: imported }, metadata: NativeScreenFrame) => {
+    let frame: ReturnType<typeof imported.getVideoFrame> | undefined;
+    // A malformed message is never sent by the main broker. Retire the import
+    // without issuing a slot credit rather than trusting unvalidated metadata.
+    if (!nativeFrameValid(metadata)) { imported.release(); return; }
+    const key = nativePermitKey(metadata);
+    let permitTimer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
+    const permit = new Promise<void>((resolve) => {
+      if (nativeEarlyPermits.delete(key)) { resolve(); return; }
+      nativeReleasePermits.set(key, resolve);
+      permitTimer = setTimeout(() => {
+        timedOut = true;
+        nativeReleasePermits.delete(key);
+        // No credit is fabricated on a timeout. Main retires this session.
+        void ipcRenderer.invoke('cove:native-screen:stop', metadata.requestId, 'receiver_failed').catch(() => {});
+        resolve();
+      }, 1500);
+    });
+    try {
+      const listener = nativeFrameListeners.get(metadata.requestId);
+      if (listener) {
+        frame = imported.getVideoFrame();
+        await listener(frame, metadata);
+      }
+    } catch (error) {
+      console.warn('[native-screen] renderer_frame_callback_error', error instanceof Error ? error.name : 'unknown');
+      void ipcRenderer.invoke('cove:native-screen:stop', metadata.requestId, 'receiver_failed').catch(() => {});
+    } finally {
+      frame?.close();
+      await permit;
+      clearTimeout(permitTimer);
+      nativeReleasePermits.delete(key);
+      // sendSharedTexture owns another main-process reference until transfer
+      // completion. On timeout the entire session is retired, never reused.
+      imported.release();
+      if (timedOut) nativeEarlyPermits.delete(key);
+    }
+  });
+}
+contextBridge.exposeInMainWorld('coveNativeScreen', {
+  supported: nativeEnabled,
+  start: (requestId: string, options: NativeScreenOptions): Promise<NativeScreenStartResult> =>
+    nativeEnabled && nativeRequestId(requestId)
+      ? ipcRenderer.invoke('cove:native-screen:start', requestId, options)
+      : Promise.resolve({ ok: false, reason: 'unavailable' }),
+  stop: (requestId: string, fault?: 'renderer_failed' | 'receiver_failed'): Promise<boolean> => nativeRequestId(requestId) &&
+    (fault === undefined || fault === 'renderer_failed' || fault === 'receiver_failed')
+    ? ipcRenderer.invoke('cove:native-screen:stop', requestId, fault) : Promise.resolve(false),
+  onFrame: (requestId: string, listener: (frame: unknown, metadata: NativeScreenFrame) => Promise<void>) => {
+    if (!nativeRequestId(requestId) || typeof listener !== 'function') return () => {};
+    nativeFrameListeners.set(requestId, listener);
+    return () => { if (nativeFrameListeners.get(requestId) === listener) nativeFrameListeners.delete(requestId); };
+  },
+  onEnded: (requestId: string, listener: (reason: string) => void) => {
+    if (!nativeRequestId(requestId) || typeof listener !== 'function') return () => {};
+    nativeEndListeners.set(requestId, listener);
+    return () => { if (nativeEndListeners.get(requestId) === listener) nativeEndListeners.delete(requestId); };
+  },
+});
 
 contextBridge.exposeInMainWorld('coveServerAccess', {
   get: (server: string, email: string) => ipcRenderer.invoke('cove:server-access:get', server, email),
