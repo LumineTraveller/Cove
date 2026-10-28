@@ -1,5 +1,8 @@
 # Screen capture efficiency investigation, 2026-10-28
 
+后续状态：本报告记录原生后端实现前的诊断。现已完成独立 opt-in 原生 GPU
+候选，当前实现、实测结果及限制见[原生采集验收](native-gpu-capture-20261028.md)。
+
 本轮结论：整屏路径仍先搬运大图到 CPU，再做缩放/色彩转换；Chromium
 把包含等待的总历时纳入 50% 预算，形成约 70～80 FPS 的实际采集间隔。
 本机 DXGI 和 GPU 预缩放原型都能取得更高帧率，不能把这个结果当成

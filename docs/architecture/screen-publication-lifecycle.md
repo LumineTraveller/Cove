@@ -60,8 +60,10 @@ mode preserves the FPS-only capture request. The existing RTP plan remains the
 output ceiling, so a platform ignoring capture-size constraints still uses the
 normal sender limits. No repeated post-start `applyConstraints` is introduced.
 
-This optimization cannot move the Windows desktop-duplication readback onto the
-GPU or change Chromium's capture scheduler. The native probes and one-frame
-shared-texture experiment are isolated tooling, not providers loaded by the
-application. See [the measured capture architecture](../diagnostics/screen-capture-efficiency-20261028.md)
-for those costs and the future `CaptureAdapter`/`CaptureSession` boundary.
+This constraint optimization alone cannot move Windows desktop-duplication
+readback onto the GPU or change Chromium's capture scheduler. The opt-in
+[native GPU capture adapter](native-gpu-screen-capture.md) provides that separate
+backend after a stock publication succeeds. It reuses this session's ordered
+replacement queue and leaves the codec/SFU/audio contracts intact. The default
+release path remains stock. See [the measured capture architecture](../diagnostics/screen-capture-efficiency-20261028.md)
+for the original costs and the independent probe evidence.

@@ -1,5 +1,9 @@
 # Cove 三端模块化架构
 
+Windows 共享采集新增了独立 opt-in 的[原生 GPU 后端](native-gpu-screen-capture.md)，
+保留 stock 启动与回退。其[当前验收结果](../diagnostics/native-gpu-capture-20261028.md)
+与旧纯诊断原型有明确区别；正式默认采集器仍未切换。
+
 ## 基线与范围
 
 重构基线是原目录的完整当前源码，包含尚未提交的修复，不只是 v1.5.4 标签。`refactor-baseline` 本地标签保存该基线；`baseline/relocation-map.json` 可追溯旧路径。原目录、线上服务器、账号数据库和发布记录均不修改。

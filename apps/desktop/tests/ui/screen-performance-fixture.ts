@@ -1,5 +1,6 @@
 // Test-only source and safe counters for the real two-peer/SFU media fixture.
 // Generated-source throughput does not measure Windows desktop capture.
+import { getNativeScreenCaptureDiagnostics } from '../../src/features/media/screen/nativeScreenCapture';
 type VideoGenerator = MediaStreamTrack & { writable: WritableStream<VideoFrame> };
 type GeneratorConstructor = new (options: { kind: 'video' }) => VideoGenerator;
 type SafeStat = Record<string, number | string | boolean | null>;
@@ -21,6 +22,7 @@ const VIDEO_FIELDS = [
   'freezeCount', 'totalFreezesDuration', 'qualityLimitationReason',
   'qualityLimitationResolutionChanges', 'encoderImplementation', 'decoderImplementation',
   'powerEfficientEncoder', 'powerEfficientDecoder', 'hugeFramesSent',
+  'contentType', 'scalabilityMode',
 ] as const;
 
 function positiveParameter(params: URLSearchParams, name: string, fallback: number, maximum: number) {
@@ -56,6 +58,7 @@ export function installScreenPerformanceFixture(
     fps: positiveParameter(params, 'fps', 120, 240),
     captureWidth: Math.round(positiveParameter(params, 'captureWidth', 0, 8192)),
     captureHeight: Math.round(positiveParameter(params, 'captureHeight', 0, 8192)),
+    nativeGpuCapture: params.get('nativeGpu') === '1',
   };
   const Generator = (window as unknown as { MediaStreamTrackGenerator?: GeneratorConstructor })
     .MediaStreamTrackGenerator;
@@ -64,8 +67,8 @@ export function installScreenPerformanceFixture(
   const nativeCapture = originalCapture.bind(navigator.mediaDevices);
   const sources: Array<{
     kind: string; track: MediaStreamTrack; width: number | null; height: number | null;
-    requestedFps: number | null; uniqueFramesDrawn: number; uniqueFramesWritten: number;
-    skippedDeadlines: number; totalWriteMs: number; maxWriteMs: number;
+    requestedFps: number | null; uniqueFramesDrawn: number | null; uniqueFramesWritten: number | null;
+    skippedDeadlines: number | null; totalWriteMs: number | null; maxWriteMs: number | null;
     startedAt: number; lastFrameAt: number | null; error: string | null; stop: () => void;
   }> = [];
   const presentations = new Map<HTMLVideoElement, {
@@ -365,6 +368,24 @@ export function installScreenPerformanceFixture(
 
   async function sample() {
     observeVideos();
+    const fixtureWindow = window as unknown as { coveNativeScreen?: { supported?: boolean };
+      coveMediaQA?: { rtc?: { localScreen?: MediaStream } } };
+    const localScreenTrack = fixtureWindow.coveMediaQA?.rtc?.localScreen?.getVideoTracks()[0];
+    const videoSenders = [...peerConnections].flatMap(connection => connection.getSenders())
+      .filter(sender => sender.track?.kind === 'video' && sender.track.readyState === 'live');
+    // getDisplayMedia cannot observe the generator created by the product's
+    // background upgrade. Register only the actual replacement shared by the
+    // live sender and localScreen, after the owned stock capture ended.
+    if (configuration.nativeGpuCapture && sourceMode === 'native' && fixtureWindow.coveNativeScreen?.supported &&
+      localScreenTrack && videoSenders.length === 1 && videoSenders[0].track === localScreenTrack &&
+      !sources.some(source => source.track === localScreenTrack) &&
+      sources.some(source => source.kind === 'native-display-capture' && source.track.readyState === 'ended')) {
+      const track = localScreenTrack, settings = track.getSettings();
+      sources.push({ kind: 'native-gpu-adapter', track, width: settings.width ?? null, height: settings.height ?? null,
+        requestedFps: null, uniqueFramesDrawn: null, uniqueFramesWritten: null, skippedDeadlines: null,
+        totalWriteMs: null, maxWriteMs: null, startedAt: performance.now(), lastFrameAt: null,
+        error: null, stop: () => track.stop() });
+    }
     const liveSources = sources.filter(source => source.track.readyState === 'live' &&
       [...peerConnections].some(connection => connection.getSenders().some(sender => sender.track === source.track)));
     const liveSource = liveSources.length === 1 ? liveSources[0] : null;
@@ -388,12 +409,22 @@ export function installScreenPerformanceFixture(
         }
         const codec = report.get(stat.codecId);
         if (typeof codec?.mimeType === 'string') result.codec = codec.mimeType;
+        if (typeof codec?.sdpFmtpLine === 'string') result.codecFmtp = codec.sdpFmtpLine;
         if (typeof stat.mediaSourceId === 'string') result.mediaSourceId = stat.mediaSourceId;
         if (stat.type === 'media-source' && liveSource && stat.trackIdentifier === liveSource.track.id)
           result.isLiveCaptureSource = true;
         stats.push(result);
       }
-      return { index, connectionState: connection.connectionState, stats };
+      const senders = connection.getSenders().filter(sender => sender.track?.kind === 'video').map(sender => {
+        const track = sender.track!;
+        if (!videoTrackTokens.has(track)) videoTrackTokens.set(track, ++nextVideoTrackToken);
+        let degradationPreference: string | null = null;
+        try { degradationPreference = sender.getParameters().degradationPreference ?? null; } catch { /* Closed sender. */ }
+        return { trackToken: videoTrackTokens.get(track)!, trackState: track.readyState,
+          isLiveCaptureSource: track === liveSource?.track, contentHint: track.contentHint,
+          degradationPreference };
+      });
+      return { index, connectionState: connection.connectionState, stats, senders };
     }));
     // Bind recovery checks to the receiver currently feeding the video element.
     // Full-PC stats can retain closed consumers' cumulative inbound counters.
@@ -435,6 +466,7 @@ export function installScreenPerformanceFixture(
       ? await readOwnedPatternSnapshot(video) : null;
     return {
       timestamp: performance.now(), configuration, supportsGenerator,
+      nativeCaptureCounters: liveSource ? getNativeScreenCaptureDiagnostics(liveSource.track) : null,
       unexpectedAlerts: [...unexpectedAlerts],
       activityAnalysis: { ...analysisTiming },
       product: (() => {
@@ -445,15 +477,23 @@ export function installScreenPerformanceFixture(
           requestedSenderFps: rtc?.screenEncodingPlan?.fps ?? null,
           plannedContentHint: rtc?.screenEncodingPlan?.contentHint ?? null,
           degradationPreference: rtc?.screenEncodingPlan?.degradationPreference ?? null,
-          trackContentHint: sources.find(source => source.track.readyState === 'live')?.track.contentHint ?? null };
+          trackContentHint: liveSource?.track.contentHint ?? null,
+          senderDegradationPreference: connections.flatMap(connection => connection.senders)
+            .find(sender => sender.isLiveCaptureSource)?.degradationPreference ?? null };
       })(),
+      nativeGpu: { enabled: configuration.nativeGpuCapture, bridgeSupported: fixtureWindow.coveNativeScreen?.supported === true,
+        localScreenTrackMatchesSender: Boolean(liveSource && localScreenTrack === liveSource.track),
+        upgraded: liveSource?.kind === 'native-gpu-adapter' },
       sourceMeaning: sourceMode === 'native'
-        ? 'Native getDisplayMedia: source production count is unavailable; use media-source counters.'
+        ? liveSource?.kind === 'native-gpu-adapter'
+          ? 'Product native GPU adapter: fixture write/draw counts are unavailable; use the actual sender track and linked media-source counters.'
+          : 'Native getDisplayMedia: source production count is unavailable; use media-source counters.'
         : supportsGenerator
           ? 'Every successful generator write has distinct pixels and timestamp; independent of display vsync. This excludes native screen capture.'
           : 'Canvas fallback: drawn images are unique, but canvas capture may coalesce them. Draw count is not captured or encoded FPS.',
       sources: sources.map(({ track, stop: _stop, ...state }) => ({ ...state,
-        trackState: track.readyState, settings: safeSettings(track) })),
+        trackState: track.readyState, trackToken: videoTrackTokens.get(track) ?? null,
+        isLiveSenderSource: track === liveSource?.track, settings: safeSettings(track) })),
       connections,
       currentVideo,
       reports,

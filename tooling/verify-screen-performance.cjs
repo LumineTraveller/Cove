@@ -5,6 +5,7 @@ const fs=require('node:fs'),path=require('node:path'),{pathToFileURL}=require('n
 const {spawn}=require('node:child_process'),dgram=require('node:dgram');
 const crypto=require('node:crypto');
 const {cleanupOwnedTraceExports}=require('./analyze-screen-performance-trace.cjs');
+const {nativePerformanceEnabled,nativePerformancePaths}=require('./screen-performance-native.cjs');
 const root=path.resolve(__dirname,'..');
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 async function stop(child){
@@ -25,8 +26,12 @@ async function main(){
   const runtime=path.join(root,'runtime',runtimeName);fs.mkdirSync(runtime,{recursive:true});
   const label=process.env.COVE_FPS_LABEL||'baseline';if(!/^[a-z0-9-]{1,60}$/.test(label))throw Error('Invalid performance label');
   const directory=fs.mkdtempSync(path.join(runtime,label+'-'));
-  const sources=['apps/desktop/src/features/media/screen/screenCapture.ts','apps/desktop/src/features/media/screen/useScreenPublishing.ts','apps/desktop/src/features/media/screen/useScreenAnalysis.ts','apps/desktop/tests/ui/media-integration.tsx','apps/desktop/tests/ui/screen-performance-fixture.ts','apps/desktop/tests/ui/screen-performance.electron.cjs','apps/desktop/tests/ui/screen-performance-backend.cjs','tooling/verify-screen-performance.cjs','tooling/screen-performance-config.cjs','tooling/analyze-screen-performance-trace.cjs'];
-  fs.writeFileSync(path.join(directory,'source.json'),JSON.stringify({startedAt:new Date().toISOString(),node:process.version,files:Object.fromEntries(sources.map(file=>[file,crypto.createHash('sha256').update(fs.readFileSync(path.join(root,file))).digest('hex')]))},null,2)+'\n');
+  const nativeGpuEnabled=nativePerformanceEnabled(),nativePaths=nativeGpuEnabled?nativePerformancePaths(root):null;
+  const sources=['apps/desktop/src/features/media/screen/screenCapture.ts','apps/desktop/src/features/media/screen/useScreenPublishing.ts','apps/desktop/src/features/media/screen/useScreenAnalysis.ts','apps/desktop/tests/ui/media-integration.tsx','apps/desktop/tests/ui/screen-performance-fixture.ts','apps/desktop/tests/ui/screen-performance.electron.cjs','apps/desktop/tests/ui/screen-performance-backend.cjs','tooling/verify-screen-performance.cjs','tooling/screen-performance-config.cjs','tooling/screen-performance-native.cjs','tooling/analyze-screen-performance-trace.cjs',
+    'apps/desktop/electron/native-screen-capture-protocol.ts','apps/desktop/electron/native-screen-capture-helper.cpp','apps/desktop/electron/native-screen-handles.cpp','apps/desktop/electron/build-native-screen-capture.cjs','apps/desktop/electron/native-screen-capture.ts','apps/desktop/electron/preload.ts','apps/desktop/src/features/media/screen/nativeScreenCapture.ts','apps/desktop/src/features/media/screen/nativeScreenUpgrade.ts'];
+  if(nativePaths)sources.push(...Object.values(nativePaths));
+  fs.writeFileSync(path.join(directory,'source.json'),JSON.stringify({startedAt:new Date().toISOString(),node:process.version,nativeGpuEnabled,
+    nativeArtifacts:nativePaths,files:Object.fromEntries(sources.map(file=>[file,crypto.createHash('sha256').update(fs.readFileSync(path.join(root,file))).digest('hex')]))},null,2)+'\n');
   const env={...process.env,COVE_FPS_RUN_DIR:directory,COVE_TEST_NODE:process.execPath,COVE_QA_MEDIA_PORT:String(await port())};delete env.ELECTRON_RUN_AS_NODE;
   const dependencies=path.dirname(fs.realpathSync(path.join(root,'node_modules/vite')));
   const entry=pathToFileURL(path.join(path.dirname(require.resolve('vite/package.json')),'dist/node/index.js')).href;
@@ -52,9 +57,11 @@ async function main(){
   }
   console.log(JSON.stringify({directory:path.relative(root,directory),passed:!error&&!interrupted&&result?.passed===true,error:error||result?.error||null,interrupted,
     captureFeatures:result?.captureFeatures,disabledCaptureFeatures:result?.disabledCaptureFeatures,peerRenderMode:result?.peerRenderMode,
+    nativeGpu:result?.nativeGpu,
     profilingOnly:result?.profilingOnly,trace:result?.trace,
-    cases:result?.cases?.map(c=>({config:c.config,summary:c.summary?Object.fromEntries(Object.entries(c.summary).filter(([key])=>!['senderLast','viewerLast'].includes(key))):null,nativeBaseline:c.nativeBaseline,comparisonContract:c.comparisonContract})),
-    cleanup:{timeouts:result?.cleanupTimeouts,passed:result?.cleanup?.passed,rendererResourcesZero:result?.cleanup?.rendererResourcesZero,backendResourcesZero:result?.cleanup?.backendResourcesZero,backendStopped:result?.backendStopped,finishedAt:result?.finishedAt}},null,2));
+    cases:result?.cases?.map(c=>({config:c.config,summary:c.summary?Object.fromEntries(Object.entries(c.summary).filter(([key])=>!['senderLast','viewerLast'].includes(key))):null,nativeBaseline:c.nativeBaseline,comparisonContract:c.comparisonContract,
+      nativeUpgradeRequired:c.nativeUpgradeRequired,nativeUpgradeSucceeded:c.nativeUpgradeSucceeded,nativeGpu:c.nativeGpu,nativeLifecycle:c.nativeLifecycle})),
+    cleanup:{timeouts:result?.cleanupTimeouts,passed:result?.cleanup?.passed,rendererResourcesZero:result?.cleanup?.rendererResourcesZero,backendResourcesZero:result?.cleanup?.backendResourcesZero,nativeGpu:result?.cleanup?.nativeGpu,backendStopped:result?.backendStopped,finishedAt:result?.finishedAt}},null,2));
   process.exitCode=error||interrupted||!result?.passed?1:0;
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});
