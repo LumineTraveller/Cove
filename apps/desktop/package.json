@@ -10,7 +10,7 @@
     "remote-input:build": "node electron/build-remote-input.cjs",
     "application-audio:build": "node electron/build-application-audio.cjs",
     "native-screen-capture:build": "node electron/build-native-screen-capture.cjs --output build/native-screen-capture-helper.exe --self-test",
-    "test:native-screen-capture": "tsx --test tests/nativeScreenCapture.test.ts tests/nativeScreenUpgrade.test.ts tests/nativeScreenCaptureController.test.ts && node --test tests/nativeScreenPreload.test.cjs",
+    "test:native-screen-capture": "tsx --test tests/nativeFrameWriteQueue.test.ts tests/nativeScreenCapture.test.ts tests/nativeScreenUpgrade.test.ts tests/nativeScreenCaptureController.test.ts tests/nativeScreenCpuDelivery.test.ts && node --test tests/nativeScreenPreload.test.cjs tests/nativeScreenCpuAckIpc.test.cjs",
     "test:application-audio-sources": "tsx --test tests/applicationAudioSources.test.ts && node tests/applicationAudioSources.native.cjs",
     "prepare:rnnoise-assets": "node tools/prepare-rnnoise-assets.cjs",
     "electron:compile": "npm run remote-input:build && npm run application-audio:build && node electron/build-annotation-window.cjs && tsc -p electron/tsconfig.json",

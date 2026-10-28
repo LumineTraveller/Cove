@@ -108,6 +108,9 @@ let integrityController: ReturnType<typeof createInstallationIntegrityController
 let mainWindow: BrowserWindow | null = null;
 const nativeScreenCapture = new NativeScreenCaptureController({
   enabled: nativeCaptureEnabled,
+  pixelFormat: process.env.COVE_NATIVE_GPU_CAPTURE_PIXEL_FORMAT === 'nv12' ? 'nv12' : 'bgra',
+  storage: process.env.COVE_NATIVE_GPU_CAPTURE_CPU_FRAMES === '1' ? 'cpu' : 'gpu',
+  completion: process.env.COVE_NATIVE_GPU_CAPTURE_COMPLETION === 'fence' ? 'fence' : undefined,
   helperPath: app.isPackaged ? path.join(process.resourcesPath, 'native-screen-capture-helper.exe') :
     path.join(__dirname, '../build/native-screen-capture-helper.exe'),
 });
@@ -336,6 +339,11 @@ app.whenReady().then(() => {
     : { ok: false, reason: 'untrusted_sender' });
   ipcMain.handle('cove:native-screen:stop', (event, requestId, fault) => integritySender(event)
     ? nativeScreenCapture.stop(event.sender, requestId, fault) : false);
+  ipcMain.on('cove:native-screen:cpu-frame-done', (event, metadata) => {
+    if (event.sender === mainWindow?.webContents && !event.sender.isDestroyed() &&
+        event.senderFrame === mainWindow?.webContents.mainFrame)
+      nativeScreenCapture.acknowledgeCpuFrame(event.sender, metadata);
+  });
   const unavailableIntegrityState: InstallationIntegrityState = {
     status: 'disabled', version: app.getVersion(), platform: process.platform, arch: process.arch,
     message: '安装完整性服务尚未就绪。',

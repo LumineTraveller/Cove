@@ -3,6 +3,7 @@ import type {
   NativeScreenOptions,
   NativeScreenStartResult,
 } from '../../../../electron/native-screen-capture-protocol';
+import { createNativeFrameWriteQueue } from './nativeFrameWriteQueue';
 
 export interface NativeScreenBridge {
   readonly supported: boolean;
@@ -28,12 +29,20 @@ export interface NativeScreenCaptureOptions extends NativeScreenOptions {
 
 export interface NativeScreenCaptureDiagnostics {
   backend: 'native-gpu';
+  pixelFormat: 'bgra' | 'nv12';
+  frameStorage: 'gpu' | 'cpu';
   framesReceived: number;
   refreshFrames: number;
   framesWritten: number;
   framesDroppedWhileBusy: number;
   totalWriteMs: number;
   maxWriteMs: number;
+  framesDroppedExpired: number;
+  totalQueueAgeMs: number;
+  maxQueueAgeMs: number;
+  totalWriteIdleMs: number;
+  maxWriteIdleMs: number;
+  writesOverFramePeriod: number;
 }
 
 const captureDiagnostics = new WeakMap<MediaStreamTrack, NativeScreenCaptureDiagnostics>();
@@ -42,6 +51,36 @@ const captureDiagnostics = new WeakMap<MediaStreamTrack, NativeScreenCaptureDiag
 export function getNativeScreenCaptureDiagnostics(track: MediaStreamTrack): NativeScreenCaptureDiagnostics | null {
   const diagnostics = captureDiagnostics.get(track);
   return diagnostics ? { ...diagnostics } : null;
+}
+
+export type NativeScreenCaptureAttemptPhase =
+  'starting' | 'helper-ready' | 'frame-written' | 'settings-ready' | 'committed' | 'stopped';
+export type NativeScreenCaptureStopReason =
+  'deadline_timeout' | 'abort' | 'stock_ended' | 'not_current' | 'native_ended' | 'frame_error' |
+  'normal_stop' | 'start_rejected' | 'invalid_start_result' | 'start_error' | 'setup_error' | 'ineligible';
+export interface NativeScreenCaptureAttempt {
+  phase: NativeScreenCaptureAttemptPhase;
+  /** All stage times are elapsed from this attempt's entry, except the explicit duration. */
+  elapsedMs: number;
+  bridgeStartMs: number | null;
+  helperResponseMs: number | null;
+  helperResponseDurationMs: number | null;
+  helperResponseOk: boolean | null;
+  firstFrameMs: number | null;
+  firstWriteMs: number | null;
+  settingsReadyMs: number | null;
+  committedMs: number | null;
+  stoppedMs: number | null;
+  stopReason: NativeScreenCaptureStopReason | null;
+}
+type CaptureAttemptState = Omit<NativeScreenCaptureAttempt, 'elapsedMs'> & { startedAt: number };
+let lastCaptureAttempt: CaptureAttemptState | undefined;
+
+/** One bounded attempt, without source or session identifiers. Each read is detached and frozen. */
+export function getLastNativeScreenCaptureAttempt(): Readonly<NativeScreenCaptureAttempt> | null {
+  if (!lastCaptureAttempt) return null;
+  const { startedAt, ...snapshot } = lastCaptureAttempt;
+  return Object.freeze({ ...snapshot, elapsedMs: snapshot.stoppedMs ?? Math.max(0, performance.now() - startedAt) });
 }
 
 type GeneratorTrack = MediaStreamTrack & { writable: WritableStream<VideoFrame> };
@@ -61,6 +100,20 @@ export async function tryNativeScreenCapture(
   stockStream: MediaStream,
   options: NativeScreenCaptureOptions,
 ): Promise<NativeCaptureCandidate | null> {
+  // Async callbacks retain this attempt only; a late predecessor cannot replace
+  // the single current diagnostic record installed by a newer invocation.
+  const attempt: CaptureAttemptState = {
+    startedAt: performance.now(), phase: 'starting', bridgeStartMs: null,
+    helperResponseMs: null, helperResponseDurationMs: null, helperResponseOk: null,
+    firstFrameMs: null, firstWriteMs: null, settingsReadyMs: null, committedMs: null,
+    stoppedMs: null, stopReason: null,
+  };
+  lastCaptureAttempt = attempt;
+  const attemptElapsed = () => Math.max(0, performance.now() - attempt.startedAt);
+  function finishAttempt(reason: NativeScreenCaptureStopReason) {
+    if (attempt.stoppedMs !== null) return;
+    attempt.phase = 'stopped'; attempt.stopReason = reason; attempt.stoppedMs = attemptElapsed();
+  }
   let bridge: NativeScreenBridge;
   let stockTrack: MediaStreamTrack;
   let track: GeneratorTrack;
@@ -71,13 +124,17 @@ export async function tryNativeScreenCapture(
       (window as Window & { coveNativeScreen?: NativeScreenBridge }).coveNativeScreen;
     const Generator = (globalThis as typeof globalThis & { MediaStreamTrackGenerator?: GeneratorConstructor }).MediaStreamTrackGenerator;
     const selectedTrack = stockStream.getVideoTracks()[0];
-    if (!candidateBridge?.supported || !Generator || typeof MediaStream !== 'function' ||
-        options.nativeResolution || options.signal.aborted || !options.isCurrent() ||
-        !selectedTrack || selectedTrack.readyState !== 'live' ||
+    if (!candidateBridge?.supported || !Generator || typeof MediaStream !== 'function' || options.nativeResolution) {
+      finishAttempt('ineligible'); return null;
+    }
+    if (options.signal.aborted) { finishAttempt('abort'); return null; }
+    if (!options.isCurrent()) { finishAttempt('not_current'); return null; }
+    if (selectedTrack && selectedTrack.readyState !== 'live') { finishAttempt('stock_ended'); return null; }
+    if (!selectedTrack ||
         selectedTrack.getSettings().displaySurface !== 'monitor' ||
         !Number.isInteger(options.maxWidth) || options.maxWidth < 2 || options.maxWidth > 4096 ||
         !Number.isInteger(options.maxHeight) || options.maxHeight < 2 || options.maxHeight > 2560 ||
-        ![30, 60, 120].includes(options.fps)) return null;
+        ![30, 60, 120].includes(options.fps)) { finishAttempt('ineligible'); return null; }
     bridge = candidateBridge;
     stockTrack = selectedTrack;
     track = new Generator({ kind: 'video' });
@@ -87,15 +144,19 @@ export async function tryNativeScreenCapture(
       writer = track.writable.getWriter();
     } catch {
       track.stop();
+      finishAttempt('setup_error');
       return null;
     }
   } catch {
+    finishAttempt('setup_error');
     return null;
   }
 
   const diagnostics: NativeScreenCaptureDiagnostics = {
-    backend: 'native-gpu', framesReceived: 0, refreshFrames: 0, framesWritten: 0,
+    backend: 'native-gpu', pixelFormat: 'bgra', frameStorage: 'gpu', framesReceived: 0, refreshFrames: 0, framesWritten: 0,
     framesDroppedWhileBusy: 0, totalWriteMs: 0, maxWriteMs: 0,
+    framesDroppedExpired: 0, totalQueueAgeMs: 0, maxQueueAgeMs: 0,
+    totalWriteIdleMs: 0, maxWriteIdleMs: 0, writesOverFramePeriod: 0,
   };
   captureDiagnostics.set(track, diagnostics);
   const requestId = `native_${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}_${Math.random().toString(36).slice(2)}`}`;
@@ -103,7 +164,7 @@ export async function tryNativeScreenCapture(
   let stopped = false;
   let committed = false;
   let ready = false;
-  let writing = false;
+  let lastWriteCompletedAt: number | undefined;
   let startIssued = false;
   let lastSerial = 0;
   let lastTimestamp = -1;
@@ -113,9 +174,8 @@ export async function tryNativeScreenCapture(
   let settingsPoll: ReturnType<typeof setTimeout> | undefined;
   let resolveCandidate!: (candidate: NativeCaptureCandidate | null) => void;
   const outcome = new Promise<NativeCaptureCandidate | null>((resolve) => { resolveCandidate = resolve; });
-  let resolveCancelled!: () => void;
-  const cancelled = new Promise<void>((resolve) => { resolveCancelled = resolve; });
   const originalStop = track.stop.bind(track);
+  let currentStopReason: NativeScreenCaptureStopReason = 'not_current';
 
   function stopBridge(unexpected = false) {
     try {
@@ -129,15 +189,21 @@ export async function tryNativeScreenCapture(
     // until the publisher has actually replaced it and calls track.stop().
     if (committed) return true;
     try {
-      return !options.signal.aborted && options.isCurrent() && stockTrack.readyState === 'live';
+      if (options.signal.aborted) { currentStopReason = 'abort'; return false; }
+      if (!options.isCurrent()) { currentStopReason = 'not_current'; return false; }
+      if (stockTrack.readyState !== 'live') { currentStopReason = 'stock_ended'; return false; }
+      return true;
     } catch {
+      currentStopReason = 'not_current';
       return false;
     }
   }
 
-  function stop(unexpected = false) {
+  function stop(unexpected = false, reason: NativeScreenCaptureStopReason = 'normal_stop') {
     if (stopped) return;
     stopped = true;
+    finishAttempt(reason);
+    writeQueue.stop();
     if (deadline !== undefined) clearTimeout(deadline);
     if (settingsPoll !== undefined) clearTimeout(settingsPoll);
     settingsPoll = undefined;
@@ -146,7 +212,6 @@ export async function tryNativeScreenCapture(
     track.removeEventListener('ended', onTrackEnded);
     try { unsubscribeFrame(); } catch { /* Continue releasing the other resources. */ }
     try { unsubscribeEnded(); } catch { /* Continue releasing the other resources. */ }
-    resolveCancelled();
     try { originalStop(); } catch { /* Still release the helper if a track is already invalid. */ }
     // Do not block stock fallback on an IPC or WritableStream promise.
     try {
@@ -162,17 +227,51 @@ export async function tryNativeScreenCapture(
     if (unexpected && committed) track.dispatchEvent(new Event('ended'));
   }
 
-  function onCancelled() { stop(); }
-  function onTrackEnded() { stop(true); }
+  function onCancelled(event: Event) { stop(false, event.type === 'abort' ? 'abort' : 'stock_ended'); }
+  function onTrackEnded() { stop(true, 'native_ended'); }
+
+  const writeQueue = createNativeFrameWriteQueue<VideoFrame>({
+    now: () => performance.now(),
+    maxPendingAgeMs: 2 * 1000 / options.fps,
+    write(frame) {
+      if (lastWriteCompletedAt !== undefined) {
+        const idleMs = Math.max(0, performance.now() - lastWriteCompletedAt);
+        diagnostics.totalWriteIdleMs += idleMs;
+        diagnostics.maxWriteIdleMs = Math.max(diagnostics.maxWriteIdleMs, idleMs);
+      }
+      return writer.write(frame);
+    },
+    onWritten(writeMs, queueAgeMs) {
+      if (!stopped && attempt.firstWriteMs === null) {
+        attempt.firstWriteMs = attemptElapsed(); attempt.phase = 'frame-written';
+      }
+      diagnostics.framesWritten++;
+      diagnostics.totalWriteMs += writeMs;
+      diagnostics.maxWriteMs = Math.max(diagnostics.maxWriteMs, writeMs);
+      diagnostics.totalQueueAgeMs += queueAgeMs;
+      diagnostics.maxQueueAgeMs = Math.max(diagnostics.maxQueueAgeMs, queueAgeMs);
+      if (writeMs > 1000 / options.fps) diagnostics.writesOverFramePeriod++;
+      lastWriteCompletedAt = performance.now();
+    },
+    onDropped(reason) {
+      diagnostics.framesDroppedWhileBusy++;
+      if (reason === 'expired') diagnostics.framesDroppedExpired++;
+    },
+    onFailure(error) {
+      console.warn('[native-screen] frame_write_error', error instanceof Error ? error.name : 'unknown');
+      stop(true, 'frame_error');
+    },
+  });
 
   function checkFirstFrameSettings() {
     if (stopped || ready || !session) return;
-    if (!current()) { stop(); return; }
-    if (track.readyState !== 'live') { stop(true); return; }
+    if (!current()) { stop(false, currentStopReason); return; }
+    if (track.readyState !== 'live') { stop(true, 'native_ended'); return; }
     try {
       const settings = track.getSettings();
       if (settings.width === session.width && settings.height === session.height) {
         ready = true;
+        attempt.settingsReadyMs = attemptElapsed(); attempt.phase = 'settings-ready';
         if (deadline !== undefined) clearTimeout(deadline);
         if (settingsPoll !== undefined) clearTimeout(settingsPoll);
         settingsPoll = undefined;
@@ -187,7 +286,7 @@ export async function tryNativeScreenCapture(
         }, SETTINGS_POLL_MS);
       }
     } catch {
-      stop(true);
+      stop(true, 'frame_error');
     }
   }
 
@@ -195,61 +294,58 @@ export async function tryNativeScreenCapture(
     stream,
     commit() {
       if (stopped || !ready || track.readyState !== 'live') return;
-      if (!current()) { stop(); return; }
+      if (!current()) { stop(false, currentStopReason); return; }
       committed = true;
+      if (attempt.committedMs === null) attempt.committedMs = attemptElapsed();
+      attempt.phase = 'committed';
       options.signal.removeEventListener('abort', onCancelled);
       stockTrack.removeEventListener('ended', onCancelled);
     },
     stop() { stop(); },
   };
   async function onFrame(frame: VideoFrame, metadata: NativeScreenFrame): Promise<void> {
-    let ownsWrite = false;
     try {
       if (stopped) return;
-      if (!current()) { stop(); return; }
+      if (attempt.firstFrameMs === null) attempt.firstFrameMs = attemptElapsed();
+      if (!current()) { stop(false, currentStopReason); return; }
       // The start response establishes the only accepted session; never buffer early frames.
       if (!session || metadata.requestId !== requestId || metadata.sessionId !== session.sessionId) return;
       if (!Number.isInteger(metadata.slot) || metadata.slot < 0 || metadata.slot >= POOL_SIZE ||
           !Number.isSafeInteger(metadata.serial) || metadata.serial <= lastSerial ||
           !Number.isSafeInteger(metadata.timestamp) || metadata.timestamp < 0 || metadata.timestamp < lastTimestamp ||
           typeof metadata.refresh !== 'boolean') return;
-      if (metadata.width !== session.width || metadata.height !== session.height ||
+      const pixelFormat = session.pixelFormat ?? 'bgra';
+      const formatMatches = (metadata.pixelFormat ?? 'bgra') === pixelFormat && metadata.storage === session.storage &&
+        (pixelFormat !== 'nv12' || (frame.format === 'NV12' && frame.colorSpace.primaries === 'bt709' &&
+          frame.colorSpace.transfer === 'bt709' && frame.colorSpace.matrix === 'bt709' && frame.colorSpace.fullRange === false));
+      if (!formatMatches || metadata.width !== session.width || metadata.height !== session.height ||
           frame.displayWidth !== session.width || frame.displayHeight !== session.height ||
           frame.timestamp !== metadata.timestamp) {
         console.warn('[native-screen] frame_metadata_error', {
           width: frame.displayWidth, height: frame.displayHeight, timestampMatches: frame.timestamp === metadata.timestamp,
           expectedWidth: session.width, expectedHeight: session.height,
+          formatMatches,
         });
-        stop(true); return;
+        stop(true, 'frame_error'); return;
       }
       lastSerial = metadata.serial;
       lastTimestamp = metadata.timestamp;
       diagnostics.framesReceived++;
       if (metadata.refresh) diagnostics.refreshFrames++;
-      // There is at most one retained callback/write, regardless of the producer cadence.
-      if (writing) { diagnostics.framesDroppedWhileBusy++; return; }
-      writing = true;
-      ownsWrite = true;
-      const writeStartedAt = performance.now();
-      const write = writer.write(frame);
-      void write.then(() => {
-        const writeMs = performance.now() - writeStartedAt;
-        diagnostics.framesWritten++;
-        diagnostics.totalWriteMs += writeMs;
-        diagnostics.maxWriteMs = Math.max(diagnostics.maxWriteMs, writeMs);
-      }, () => {});
-      await Promise.race([write, cancelled]);
+      // Retain only the latest pending frame while one conversion/write runs.
+      // The callback stays pending until written, superseded or cancelled, so
+      // preload and allReferencesReleased still own the actual GPU slot credit.
+      if (await writeQueue.submit(frame) !== 'written') return;
       if (stopped) return;
-      if (!current()) { stop(); return; }
-      if (track.readyState !== 'live') { stop(true); return; }
+      if (!current()) { stop(false, currentStopReason); return; }
+      if (track.readyState !== 'live') { stop(true, 'native_ended'); return; }
       // Metadata and actual frame geometry stay checked above on every frame.
       // Settings may lag; they are only a prerequisite for initial readiness.
       if (!ready) checkFirstFrameSettings();
     } catch (error) {
       console.warn('[native-screen] frame_write_error', error instanceof Error ? error.name : 'unknown');
-      stop(true);
+      stop(true, 'frame_error');
     } finally {
-      if (ownsWrite) writing = false;
       try { frame.close(); } catch { /* Always settle the preload's frame-release barrier. */ }
     }
   }
@@ -257,26 +353,44 @@ export async function tryNativeScreenCapture(
   try {
     // Existing publisher stop paths must also release the helper and writer.
     track.stop = () => stop();
-    deadline = setTimeout(() => stop(), START_TIMEOUT_MS);
+    deadline = setTimeout(() => stop(false, 'deadline_timeout'), START_TIMEOUT_MS);
     options.signal.addEventListener('abort', onCancelled, { once: true });
     stockTrack.addEventListener('ended', onCancelled, { once: true });
     track.addEventListener('ended', onTrackEnded, { once: true });
     unsubscribeFrame = bridge.onFrame(requestId, onFrame);
     if (stopped) unsubscribeFrame();
-    unsubscribeEnded = bridge.onEnded(requestId, () => stop(true));
+    unsubscribeEnded = bridge.onEnded(requestId, () => stop(true, 'native_ended'));
     if (stopped) unsubscribeEnded();
-    if (stopped || !current()) { stop(); return outcome; }
+    if (stopped || !current()) { stop(false, currentStopReason); return outcome; }
     startIssued = true;
+    attempt.bridgeStartMs = attemptElapsed();
     void bridge.start(requestId, { maxWidth: options.maxWidth, maxHeight: options.maxHeight, fps: options.fps }).then((result) => {
+      attempt.helperResponseMs = attemptElapsed();
+      attempt.helperResponseDurationMs = Math.max(0, attempt.helperResponseMs - attempt.bridgeStartMs!);
+      attempt.helperResponseOk = result.ok === true;
       // A helper may finish starting after the cancellation IPC. Retire that late session too.
       if (stopped) { if (result.ok) stopBridge(); return; }
-      if (!current()) { stop(); return; }
+      if (!current()) { stop(false, currentStopReason); return; }
       if (!result.ok || typeof result.sessionId !== 'string' || !result.sessionId ||
-          !validDimensions(result.width, result.height, options)) { stop(); return; }
+          (result.pixelFormat !== undefined && result.pixelFormat !== 'bgra' && result.pixelFormat !== 'nv12') ||
+          (result.storage !== undefined && (result.storage !== 'cpu' || result.pixelFormat !== 'nv12')) ||
+          !validDimensions(result.width, result.height, options)) {
+        stop(false, result.ok ? 'invalid_start_result' : 'start_rejected'); return;
+      }
       session = result;
-    }).catch(() => stop());
+      attempt.phase = 'helper-ready';
+      diagnostics.pixelFormat = result.pixelFormat ?? 'bgra';
+      diagnostics.frameStorage = result.storage ?? 'gpu';
+    }).catch(() => {
+      if (attempt.helperResponseMs === null) {
+        attempt.helperResponseMs = attemptElapsed();
+        attempt.helperResponseDurationMs = Math.max(0, attempt.helperResponseMs - attempt.bridgeStartMs!);
+      }
+      if (attempt.helperResponseOk === null) attempt.helperResponseOk = false;
+      stop(false, 'start_error');
+    });
   } catch {
-    stop();
+    stop(false, 'setup_error');
   }
   return outcome;
 }

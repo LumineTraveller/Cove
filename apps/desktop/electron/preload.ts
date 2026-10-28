@@ -16,16 +16,28 @@ const nativeRequestId = (value: unknown): value is string => typeof value === 's
 const nativeEnabled = process.platform === 'win32' && process.argv.includes('--cove-native-gpu-capture=1') &&
   typeof sharedTexture?.setSharedTextureReceiver === 'function';
 const nativePermitKey = (metadata: NativeScreenFrame) => `${metadata.sessionId}:${metadata.serial}`;
+// The intrinsic getter checks the ArrayBuffer internal slot across realms. A
+// byteLength property or Symbol.toStringTag on an arbitrary object is not enough.
+const nativeArrayBufferByteLength = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'byteLength')!.get!;
+type NativeCpuVideoFrame = { close(): void };
+type NativeCpuVideoFrameConstructor = new (data: ArrayBuffer, init: {
+  format: 'NV12'; codedWidth: number; codedHeight: number; displayWidth: number; displayHeight: number; timestamp: number;
+  layout: { offset: number; stride: number }[];
+  colorSpace: { primaries: 'bt709'; transfer: 'bt709'; matrix: 'bt709'; fullRange: false };
+  transfer: ArrayBuffer[];
+}) => NativeCpuVideoFrame;
 const nativeFrameValid = (value: NativeScreenFrame): boolean => Boolean(value && nativeRequestId(value.requestId) &&
   typeof value.sessionId === 'string' && /^[A-Za-z0-9-]{8,80}$/.test(value.sessionId) &&
   Number.isSafeInteger(value.serial) && value.serial > 0 && Number.isInteger(value.slot) && value.slot >= 0 && value.slot < 3 &&
   Number.isInteger(value.width) && value.width >= 2 && value.width <= 4096 &&
   Number.isInteger(value.height) && value.height >= 2 && value.height <= 2560 &&
-  Number.isSafeInteger(value.timestamp) && value.timestamp >= 0 && typeof value.refresh === 'boolean');
+  Number.isSafeInteger(value.timestamp) && value.timestamp >= 0 && typeof value.refresh === 'boolean' &&
+  (value.pixelFormat === undefined || value.pixelFormat === 'bgra' || value.pixelFormat === 'nv12') &&
+  (value.storage === undefined || value.storage === 'cpu'));
 
 if (nativeEnabled) {
   ipcRenderer.on('cove:native-screen:release-permit', (_event, metadata: NativeScreenFrame) => {
-    if (!nativeFrameValid(metadata)) return;
+    if (!nativeFrameValid(metadata) || metadata.storage !== undefined) return;
     const key = nativePermitKey(metadata);
     const release = nativeReleasePermits.get(key);
     if (release) { nativeReleasePermits.delete(key); release(); }
@@ -35,11 +47,57 @@ if (nativeEnabled) {
     if (!event || !nativeRequestId(event.requestId) || typeof event.reason !== 'string') return;
     nativeEndListeners.get(event.requestId)?.(event.reason);
   });
+  ipcRenderer.on('cove:native-screen:cpu-frame', async (_event, metadata: NativeScreenFrame, data: ArrayBuffer) => {
+    if (!nativeFrameValid(metadata) || metadata.storage !== 'cpu' || metadata.pixelFormat !== 'nv12' ||
+        metadata.width % 2 !== 0 || metadata.height % 2 !== 0) {
+      if (nativeRequestId(metadata?.requestId)) {
+        void ipcRenderer.invoke('cove:native-screen:stop', metadata.requestId, 'receiver_failed').catch(() => {});
+      }
+      return;
+    }
+    let frame: NativeCpuVideoFrame | undefined;
+    let failed = false;
+    const stopReceiver = () => {
+      if (failed) return;
+      failed = true;
+      void ipcRenderer.invoke('cove:native-screen:stop', metadata.requestId, 'receiver_failed').catch(() => {});
+    };
+    try {
+      const expectedBytes = metadata.width * metadata.height * 3 / 2;
+      if (expectedBytes > 16 * 1024 * 1024 || nativeArrayBufferByteLength.call(data) !== expectedBytes) {
+        throw new TypeError('invalid_native_cpu_frame_bytes');
+      }
+      const listener = nativeFrameListeners.get(metadata.requestId);
+      if (listener) {
+        const CpuVideoFrame = (globalThis as { VideoFrame?: NativeCpuVideoFrameConstructor }).VideoFrame;
+        if (typeof CpuVideoFrame !== 'function') throw new TypeError('native_cpu_video_frame_unavailable');
+        frame = new CpuVideoFrame(data, {
+          format: 'NV12', codedWidth: metadata.width, codedHeight: metadata.height,
+          displayWidth: metadata.width, displayHeight: metadata.height, timestamp: metadata.timestamp,
+          layout: [{ offset: 0, stride: metadata.width }, { offset: metadata.width * metadata.height, stride: metadata.width }],
+          colorSpace: { primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', fullRange: false },
+          // Implementations may consume the ArrayBuffer; correctness also holds
+          // when the constructor copies it and ignores this transfer hint.
+          transfer: [data],
+        });
+        await listener(frame, metadata);
+      }
+    } catch (error) {
+      console.warn('[native-screen] renderer_cpu_frame_error', error instanceof Error ? error.name : 'unknown');
+      stopReceiver();
+    } finally {
+      try { frame?.close(); }
+      catch { stopReceiver(); }
+      // Main owns the slot bytes independently. Only this CPU acknowledgment
+      // returns that credit; it never participates in GPU release permits.
+      ipcRenderer.send('cove:native-screen:cpu-frame-done', metadata);
+    }
+  });
   sharedTexture.setSharedTextureReceiver(async ({ importedSharedTexture: imported }, metadata: NativeScreenFrame) => {
     let frame: ReturnType<typeof imported.getVideoFrame> | undefined;
     // A malformed message is never sent by the main broker. Retire the import
     // without issuing a slot credit rather than trusting unvalidated metadata.
-    if (!nativeFrameValid(metadata)) { imported.release(); return; }
+    if (!nativeFrameValid(metadata) || metadata.storage !== undefined) { imported.release(); return; }
     const key = nativePermitKey(metadata);
     let permitTimer: ReturnType<typeof setTimeout> | undefined;
     let timedOut = false;

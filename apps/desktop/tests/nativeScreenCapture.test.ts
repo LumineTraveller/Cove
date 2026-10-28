@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   tryNativeScreenCapture,
   getNativeScreenCaptureDiagnostics,
+  getLastNativeScreenCaptureAttempt,
   type NativeScreenBridge,
   type NativeScreenCaptureOptions,
 } from '../src/features/media/screen/nativeScreenCapture';
@@ -141,6 +142,8 @@ function fixture(context: TestContext) {
     flush, metadata, frame, ready,
     get aborts() { return aborts; }, get releases() { return releases; },
     get requestId() { return requestId; },
+    get frameCallback() { return lastFrame; },
+    get endedCallback() { return lastEnded; },
     setCurrent(value: boolean) { current = value; },
     setStart(value: () => Promise<NativeScreenStartResult>) { startImplementation = value; },
     setResult(value: NativeScreenStartResult) { result = value; },
@@ -196,6 +199,50 @@ test('first written frame yields a live hinted candidate and commit never stops 
   assert.deepEqual(f.stopRequests, [f.requestId]);
   assert.deepEqual(f.stopFaults, [undefined]);
   assert.deepEqual(f.stopArgumentCounts, [1], 'normal stop omits the fault argument');
+});
+
+test('NV12 candidate preserves explicit limited BT709 frame metadata and uses the same bounded writer', async context => {
+  const f = fixture(context);
+  f.setResult({ ok: true, sessionId: 'session-1', width: 1920, height: 1080, pixelFormat: 'nv12' });
+  const pending = tryNativeScreenCapture(f.stream, f.options); await f.flush();
+  const frame = Object.assign(new FakeFrame(), { format: 'NV12', colorSpace: {
+    primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', fullRange: false,
+  } });
+  await f.frame({ pixelFormat: 'nv12' }, frame);
+  const candidate = await pending; assert.ok(candidate); candidate.commit();
+  assert.equal(frame.closes, 1); assert.equal(f.writes.length, 1);
+  assert.equal(getNativeScreenCaptureDiagnostics(candidate.stream.getVideoTracks()[0])?.pixelFormat, 'nv12');
+  candidate.stop(); assert.equal(f.stock.stops, 0);
+});
+
+test('CPU NV12 delivery stays on the existing producer candidate contract and declares its storage', async context => {
+  const f = fixture(context);
+  f.setResult({ ok: true, sessionId: 'session-1', width: 1920, height: 1080, pixelFormat: 'nv12', storage: 'cpu' });
+  const pending = tryNativeScreenCapture(f.stream, f.options); await f.flush();
+  const frame = Object.assign(new FakeFrame(), { format: 'NV12', colorSpace: {
+    primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', fullRange: false,
+  } });
+  await f.frame({ pixelFormat: 'nv12', storage: 'cpu' }, frame);
+  const candidate = await pending; assert.ok(candidate); candidate.commit();
+  assert.equal(frame.closes, 1); assert.equal(f.writes.length, 1);
+  assert.equal(getNativeScreenCaptureDiagnostics(candidate.stream.getVideoTracks()[0])?.frameStorage, 'cpu');
+  candidate.stop(); assert.equal(f.stock.stops, 0);
+});
+
+test('negotiated NV12 rejects missing format, wrong planes or changed color metadata before writing', async context => {
+  for (const invalid of ['missing-metadata', 'wrong-format', 'wrong-matrix', 'full-range']) {
+    await context.test(invalid, async subcontext => {
+      const f = fixture(subcontext);
+      f.setResult({ ok: true, sessionId: 'session-1', width: 1920, height: 1080, pixelFormat: 'nv12' });
+      const pending = tryNativeScreenCapture(f.stream, f.options); await f.flush();
+      const value = Object.assign(new FakeFrame(), { format: invalid === 'wrong-format' ? 'BGRA' : 'NV12',
+        colorSpace: { primaries: 'bt709', transfer: 'bt709', matrix: invalid === 'wrong-matrix' ? 'bt601' : 'bt709',
+          fullRange: invalid === 'full-range' } });
+      await f.frame(invalid === 'missing-metadata' ? {} : { pixelFormat: 'nv12' }, value);
+      assert.equal(await pending, null); assert.equal(value.closes, 1); assert.equal(f.writes.length, 0);
+      assert.deepEqual(f.stopFaults, ['renderer_failed']); assert.equal(f.stock.stops, 0);
+    });
+  }
 });
 
 test('startup failure, rejected first write and invalid generated settings preserve stock', async (context) => {
@@ -258,7 +305,7 @@ test('first write may resolve before settings; startup polls real settings witho
 });
 
 test('settings polls share the original deadline and cannot revive a cancelled startup', async (context) => {
-  for (const reason of ['abort', 'stock', 'stop', 'timeout', 'superseded']) {
+  for (const reason of ['abort', 'stock', 'stop', 'timeout', 'superseded'] as const) {
     await context.test(reason, async (subcontext) => {
       subcontext.mock.timers.enable({ apis: ['setTimeout'] });
       const pendingTimers = new Set<ReturnType<typeof setTimeout>>();
@@ -285,6 +332,9 @@ test('settings polls share the original deadline and cannot revive a cancelled s
       if (reason === 'superseded') { f.setCurrent(false); subcontext.mock.timers.tick(5); }
       if (reason === 'timeout') subcontext.mock.timers.tick(1_500);
       assert.equal(await pending, null);
+      assert.equal(getLastNativeScreenCaptureAttempt()?.stopReason, {
+        abort: 'abort', stock: 'stock_ended', stop: 'normal_stop', timeout: 'deadline_timeout', superseded: 'not_current',
+      }[reason]);
       assert.equal(pendingTimers.size, 0, 'stop cancels both the settings poll and the original deadline');
       f.native[0].settings = { width: 1920, height: 1080 };
       // Advancing beyond every cancelled poll must not restart or commit it.
@@ -316,20 +366,31 @@ test('a late first write gets only the remainder of the original readiness deadl
 
 test('the total 1500ms deadline also bounds an unresolved start and retires late success', async (context) => {
   context.mock.timers.enable({ apis: ['setTimeout'] });
+  let now = 0;
+  replaceGlobal(context, 'performance', { now: () => now });
   const f = fixture(context);
   const start = deferred<NativeScreenStartResult>();
   f.setStart(() => start.promise);
   const pending = tryNativeScreenCapture(f.stream, f.options);
   let resolved = false;
   void pending.then(() => { resolved = true; });
-  context.mock.timers.tick(1_499);
+  now = 1_499; context.mock.timers.tick(1_499);
   await f.flush();
   assert.equal(resolved, false);
-  context.mock.timers.tick(1);
+  now = 1_500; context.mock.timers.tick(1);
   assert.equal(await pending, null);
+  const timedOut = getLastNativeScreenCaptureAttempt()!;
+  assert.equal(timedOut.phase, 'stopped'); assert.equal(timedOut.stopReason, 'deadline_timeout');
+  assert.equal(timedOut.elapsedMs, 1_500); assert.equal(timedOut.helperResponseMs, null);
   assert.equal(f.stopRequests.length, 1);
+  now = 1_575;
   start.resolve({ ok: true, sessionId: 'late-session', width: 1920, height: 1080 });
   await f.flush();
+  const lateResponse = getLastNativeScreenCaptureAttempt()!;
+  assert.equal(lateResponse.phase, 'stopped'); assert.equal(lateResponse.stopReason, 'deadline_timeout');
+  assert.equal(lateResponse.elapsedMs, 1_500); assert.equal(lateResponse.helperResponseMs, 1_575);
+  assert.equal(lateResponse.helperResponseDurationMs, 1_575); assert.equal(lateResponse.helperResponseOk, true);
+  assert.equal(timedOut.helperResponseMs, null, 'earlier snapshots never change when late IPC results arrive');
   assert.deepEqual(f.stopRequests, [f.requestId, f.requestId]);
   assert.deepEqual(f.stopFaults, [undefined, undefined], 'timeout and late start cleanup are ordinary cancellation');
   const late = await f.frame({}, new FakeFrame(), true);
@@ -469,7 +530,8 @@ test('an unexpected committed track ending reports a renderer fault exactly once
   assert.deepEqual(f.stopArgumentCounts, [2]);
 });
 
-test('concurrent frames are dropped while a single write is pending and all frame callbacks close', async (context) => {
+test('a frame storm retains only one active and the latest pending frame, then drains without waiting for another capture', async (context) => {
+  replaceGlobal(context, 'performance', { now: () => 0 });
   const f = fixture(context);
   const { candidate } = await f.ready();
   const write = deferred<void>();
@@ -477,22 +539,54 @@ test('concurrent frames are dropped while a single write is pending and all fram
   const first = Object.assign(new FakeFrame(), { timestamp: 2_000 });
   const pending = f.frame({ serial: 2, timestamp: 2_000 }, first);
   await f.flush();
+  const queued: { value: FakeFrame; completed: Promise<FakeFrame> }[] = [];
   for (let serial = 3; serial < 100; serial++) {
     const value = Object.assign(new FakeFrame(), { timestamp: serial * 1_000 });
-    await f.frame({ serial, timestamp: value.timestamp, slot: serial % 3 }, value);
-    assert.equal(value.closes, 1);
+    queued.push({ value, completed: f.frame({ serial, timestamp: value.timestamp, slot: serial % 3 }, value) });
+    await f.flush();
+    assert.equal(value.closes, 0, 'latest pending frame remains owned until written or replaced');
+    if (queued.length > 1) assert.equal(queued.at(-2)!.value.closes, 1);
   }
-  assert.equal(f.writes.length, 2, 'one initial and one in-flight write, with no queued writes');
+  assert.equal(f.writes.length, 2, 'one initial and one active write; pending frames never enter the writable queue');
   const busyDiagnostics = getNativeScreenCaptureDiagnostics(candidate.stream.getVideoTracks()[0]);
   assert.equal(busyDiagnostics?.framesReceived, 99);
   assert.equal(busyDiagnostics?.framesWritten, 1);
-  assert.equal(busyDiagnostics?.framesDroppedWhileBusy, 97);
+  assert.equal(busyDiagnostics?.framesDroppedWhileBusy, 96);
   assert.equal(first.closes, 0);
   write.resolve();
-  await pending;
+  await Promise.all([pending, ...queued.map(entry => entry.completed)]);
   assert.equal(first.closes, 1);
-  assert.equal(getNativeScreenCaptureDiagnostics(candidate.stream.getVideoTracks()[0])?.framesWritten, 2);
+  assert.equal(f.writes.length, 3);
+  assert.equal(f.writes[2], queued.at(-1)!.value);
+  assert.ok(queued.every(entry => entry.value.closes === 1));
+  assert.equal(getNativeScreenCaptureDiagnostics(candidate.stream.getVideoTracks()[0])?.framesWritten, 3);
   candidate.stop();
+});
+
+test('stopping sharing closes active and pending callback frames and a late write cannot publish the pending frame', async context => {
+  const f = fixture(context); const { candidate } = await f.ready(); candidate.commit();
+  const write = deferred<void>(); f.setWrite(() => write.promise);
+  const active = Object.assign(new FakeFrame(), { timestamp: 2_000 });
+  const pending = Object.assign(new FakeFrame(), { timestamp: 3_000 });
+  const callbacks = [f.frame({ serial: 2, timestamp: 2_000 }, active), f.frame({ serial: 3, timestamp: 3_000, slot: 1 }, pending)];
+  await f.flush(); assert.equal(f.writes.length, 2);
+  candidate.stop(); await Promise.all(callbacks);
+  assert.equal(active.closes, 1); assert.equal(pending.closes, 1);
+  write.resolve(); await f.flush();
+  assert.equal(f.writes.length, 2); assert.deepEqual(f.stopFaults, [undefined]);
+});
+
+test('one failed active write retires pending frames and emits one committed sharing fault', async context => {
+  const f = fixture(context); const { candidate } = await f.ready(); candidate.commit();
+  const write = deferred<void>(); f.setWrite(() => write.promise);
+  const active = Object.assign(new FakeFrame(), { timestamp: 2_000 });
+  const pending = Object.assign(new FakeFrame(), { timestamp: 3_000 });
+  let ended = 0; candidate.stream.getVideoTracks()[0].addEventListener('ended', () => ended++);
+  const callbacks = [f.frame({ serial: 2, timestamp: 2_000 }, active), f.frame({ serial: 3, timestamp: 3_000, slot: 1 }, pending)];
+  await f.flush(); write.reject(new Error('conversion failed')); await Promise.all(callbacks);
+  assert.equal(active.closes, 1); assert.equal(pending.closes, 1);
+  assert.equal(f.writes.length, 2); assert.equal(ended, 1);
+  assert.deepEqual(f.stopFaults, ['renderer_failed']); candidate.stop();
 });
 
 test('diagnostics count validated frames and successful write time, returning detached snapshots', async (context) => {
@@ -503,8 +597,10 @@ test('diagnostics count validated frames and successful write time, returning de
   const track = candidate.stream.getVideoTracks()[0];
   assert.equal(getNativeScreenCaptureDiagnostics(f.stock as unknown as MediaStreamTrack), null);
   assert.deepEqual(getNativeScreenCaptureDiagnostics(track), {
-    backend: 'native-gpu', framesReceived: 1, refreshFrames: 0, framesWritten: 1,
+    backend: 'native-gpu', pixelFormat: 'bgra', frameStorage: 'gpu', framesReceived: 1, refreshFrames: 0, framesWritten: 1,
     framesDroppedWhileBusy: 0, totalWriteMs: 0, maxWriteMs: 0,
+    framesDroppedExpired: 0, totalQueueAgeMs: 0, maxQueueAgeMs: 0,
+    totalWriteIdleMs: 0, maxWriteIdleMs: 0, writesOverFramePeriod: 0,
   });
   f.setWrite(async () => { now += 7.5; });
   await f.frame({ serial: 2, timestamp: 2_000, refresh: true }, Object.assign(new FakeFrame(), { timestamp: 2_000 }));
@@ -514,8 +610,10 @@ test('diagnostics count validated frames and successful write time, returning de
   await f.frame({ serial: 4, slot: 3 });
   const snapshot = getNativeScreenCaptureDiagnostics(track)!;
   assert.deepEqual(snapshot, {
-    backend: 'native-gpu', framesReceived: 3, refreshFrames: 1, framesWritten: 3,
+    backend: 'native-gpu', pixelFormat: 'bgra', frameStorage: 'gpu', framesReceived: 3, refreshFrames: 1, framesWritten: 3,
     framesDroppedWhileBusy: 0, totalWriteMs: 19.5, maxWriteMs: 12,
+    framesDroppedExpired: 0, totalQueueAgeMs: 0, maxQueueAgeMs: 0,
+    totalWriteIdleMs: 0, maxWriteIdleMs: 0, writesOverFramePeriod: 1,
   });
   snapshot.framesReceived = 10_000;
   snapshot.totalWriteMs = -1;
@@ -570,4 +668,79 @@ test('changed frame geometry safely retires the native session', async (context)
   assert.equal(f.stock.stops, 0);
   assert.deepEqual(f.stopFaults, ['renderer_failed']);
   assert.deepEqual(f.stopArgumentCounts, [2]);
+});
+
+test('startup attempt snapshots retain stage times without exposing identifiers or mutable state', async context => {
+  let now = 10;
+  replaceGlobal(context, 'performance', { now: () => now });
+  const f = fixture(context);
+  const start = deferred<NativeScreenStartResult>(); f.setStart(() => start.promise);
+  const pending = tryNativeScreenCapture(f.stream, f.options);
+  const starting = getLastNativeScreenCaptureAttempt()!;
+  assert.equal(starting.phase, 'starting'); assert.equal(starting.bridgeStartMs, 0);
+  assert.equal(starting.helperResponseMs, null); assert.equal(starting.stopReason, null);
+  assert.ok(Object.isFrozen(starting));
+  assert.throws(() => Object.assign(starting, { phase: 'stopped' }), TypeError);
+  assert.deepEqual(Object.keys(starting).sort(), [
+    'phase', 'elapsedMs', 'bridgeStartMs', 'helperResponseMs', 'helperResponseDurationMs', 'helperResponseOk',
+    'firstFrameMs', 'firstWriteMs', 'settingsReadyMs', 'committedMs', 'stoppedMs', 'stopReason',
+  ].sort(), 'only fixed stage metadata is exposed');
+  now = 40; start.resolve({ ok: true, sessionId: 'session-1', width: 1920, height: 1080 });
+  await f.flush();
+  const helperReady = getLastNativeScreenCaptureAttempt()!;
+  assert.equal(helperReady.phase, 'helper-ready'); assert.equal(helperReady.helperResponseMs, 30);
+  assert.equal(helperReady.helperResponseDurationMs, 30); assert.equal(helperReady.helperResponseOk, true);
+  assert.equal(starting.phase, 'starting'); assert.equal(starting.helperResponseMs, null);
+  const write = deferred<void>(); f.setWrite(() => write.promise);
+  now = 50; const frame = f.frame(); await f.flush();
+  assert.equal(getLastNativeScreenCaptureAttempt()?.firstFrameMs, 40);
+  assert.equal(getLastNativeScreenCaptureAttempt()?.firstWriteMs, null);
+  now = 55; write.resolve(); await frame;
+  const candidate = await pending; assert.ok(candidate);
+  const ready = getLastNativeScreenCaptureAttempt()!;
+  assert.equal(ready.phase, 'settings-ready'); assert.equal(ready.firstWriteMs, 45);
+  assert.equal(ready.settingsReadyMs, 45);
+  now = 60; candidate.commit();
+  assert.equal(getLastNativeScreenCaptureAttempt()?.phase, 'committed');
+  assert.equal(getLastNativeScreenCaptureAttempt()?.committedMs, 50);
+  now = 70; candidate.stop();
+  const stopped = getLastNativeScreenCaptureAttempt()!;
+  assert.equal(stopped.phase, 'stopped'); assert.equal(stopped.stopReason, 'normal_stop');
+  assert.equal(stopped.stoppedMs, 60); assert.equal(stopped.elapsedMs, 60);
+  now = 100;
+  assert.deepEqual(getLastNativeScreenCaptureAttempt(), stopped, 'the terminal elapsed time remains fixed');
+  assert.equal(ready.phase, 'settings-ready'); assert.equal(helperReady.firstFrameMs, null);
+});
+
+test('late responses, frames and ended callbacks from a predecessor cannot overwrite the current attempt', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  let now = 0;
+  replaceGlobal(context, 'performance', { now: () => now });
+  const f = fixture(context);
+  const oldStart = deferred<NativeScreenStartResult>(); f.setStart(() => oldStart.promise);
+  const oldPending = tryNativeScreenCapture(f.stream, f.options);
+  const oldFrameCallback = f.frameCallback!; const oldEndedCallback = f.endedCallback!;
+  const oldMetadata = f.metadata();
+  now = 1_500; context.mock.timers.tick(1_500);
+  assert.equal(await oldPending, null);
+  const oldSnapshot = getLastNativeScreenCaptureAttempt()!;
+  assert.equal(oldSnapshot.stopReason, 'deadline_timeout');
+  const newStart = deferred<NativeScreenStartResult>(); f.setStart(() => newStart.promise);
+  now = 1_505; const newPending = tryNativeScreenCapture(f.stream, f.options);
+  now = 1_510;
+  oldStart.resolve({ ok: true, sessionId: 'session-1', width: 1920, height: 1080 });
+  await f.flush();
+  const oldFrame = new FakeFrame();
+  await oldFrameCallback(oldFrame as unknown as VideoFrame, oldMetadata); oldEndedCallback('device-lost');
+  assert.equal(oldFrame.closes, 1);
+  const current = getLastNativeScreenCaptureAttempt()!;
+  assert.equal(current.phase, 'starting'); assert.equal(current.elapsedMs, 5);
+  assert.equal(current.helperResponseMs, null); assert.equal(current.firstFrameMs, null);
+  assert.equal(current.stopReason, null); assert.equal(oldSnapshot.helperResponseMs, null);
+  now = 1_600; newStart.resolve({ ok: true, sessionId: 'session-1', width: 1920, height: 1080 });
+  await f.flush(); await f.frame();
+  const candidate = await newPending; assert.ok(candidate);
+  assert.equal(getLastNativeScreenCaptureAttempt()?.helperResponseMs, 95);
+  assert.equal(getLastNativeScreenCaptureAttempt()?.phase, 'settings-ready');
+  candidate.stop();
 });

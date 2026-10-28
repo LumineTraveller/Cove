@@ -1,0 +1,397 @@
+import test, { type TestContext } from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  createNativeCpuFrameDelivery,
+  type NativeCpuFrameDeliveryOptions,
+  type NativeCpuFrameFailure,
+  type NativeCpuFrameTimingStage,
+  type NativeCpuScreenFrame,
+} from '../electron/native-screen-cpu-delivery';
+
+interface Timer { due: number; callback(): void; unref(): void; }
+
+function fixture(context: TestContext) {
+  let time = 0;
+  let unrefs = 0;
+  const timers = new Map<Timer, Timer>();
+  const allTimers: Timer[] = [];
+  context.mock.method(globalThis, 'setTimeout', ((callback: () => void, delay: number) => {
+    const timer: Timer = { due: time + delay, callback, unref() { unrefs++; } };
+    timers.set(timer, timer); allTimers.push(timer); return timer;
+  }) as unknown as typeof setTimeout);
+  context.mock.method(globalThis, 'clearTimeout', ((timer: Timer) => { timers.delete(timer); }) as unknown as typeof clearTimeout);
+  const source = Buffer.from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+  const handle = Buffer.alloc(8, 1);
+  const events: string[] = [];
+  const reads: { handle: Buffer; expectedBytes: number }[] = [];
+  const imported: NativeCpuScreenFrame[] = [];
+  const sent: { metadata: NativeCpuScreenFrame; data: ArrayBuffer }[] = [];
+  const credits: NativeCpuScreenFrame[] = [];
+  const failures: NativeCpuFrameFailure[] = [];
+  const timings: { stage: NativeCpuFrameTimingStage; durationMs: number }[] = [];
+  const hooks = {
+    read: (_handle: Buffer, _expectedBytes: number, _metadata: NativeCpuScreenFrame): ArrayBuffer => Uint8Array.from(source).buffer,
+    imported: (_metadata: NativeCpuScreenFrame): boolean => true,
+    send: (_metadata: NativeCpuScreenFrame, _data: ArrayBuffer): void => {},
+    released: (_metadata: NativeCpuScreenFrame): boolean => true,
+    timing: (_stage: NativeCpuFrameTimingStage, _durationMs: number): void => {},
+  };
+  const options: NativeCpuFrameDeliveryOptions = {
+    requestId: 'request-1', sessionId: 'session-1', width: 4, height: 2,
+    now: () => time,
+    readFrame(value, expectedBytes, metadata) {
+      events.push('read'); reads.push({ handle: value, expectedBytes });
+      return hooks.read(value, expectedBytes, metadata);
+    },
+    onImported(metadata) { events.push('imported'); imported.push(metadata); return hooks.imported(metadata); },
+    send(metadata, data) { events.push('send'); sent.push({ metadata, data }); hooks.send(metadata, data); },
+    onReleased(metadata) { events.push('released'); credits.push(metadata); return hooks.released(metadata); },
+    onFailure(code) { events.push(code); failures.push(code); },
+    onTiming(stage, durationMs) { timings.push({ stage, durationMs }); hooks.timing(stage, durationMs); },
+  };
+  const delivery = createNativeCpuFrameDelivery(options);
+  context.after(() => delivery.stop());
+  const frame = (patch: Partial<NativeCpuScreenFrame> = {}): NativeCpuScreenFrame => ({
+    requestId: 'request-1', sessionId: 'session-1', slot: 0, serial: 1,
+    width: 4, height: 2, timestamp: 1_000, refresh: false, pixelFormat: 'nv12', storage: 'cpu', ...patch,
+  });
+  return { delivery, options, frame, hooks, source, handle, events, reads, imported, sent, credits,
+    failures, timings, timers, allTimers, get unrefs() { return unrefs; },
+    at(value: number) { time = value; },
+    advance(milliseconds: number) {
+      const until = time + milliseconds;
+      while (true) {
+        const next = [...timers.values()].filter(timer => timer.due <= until).sort((a, b) => a.due - b.due)[0];
+        if (!next) break;
+        time = next.due; timers.delete(next); next.callback();
+      }
+      time = until;
+    },
+  };
+}
+
+test('an independent exact NV12 copy is imported before send and credited only after final ack', context => {
+  const f = fixture(context);
+  f.hooks.read = () => { f.at(2); return Uint8Array.from(f.source).buffer; };
+  f.hooks.imported = () => { f.at(3); return true; };
+  f.hooks.send = () => { f.at(6); };
+  const original = f.frame();
+  f.delivery.deliver(original, f.handle);
+  assert.deepEqual(f.events, ['read', 'imported', 'send']);
+  assert.deepEqual(f.reads, [{ handle: f.handle, expectedBytes: 12 }]);
+  assert.equal(f.unrefs, 1);
+  assert.equal(f.timers.size, 1);
+  assert.deepEqual(f.delivery.snapshot(), { inFlight: 1, stopped: false, frames: 1, released: 0, expectedBytes: 12 });
+  assert.equal(f.sent[0].data.byteLength, 12);
+  assert.deepEqual([...new Uint8Array(f.sent[0].data)], [...f.source]);
+  f.source.fill(99);
+  assert.equal(new Uint8Array(f.sent[0].data)[0], 1);
+  new Uint8Array(f.sent[0].data).fill(55);
+  assert.equal(f.source[0], 99);
+  original.serial = 100;
+  assert.equal(f.sent[0].metadata.serial, 1);
+  assert.equal(Object.isFrozen(f.sent[0].metadata), true);
+  f.at(10);
+  assert.equal(f.delivery.acknowledge(f.sent[0].metadata), true);
+  assert.equal(f.delivery.acknowledge(f.sent[0].metadata), false);
+  assert.equal(f.credits.length, 1);
+  assert.equal(f.timers.size, 0);
+  assert.deepEqual(f.timings, [
+    { stage: 'import', durationMs: 2 }, { stage: 'transfer', durationMs: 3 }, { stage: 'reference', durationMs: 10 },
+  ]);
+  assert.deepEqual(f.delivery.snapshot(), { inFlight: 0, stopped: false, frames: 1, released: 1, expectedBytes: 12 });
+});
+
+test('three slots stay bounded and an acknowledged slot can be reused with a newer serial', context => {
+  const f = fixture(context);
+  for (let slot = 0; slot < 3; slot++) f.delivery.deliver(f.frame({ slot, serial: slot + 1, timestamp: (slot + 1) * 1000 }), f.handle);
+  assert.equal(f.delivery.snapshot().inFlight, 3);
+  assert.equal(f.timers.size, 3);
+  assert.equal(f.delivery.acknowledge(f.sent[0].metadata), true);
+  f.delivery.deliver(f.frame({ serial: 4, timestamp: 4000 }), f.handle);
+  assert.equal(f.delivery.snapshot().inFlight, 3);
+  assert.equal(f.timers.size, 3);
+  f.delivery.deliver(f.frame({ serial: 5, timestamp: 5000 }), f.handle);
+  assert.deepEqual(f.failures, ['cpu_frame_failed']);
+  assert.equal(f.reads.length, 4);
+  assert.equal(f.delivery.snapshot().inFlight, 0);
+  assert.equal(f.timers.size, 0);
+  assert.equal(f.credits.length, 1);
+});
+
+test('the reader receives the exact validated lease metadata for each slot and reuse', context => {
+  const f = fixture(context);
+  const received: NativeCpuScreenFrame[] = [];
+  f.hooks.read = (handle, expectedBytes, metadata) => {
+    assert.equal(handle, f.handle);
+    assert.equal(expectedBytes, 12);
+    assert.equal(Object.isFrozen(metadata), true);
+    received.push(metadata);
+    return new ArrayBuffer(expectedBytes);
+  };
+  const first = f.frame({ slot: 2, serial: 14, timestamp: 2024, refresh: true });
+  const second = f.frame({ slot: 0, serial: 15, timestamp: 2030 });
+  f.delivery.deliver(first, f.handle);
+  f.delivery.deliver(second, f.handle);
+  assert.deepEqual(received, [first, second]);
+  assert.notEqual(received[0], first);
+  first.slot = 1; first.timestamp = 100;
+  assert.equal(received[0].slot, 2);
+  assert.equal(received[0].timestamp, 2024);
+  assert.equal(f.delivery.acknowledge(received[0]), true);
+  const reused = f.frame({ slot: 2, serial: 16, timestamp: 2036 });
+  f.delivery.deliver(reused, f.handle);
+  assert.deepEqual(received[2], reused);
+  for (let index = 0; index < received.length; index++) {
+    assert.equal(received[index], f.imported[index]);
+    assert.equal(received[index], f.sent[index].metadata);
+  }
+  assert.equal(f.delivery.acknowledge(received[1]), true);
+  assert.equal(f.delivery.acknowledge(received[2]), true);
+  assert.equal(f.delivery.snapshot().inFlight, 0);
+  assert.equal(f.timers.size, 0);
+  assert.deepEqual(f.failures, []);
+});
+
+test('an existing two-argument reader remains compatible', context => {
+  const f = fixture(context);
+  let reads = 0;
+  const delivery = createNativeCpuFrameDelivery({ ...f.options, readFrame(handle, expectedBytes) {
+    reads++;
+    assert.equal(handle, f.handle);
+    assert.equal(expectedBytes, 12);
+    return new ArrayBuffer(expectedBytes);
+  } });
+  context.after(() => delivery.stop());
+  delivery.deliver(f.frame(), f.handle);
+  assert.equal(reads, 1);
+  assert.equal(delivery.acknowledge(f.sent[0].metadata), true);
+  assert.equal(delivery.snapshot().inFlight, 0);
+  assert.equal(f.timers.size, 0);
+  assert.deepEqual(f.failures, []);
+});
+
+test('constructor enforces even safe geometry and the 16 MiB stream bound', context => {
+  const f = fixture(context);
+  for (const [width, height] of [[0, 2], [-2, 2], [3, 2], [2, 3], [2.5, 2], [NaN, 2],
+    [Infinity, 2], [Number.MAX_SAFE_INTEGER + 1, 2], [4096, 2732]]) {
+    assert.throws(() => createNativeCpuFrameDelivery({ ...f.options, width, height }), RangeError);
+  }
+  const maximum = createNativeCpuFrameDelivery({ ...f.options, width: 4096, height: 2730 });
+  assert.equal(maximum.snapshot().expectedBytes, 16_773_120);
+  maximum.stop();
+  assert.throws(() => createNativeCpuFrameDelivery({ ...f.options, requestId: '' }), TypeError);
+  assert.throws(() => createNativeCpuFrameDelivery({ ...f.options, sessionId: '' }), TypeError);
+});
+
+const invalidFrames: [string, Record<string, unknown>][] = [
+  ['request', { requestId: 'different' }], ['session', { sessionId: 'old-session' }],
+  ['negative slot', { slot: -1 }], ['fourth slot', { slot: 3 }], ['fractional slot', { slot: 0.5 }],
+  ['zero serial', { serial: 0 }], ['unsafe serial', { serial: Number.MAX_SAFE_INTEGER + 1 }],
+  ['zero timestamp', { timestamp: 0 }], ['unsafe timestamp', { timestamp: Infinity }],
+  ['width', { width: 6 }], ['height', { height: 4 }], ['refresh', { refresh: 1 }],
+  ['pixel format', { pixelFormat: 'bgra' }], ['storage', { storage: 'gpu' }], ['absent storage', { storage: undefined }],
+];
+for (const [label, patch] of invalidFrames) {
+  test(`invalid delivery ${label} fails without reading or giving credit`, context => {
+    const f = fixture(context);
+    f.delivery.deliver(f.frame(patch as Partial<NativeCpuScreenFrame>), f.handle);
+    assert.deepEqual(f.failures, ['cpu_frame_failed']);
+    assert.equal(f.reads.length, 0);
+    assert.equal(f.credits.length, 0);
+    assert.equal(f.timers.size, 0);
+  });
+}
+
+test('serial and timestamp must both advance even after the previous frame was acknowledged', context => {
+  const f = fixture(context);
+  f.delivery.deliver(f.frame(), f.handle);
+  f.delivery.acknowledge(f.sent[0].metadata);
+  f.delivery.deliver(f.frame({ slot: 1, serial: 2 }), f.handle);
+  assert.deepEqual(f.failures, ['cpu_frame_failed']);
+  assert.equal(f.reads.length, 1);
+});
+
+test('stale, cross-session, forged and malformed acks never release a lease', context => {
+  const f = fixture(context);
+  f.delivery.deliver(f.frame(), f.handle);
+  for (const patch of [...invalidFrames.map(([, patch]) => patch), { serial: 2 }, { timestamp: 1001 },
+    { slot: 1 }, { refresh: true }]) {
+    assert.equal(f.delivery.acknowledge({ ...f.sent[0].metadata, ...patch }), false);
+  }
+  for (const value of [null, undefined, false, 1, 'frame', [], { get requestId() { throw Error('getter'); } }])
+    assert.equal(f.delivery.acknowledge(value), false);
+  assert.equal(f.credits.length, 0);
+  assert.equal(f.delivery.snapshot().inFlight, 1);
+  assert.deepEqual(f.failures, []);
+  assert.equal(f.delivery.acknowledge(f.sent[0].metadata), true);
+  f.delivery.stop();
+  const next = createNativeCpuFrameDelivery({ ...f.options, sessionId: 'session-2' });
+  next.deliver(f.frame({ sessionId: 'session-2' }), f.handle);
+  assert.equal(next.acknowledge(f.sent[0].metadata), false);
+  assert.equal(next.snapshot().inFlight, 1);
+  next.stop();
+});
+
+test('acks before send are rejected while an immediate transport ack is accepted once', context => {
+  const f = fixture(context);
+  f.hooks.imported = metadata => { assert.equal(f.delivery.acknowledge(metadata), false); return true; };
+  f.hooks.send = metadata => { assert.equal(f.delivery.acknowledge(metadata), true); };
+  f.hooks.released = metadata => { assert.equal(f.delivery.acknowledge(metadata), false); return true; };
+  f.delivery.deliver(f.frame(), f.handle);
+  assert.equal(f.credits.length, 1);
+  assert.equal(f.delivery.snapshot().inFlight, 0);
+  assert.equal(f.timers.size, 0);
+  assert.deepEqual(f.failures, []);
+});
+
+for (const stage of ['read', 'import timing', 'imported', 'send', 'released'] as const) {
+  test(`a synchronous stop during ${stage} prevents subsequent work and clears resources`, context => {
+    const f = fixture(context);
+    if (stage === 'read') f.hooks.read = () => { f.delivery.stop(); return new ArrayBuffer(12); };
+    if (stage === 'import timing') f.hooks.timing = value => { if (value === 'import') f.delivery.stop(); };
+    if (stage === 'imported') f.hooks.imported = () => { f.delivery.stop(); return false; };
+    if (stage === 'send') f.hooks.send = () => f.delivery.stop();
+    if (stage === 'released') f.hooks.released = () => { f.delivery.stop(); return true; };
+    f.delivery.deliver(f.frame(), f.handle);
+    if (stage === 'released') assert.equal(f.delivery.acknowledge(f.sent[0].metadata), true);
+    const eventCount = f.events.length, timingCount = f.timings.length;
+    f.delivery.stop(); f.delivery.stop();
+    f.delivery.deliver(f.frame({ serial: 2, timestamp: 2000 }), f.handle);
+    assert.equal(f.delivery.acknowledge(f.frame()), false);
+    f.advance(2000);
+    assert.equal(f.events.length, eventCount);
+    assert.equal(f.timings.length, timingCount);
+    assert.equal(f.sent.length, stage === 'send' || stage === 'released' ? 1 : 0);
+    assert.equal(f.credits.length, stage === 'released' ? 1 : 0);
+    assert.equal(f.delivery.snapshot().inFlight, 0);
+    assert.equal(f.delivery.snapshot().stopped, true);
+    assert.equal(f.timers.size, 0);
+    assert.deepEqual(f.failures, []);
+  });
+}
+
+for (const stage of ['read', 'imported false', 'imported throw', 'send', 'released false', 'released throw'] as const) {
+  test(`${stage} failure reports once, clears all leases and never gives another credit`, context => {
+    const f = fixture(context);
+    f.delivery.deliver(f.frame(), f.handle);
+    if (stage === 'read') f.hooks.read = () => { throw Error('private read error'); };
+    if (stage === 'imported false') f.hooks.imported = () => false;
+    if (stage === 'imported throw') f.hooks.imported = () => { throw Error('private import error'); };
+    if (stage === 'send') f.hooks.send = () => { throw Error('private transport error'); };
+    if (stage === 'released false') f.hooks.released = () => false;
+    if (stage === 'released throw') f.hooks.released = () => { throw Error('private release error'); };
+    f.delivery.deliver(f.frame({ slot: 1, serial: 2, timestamp: 2000 }), f.handle);
+    if (stage.startsWith('released')) assert.equal(f.delivery.acknowledge(f.sent[1].metadata), false);
+    assert.deepEqual(f.failures, ['cpu_frame_failed']);
+    assert.equal(f.delivery.snapshot().inFlight, 0);
+    assert.equal(f.timers.size, 0);
+    const credits = f.credits.length;
+    assert.equal(f.delivery.acknowledge(f.sent[0].metadata), false);
+    f.delivery.deliver(f.frame({ slot: 2, serial: 3, timestamp: 3000 }), f.handle);
+    f.advance(2000);
+    assert.equal(f.credits.length, credits);
+    assert.deepEqual(f.failures, ['cpu_frame_failed']);
+  });
+}
+
+for (const data of [new ArrayBuffer(11), new ArrayBuffer(13), new Uint8Array(12), new SharedArrayBuffer(12), null]) {
+  test(`the native reader must return an exact owned ArrayBuffer (${Object.prototype.toString.call(data)})`, context => {
+    const f = fixture(context);
+    f.hooks.read = () => data as ArrayBuffer;
+    f.delivery.deliver(f.frame(), f.handle);
+    assert.deepEqual(f.failures, ['cpu_frame_failed']);
+    assert.equal(f.imported.length, 0);
+    assert.equal(f.sent.length, 0);
+    assert.equal(f.timers.size, 0);
+  });
+}
+
+test('bad handle shapes never reach the native reader', context => {
+  const f = fixture(context);
+  f.delivery.deliver(f.frame(), Buffer.alloc(7));
+  assert.equal(f.reads.length, 0);
+  assert.deepEqual(f.failures, ['cpu_frame_failed']);
+});
+
+test('all leases share a total 1500 ms ack limit and timeout clears every timer without credit', context => {
+  const f = fixture(context);
+  for (let slot = 0; slot < 3; slot++) f.delivery.deliver(f.frame({ slot, serial: slot + 1, timestamp: (slot + 1) * 1000 }), f.handle);
+  assert.equal(f.unrefs, 3);
+  f.advance(1499);
+  assert.deepEqual(f.failures, []);
+  f.advance(1);
+  assert.deepEqual(f.failures, ['cpu_ack_timeout']);
+  assert.equal(f.credits.length, 0);
+  assert.equal(f.delivery.snapshot().inFlight, 0);
+  assert.equal(f.timers.size, 0);
+  assert.equal(f.delivery.acknowledge(f.sent[0].metadata), false);
+  f.advance(10000);
+  assert.deepEqual(f.failures, ['cpu_ack_timeout']);
+});
+
+test('copy and imported work consume the same deadline instead of starting a fresh ack timer', context => {
+  const f = fixture(context);
+  f.hooks.read = () => { f.at(1499); return new ArrayBuffer(12); };
+  f.hooks.imported = () => { f.at(1500); return true; };
+  f.delivery.deliver(f.frame(), f.handle);
+  assert.deepEqual(f.events, ['read', 'imported', 'cpu_ack_timeout']);
+  assert.equal(f.sent.length, 0);
+  assert.equal(f.timers.size, 0);
+});
+
+test('an overdue ack fails even when the event loop has not dispatched the timer', context => {
+  const f = fixture(context);
+  f.delivery.deliver(f.frame(), f.handle);
+  f.at(1500);
+  assert.equal(f.delivery.acknowledge(f.sent[0].metadata), false);
+  assert.deepEqual(f.failures, ['cpu_ack_timeout']);
+  assert.equal(f.credits.length, 0);
+  assert.equal(f.timers.size, 0);
+});
+
+test('a delayed old timer cannot expire a newer lease reusing the same slot', context => {
+  const f = fixture(context);
+  f.delivery.deliver(f.frame(), f.handle);
+  const oldTimer = f.allTimers[0];
+  assert.equal(f.delivery.acknowledge(f.sent[0].metadata), true);
+  f.at(100);
+  f.delivery.deliver(f.frame({ serial: 2, timestamp: 2000 }), f.handle);
+  oldTimer.callback();
+  assert.deepEqual(f.failures, []);
+  assert.equal(f.delivery.snapshot().inFlight, 1);
+  assert.equal(f.delivery.acknowledge(f.sent[0].metadata), false);
+  assert.equal(f.delivery.acknowledge(f.sent[1].metadata), true);
+  assert.equal(f.timers.size, 0);
+});
+
+test('an unknown ack accessor cannot credit after synchronously stopping the session', context => {
+  const f = fixture(context);
+  f.delivery.deliver(f.frame(), f.handle);
+  let serialReads = 0;
+  const ack = { ...f.sent[0].metadata, get serial() {
+    if (++serialReads === 2) f.delivery.stop();
+    return 1;
+  } };
+  assert.equal(f.delivery.acknowledge(ack), false);
+  assert.equal(f.credits.length, 0);
+  assert.equal(f.timers.size, 0);
+  assert.equal(f.delivery.snapshot().inFlight, 0);
+  assert.deepEqual(f.failures, []);
+});
+
+test('a clock callback cannot credit after synchronously stopping the session', context => {
+  const f = fixture(context);
+  let stopOnClock = false;
+  const delivery = createNativeCpuFrameDelivery({ ...f.options, now: () => {
+    if (stopOnClock) delivery.stop();
+    return 0;
+  } });
+  delivery.deliver(f.frame(), f.handle);
+  stopOnClock = true;
+  assert.equal(delivery.acknowledge(f.sent[0].metadata), false);
+  assert.equal(f.credits.length, 0);
+  assert.equal(f.timers.size, 0);
+  assert.equal(delivery.snapshot().inFlight, 0);
+  assert.deepEqual(f.failures, []);
+});

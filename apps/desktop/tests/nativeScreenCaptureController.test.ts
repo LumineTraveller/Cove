@@ -6,6 +6,7 @@ import vm from 'node:vm';
 import path from 'node:path';
 import ts from 'typescript';
 import * as protocol from '../electron/native-screen-capture-protocol';
+import * as cpuDelivery from '../electron/native-screen-cpu-delivery';
 import type { NativeScreenCaptureController } from '../electron/native-screen-capture';
 
 // Exercise the production broker, fake only Electron/GPU and the owned child pipes.
@@ -20,9 +21,10 @@ const frame = (serial = 1, slot = 0) => ({ type: 'frame', serial, slot, width: 1
   timestamp: serial * 1000, handle: '0xabcd', refresh: false });
 const flush = async () => { for (let n = 0; n < 6; n++) await Promise.resolve(); };
 
-function harness(overrides: { enabled?: boolean; platform?: string; electron?: string; missingBridge?: boolean } = {}) {
+function harness(overrides: { enabled?: boolean; platform?: string; electron?: string; missingBridge?: boolean; timing?: boolean; pixelFormat?: 'bgra' | 'nv12'; storage?: 'gpu' | 'cpu'; completion?: 'query' | 'fence'; supportsCpuFrames?: boolean; supportsCachedCpuFrames?: boolean; supportsCachedCpuFramesInto?: boolean } = {}) {
   let now = 100_000, uuid = 0, importError = false, sendError = false, sendThrows = false, sendFrameError = false;
   let duplicateError = false, closeError = false, openError = false;
+  let cpuReadError = false;
   const timers = new Map<any, { due: number; callback: () => void }>();
   const setTimer = (callback: () => void, milliseconds: number) => {
     const id = { unref() {} }; timers.set(id, { due: now + milliseconds, callback }); return id;
@@ -36,10 +38,21 @@ function harness(overrides: { enabled?: boolean; platform?: string; electron?: s
     }
     now = until;
   };
-  const children: any[] = [], imports: any[] = [], transfers: any[] = [], sent: any[] = [], duplicates: any[] = [], childHandles: any[] = [];
-  const handles = { openChild(pid: number) {
+  const children: any[] = [], imports: any[] = [], transfers: any[] = [], sent: any[] = [], duplicates: any[] = [], childHandles: any[] = [], cpuReads: any[] = [];
+  const handles = { supportsCpuFrames: overrides.supportsCpuFrames ?? true,
+    supportsCachedCpuFrames: overrides.supportsCachedCpuFrames,
+    supportsCachedCpuFramesInto: overrides.supportsCachedCpuFramesInto, openChild(pid: number) {
     if (openError) throw Error('open failed');
-    const owner = { pid, closes: 0, close() { owner.closes++; }, duplicate(source: Buffer) {
+    const owner = { pid, closes: 0, close() { owner.closes++; }, readFrame(source: Buffer, expectedBytes: number) {
+      if (cpuReadError) throw Error('read failed');
+      cpuReads.push({ source: Buffer.from(source), expectedBytes }); return new ArrayBuffer(expectedBytes);
+    }, readFrameCached(slot: number, source: Buffer, expectedBytes: number) {
+      if (cpuReadError) throw Error('read failed');
+      cpuReads.push({ source: Buffer.from(source), expectedBytes, cachedSlot: slot }); return new ArrayBuffer(expectedBytes);
+    }, readFrameCachedInto(slot: number, source: Buffer, target: ArrayBuffer) {
+      if (cpuReadError) throw Error('read failed');
+      cpuReads.push({ source: Buffer.from(source), expectedBytes: target.byteLength, cachedSlot: slot, target });
+    }, duplicate(source: Buffer) {
     if (duplicateError) throw Error('duplicate failed');
     const owned = { pid, source: Buffer.from(source), handle: Buffer.alloc(8), closes: 0,
       close() { owned.closes++; if (closeError) throw Error('close failed'); } };
@@ -47,9 +60,9 @@ function harness(overrides: { enabled?: boolean; platform?: string; electron?: s
     } }; childHandles.push(owner); return owner;
   } };
   const target = Object.assign(new EventEmitter(), { isDestroyed: () => false,
-    mainFrame: { send(channel: string, data: unknown) {
+    mainFrame: { send(channel: string, data: unknown, binary?: ArrayBuffer) {
       if (sendFrameError) throw Error('target unavailable');
-      sent.push({ channel, data });
+      sent.push({ channel, data, ...(binary ? { binary } : {}) });
     } } });
   const spawn = (file: string, args: string[], config: unknown) => {
     const writes: string[] = [];
@@ -78,30 +91,33 @@ function harness(overrides: { enabled?: boolean; platform?: string; electron?: s
     },
   };
   const module = { exports: {} as { NativeScreenCaptureController: typeof NativeScreenCaptureController } };
-  vm.runInNewContext(compiled, { exports: module.exports, Buffer,
+  vm.runInNewContext(compiled, { exports: module.exports, Buffer, ArrayBuffer,
     process: { platform: overrides.platform ?? 'win32', arch: 'x64', pid: 1234, versions: { electron: overrides.electron ?? '44.0.0' } },
     Date: class extends Date { static now() { return now; } }, setTimeout: setTimer, clearTimeout: (id: any) => timers.delete(id),
     require(name: string) {
       if (name === 'electron') return { sharedTexture };
       if (name === 'node:child_process') return { spawn };
       if (name === 'node:crypto') return { randomUUID: () => `00000000-0000-4000-8000-${String(++uuid).padStart(12, '0')}` };
+      if (name === 'node:perf_hooks') return { performance: { now: () => now } };
       if (name === 'node:path') return path;
       if (name.endsWith('native-screen-handles.node')) {
         if (overrides.missingBridge) throw Error('missing');
         return handles;
       }
       if (name === './native-screen-capture-protocol') return protocol;
+      if (name === './native-screen-cpu-delivery') return cpuDelivery;
       throw Error(`Unexpected import ${name}`);
     },
   });
-  const controller = new module.exports.NativeScreenCaptureController({ enabled: overrides.enabled ?? true, helperPath: 'owned-helper.exe' });
+  const controller = new module.exports.NativeScreenCaptureController({ enabled: overrides.enabled ?? true, helperPath: 'owned-helper.exe', timing: overrides.timing, pixelFormat: overrides.pixelFormat, storage: overrides.storage, completion: overrides.completion });
   const choose = (patch: Partial<protocol.NativeScreenSourceSelection> = {}) => controller.noteStockSelection({ sourceId: 'screen:0:0',
     displayId: '123', primaryDisplayId: '123', displayCount: 1, sourceWidth: 2560, sourceHeight: 1440, selectedAt: now, ...patch });
   const start = (requestId = 'request_01') => { choose(); return controller.start(target as any, requestId, options); };
-  return { controller, target, start, choose, children, imports, transfers, sent, duplicates, childHandles, timers, advance,
+  return { controller, target, start, choose, children, imports, transfers, sent, duplicates, childHandles, cpuReads, timers, advance,
     failImport() { importError = true; }, failSend(sync = false) { sendError = true; sendThrows = sync; },
     failDuplicate() { duplicateError = true; }, failHandleClose() { closeError = true; },
     failOpen() { openError = true; },
+    failCpuRead() { cpuReadError = true; },
     failTargetSend() { sendFrameError = true; } };
 }
 
@@ -142,6 +158,160 @@ test('only fixed CLI arguments reach owned helper; ready validates exact floor-e
   assert.equal(h.controller.snapshot().activeSessions, 1);
   assert.equal((await h.start()).ok, false);
   h.controller.reset(); h.children[0].close();
+});
+
+test('optional stage timing distinguishes import, transfer and downstream reference hold without changing credits', async () => {
+  assert.equal(harness().controller.snapshot().timing, null);
+  const h = harness({ timing: true }); const pending = h.start();
+  h.children[0].emitMessage(ready); await pending; h.children[0].emitMessage(frame());
+  h.advance(9); h.transfers[0].resolve(); await flush();
+  assert.equal(h.children[0].writes.some((line: string) => line.startsWith('released ')), false);
+  h.advance(8); h.imports[0].config.allReferencesReleased();
+  const timing = h.controller.snapshot().timing!;
+  assert.equal(timing.import.count, 1); assert.equal(timing.import.totalMs, 0);
+  assert.equal(timing.transfer.totalMs, 9); assert.equal(timing.transfer.buckets[4], 1);
+  assert.equal(timing.reference.totalMs, 17); assert.equal(timing.reference.buckets[5], 1);
+  assert.equal(h.children[0].writes.filter((line: string) => line.startsWith('released ')).length, 1);
+  timing.reference.buckets.fill(999); timing.reference.totalMs = 999;
+  assert.equal(h.controller.snapshot().timing!.reference.totalMs, 17);
+  assert.equal(h.controller.snapshot().timing!.reference.buckets[5], 1);
+  h.controller.reset(); h.children[0].close();
+  assert.equal(h.controller.snapshot().pendingReferences, 0);
+});
+
+test('NV12 is explicitly negotiated with protocol 3 and fixed limited BT709, while protocol 2 remains BGRA', async () => {
+  const nv12Ready = { ...ready, protocol: 3, pixelFormat: 'nv12', colorSpace: 'bt709-limited' };
+  for (const requested of ['bgra', 'nv12'] as const) {
+    const h = harness({ pixelFormat: requested }); const pending = h.start();
+    h.children[0].emitMessage(requested === 'nv12' ? nv12Ready : ready);
+    const started = await pending; assert.equal(started.ok, true);
+    assert.equal(h.children[0].args.includes('--pixel-format'), requested === 'nv12');
+    h.children[0].emitMessage({ ...frame(), ...(requested === 'nv12' ? { pixelFormat: 'nv12' } : {}) });
+    assert.equal(h.imports[0].config.textureInfo.pixelFormat, requested);
+    if (requested === 'nv12') assert.equal(JSON.stringify(h.imports[0].config.textureInfo.colorSpace),
+      JSON.stringify({ primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', range: 'limited' }));
+    else assert.equal(h.imports[0].config.textureInfo.colorSpace, undefined);
+    assert.equal(h.controller.snapshot().pixelFormat, requested);
+    h.transfers[0].resolve(); await flush(); h.imports[0].config.allReferencesReleased();
+    h.controller.reset(); h.children[0].close();
+  }
+  for (const [requested, announcement] of [
+    ['bgra', nv12Ready], ['nv12', ready], ['nv12', { ...nv12Ready, colorSpace: 'bt601-limited' }],
+    ['nv12', { ...nv12Ready, colorSpace: undefined }], ['nv12', { ...nv12Ready, protocol: 2 }],
+    ['nv12', { ...nv12Ready, pixelFormat: 'bgra' }],
+  ] as const) {
+    const h = harness({ pixelFormat: requested }); const pending = h.start(); h.children[0].emitMessage(announcement);
+    assert.equal((await pending).ok, false); assert.equal(h.controller.snapshot().failureCode, 'invalid_protocol'); h.children[0].close();
+  }
+});
+
+test('a session cannot change frame pixel format or omit the negotiated NV12 format', async () => {
+  for (const requested of ['bgra', 'nv12'] as const) {
+    for (const format of requested === 'nv12' ? [undefined, 'bgra', 'invalid'] : ['nv12', 'invalid']) {
+      const h = harness({ pixelFormat: requested }); const pending = h.start();
+      h.children[0].emitMessage(requested === 'nv12' ? { ...ready, protocol: 3, pixelFormat: 'nv12', colorSpace: 'bt709-limited' } : ready);
+      await pending; h.children[0].emitMessage({ ...frame(), pixelFormat: format });
+      assert.equal(h.controller.snapshot().failureCode, 'invalid_protocol'); assert.equal(h.imports.length, 0); h.children[0].close();
+    }
+  }
+});
+
+const cpuReady = { ...ready, protocol: 4, pixelFormat: 'nv12', storage: 'cpu', colorSpace: 'bt709-limited' };
+const cpuFrame = (serial = 1, slot = 0) => ({ ...frame(serial, slot), pixelFormat: 'nv12', storage: 'cpu', byteLength: 1920 * 1080 * 3 / 2 });
+
+test('completion experiments are explicit and leave the default helper invocation unchanged', async () => {
+  for (const completion of [undefined, 'query', 'fence'] as const) {
+    const h = harness({ completion }); const pending = h.start();
+    assert.equal(h.children[0].args.includes('--completion'), completion !== undefined);
+    if (completion) assert.deepEqual(Array.from(h.children[0].args.slice(-2)), ['--completion', completion]);
+    h.children[0].emitMessage(ready); await pending; h.controller.reset(); h.children[0].close();
+  }
+});
+
+test('CPU mapping cache is explicitly negotiated and receives the validated slot', async () => {
+  for (const supported of [undefined, false, true]) {
+    const h = harness({ pixelFormat: 'nv12', storage: 'cpu', supportsCachedCpuFrames: supported });
+    const pending = h.start(); h.children[0].emitMessage(cpuReady); await pending;
+    h.children[0].emitMessage(cpuFrame(1, 2));
+    assert.equal(h.cpuReads.length, 1);
+    assert.equal(h.cpuReads[0].cachedSlot, supported === true ? 2 : undefined);
+    h.controller.reset(); h.children[0].close();
+    assert.equal(h.controller.snapshot().cpuFramesInFlight, 0);
+  }
+});
+
+test('CPU frame buffers are bounded to slots and only reused after matching completion', async () => {
+  const h = harness({ pixelFormat: 'nv12', storage: 'cpu', supportsCachedCpuFramesInto: true });
+  const pending = h.start(); h.children[0].emitMessage(cpuReady); await pending;
+  for (let serial = 1; serial <= 7; serial++) {
+    const slot = (serial - 1) % 3;
+    h.children[0].emitMessage(cpuFrame(serial, slot));
+    assert.equal(h.cpuReads.length, serial);
+    assert.equal(h.cpuReads.at(-1).cachedSlot, slot);
+    assert.equal(h.controller.snapshot().cpuFrameBuffers, Math.min(serial, 3));
+    const metadata = h.sent.filter(entry => entry.channel === 'cove:native-screen:cpu-frame').at(-1).data;
+    assert.equal(h.controller.acknowledgeCpuFrame(h.target as any, metadata), true);
+    if (serial > 3) assert.equal(h.cpuReads[serial - 1].target, h.cpuReads[serial - 4].target);
+  }
+  assert.notEqual(h.cpuReads[0].target, h.cpuReads[1].target);
+  h.controller.reset(); h.children[0].close();
+  assert.equal(h.controller.snapshot().cpuFrameBuffers, 0);
+
+  const late = harness({ pixelFormat: 'nv12', storage: 'cpu', supportsCachedCpuFramesInto: true });
+  const start = late.start(); late.children[0].emitMessage(cpuReady); await start;
+  late.children[0].emitMessage(cpuFrame(1, 0));
+  late.children[0].emitMessage(cpuFrame(2, 0));
+  assert.equal(late.cpuReads.length, 1);
+  assert.equal(late.controller.snapshot().failureCode, 'cpu_frame_failed');
+  assert.equal(late.controller.snapshot().cpuFrameBuffers, 0);
+  late.children[0].close();
+});
+
+test('protocol 4 CPU frames never enter GPU import and credit only the matching renderer completion', async () => {
+  const h = harness({ pixelFormat: 'nv12', storage: 'cpu', timing: true }); const pending = h.start();
+  assert.deepEqual(Array.from(h.children[0].args.slice(-4)), ['--pixel-format', 'nv12', '--frame-storage', 'cpu']);
+  h.children[0].emitMessage(cpuReady); const started = await pending; assert.ok(started.ok);
+  if (started.ok) assert.equal(started.storage, 'cpu');
+  h.children[0].emitMessage(cpuFrame());
+  assert.equal(h.imports.length, 0); assert.equal(h.transfers.length, 0);
+  assert.equal(h.cpuReads.length, 1); assert.equal(h.cpuReads[0].expectedBytes, 1920 * 1080 * 3 / 2);
+  const sent = h.sent.find(entry => entry.channel === 'cove:native-screen:cpu-frame');
+  assert.ok(sent); assert.equal(sent.binary.byteLength, h.cpuReads[0].expectedBytes);
+  assert.equal(h.controller.snapshot().frameStorage, 'cpu'); assert.equal(h.controller.snapshot().cpuFramesInFlight, 1);
+  assert.deepEqual(h.children[0].writes, ['imported 0 1\n']);
+  assert.equal(h.controller.acknowledgeCpuFrame({} as any, sent.data), false);
+  assert.equal(h.controller.acknowledgeCpuFrame(h.target as any, { ...sent.data, sessionId: 'another-session' }), false);
+  assert.equal(h.controller.acknowledgeCpuFrame(h.target as any, sent.data), true);
+  assert.equal(h.controller.acknowledgeCpuFrame(h.target as any, sent.data), false);
+  assert.deepEqual(h.children[0].writes, ['imported 0 1\n', 'released 0 1\n']);
+  assert.equal(h.controller.snapshot().cpuFramesInFlight, 0);
+  h.controller.reset(); h.children[0].close(); assert.equal(h.controller.snapshot().sessions, 0);
+});
+
+test('CPU storage requires addon capability and exact NV12 byte length; wrong storage never reads a handle', async () => {
+  for (const config of [{ pixelFormat: 'nv12', storage: 'cpu', supportsCpuFrames: false }, { storage: 'cpu' }] as const) {
+    const h = harness(config); assert.equal((await h.start()).ok, false); assert.equal(h.children.length, 0);
+  }
+  for (const patch of [{ byteLength: undefined }, { byteLength: 1 }, { byteLength: 1920 * 1080 * 3 / 2 + 1 },
+    { storage: undefined }, { storage: 'gpu' }, { pixelFormat: 'bgra' }]) {
+    const h = harness({ pixelFormat: 'nv12', storage: 'cpu' }); const pending = h.start();
+    h.children[0].emitMessage(cpuReady); await pending; h.children[0].emitMessage({ ...cpuFrame(), ...patch });
+    assert.equal(h.cpuReads.length, 0); assert.equal(h.imports.length, 0);
+    assert.equal(h.controller.snapshot().failureCode, 'invalid_protocol'); h.children[0].close();
+  }
+});
+
+test('CPU copy failure and stop retire the owned delivery without fabricated credits or late-session acknowledgement', async () => {
+  for (const failRead of [false, true]) {
+    const h = harness({ pixelFormat: 'nv12', storage: 'cpu' }); const pending = h.start(); h.children[0].emitMessage(cpuReady); await pending;
+    if (failRead) h.failCpuRead(); h.children[0].emitMessage(cpuFrame());
+    const metadata = h.sent.find(entry => entry.channel === 'cove:native-screen:cpu-frame')?.data;
+    h.controller.reset(); h.children[0].close();
+    assert.equal(h.controller.snapshot().cpuFramesInFlight, 0); assert.equal(h.controller.snapshot().sessions, 0);
+    if (metadata) assert.equal(h.controller.acknowledgeCpuFrame(h.target as any, metadata), false);
+    assert.equal(h.children[0].writes.some((line: string) => line.startsWith('released ')), false);
+    if (failRead) assert.equal(h.controller.snapshot().failureCode, 'cpu_frame_failed');
+  }
 });
 
 test('startup timeout is bounded, disables native for this app session, and kills only its own child', async () => {

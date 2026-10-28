@@ -14,10 +14,14 @@ export interface NativeScreenFrame {
   height: number;
   timestamp: number;
   refresh: boolean;
+  /** Omitted by protocol-2 BGRA peers. Protocol 3 declares NV12 explicitly. */
+  pixelFormat?: 'bgra' | 'nv12';
+  /** Protocol 4 carries independent CPU bytes rather than a shared GPU import. */
+  storage?: 'cpu';
 }
 
 export type NativeScreenStartResult =
-  | { ok: true; sessionId: string; width: number; height: number }
+  | { ok: true; sessionId: string; width: number; height: number; pixelFormat?: 'bgra' | 'nv12'; storage?: 'cpu' }
   | { ok: false; reason: string };
 
 export interface NativeScreenSourceSelection {
