@@ -2,6 +2,7 @@ param(
   [string]$Compiler = '',
   [string]$Node = 'node',
   [string]$OutputDirectory = '',
+  [ValidateSet('bgra', 'nv12', 'both', 'cpu-nv12')][string]$PixelFormat = 'bgra',
   [switch]$SkipGpu,
   [switch]$BuildOnly
 )
@@ -58,7 +59,7 @@ if (-not $BuildOnly) {
   if ($LASTEXITCODE -ne 0) { throw "Native handle lifecycle test failed: $LASTEXITCODE" }
   if (-not $SkipGpu) {
     # Synthetic texture inputs only. This executable never calls desktop APIs.
-    & $synthetic | Tee-Object -FilePath (Join-Path $output 'synthetic-result.ndjson')
+    & $synthetic '--pixel-format' $PixelFormat | Tee-Object -FilePath (Join-Path $output 'synthetic-result.ndjson')
     if ($LASTEXITCODE -ne 0) { throw "Synthetic GPU reference test failed: $LASTEXITCODE" }
   }
 }
@@ -72,6 +73,7 @@ $manifest = [ordered]@{
   desktopCapture = $false
   buildOnly = [bool]$BuildOnly
   syntheticGpu = -not [bool]$SkipGpu
+  syntheticPixelFormat = if ($SkipGpu) { $null } else { $PixelFormat }
   outputDirectory = $output.Substring($runtimePrefix.Length).Replace('\', '/')
   binaries = $hashes
 }

@@ -2,7 +2,7 @@
 // Existing double-Chromium/product-hook/SFU fixture, with an independent profile,
 // Vite cache and loopback backend for each bounded performance measurement.
 const fs=require('node:fs'),path=require('node:path'),{pathToFileURL}=require('node:url');
-const {spawn}=require('node:child_process'),dgram=require('node:dgram');
+const {spawn}=require('node:child_process'),dgram=require('node:dgram'),net=require('node:net');
 const crypto=require('node:crypto');
 const {cleanupOwnedTraceExports}=require('./analyze-screen-performance-trace.cjs');
 const {nativePerformanceEnabled,nativePerformancePaths}=require('./screen-performance-native.cjs');
@@ -19,24 +19,66 @@ async function stop(child){
   else child.kill('SIGKILL');
 }
 function logged(executable,args,env,file){const fd=fs.openSync(file,'w');const child=spawn(executable,args,{cwd:root,env,windowsHide:true,stdio:['ignore',fd,fd,'ipc']});child.once('close',()=>fs.closeSync(fd));return child;}
-async function port(){const socket=dgram.createSocket('udp4');await new Promise((resolve,reject)=>{socket.once('error',reject);socket.bind(0,'127.0.0.1',resolve);});const value=socket.address().port;await new Promise(resolve=>socket.close(resolve));return value<65000?value:port();}
+async function port(){
+  let lastCode='unavailable';
+  for(let attempt=0;attempt<32;attempt++){
+    const udp=dgram.createSocket('udp4'),tcp=net.createServer();
+    try{
+      await new Promise((resolve,reject)=>{udp.once('error',reject);udp.bind({port:0,address:'127.0.0.1',exclusive:true},resolve);});
+      const value=udp.address().port;
+      if(!Number.isInteger(value)||value<1||value>65535){lastCode='invalid_port';continue;}
+      // Windows can allow UDP while excluding the same TCP port. The SFU
+      // needs both protocols, so hold both loopback probes at once.
+      await new Promise((resolve,reject)=>{tcp.once('error',reject);tcp.listen({port:value,host:'127.0.0.1',exclusive:true},resolve);});
+      return value;
+    }catch(error){lastCode=/^[A-Z0-9_]{1,40}$/.test(error?.code??'')?error.code:'bind_failed';}
+    finally{
+      await Promise.all([new Promise(resolve=>{try{udp.close(()=>resolve());}catch{resolve();}}),
+        new Promise(resolve=>{try{tcp.close(()=>resolve());}catch{resolve();}})]);
+    }
+  }
+  throw Error('No loopback port available for both TCP and UDP after 32 probes ('+lastCode+')');
+}
 async function main(){
   const runtimeName=process.env.COVE_FPS_RUNTIME_NAME||'fps-candidate';
   if(!/^fps-(?:candidate|validation-[a-z0-9-]{1,60})$/.test(runtimeName))throw Error('Invalid performance runtime namespace');
+  const baselineWriterFlag=process.env.COVE_FPS_BASELINE_FRAME_WRITER;
+  if(baselineWriterFlag!==undefined&&!['0','1'].includes(baselineWriterFlag))throw Error('Invalid baseline frame writer option');
+  const baselineFrameWriterOverride=baselineWriterFlag==='1',nativeGpuEnabled=nativePerformanceEnabled();
+  if(baselineFrameWriterOverride&&!nativeGpuEnabled)throw Error('Baseline frame writer override requires native GPU performance measurement');
+  const nativeFrameWriter='apps/desktop/src/features/media/screen/nativeScreenCapture.ts';
+  const effectiveNativeFrameWriterPath=baselineFrameWriterOverride
+    ?'runtime/native-throughput-20261028-baseline/nativeScreenCapture.ts':nativeFrameWriter;
+  if(baselineFrameWriterOverride&&!fs.existsSync(path.join(root,effectiveNativeFrameWriterPath)))
+    throw Error('The fixed 20261028 baseline frame writer snapshot is required; no source fallback is allowed');
+  const effectiveNativeFrameWriterBytes=fs.readFileSync(path.join(root,effectiveNativeFrameWriterPath));
+  const effectiveNativeFrameWriter={path:effectiveNativeFrameWriterPath,
+    sha256:crypto.createHash('sha256').update(effectiveNativeFrameWriterBytes).digest('hex')};
   const runtime=path.join(root,'runtime',runtimeName);fs.mkdirSync(runtime,{recursive:true});
   const label=process.env.COVE_FPS_LABEL||'baseline';if(!/^[a-z0-9-]{1,60}$/.test(label))throw Error('Invalid performance label');
   const directory=fs.mkdtempSync(path.join(runtime,label+'-'));
-  const nativeGpuEnabled=nativePerformanceEnabled(),nativePaths=nativeGpuEnabled?nativePerformancePaths(root):null;
-  const sources=['apps/desktop/src/features/media/screen/screenCapture.ts','apps/desktop/src/features/media/screen/useScreenPublishing.ts','apps/desktop/src/features/media/screen/useScreenAnalysis.ts','apps/desktop/tests/ui/media-integration.tsx','apps/desktop/tests/ui/screen-performance-fixture.ts','apps/desktop/tests/ui/screen-performance.electron.cjs','apps/desktop/tests/ui/screen-performance-backend.cjs','tooling/verify-screen-performance.cjs','tooling/screen-performance-config.cjs','tooling/screen-performance-native.cjs','tooling/analyze-screen-performance-trace.cjs',
-    'apps/desktop/electron/native-screen-capture-protocol.ts','apps/desktop/electron/native-screen-capture-helper.cpp','apps/desktop/electron/native-screen-handles.cpp','apps/desktop/electron/build-native-screen-capture.cjs','apps/desktop/electron/native-screen-capture.ts','apps/desktop/electron/preload.ts','apps/desktop/src/features/media/screen/nativeScreenCapture.ts','apps/desktop/src/features/media/screen/nativeScreenUpgrade.ts'];
-  if(nativePaths)sources.push(...Object.values(nativePaths));
+  const nativePaths=nativeGpuEnabled?nativePerformancePaths(root):null;
+  const nativeHelperSourcePath=nativePaths?path.posix.join(path.posix.dirname(nativePaths.helper),'source.cpp'):null;
+  const effectiveNativeHelperSource=nativeHelperSourcePath&&fs.existsSync(path.join(root,nativeHelperSourcePath))
+    ?{path:nativeHelperSourcePath,sha256:crypto.createHash('sha256').update(fs.readFileSync(path.join(root,nativeHelperSourcePath))).digest('hex')}:null;
+  const sources=['apps/desktop/src/features/media/screen/screenCapture.ts','apps/desktop/src/features/media/screen/useScreenPublishing.ts','apps/desktop/src/features/media/screen/useScreenAnalysis.ts','apps/desktop/tests/ui/media-integration.tsx','apps/desktop/tests/ui/screen-performance-fixture.ts','apps/desktop/tests/ui/screen-performance.electron.cjs','apps/desktop/tests/ui/screen-performance-backend.cjs','tooling/verify-screen-performance.cjs','tooling/screen-performance-config.cjs','tooling/screen-performance-native.cjs','tooling/screen-performance-source-age.cjs','tooling/analyze-screen-performance-trace.cjs',
+    'apps/desktop/electron/native-screen-capture-protocol.ts','apps/desktop/electron/native-screen-capture-helper.cpp','apps/desktop/electron/native-screen-handles.cpp','apps/desktop/electron/build-native-screen-capture.cjs','apps/desktop/electron/native-screen-capture.ts','apps/desktop/electron/native-screen-cpu-delivery.ts','apps/desktop/electron/native-screen-cpu-buffer-pipeline.ts','apps/desktop/electron/preload.ts','apps/desktop/src/features/media/screen/nativeScreenCapture.ts','apps/desktop/src/features/media/screen/nativeFrameWriteQueue.ts','apps/desktop/src/features/media/screen/nativeScreenUpgrade.ts','apps/desktop/src/features/media/screen/nativeScreenColorPolicy.ts'];
+  if(nativePaths)sources.push(...Object.values(nativePaths),'apps/desktop/dist-electron/native-screen-cpu-buffer-pipeline.js','apps/desktop/dist-electron/native-screen-cpu-delivery.js','apps/desktop/dist-electron/native-screen-capture-protocol.js');
+  if(effectiveNativeHelperSource)sources.push(effectiveNativeHelperSource.path);
+  if(baselineFrameWriterOverride)sources.push(effectiveNativeFrameWriterPath);
   fs.writeFileSync(path.join(directory,'source.json'),JSON.stringify({startedAt:new Date().toISOString(),node:process.version,nativeGpuEnabled,
-    nativeArtifacts:nativePaths,files:Object.fromEntries(sources.map(file=>[file,crypto.createHash('sha256').update(fs.readFileSync(path.join(root,file))).digest('hex')]))},null,2)+'\n');
+    nativeArtifacts:nativePaths,effectiveNativeHelperSource,baselineFrameWriterOverride,effectiveNativeFrameWriter,
+    files:Object.fromEntries(sources.map(file=>[file,crypto.createHash('sha256').update(fs.readFileSync(path.join(root,file))).digest('hex')]))},null,2)+'\n');
   const env={...process.env,COVE_FPS_RUN_DIR:directory,COVE_TEST_NODE:process.execPath,COVE_QA_MEDIA_PORT:String(await port())};delete env.ELECTRON_RUN_AS_NODE;
   const dependencies=path.dirname(fs.realpathSync(path.join(root,'node_modules/vite')));
   const entry=pathToFileURL(path.join(path.dirname(require.resolve('vite/package.json')),'dist/node/index.js')).href;
   const bootstrap=path.join(directory,'vite-bootstrap.mjs');
-  fs.writeFileSync(bootstrap,`import {createServer} from ${JSON.stringify(entry)};\nconst server=await createServer({root:${JSON.stringify(path.join(root,'apps/desktop'))},configFile:${JSON.stringify(path.join(root,'apps/desktop/vite.config.ts'))},cacheDir:${JSON.stringify(path.join(directory,'vite-cache'))},server:{host:'127.0.0.1',port:0,strictPort:true,hmr:false,watch:null,fs:{allow:${JSON.stringify([root,dependencies])}}}});\nawait server.listen();process.send?.({type:'ready',url:'http://127.0.0.1:'+server.httpServer.address().port});process.on('message',async m=>{if(m?.type==='stop'){await server.close();process.disconnect?.();}});`);
+  // Keep the original module ID, so the immutable baseline's relative imports
+  // resolve beside the current adapter. The only alternate text is this fixed,
+  // explicitly recorded snapshot; no environment-provided path is accepted.
+  const baselineWriterPlugin=baselineFrameWriterOverride
+    ?`,plugins:[{name:'cove-isolated-20261028-baseline-frame-writer',enforce:'pre',load(id){const original=normalizePath(${JSON.stringify(path.join(root,nativeFrameWriter))});if(normalizePath(id)===original)return {code:${JSON.stringify(effectiveNativeFrameWriterBytes.toString('utf8'))},map:null};if(normalizePath(id).split('?')[0]===original)throw Error('Baseline frame writer must use its unique original module ID');return null;}}]`:'';
+  fs.writeFileSync(bootstrap,`import {createServer,normalizePath} from ${JSON.stringify(entry)};\nconst server=await createServer({root:${JSON.stringify(path.join(root,'apps/desktop'))},configFile:${JSON.stringify(path.join(root,'apps/desktop/vite.config.ts'))},cacheDir:${JSON.stringify(path.join(directory,'vite-cache'))}${baselineWriterPlugin},server:{host:'127.0.0.1',port:0,strictPort:true,hmr:false,watch:null,fs:{allow:${JSON.stringify([root,dependencies])}}}});\nawait server.listen();process.send?.({type:'ready',url:'http://127.0.0.1:'+server.httpServer.address().port});process.on('message',async m=>{if(m?.type==='stop'){await server.close();process.disconnect?.();}});`);
   let vite,electron;let error=null;let interrupted=false;
   const onSignal=()=>{interrupted=true;void stop(electron);void stop(vite);};process.once('SIGINT',onSignal);process.once('SIGTERM',onSignal);
   try{

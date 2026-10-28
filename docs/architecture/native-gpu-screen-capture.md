@@ -49,6 +49,12 @@ grant or cancelled intent is restored.
 
 ## Data and resource path
 
+The diagram and GPU release barrier below describe the original protocol-2 BGRA
+provider. The later, explicitly selected CPU NV12 experiment uses a different
+ownership boundary; see [throughput investigation](../diagnostics/native-throughput-20261028.md).
+It performs full-frame readback and CPU IPC copies. Neither route changes codec
+selection or RTP settings. Experimental NV12 modes are not enabled in a normal build.
+
 ```text
 DXGI primary-monitor texture + cursor metadata
   -> GPU cursor composition and area/box downscale
@@ -57,7 +63,7 @@ DXGI primary-monitor texture + cursor metadata
   -> video track / existing publisher / existing encoder and SFU
 ```
 
-Only small protocol metadata and cursor-shape data enter CPU-side queues; there
+For the original GPU-texture route, only small protocol metadata and cursor-shape data enter CPU-side queues; there
 is no per-frame full-size readback, image serialization, base64 or pixel pipe.
 The helper exports only its own local NT handle values. A small main-process
 N-API resource owner duplicates a handle from the verified live child, owns the

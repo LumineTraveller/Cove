@@ -37,6 +37,58 @@ function nativeHelperCompletionEvidence(records, expectedCompletion, sessionInde
     matched: validRequest && observed.size < 2 && (expectedCompletion === 'fence' ? actual === 'fence' : actual === null || actual === 'query') };
 }
 
+const HELPER_SNAPSHOT_FIELDS = ['elapsedUs', 'newFrames', 'refreshFrames', 'ticks', 'missedTicks', 'noSlot', 'noPresent', 'periodUs'];
+const HELPER_SNAPSHOT_COUNTERS = ['newFrames', 'refreshFrames', 'ticks', 'missedTicks', 'noSlot', 'noPresent'];
+const HELPER_SNAPSHOT_OPTIONAL = ['acquireSuccess', 'acquireTimeout'];
+const HELPER_SNAPSHOT_MODES = ['gpu', 'final-ack', 'copy-complete'];
+const safeNonnegativeInteger = value => Number.isSafeInteger(value) && value >= 0;
+
+function nativeHelperTimingSnapshot(records, helperIndex, mode) {
+  if (!Array.isArray(records) || records.length > 120 || !Number.isSafeInteger(helperIndex) || helperIndex <= 0 ||
+      !HELPER_SNAPSHOT_MODES.includes(mode)) return null;
+  for (let index = records.length - 1; index >= 0; index--) {
+    const record = records[index];
+    if (record?.sessionIndex !== helperIndex || record.schemaVersion !== 1 ||
+        !HELPER_SNAPSHOT_FIELDS.every(key => safeNonnegativeInteger(record[key])) || record.periodUs <= 0) continue;
+    const snapshot = { helperIndex, mode };
+    for (const key of HELPER_SNAPSHOT_FIELDS) snapshot[key] = record[key];
+    for (const key of HELPER_SNAPSHOT_OPTIONAL) if (safeNonnegativeInteger(record[key])) snapshot[key] = record[key];
+    snapshot.selectedCompletion = ['query', 'fence'].includes(record.selectedCompletion) ? record.selectedCompletion : null;
+    snapshot.selectedAcquireMode = ['timeout', 'poll'].includes(record.selectedAcquireMode) ? record.selectedAcquireMode : null;
+    return snapshot;
+  }
+  return null;
+}
+
+function nativeHelperTimingSummary(snapshots) {
+  if (!Array.isArray(snapshots) || snapshots.length < 2 || snapshots.length > 31) return null;
+  const sameFields = ['helperIndex', 'mode', 'periodUs', 'selectedCompletion', 'selectedAcquireMode'];
+  const first = snapshots[0], lastSeenOptional = {};
+  for (let index = 0; index < snapshots.length; index++) {
+    const snapshot = snapshots[index], previous = snapshots[index - 1];
+    if (!snapshot || !Number.isSafeInteger(snapshot.helperIndex) || snapshot.helperIndex <= 0 ||
+        !HELPER_SNAPSHOT_MODES.includes(snapshot.mode) || !HELPER_SNAPSHOT_FIELDS.every(key => safeNonnegativeInteger(snapshot[key])) ||
+        snapshot.periodUs <= 0 || ![null, 'query', 'fence'].includes(snapshot.selectedCompletion) ||
+        ![null, 'timeout', 'poll'].includes(snapshot.selectedAcquireMode) ||
+        !sameFields.every(key => snapshot[key] === first[key]) ||
+        previous && ['elapsedUs', ...HELPER_SNAPSHOT_COUNTERS].some(key => snapshot[key] < previous[key])) return null;
+    for (const key of HELPER_SNAPSHOT_OPTIONAL) if (Object.hasOwn(snapshot, key)) {
+      if (!safeNonnegativeInteger(snapshot[key]) || lastSeenOptional[key] !== undefined && snapshot[key] < lastSeenOptional[key]) return null;
+      lastSeenOptional[key] = snapshot[key];
+    }
+  }
+  const last = snapshots.at(-1), elapsedUs = last.elapsedUs - first.elapsedUs;
+  if (elapsedUs <= 0) return null;
+  const deltas = Object.fromEntries(HELPER_SNAPSHOT_COUNTERS.map(key => [key, last[key] - first[key]]));
+  for (const key of HELPER_SNAPSHOT_OPTIONAL)
+    if (snapshots.every(snapshot => Object.hasOwn(snapshot, key))) deltas[key] = last[key] - first[key];
+  // The denominator belongs to the same helper as the counters. Neither browser
+  // polling time, broker frame acknowledgments nor renderer clocks enter it.
+  return { helperIndex: first.helperIndex, mode: first.mode,
+    startElapsedUs: first.elapsedUs, endElapsedUs: last.elapsedUs, seconds: elapsedUs / 1e6,
+    uniqueCaptureFps: deltas.newFrames * 1e6 / elapsedUs, refreshFps: deltas.refreshFrames * 1e6 / elapsedUs, deltas };
+}
+
 function nativeStopRequestEvidence(fault, broker, at = Date.now()) {
   const counter = key => Number.isSafeInteger(broker?.[key]) && broker[key] >= 0 ? broker[key] : null;
   return { at, fault: ['renderer_failed', 'receiver_failed'].includes(fault) ? fault : 'normal',
@@ -221,7 +273,7 @@ function createNativeStartupCollector(onSample, maximumSamples = 120) {
 function nativeBrokerSnapshot(controller) {
   if (!controller) return null;
   const snapshot = controller.snapshot(), safe = {};
-  for (const key of ['sessions', 'activeSessions', 'helpers', 'imports', 'pendingReferences', 'childHandles', 'busySlots', 'started', 'stopped', 'frames', 'refreshFrames', 'transferredFrames', 'releasedFrames', 'cpuFramesInFlight']) {
+  for (const key of ['sessions', 'activeSessions', 'helpers', 'imports', 'pendingReferences', 'childHandles', 'busySlots', 'started', 'stopped', 'frames', 'refreshFrames', 'transferredFrames', 'releasedFrames', 'cpuFramesInFlight', 'cpuFrameBuffers', 'sourceCopied', 'sourceDiscarded', 'sourceReleased', 'mainSent', 'finalAck', 'pendingSuperseded', 'pendingExpired', 'activeNativeLeases', 'mainBuffersInUse', 'pendingFrames']) {
     const value = snapshot[key];
     if (Number.isSafeInteger(value) && value >= 0) safe[key] = value;
   }
@@ -230,6 +282,8 @@ function nativeBrokerSnapshot(controller) {
   safe.frameStorage = ['gpu', 'cpu'].includes(snapshot.frameStorage) ? snapshot.frameStorage : null;
   if (['immediate', 'yield'].includes(snapshot.cpuDeliveryScheduling))
     safe.cpuDeliveryScheduling = snapshot.cpuDeliveryScheduling;
+  if (['final-ack', 'copy-complete'].includes(snapshot.cpuOwnership))
+    safe.cpuOwnership = snapshot.cpuOwnership;
   safe.failureCode = typeof snapshot.failureCode === 'string' && /^[a-z_]{1,50}$/.test(snapshot.failureCode)
     ? snapshot.failureCode : null;
   safe.lastEndReason = typeof snapshot.lastEndReason === 'string' && /^[a-z_]{1,50}$/.test(snapshot.lastEndReason)
@@ -273,7 +327,9 @@ function captureCpuSummary(samples, nativeEnabled) {
 
 function nativeResourcesReleased(snapshot) {
   return Boolean(snapshot && ['sessions', 'activeSessions', 'helpers', 'imports', 'pendingReferences', 'childHandles', 'busySlots'].every(key => snapshot[key] === 0) &&
-    (!Object.hasOwn(snapshot, 'cpuFramesInFlight') || snapshot.cpuFramesInFlight === 0));
+    (!Object.hasOwn(snapshot, 'cpuFramesInFlight') || snapshot.cpuFramesInFlight === 0) &&
+    (snapshot.cpuOwnership !== 'copy-complete' ||
+      ['activeNativeLeases', 'mainBuffersInUse', 'pendingFrames', 'cpuFrameBuffers'].every(key => snapshot[key] === 0)));
 }
 
 function nativeUpgradeEvidence(sample, broker, expectedFormat, expectedStorage) {
@@ -295,4 +351,5 @@ module.exports = { nativePerformanceEnabled, nativePerformancePaths, nativeUpgra
   nativeResourcesReleased, nativeUpgradeEvidence, captureCpuSummary, safeNativeHelperTiming, createNativeTimingCollector,
   nativePerformanceTracePhase, nativeProviderDiagnosticsDelta, nativePerformancePixelFormat, nativePerformanceStorage,
   safeNativeHelperStartup, createNativeStartupCollector, nativePerformanceCompletion, nativeHelperCompletionEvidence,
-  nativeStopRequestEvidence, performanceDisplaySleepPrevention, stockFallbackPlaybackEvidence };
+  nativeStopRequestEvidence, performanceDisplaySleepPrevention, stockFallbackPlaybackEvidence,
+  nativeHelperTimingSnapshot, nativeHelperTimingSummary };

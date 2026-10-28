@@ -3,6 +3,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const { nativePerformanceEnabled, nativePerformancePaths, nativeUpgradeRequired, nativeBrokerSnapshot, nativeResourcesReleased, nativeUpgradeEvidence, captureCpuSummary, safeNativeHelperTiming, createNativeTimingCollector, nativePerformanceTracePhase, nativeProviderDiagnosticsDelta, nativePerformancePixelFormat, nativePerformanceStorage, safeNativeHelperStartup, createNativeStartupCollector, nativePerformanceCompletion, nativeHelperCompletionEvidence, nativeStopRequestEvidence, performanceDisplaySleepPrevention, stockFallbackPlaybackEvidence } = require('./screen-performance-native.cjs');
+const { nativeHelperTimingSnapshot, nativeHelperTimingSummary } = require('./screen-performance-native.cjs');
 
 test('native measurement requires its own opt-in and respects the disable override', () => {
   assert.equal(nativePerformanceEnabled({}), false);
@@ -422,4 +423,102 @@ test('broker snapshot only reports the actual fixed CPU scheduling mode', () => 
     assert.equal(nativeBrokerSnapshot({ snapshot: () => ({ cpuDeliveryScheduling: mode }) }).cpuDeliveryScheduling, mode);
   for (const mode of [undefined, null, 'unknown', 'secret-source', 1, {}])
     assert.equal(nativeBrokerSnapshot({ snapshot: () => ({ cpuDeliveryScheduling: mode }) }).cpuDeliveryScheduling, undefined);
+});
+
+
+test('broker snapshot keeps only safe ownership counters and the fixed actual mode', () => {
+  const fields=['cpuFrameBuffers','sourceCopied','sourceDiscarded','sourceReleased','mainSent','finalAck',
+    'pendingSuperseded','pendingExpired','activeNativeLeases','mainBuffersInUse','pendingFrames'];
+  const raw={cpuOwnership:'copy-complete',...Object.fromEntries(fields.map(key=>[key,2]))};
+  const safe=nativeBrokerSnapshot({snapshot:()=>raw});
+  assert.equal(safe.cpuOwnership,'copy-complete');
+  for(const key of fields)assert.equal(safe[key],2);
+  for(const mode of ['final-ack','copy-complete'])assert.equal(nativeBrokerSnapshot({snapshot:()=>({cpuOwnership:mode})}).cpuOwnership,mode);
+  for(const value of [-1,NaN,Infinity,1.5,'3',null]){
+    const invalid=nativeBrokerSnapshot({snapshot:()=>({cpuOwnership:'private-unrecognized',...Object.fromEntries(fields.map(key=>[key,value]))})});
+    assert.equal(invalid.cpuOwnership,undefined);
+    for(const key of fields)assert.equal(invalid[key],undefined);
+  }
+});
+
+
+test('copy-complete cleanup requires both pools and its pending candidate to be empty', () => {
+  const zero={sessions:0,activeSessions:0,helpers:0,imports:0,pendingReferences:0,childHandles:0,busySlots:0,
+    cpuFramesInFlight:0,cpuOwnership:'copy-complete',activeNativeLeases:0,mainBuffersInUse:0,pendingFrames:0,cpuFrameBuffers:0};
+  assert.equal(nativeResourcesReleased(zero),true);
+  for(const key of ['activeNativeLeases','mainBuffersInUse','pendingFrames','cpuFrameBuffers']){
+    assert.equal(nativeResourcesReleased({...zero,[key]:1}),false);
+    const missing={...zero};delete missing[key];assert.equal(nativeResourcesReleased(missing),false);
+  }
+});
+
+function helperTimingRecord(overrides = {}) {
+  return { sessionIndex: 1, schemaVersion: 1, elapsedUs: 1000000, newFrames: 100, refreshFrames: 2,
+    ticks: 120, missedTicks: 1, noSlot: 10, noPresent: 7, periodUs: 8333,
+    selectedCompletion: 'query', selectedAcquireMode: 'timeout', ...overrides };
+}
+
+test('helper timing snapshot selects only the last valid record from its bounded current helper history', () => {
+  const record = helperTimingRecord({ acquireSuccess: 100, acquireTimeout: 3, stages: { private: 'secret' }, requestId: 'secret' });
+  const records = [helperTimingRecord({ elapsedUs: 900000 }), record, helperTimingRecord({ sessionIndex: 2, elapsedUs: 9999999 }),
+    helperTimingRecord({ newFrames: -1 }), helperTimingRecord({ schemaVersion: 2 }), null];
+  assert.deepEqual(nativeHelperTimingSnapshot(records, 1, 'copy-complete'), {
+    helperIndex: 1, mode: 'copy-complete', elapsedUs: 1000000, newFrames: 100, refreshFrames: 2,
+    ticks: 120, missedTicks: 1, noSlot: 10, noPresent: 7, periodUs: 8333,
+    acquireSuccess: 100, acquireTimeout: 3, selectedCompletion: 'query', selectedAcquireMode: 'timeout' });
+  assert.equal(nativeHelperTimingSnapshot(records, 3, 'gpu'), null);
+  assert.equal(nativeHelperTimingSnapshot([], 1, 'gpu'), null);
+  assert.notEqual(nativeHelperTimingSnapshot([record], 1, 'gpu'), record);
+  assert.equal(nativeHelperTimingSnapshot(Array(120).fill(record), 1, 'final-ack').newFrames, 100);
+  assert.equal(nativeHelperTimingSnapshot(Array(121).fill(record), 1, 'final-ack'), null);
+  for (const input of [undefined, null, {}, 'private']) assert.equal(nativeHelperTimingSnapshot(input, 1, 'gpu'), null);
+  for (const index of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, '1', null])
+    assert.equal(nativeHelperTimingSnapshot([record], index, 'gpu'), null);
+  for (const mode of [undefined, null, 'cpu', 'GPU', 'secret']) assert.equal(nativeHelperTimingSnapshot([record], 1, mode), null);
+});
+
+test('helper timing snapshots reject bad core values and keep old missing or invalid optional diagnostics unknown', () => {
+  const core = ['elapsedUs', 'newFrames', 'refreshFrames', 'ticks', 'missedTicks', 'noSlot', 'noPresent', 'periodUs'];
+  for (const key of core) for (const value of [undefined, null, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, '1', true])
+    assert.equal(nativeHelperTimingSnapshot([helperTimingRecord({ [key]: value })], 1, 'gpu'), null);
+  assert.equal(nativeHelperTimingSnapshot([helperTimingRecord({ periodUs: 0 })], 1, 'gpu'), null);
+  assert.equal(nativeHelperTimingSnapshot([{ sessionIndex: 1, schemaVersion: 1, ticks: 1 }], 1, 'gpu'), null);
+  const old = nativeHelperTimingSnapshot([helperTimingRecord({ selectedCompletion: undefined, selectedAcquireMode: 'private',
+    acquireSuccess: -1, acquireTimeout: '3' })], 1, 'gpu');
+  assert.equal(old.selectedCompletion, null); assert.equal(old.selectedAcquireMode, null);
+  assert.equal('acquireSuccess' in old, false); assert.equal('acquireTimeout' in old, false);
+});
+
+test('helper timing summary derives unique and refresh rates solely from the same helper cumulative clock', () => {
+  const a = nativeHelperTimingSnapshot([helperTimingRecord({ acquireSuccess: 101, acquireTimeout: 10 })], 1, 'final-ack');
+  const b = nativeHelperTimingSnapshot([helperTimingRecord({ elapsedUs: 3000000, newFrames: 220, refreshFrames: 6,
+    ticks: 360, missedTicks: 3, noSlot: 25, noPresent: 13, acquireSuccess: 225, acquireTimeout: 13 })], 1, 'final-ack');
+  const actual = nativeHelperTimingSummary([{ ...a, at: 99999999999, broker: { frames: 999 } }, { ...b, at: 1, broker: { frames: 0 } }]);
+  assert.deepEqual(actual, { helperIndex: 1, mode: 'final-ack', startElapsedUs: 1000000, endElapsedUs: 3000000,
+    seconds: 2, uniqueCaptureFps: 60, refreshFps: 2,
+    deltas: { newFrames: 120, refreshFrames: 4, ticks: 240, missedTicks: 2, noSlot: 15, noPresent: 6, acquireSuccess: 124, acquireTimeout: 3 } });
+  assert.deepEqual(nativeHelperTimingSummary([a, a, b]), actual);
+  assert.equal(nativeHelperTimingSummary([a, a]), null);
+  const legacyA = { ...a }, legacyB = { ...b }; delete legacyA.acquireSuccess; delete legacyB.acquireSuccess;
+  assert.equal('acquireSuccess' in nativeHelperTimingSummary([legacyA, legacyB]).deltas, false);
+  assert.equal('acquireSuccess' in nativeHelperTimingSummary([legacyA, b]).deltas, false);
+});
+
+test('helper timing summary rejects identity, mode, clock and every intermediate counter rollback', () => {
+  const a = nativeHelperTimingSnapshot([helperTimingRecord()], 1, 'copy-complete');
+  const b = { ...a, elapsedUs: 2000000, newFrames: 200, refreshFrames: 3, ticks: 240, missedTicks: 2, noSlot: 20, noPresent: 10 };
+  for (const changed of [{ helperIndex: 2 }, { mode: 'gpu' }, { periodUs: 16667 }, { selectedCompletion: 'fence' },
+    { selectedAcquireMode: 'poll' }, { selectedCompletion: undefined }, { selectedAcquireMode: 'private' }, { elapsedUs: a.elapsedUs }])
+    assert.equal(nativeHelperTimingSummary([a, { ...b, ...changed }]), null);
+  for (const key of ['elapsedUs', 'newFrames', 'refreshFrames', 'ticks', 'missedTicks', 'noSlot', 'noPresent']) {
+    const middle = { ...a, [key]: a[key] - 1 };
+    assert.equal(nativeHelperTimingSummary([a, middle, b]), null);
+  }
+  for (const key of ['helperIndex', 'elapsedUs', 'newFrames', 'refreshFrames', 'ticks', 'missedTicks', 'noSlot', 'noPresent', 'periodUs'])
+    for (const value of [-1, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, '1', null])
+      assert.equal(nativeHelperTimingSummary([a, { ...b, [key]: value }]), null);
+  assert.equal(nativeHelperTimingSummary([a, { ...b, acquireSuccess: 'private' }]), null);
+  assert.equal(nativeHelperTimingSummary([{ ...a, acquireTimeout: 5 }, a, { ...b, acquireTimeout: 4 }]), null);
+  for (const input of [undefined, null, {}, [], [a], [a, null], Array(32).fill(a)]) assert.equal(nativeHelperTimingSummary(input), null);
+  assert.equal(nativeHelperTimingSummary([...Array(30).fill(a), b]).uniqueCaptureFps, 100);
 });
