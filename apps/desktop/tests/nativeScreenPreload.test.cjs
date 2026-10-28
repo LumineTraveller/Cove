@@ -22,7 +22,7 @@ function bridge(enabled = true, options = {}) {
   const electron = { contextBridge: { exposeInMainWorld: (name, value) => { api[name] = value; } },
     ipcRenderer: ipc, sharedTexture: options.sharedTexture === false ? {} : { setSharedTextureReceiver: callback => { receiver = callback; } } };
   vm.runInNewContext(source, { require: name => { assert.equal(name, 'electron'); return electron; }, exports: {},
-    process: { platform: options.platform ?? 'win32', env: {}, argv: [
+    process: { platform: options.platform ?? 'win32', env: {}, versions: options.versions ?? { electron: '44.0.0' }, argv: [
       ...(enabled ? ['--cove-native-gpu-capture=1'] : []), ...(options.argv ?? []),
       ...(options.cpuFrameTiming ? ['--cove-native-cpu-frame-timing=1'] : []),
     ] },
@@ -43,6 +43,17 @@ function texture() {
 }
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const plain = value => JSON.parse(JSON.stringify(value));
+
+test('Canvas preference requires exact flag, qualified runtime and native support', () => {
+  assert.equal(bridge(true, { argv: ['--cove-native-frame-sink=canvas'] }).api.preferredFrameSink, 'canvas');
+  for (const [enabled, options] of [[true, {}], [false, { argv: ['--cove-native-frame-sink=canvas'] }],
+    [true, { argv: ['--cove-native-frame-sink=canvas-extra'] }],
+    [true, { argv: ['--cove-native-frame-sink=canvas'], versions: { electron: '43.0.0' } }],
+    [true, { argv: ['--cove-native-frame-sink=canvas'], platform: 'linux' }],
+    [true, { argv: ['--cove-native-frame-sink=canvas'], sharedTexture: false }]]) {
+    assert.equal(bridge(enabled, options).api.preferredFrameSink, undefined);
+  }
+});
 
 test('CPU timing requires the exact opt-in flag and native support, with no default clock reads', async () => {
   for (const [enabled, options] of [[true, {}], [true, { argv: ['--cove-native-cpu-frame-timing=0'] }],

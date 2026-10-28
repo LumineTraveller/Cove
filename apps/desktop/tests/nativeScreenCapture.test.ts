@@ -52,6 +52,34 @@ class FakeFrame {
 
 type FrameCallback = Parameters<NativeScreenBridge['onFrame']>[1];
 
+test('experimental Canvas preference does not replace an unqualified color contract', async context => {
+  for (const colorSpace of [undefined, 'bt601-limited'] as const) {
+    await context.test(String(colorSpace), async child => {
+      const f = fixture(child);
+      Object.assign(f.bridge, { preferredFrameSink: 'canvas' });
+      f.options.colorSpace = colorSpace;
+      const { candidate } = await f.ready();
+      assert.equal(getNativeScreenCaptureDiagnostics(candidate.stream.getVideoTracks()[0])?.frameSink, 'generator');
+      assert.equal(f.writes.length, 1);
+      candidate.stop();
+    });
+  }
+});
+
+test('unavailable experimental Canvas setup preserves published stock without faulting native', async context => {
+  const f = fixture(context);
+  Object.assign(f.bridge, { preferredFrameSink: 'canvas' });
+  f.options.colorSpace = 'bt709-limited';
+  // This Node fixture deliberately has no browser Canvas/Processor boundary.
+  const pending = tryNativeScreenCapture(f.stream, f.options);
+  await f.flush();
+  assert.equal(await pending, null);
+  assert.equal(f.stock.stops, 0);
+  assert.equal(f.writes.length, 0);
+  assert.deepEqual(f.stopFaults, [undefined]);
+  assert.equal(getLastNativeScreenCaptureAttempt()?.stopReason, 'setup_error');
+});
+
 function fixture(context: TestContext) {
   const controller = new AbortController();
   const stock = new FakeTrack();
@@ -649,7 +677,7 @@ test('diagnostics count validated frames and successful write time, returning de
   const track = candidate.stream.getVideoTracks()[0];
   assert.equal(getNativeScreenCaptureDiagnostics(f.stock as unknown as MediaStreamTrack), null);
   assert.deepEqual(getNativeScreenCaptureDiagnostics(track), {
-    backend: 'native-gpu', pixelFormat: 'bgra', frameStorage: 'gpu', framesReceived: 1, refreshFrames: 0, framesWritten: 1,
+    backend: 'native-gpu', frameSink: 'generator', pixelFormat: 'bgra', frameStorage: 'gpu', framesReceived: 1, refreshFrames: 0, framesWritten: 1,
     framesDroppedWhileBusy: 0, totalWriteMs: 0, maxWriteMs: 0,
     framesDroppedExpired: 0, totalQueueAgeMs: 0, maxQueueAgeMs: 0,
     totalWriteIdleMs: 0, maxWriteIdleMs: 0, writesOverFramePeriod: 0,
@@ -662,7 +690,7 @@ test('diagnostics count validated frames and successful write time, returning de
   await f.frame({ serial: 4, slot: 3 });
   const snapshot = getNativeScreenCaptureDiagnostics(track)!;
   assert.deepEqual(snapshot, {
-    backend: 'native-gpu', pixelFormat: 'bgra', frameStorage: 'gpu', framesReceived: 3, refreshFrames: 1, framesWritten: 3,
+    backend: 'native-gpu', frameSink: 'generator', pixelFormat: 'bgra', frameStorage: 'gpu', framesReceived: 3, refreshFrames: 1, framesWritten: 3,
     framesDroppedWhileBusy: 0, totalWriteMs: 19.5, maxWriteMs: 12,
     framesDroppedExpired: 0, totalQueueAgeMs: 0, maxQueueAgeMs: 0,
     totalWriteIdleMs: 0, maxWriteIdleMs: 0, writesOverFramePeriod: 1,

@@ -197,6 +197,10 @@ if (nativeEnabled) {
 }
 contextBridge.exposeInMainWorld('coveNativeScreen', {
   supported: nativeEnabled,
+  // Experimental handoff only; the qualified runtime and explicit launch flag
+  // are required. This grants no additional IPC, source or renderer authority.
+  preferredFrameSink: nativeEnabled && process.versions?.electron === '44.0.0' &&
+    process.argv.includes('--cove-native-frame-sink=canvas') ? 'canvas' : undefined,
   getCpuFrameTiming: getNativeCpuFrameTiming,
   start: (requestId: string, options: NativeScreenOptions): Promise<NativeScreenStartResult> =>
     nativeEnabled && nativeRequestId(requestId)

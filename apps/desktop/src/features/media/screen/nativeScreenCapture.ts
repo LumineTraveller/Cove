@@ -4,9 +4,11 @@ import type {
   NativeScreenStartResult,
 } from '../../../../electron/native-screen-capture-protocol';
 import { createNativeFrameWriteQueue } from './nativeFrameWriteQueue';
+import { createNativeCanvasFrameSink, getNativeCanvasFrameFailureCode, type NativeCanvasFrameSinkSnapshot } from './nativeCanvasFrameSink';
 
 export interface NativeScreenBridge {
   readonly supported: boolean;
+  readonly preferredFrameSink?: 'canvas';
   start(requestId: string, options: NativeScreenOptions): Promise<NativeScreenStartResult>;
   stop(requestId: string, fault?: 'renderer_failed' | 'receiver_failed'): Promise<boolean>;
   onFrame(requestId: string, callback: (frame: VideoFrame, metadata: NativeScreenFrame) => Promise<void>): () => void;
@@ -29,6 +31,7 @@ export interface NativeScreenCaptureOptions extends NativeScreenOptions {
 
 export interface NativeScreenCaptureDiagnostics {
   backend: 'native-gpu';
+  frameSink: 'generator' | 'canvas';
   pixelFormat: 'bgra' | 'nv12';
   frameStorage: 'gpu' | 'cpu';
   framesReceived: number;
@@ -43,14 +46,19 @@ export interface NativeScreenCaptureDiagnostics {
   totalWriteIdleMs: number;
   maxWriteIdleMs: number;
   writesOverFramePeriod: number;
+  /** On-demand aggregate observation; never populated by per-frame allocation. */
+  canvas?: NativeCanvasFrameSinkSnapshot;
 }
 
 const captureDiagnostics = new WeakMap<MediaStreamTrack, NativeScreenCaptureDiagnostics>();
+const canvasDiagnostics = new WeakMap<MediaStreamTrack, () => NativeCanvasFrameSinkSnapshot>();
 
 /** Aggregate metadata only. A caller cannot mutate the live counters. */
 export function getNativeScreenCaptureDiagnostics(track: MediaStreamTrack): NativeScreenCaptureDiagnostics | null {
   const diagnostics = captureDiagnostics.get(track);
-  return diagnostics ? { ...diagnostics } : null;
+  if (!diagnostics) return null;
+  const canvas = canvasDiagnostics.get(track)?.();
+  return { ...diagnostics, ...(canvas ? { canvas } : {}) };
 }
 
 export type NativeScreenCaptureAttemptPhase =
@@ -72,6 +80,8 @@ export interface NativeScreenCaptureAttempt {
   committedMs: number | null;
   stoppedMs: number | null;
   stopReason: NativeScreenCaptureStopReason | null;
+  /** Failure-only, fixed aggregate metadata; never a frame, timestamp or identifier. */
+  canvasFailure?: Readonly<{ code: ReturnType<typeof getNativeCanvasFrameFailureCode>; snapshot: NativeCanvasFrameSinkSnapshot | null }>;
 }
 type CaptureAttemptState = Omit<NativeScreenCaptureAttempt, 'elapsedMs'> & { startedAt: number };
 let lastCaptureAttempt: CaptureAttemptState | undefined;
@@ -153,7 +163,7 @@ export async function tryNativeScreenCapture(
   }
 
   const diagnostics: NativeScreenCaptureDiagnostics = {
-    backend: 'native-gpu', pixelFormat: 'bgra', frameStorage: 'gpu', framesReceived: 0, refreshFrames: 0, framesWritten: 0,
+    backend: 'native-gpu', frameSink: 'generator', pixelFormat: 'bgra', frameStorage: 'gpu', framesReceived: 0, refreshFrames: 0, framesWritten: 0,
     framesDroppedWhileBusy: 0, totalWriteMs: 0, maxWriteMs: 0,
     framesDroppedExpired: 0, totalQueueAgeMs: 0, maxQueueAgeMs: 0,
     totalWriteIdleMs: 0, maxWriteIdleMs: 0, writesOverFramePeriod: 0,
@@ -165,6 +175,7 @@ export async function tryNativeScreenCapture(
   let committed = false;
   let ready = false;
   let lastWriteCompletedAt: number | undefined;
+  let canvasSink: ReturnType<typeof createNativeCanvasFrameSink> | undefined;
   let startIssued = false;
   let lastSerial = 0;
   let lastTimestamp = -1;
@@ -204,6 +215,7 @@ export async function tryNativeScreenCapture(
     stopped = true;
     finishAttempt(reason);
     writeQueue.stop();
+    canvasSink?.stop();
     if (deadline !== undefined) clearTimeout(deadline);
     if (settingsPoll !== undefined) clearTimeout(settingsPoll);
     settingsPoll = undefined;
@@ -230,33 +242,36 @@ export async function tryNativeScreenCapture(
   function onCancelled(event: Event) { stop(false, event.type === 'abort' ? 'abort' : 'stock_ended'); }
   function onTrackEnded() { stop(true, 'native_ended'); }
 
+  function onWritten(writeMs: number, queueAgeMs: number) {
+    if (!stopped && attempt.firstWriteMs === null) {
+      attempt.firstWriteMs = attemptElapsed(); attempt.phase = 'frame-written';
+    }
+    diagnostics.framesWritten++;
+    diagnostics.totalWriteMs += writeMs;
+    diagnostics.maxWriteMs = Math.max(diagnostics.maxWriteMs, writeMs);
+    diagnostics.totalQueueAgeMs += queueAgeMs;
+    diagnostics.maxQueueAgeMs = Math.max(diagnostics.maxQueueAgeMs, queueAgeMs);
+    if (writeMs > 1000 / options.fps) diagnostics.writesOverFramePeriod++;
+    lastWriteCompletedAt = performance.now();
+  }
+  function onDropped(reason: 'superseded' | 'expired' | 'stopped') {
+    diagnostics.framesDroppedWhileBusy++;
+    if (reason === 'expired') diagnostics.framesDroppedExpired++;
+  }
+  function writeFrame(frame: VideoFrame): Promise<void> {
+    if (lastWriteCompletedAt !== undefined) {
+      const idleMs = Math.max(0, performance.now() - lastWriteCompletedAt);
+      diagnostics.totalWriteIdleMs += idleMs;
+      diagnostics.maxWriteIdleMs = Math.max(diagnostics.maxWriteIdleMs, idleMs);
+    }
+    return writer.write(frame);
+  }
   const writeQueue = createNativeFrameWriteQueue<VideoFrame>({
     now: () => performance.now(),
     maxPendingAgeMs: 2 * 1000 / options.fps,
-    write(frame) {
-      if (lastWriteCompletedAt !== undefined) {
-        const idleMs = Math.max(0, performance.now() - lastWriteCompletedAt);
-        diagnostics.totalWriteIdleMs += idleMs;
-        diagnostics.maxWriteIdleMs = Math.max(diagnostics.maxWriteIdleMs, idleMs);
-      }
-      return writer.write(frame);
-    },
-    onWritten(writeMs, queueAgeMs) {
-      if (!stopped && attempt.firstWriteMs === null) {
-        attempt.firstWriteMs = attemptElapsed(); attempt.phase = 'frame-written';
-      }
-      diagnostics.framesWritten++;
-      diagnostics.totalWriteMs += writeMs;
-      diagnostics.maxWriteMs = Math.max(diagnostics.maxWriteMs, writeMs);
-      diagnostics.totalQueueAgeMs += queueAgeMs;
-      diagnostics.maxQueueAgeMs = Math.max(diagnostics.maxQueueAgeMs, queueAgeMs);
-      if (writeMs > 1000 / options.fps) diagnostics.writesOverFramePeriod++;
-      lastWriteCompletedAt = performance.now();
-    },
-    onDropped(reason) {
-      diagnostics.framesDroppedWhileBusy++;
-      if (reason === 'expired') diagnostics.framesDroppedExpired++;
-    },
+    write: writeFrame,
+    onWritten,
+    onDropped,
     onFailure(error) {
       console.warn('[native-screen] frame_write_error', error instanceof Error ? error.name : 'unknown');
       stop(true, 'frame_error');
@@ -335,6 +350,12 @@ export async function tryNativeScreenCapture(
       lastTimestamp = metadata.timestamp;
       diagnostics.framesReceived++;
       if (metadata.refresh) diagnostics.refreshFrames++;
+      if (canvasSink) {
+        // submit settles after draw (or discard), so the source import can be
+        // retired independently of the one bounded Canvas conversion/write.
+        await canvasSink.submit(frame, metadata.timestamp);
+        return;
+      }
       // Retain only the latest pending frame while one conversion/write runs.
       // The callback stays pending until written, superseded or cancelled, so
       // preload and allReferencesReleased still own the actual GPU slot credit.
@@ -388,6 +409,33 @@ export async function tryNativeScreenCapture(
       attempt.phase = 'helper-ready';
       diagnostics.pixelFormat = result.pixelFormat ?? 'bgra';
       diagnostics.frameStorage = result.storage ?? 'gpu';
+      // This route preserves the already-published AV1/BT709 contract. VP8's
+      // verified CPU601 path and every unqualified format retain their writer.
+      if (bridge.preferredFrameSink === 'canvas' && options.colorSpace === 'bt709-limited' &&
+          result.storage === undefined && (result.pixelFormat ?? 'bgra') === 'bgra') {
+        try {
+          canvasSink = createNativeCanvasFrameSink({
+            width: result.width, height: result.height, fps: options.fps, writer: { write: writeFrame },
+            onWritten(writeMs, queueAgeMs) {
+              if (stopped) return;
+              onWritten(writeMs, queueAgeMs);
+              if (!ready) checkFirstFrameSettings();
+            },
+            onDropped,
+            onFailure(error) {
+              const code = getNativeCanvasFrameFailureCode(error);
+              attempt.canvasFailure = Object.freeze({ code, snapshot: canvasSink?.snapshot() ?? null });
+              console.warn('[native-screen] canvas_frame_error', code);
+              stop(true, 'frame_error');
+            },
+          });
+          diagnostics.frameSink = 'canvas';
+          canvasDiagnostics.set(track, canvasSink.snapshot);
+          if (stopped) canvasSink.stop();
+        } catch {
+          stop(false, 'setup_error');
+        }
+      }
     }).catch(() => {
       if (attempt.helperResponseMs === null) {
         attempt.helperResponseMs = attemptElapsed();
