@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import path from 'node:path';
 import { sharedTexture, type WebContents, type WebFrameMain, type SharedTextureImported } from 'electron';
-import { createNativeCpuFrameDelivery, type NativeCpuFrameDelivery } from './native-screen-cpu-delivery';
+import { createNativeCpuFrameDelivery, type NativeCpuFrameDelivery, type NativeCpuDeliveryScheduling } from './native-screen-cpu-delivery';
 import {
   NATIVE_SCREEN_POOL_SIZE, NATIVE_SCREEN_START_TIMEOUT_MS, NATIVE_SCREEN_STOP_TIMEOUT_MS,
   validNativeScreenOptions, validNativeScreenRequestId,
@@ -107,7 +107,7 @@ export class NativeScreenCaptureController {
   private handles?: NativeScreenHandleBridge;
   private readonly timing = { import: emptyTimingMetric(), transfer: emptyTimingMetric(), reference: emptyTimingMetric() };
 
-  constructor(private readonly config: { enabled: boolean; helperPath: string; handles?: NativeScreenHandleBridge; timing?: boolean; pixelFormat?: 'bgra' | 'nv12'; storage?: 'gpu' | 'cpu'; completion?: 'query' | 'fence' }) {
+  constructor(private readonly config: { enabled: boolean; helperPath: string; handles?: NativeScreenHandleBridge; timing?: boolean; pixelFormat?: 'bgra' | 'nv12'; storage?: 'gpu' | 'cpu'; completion?: 'query' | 'fence'; cpuDeliveryScheduling?: NativeCpuDeliveryScheduling }) {
     this.handles = config.handles;
   }
 
@@ -246,6 +246,7 @@ export class NativeScreenCaptureController {
       } catch { /* Diagnostics cannot change capture or cleanup behavior. */ }
     }
     return { sessions: sessions.length, activeSessions: active.length, helperCpuSeconds,
+      cpuDeliveryScheduling: this.config.storage === 'cpu' ? this.config.cpuDeliveryScheduling ?? 'immediate' : 'immediate',
       pixelFormat: active.length === 1 ? active[0].ready?.pixelFormat ?? null : null,
       frameStorage: active.length === 1 ? active[0].ready?.storage ?? null : null,
       cpuFramesInFlight: sessions.reduce((sum, value) => sum + (value.cpuDelivery?.snapshot().inFlight ?? 0), 0),
@@ -336,6 +337,7 @@ export class NativeScreenCaptureController {
     if (cpu) {
       session.cpuDelivery = createNativeCpuFrameDelivery({ requestId: session.requestId, sessionId: session.sessionId, width, height,
         colorSpace: session.ready.colorSpace!,
+        deliveryScheduling: this.config.cpuDeliveryScheduling,
         readFrame: (handle, byteLength, metadata) => {
           const childHandles = session.childHandles!;
           if (this.handles?.supportsCachedCpuFramesInto === true && typeof childHandles.readFrameCachedInto === 'function') {

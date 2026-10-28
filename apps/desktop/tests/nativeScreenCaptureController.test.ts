@@ -6,12 +6,15 @@ import vm from 'node:vm';
 import path from 'node:path';
 import ts from 'typescript';
 import * as protocol from '../electron/native-screen-capture-protocol';
-import * as cpuDelivery from '../electron/native-screen-cpu-delivery';
+import type * as cpuDelivery from '../electron/native-screen-cpu-delivery';
 import type { NativeScreenCaptureController } from '../electron/native-screen-capture';
 
 // Exercise the production broker, fake only Electron/GPU and the owned child pipes.
 // These tests never import Electron, spawn a process or inspect the desktop.
 const compiled = ts.transpileModule(fs.readFileSync(new URL('../electron/native-screen-capture.ts', import.meta.url), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
+}).outputText;
+const compiledCpuDelivery = ts.transpileModule(fs.readFileSync(new URL('../electron/native-screen-cpu-delivery.ts', import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
 }).outputText;
 const options = { maxWidth: 1920, maxHeight: 1080, fps: 120 as const };
@@ -21,11 +24,21 @@ const frame = (serial = 1, slot = 0) => ({ type: 'frame', serial, slot, width: 1
   timestamp: serial * 1000, handle: '0xabcd', refresh: false });
 const flush = async () => { for (let n = 0; n < 6; n++) await Promise.resolve(); };
 
-function harness(overrides: { enabled?: boolean; platform?: string; electron?: string; missingBridge?: boolean; timing?: boolean; pixelFormat?: 'bgra' | 'nv12'; storage?: 'gpu' | 'cpu'; completion?: 'query' | 'fence'; supportsCpuFrames?: boolean; supportsCachedCpuFrames?: boolean; supportsCachedCpuFramesInto?: boolean } = {}) {
+function harness(overrides: { enabled?: boolean; platform?: string; electron?: string; missingBridge?: boolean; timing?: boolean; pixelFormat?: 'bgra' | 'nv12'; storage?: 'gpu' | 'cpu'; completion?: 'query' | 'fence'; cpuDeliveryScheduling?: cpuDelivery.NativeCpuDeliveryScheduling; supportsCpuFrames?: boolean; supportsCachedCpuFrames?: boolean; supportsCachedCpuFramesInto?: boolean } = {}) {
   let now = 100_000, uuid = 0, importError = false, sendError = false, sendThrows = false, sendFrameError = false;
   let duplicateError = false, closeError = false, openError = false;
   let cpuReadError = false;
   const timers = new Map<any, { due: number; callback: () => void }>();
+  const immediates = new Set<{ callback(): void }>();
+  const allImmediates: { callback(): void }[] = [];
+  const setImmediate = (callback: () => void) => {
+    const immediate = { callback }; immediates.add(immediate); allImmediates.push(immediate); return immediate;
+  };
+  const runImmediate = () => {
+    const immediate = immediates.values().next().value;
+    assert.ok(immediate, 'a delivery immediate must be pending');
+    immediates.delete(immediate); immediate.callback();
+  };
   const setTimer = (callback: () => void, milliseconds: number) => {
     const id = { unref() {} }; timers.set(id, { due: now + milliseconds, callback }); return id;
   };
@@ -91,6 +104,16 @@ function harness(overrides: { enabled?: boolean; platform?: string; electron?: s
     },
   };
   const module = { exports: {} as { NativeScreenCaptureController: typeof NativeScreenCaptureController } };
+  const cpuModule = { exports: {} as typeof cpuDelivery };
+  vm.runInNewContext(compiledCpuDelivery, { exports: cpuModule.exports, Buffer, ArrayBuffer,
+    setTimeout: setTimer, clearTimeout: (id: any) => timers.delete(id),
+    setImmediate, clearImmediate: (id: any) => immediates.delete(id),
+    require(name: string) {
+      if (name === 'node:perf_hooks') return { performance: { now: () => now } };
+      if (name === './native-screen-capture-protocol') return protocol;
+      throw Error(`Unexpected CPU import ${name}`);
+    },
+  });
   vm.runInNewContext(compiled, { exports: module.exports, Buffer, ArrayBuffer,
     process: { platform: overrides.platform ?? 'win32', arch: 'x64', pid: 1234, versions: { electron: overrides.electron ?? '44.0.0' } },
     Date: class extends Date { static now() { return now; } }, setTimeout: setTimer, clearTimeout: (id: any) => timers.delete(id),
@@ -105,17 +128,17 @@ function harness(overrides: { enabled?: boolean; platform?: string; electron?: s
         return handles;
       }
       if (name === './native-screen-capture-protocol') return protocol;
-      if (name === './native-screen-cpu-delivery') return cpuDelivery;
+      if (name === './native-screen-cpu-delivery') return cpuModule.exports;
       throw Error(`Unexpected import ${name}`);
     },
   });
-  const controller = new module.exports.NativeScreenCaptureController({ enabled: overrides.enabled ?? true, helperPath: 'owned-helper.exe', timing: overrides.timing, pixelFormat: overrides.pixelFormat, storage: overrides.storage, completion: overrides.completion });
+  const controller = new module.exports.NativeScreenCaptureController({ enabled: overrides.enabled ?? true, helperPath: 'owned-helper.exe', timing: overrides.timing, pixelFormat: overrides.pixelFormat, storage: overrides.storage, completion: overrides.completion, cpuDeliveryScheduling: overrides.cpuDeliveryScheduling });
   const choose = (patch: Partial<protocol.NativeScreenSourceSelection> = {}) => controller.noteStockSelection({ sourceId: 'screen:0:0',
     displayId: '123', primaryDisplayId: '123', displayCount: 1, sourceWidth: 2560, sourceHeight: 1440, selectedAt: now, ...patch });
   const start = (requestId = 'request_01', requested: protocol.NativeScreenOptions = {
     ...options, ...(overrides.storage === 'cpu' ? { colorSpace: 'bt709-limited' as const } : {}),
   }) => { choose(); return controller.start(target as any, requestId, requested); };
-  return { controller, target, start, choose, children, imports, transfers, sent, duplicates, childHandles, cpuReads, timers, advance,
+  return { controller, target, start, choose, children, imports, transfers, sent, duplicates, childHandles, cpuReads, timers, advance, immediates, allImmediates, runImmediate,
     failImport() { importError = true; }, failSend(sync = false) { sendError = true; sendThrows = sync; },
     failDuplicate() { duplicateError = true; }, failHandleClose() { closeError = true; },
     failOpen() { openError = true; },
@@ -372,6 +395,107 @@ test('CPU copy failure and stop retire the owned delivery without fabricated cre
     if (metadata) assert.equal(h.controller.acknowledgeCpuFrame(h.target as any, metadata), false);
     assert.equal(h.children[0].writes.some((line: string) => line.startsWith('released ')), false);
     if (failRead) assert.equal(h.controller.snapshot().failureCode, 'cpu_frame_failed');
+  }
+});
+
+test('CPU scheduling is opt-in and does not change GPU delivery or helper arguments', async () => {
+  for (const cpuDeliveryScheduling of [undefined, 'immediate', 'yield'] as const) {
+    const h = harness({ pixelFormat: 'nv12', storage: 'cpu', cpuDeliveryScheduling });
+    const pending = h.start(); h.children[0].emitMessage(cpuReady); await pending;
+    assert.equal(h.controller.snapshot().cpuDeliveryScheduling, cpuDeliveryScheduling ?? 'immediate');
+    const args = Array.from(h.children[0].args);
+    assert.equal(args.some(value => String(value).includes('scheduling')), false);
+    h.children[0].emitMessage(cpuFrame());
+    assert.equal(h.cpuReads.length, cpuDeliveryScheduling === 'yield' ? 0 : 1);
+    assert.equal(h.immediates.size, cpuDeliveryScheduling === 'yield' ? 1 : 0);
+    if (cpuDeliveryScheduling === 'yield') h.runImmediate();
+    assert.equal(h.cpuReads.length, 1);
+    assert.equal(h.cpuReads[0].source.readBigUInt64LE(), 0xabcdn);
+    h.controller.reset(); h.children[0].close();
+    assert.equal(h.timers.size, 0); assert.equal(h.immediates.size, 0);
+  }
+  const gpu = harness({ cpuDeliveryScheduling: 'yield' });
+  const pending = gpu.start(); gpu.children[0].emitMessage(ready); await pending;
+  assert.equal(gpu.controller.snapshot().cpuDeliveryScheduling, 'immediate');
+  gpu.children[0].emitMessage(frame());
+  assert.equal(gpu.imports.length, 1); assert.equal(gpu.transfers.length, 1);
+  assert.equal(gpu.cpuReads.length, 0); assert.equal(gpu.immediates.size, 0);
+  gpu.transfers[0].resolve(); await flush(); gpu.imports[0].config.allReferencesReleased();
+  gpu.controller.reset(); gpu.children[0].close();
+});
+
+test('a three-frame CPU stdout batch yields between copies and accepts the intervening final ACK', async () => {
+  const h = harness({ pixelFormat: 'nv12', storage: 'cpu', cpuDeliveryScheduling: 'yield', supportsCachedCpuFramesInto: true });
+  const pending = h.start(); h.children[0].emitMessage(cpuReady); await pending;
+  h.children[0].stdout.emit('data', Buffer.from([cpuFrame(1, 0), cpuFrame(2, 1), cpuFrame(3, 2)].map(value => JSON.stringify(value) + '\n').join('')));
+  assert.equal(h.controller.snapshot().cpuFramesInFlight, 3);
+  assert.equal(h.controller.snapshot().cpuFrameBuffers, 0);
+  assert.equal(h.cpuReads.length, 0); assert.equal(h.immediates.size, 1);
+  assert.deepEqual(h.children[0].writes, []);
+  for (let slot = 0; slot < 3; slot++) {
+    h.runImmediate();
+    assert.equal(h.cpuReads.length, slot + 1);
+    assert.equal(h.cpuReads[slot].source.readBigUInt64LE(), 0xabcdn);
+    assert.equal(h.cpuReads[slot].cachedSlot, slot);
+    assert.equal(h.controller.snapshot().cpuFrameBuffers, slot + 1);
+    const sent = h.sent.filter(entry => entry.channel === 'cove:native-screen:cpu-frame');
+    assert.equal(sent.length, slot + 1);
+    assert.equal(sent[slot].data.serial, slot + 1);
+    assert.equal(h.controller.acknowledgeCpuFrame(h.target as any, sent[slot].data), true);
+    assert.equal(h.controller.acknowledgeCpuFrame(h.target as any, sent[slot].data), false);
+    assert.deepEqual(h.children[0].writes.slice(-2), [`imported ${slot} ${slot + 1}\n`, `released ${slot} ${slot + 1}\n`]);
+  }
+  assert.equal(h.controller.snapshot().cpuFramesInFlight, 0);
+  assert.equal(h.controller.snapshot().releasedFrames, 3);
+  assert.equal(h.immediates.size, 0); assert.equal(h.imports.length, 0);
+  h.controller.reset(); h.children[0].close();
+  assert.equal(h.controller.snapshot().cpuFrameBuffers, 0); assert.equal(h.timers.size, 0);
+});
+
+for (const ending of ['reset', 'close', 'copy failure', 'timeout'] as const) {
+  test(`queued CPU ${ending} cancels delivery before any late mapping read`, async () => {
+    const h = harness({ pixelFormat: 'nv12', storage: 'cpu', cpuDeliveryScheduling: 'yield', supportsCachedCpuFramesInto: true });
+    const pending = h.start(); h.children[0].emitMessage(cpuReady); await pending;
+    for (let slot = 0; slot < 3; slot++) h.children[0].emitMessage(cpuFrame(slot + 1, slot));
+    if (ending === 'reset') h.controller.reset();
+    if (ending === 'close') h.children[0].close();
+    if (ending === 'copy failure') { h.failCpuRead(); h.runImmediate(); }
+    if (ending === 'timeout') h.advance(1500);
+    assert.equal(h.immediates.size, 0);
+    assert.equal(h.controller.snapshot().cpuFramesInFlight, 0);
+    assert.equal(h.controller.snapshot().cpuFrameBuffers, 0);
+    assert.equal(h.childHandles[0].closes, 1);
+    h.allImmediates.forEach(immediate => immediate.callback());
+    assert.equal(h.cpuReads.length, 0);
+    assert.equal(h.sent.filter(entry => entry.channel === 'cove:native-screen:cpu-frame').length, 0);
+    assert.equal(h.children[0].writes.some((line: string) => line.startsWith('released ')), false);
+    h.children[0].close();
+    assert.equal(h.controller.snapshot().sessions, 0); assert.equal(h.timers.size, 0);
+  });
+}
+
+test('yield allows synchronous renderer ACK and stops queued reads when the child closes during send', async () => {
+  for (const closeDuringSend of [false, true]) {
+    const h = harness({ pixelFormat: 'nv12', storage: 'cpu', cpuDeliveryScheduling: 'yield' });
+    const pending = h.start(); h.children[0].emitMessage(cpuReady); await pending;
+    const originalSend = h.target.mainFrame.send;
+    h.target.mainFrame.send = (channel, data, binary) => {
+      originalSend(channel, data, binary);
+      if (channel === 'cove:native-screen:cpu-frame') {
+        if (closeDuringSend) h.children[0].close();
+        else assert.equal(h.controller.acknowledgeCpuFrame(h.target as any, data), true);
+      }
+    };
+    h.children[0].emitMessage(cpuFrame(1, 0)); h.children[0].emitMessage(cpuFrame(2, 1));
+    h.runImmediate();
+    assert.equal(h.cpuReads.length, 1);
+    assert.equal(h.controller.snapshot().releasedFrames, closeDuringSend ? 0 : 1);
+    if (!closeDuringSend) { h.runImmediate(); assert.equal(h.cpuReads.length, 2); }
+    h.controller.reset(); h.children[0].close();
+    h.allImmediates.forEach(immediate => immediate.callback());
+    assert.equal(h.cpuReads.length, closeDuringSend ? 1 : 2);
+    assert.equal(h.childHandles[0].closes, 1);
+    assert.equal(h.immediates.size, 0); assert.equal(h.timers.size, 0);
   }
 });
 

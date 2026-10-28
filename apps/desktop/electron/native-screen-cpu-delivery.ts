@@ -4,6 +4,12 @@ import { NATIVE_SCREEN_POOL_SIZE, type NativeScreenFrame, type NativeScreenColor
 export type NativeCpuScreenFrame = NativeScreenFrame & { pixelFormat: 'nv12'; storage: 'cpu'; colorSpace: NativeScreenColorSpace };
 export type NativeCpuFrameFailure = 'cpu_frame_failed' | 'cpu_ack_timeout';
 export type NativeCpuFrameTimingStage = 'import' | 'transfer' | 'reference';
+export type NativeCpuDeliveryScheduling = 'immediate' | 'yield';
+
+export interface NativeCpuFrameDeliveryScheduler {
+  setImmediate(callback: () => void): ReturnType<typeof setImmediate>;
+  clearImmediate(handle: ReturnType<typeof setImmediate>): void;
+}
 
 export interface NativeCpuFrameDeliveryOptions {
   requestId: string;
@@ -11,6 +17,10 @@ export interface NativeCpuFrameDeliveryOptions {
   width: number;
   height: number;
   colorSpace: NativeScreenColorSpace;
+  /** Immediate preserves the established synchronous delivery path. */
+  deliveryScheduling?: NativeCpuDeliveryScheduling;
+  /** Injectable asynchronous scheduler for deterministic delivery tests. */
+  scheduler?: NativeCpuFrameDeliveryScheduler;
   /** Copies a verified child's mapping into an independent ArrayBuffer, using validated immutable lease metadata. */
   readFrame(handle: Buffer, expectedBytes: number, metadata: NativeCpuScreenFrame): ArrayBuffer;
   onImported(metadata: NativeCpuScreenFrame): boolean;
@@ -44,6 +54,7 @@ interface Lease {
   createdAt: number;
   timer: ReturnType<typeof setTimeout>;
   sent: boolean;
+  handle?: Buffer;
 }
 
 function positiveInteger(value: unknown): value is number {
@@ -51,7 +62,7 @@ function positiveInteger(value: unknown): value is number {
 }
 
 /**
- * Owns only CPU-delivery metadata and timers, never native mappings, handles or pixel buffers.
+ * Owns CPU-delivery metadata, timers and queued wire-handle bytes, never native objects or pixel buffers.
  * Copying/importing is not a slot credit: only the renderer's matching final ack can release
  * a slot. Stop/failure deliberately leaves helper slot retirement to the session owner.
  */
@@ -61,13 +72,20 @@ export function createNativeCpuFrameDelivery(options: NativeCpuFrameDeliveryOpti
     throw new TypeError('CPU frame delivery requires a request and session');
   if (colorSpace !== 'bt601-limited' && colorSpace !== 'bt709-limited')
     throw new TypeError('CPU frame delivery requires a color space');
+  const deliveryScheduling = options.deliveryScheduling ?? 'immediate';
+  if (deliveryScheduling !== 'immediate' && deliveryScheduling !== 'yield')
+    throw new TypeError('CPU frame delivery scheduling is invalid');
   const expectedBytes = width * height * 3 / 2;
   if (!positiveInteger(width) || !positiveInteger(height) || width % 2 || height % 2 ||
       !Number.isSafeInteger(expectedBytes) || expectedBytes > MAX_FRAME_BYTES)
     throw new RangeError('CPU NV12 frame geometry is invalid');
 
   const now = options.now ?? (() => performance.now());
+  const scheduler = options.scheduler ?? { setImmediate, clearImmediate };
   const leases = new Map<number, Lease>();
+  const pending: Lease[] = [];
+  let pendingImmediate: { handle?: ReturnType<typeof setImmediate> } | undefined;
+  let delivering = false;
   let stopped = false;
   let lastSerial = 0;
   let lastTimestamp = 0;
@@ -77,7 +95,15 @@ export function createNativeCpuFrameDelivery(options: NativeCpuFrameDeliveryOpti
   function stop(): void {
     if (stopped) return;
     stopped = true;
-    for (const lease of leases.values()) clearTimeout(lease.timer);
+    const scheduled = pendingImmediate;
+    pendingImmediate = undefined;
+    if (scheduled?.handle) scheduler.clearImmediate(scheduled.handle);
+    for (const lease of leases.values()) {
+      clearTimeout(lease.timer);
+      lease.handle?.fill(0);
+      lease.handle = undefined;
+    }
+    pending.length = 0;
     leases.clear();
   }
 
@@ -107,6 +133,75 @@ export function createNativeCpuFrameDelivery(options: NativeCpuFrameDeliveryOpti
       frame.pixelFormat === 'nv12' && frame.storage === 'cpu' && frame.colorSpace === colorSpace;
   }
 
+  function sendLease(lease: Lease, handle: Buffer): void {
+    try {
+      // A queued lease consumes the original deadline, including before any native read.
+      if (!live(lease) || expired(lease) || !live(lease)) return;
+      const { metadata, createdAt } = lease;
+      // The native reader supplies an independent exact-sized copy. Do not retain or recopy it.
+      const data = options.readFrame(handle, expectedBytes, metadata);
+      // Reading is the last use of these wire bytes. Erase before send can synchronously
+      // ack and enqueue a replacement, keeping handle snapshots bounded to three too.
+      lease.handle?.fill(0);
+      lease.handle = undefined;
+      if (!live(lease)) return;
+      if (!(data instanceof ArrayBuffer) || data.byteLength !== expectedBytes) {
+        fail('cpu_frame_failed');
+        return;
+      }
+      if (expired(lease) || !live(lease)) return;
+      if (options.onTiming) {
+        const durationMs = now() - createdAt;
+        if (!live(lease)) return;
+        options.onTiming('import', durationMs);
+      }
+      if (!live(lease) || expired(lease) || !live(lease)) return;
+      const imported = options.onImported(metadata);
+      if (!live(lease)) return;
+      if (!imported) { fail('cpu_frame_failed'); return; }
+      if (expired(lease) || !live(lease)) return;
+
+      const transferStartedAt = now();
+      if (!live(lease)) return;
+      if (transferStartedAt - createdAt >= ACK_TIMEOUT_MS) { fail('cpu_ack_timeout'); return; }
+      // Mark sent before invoking the transport: a synchronous receiver can legitimately ack.
+      lease.sent = true;
+      options.send(metadata, data);
+      frames++;
+      // Transfer measures this synchronous transport call; reference covers the renderer's ack.
+      if (!stopped && options.onTiming) {
+        const durationMs = now() - transferStartedAt;
+        if (!stopped) options.onTiming('transfer', durationMs);
+      }
+    } catch { fail('cpu_frame_failed'); }
+    finally {
+      lease.handle?.fill(0);
+      lease.handle = undefined;
+    }
+  }
+
+  function scheduleNext(): void {
+    if (stopped || delivering || pendingImmediate || pending.length === 0) return;
+    const scheduled: { handle?: ReturnType<typeof setImmediate> } = {};
+    pendingImmediate = scheduled;
+    try {
+      scheduled.handle = scheduler.setImmediate(() => {
+        // A cancelled or already-dispatched callback cannot read a retired mapping.
+        if (stopped || pendingImmediate !== scheduled) return;
+        pendingImmediate = undefined;
+        const lease = pending.shift();
+        delivering = true;
+        try { if (lease?.handle) sendLease(lease, lease.handle); }
+        finally {
+          delivering = false;
+          // Exactly one copy/send per check phase leaves poll and IPC ACKs a turn.
+          scheduleNext();
+        }
+      });
+      if (stopped || pendingImmediate !== scheduled) scheduler.clearImmediate(scheduled.handle);
+    } catch { fail('cpu_frame_failed'); }
+  }
+
   function deliver(value: NativeScreenFrame, handle: Buffer): void {
     if (stopped) return;
     try {
@@ -120,7 +215,16 @@ export function createNativeCpuFrameDelivery(options: NativeCpuFrameDeliveryOpti
       const metadata: NativeCpuScreenFrame = Object.freeze({ requestId, sessionId, slot: value.slot,
         serial: value.serial, width, height, timestamp: value.timestamp, refresh: value.refresh,
         pixelFormat: 'nv12', storage: 'cpu', colorSpace });
+      if (stopped) return;
       const createdAt = now();
+      if (stopped) return;
+      // Accessors and the injectable clock can reenter delivery. Validate the frozen
+      // snapshot against the current lease state before committing this new lease.
+      if (!validFrame(metadata) || metadata.serial <= lastSerial || metadata.timestamp <= lastTimestamp ||
+          leases.has(metadata.slot) || leases.size >= NATIVE_SCREEN_POOL_SIZE) {
+        fail('cpu_frame_failed');
+        return;
+      }
       const lease: Lease = { metadata, createdAt, sent: false,
         timer: setTimeout(() => { if (live(lease)) fail('cpu_ack_timeout'); }, ACK_TIMEOUT_MS) };
       lease.timer.unref();
@@ -128,28 +232,12 @@ export function createNativeCpuFrameDelivery(options: NativeCpuFrameDeliveryOpti
       lastSerial = metadata.serial;
       lastTimestamp = metadata.timestamp;
 
-      // The native reader supplies an independent exact-sized copy. Do not retain or recopy it.
-      const data = options.readFrame(handle, expectedBytes, metadata);
-      if (!live(lease)) return;
-      if (!(data instanceof ArrayBuffer) || data.byteLength !== expectedBytes) {
-        fail('cpu_frame_failed');
-        return;
-      }
-      if (expired(lease)) return;
-      options.onTiming?.('import', now() - createdAt);
-      if (!live(lease) || expired(lease)) return;
-      const imported = options.onImported(metadata);
-      if (!live(lease)) return;
-      if (!imported) { fail('cpu_frame_failed'); return; }
-      if (expired(lease)) return;
-
-      const transferStartedAt = now();
-      // Mark sent before invoking the transport: a synchronous receiver can legitimately ack.
-      lease.sent = true;
-      options.send(metadata, data);
-      frames++;
-      // Transfer measures this synchronous transport call; reference covers the renderer's ack.
-      if (!stopped) options.onTiming?.('transfer', now() - transferStartedAt);
+      if (deliveryScheduling === 'yield') {
+        // The caller clears its temporary handle as soon as deliver returns.
+        lease.handle = Buffer.from(handle);
+        pending.push(lease);
+        scheduleNext();
+      } else sendLease(lease, handle);
     } catch { fail('cpu_frame_failed'); }
   }
 
@@ -170,6 +258,7 @@ export function createNativeCpuFrameDelivery(options: NativeCpuFrameDeliveryOpti
       const durationMs = now() - lease.createdAt;
       // Unknown metadata accessors and the injected clock can reenter session teardown too.
       if (!live(lease)) return false;
+      if (durationMs >= ACK_TIMEOUT_MS) { fail('cpu_ack_timeout'); return false; }
       // Remove first so duplicate/reentrant acks cannot credit the same slot twice.
       clearTimeout(lease.timer);
       leases.delete(lease.metadata.slot);

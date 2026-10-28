@@ -6,15 +6,20 @@ import {
   type NativeCpuFrameFailure,
   type NativeCpuFrameTimingStage,
   type NativeCpuScreenFrame,
+  type NativeCpuDeliveryScheduling,
 } from '../electron/native-screen-cpu-delivery';
 
 interface Timer { due: number; callback(): void; unref(): void; }
+interface Immediate { callback(): void; }
 
-function fixture(context: TestContext) {
+function fixture(context: TestContext, deliveryScheduling?: NativeCpuDeliveryScheduling) {
   let time = 0;
   let unrefs = 0;
   const timers = new Map<Timer, Timer>();
   const allTimers: Timer[] = [];
+  const immediates = new Set<Immediate>();
+  const allImmediates: Immediate[] = [];
+  const cancelledImmediates: Immediate[] = [];
   context.mock.method(globalThis, 'setTimeout', ((callback: () => void, delay: number) => {
     const timer: Timer = { due: time + delay, callback, unref() { unrefs++; } };
     timers.set(timer, timer); allTimers.push(timer); return timer;
@@ -38,6 +43,17 @@ function fixture(context: TestContext) {
   };
   const options: NativeCpuFrameDeliveryOptions = {
     requestId: 'request-1', sessionId: 'session-1', width: 4, height: 2, colorSpace: 'bt709-limited',
+    deliveryScheduling,
+    scheduler: {
+      setImmediate(callback) {
+        const immediate = { callback }; immediates.add(immediate); allImmediates.push(immediate);
+        return immediate as unknown as ReturnType<typeof setImmediate>;
+      },
+      clearImmediate(handle) {
+        const immediate = handle as unknown as Immediate;
+        immediates.delete(immediate); cancelledImmediates.push(immediate);
+      },
+    },
     now: () => time,
     readFrame(value, expectedBytes, metadata) {
       events.push('read'); reads.push({ handle: value, expectedBytes });
@@ -56,7 +72,13 @@ function fixture(context: TestContext) {
     width: 4, height: 2, timestamp: 1_000, refresh: false, pixelFormat: 'nv12', storage: 'cpu', colorSpace: 'bt709-limited', ...patch,
   });
   return { delivery, options, frame, hooks, source, handle, events, reads, imported, sent, credits,
-    failures, timings, timers, allTimers, get unrefs() { return unrefs; },
+    failures, timings, timers, allTimers, immediates, allImmediates, cancelledImmediates,
+    get unrefs() { return unrefs; },
+    runImmediate() {
+      const immediate = immediates.values().next().value as Immediate | undefined;
+      assert.ok(immediate, 'a delivery immediate must be pending');
+      immediates.delete(immediate); immediate.callback();
+    },
     at(value: number) { time = value; },
     advance(milliseconds: number) {
       const until = time + milliseconds;
@@ -409,5 +431,261 @@ test('a clock callback cannot credit after synchronously stopping the session', 
   assert.equal(f.credits.length, 0);
   assert.equal(f.timers.size, 0);
   assert.equal(delivery.snapshot().inFlight, 0);
+  assert.deepEqual(f.failures, []);
+});
+
+test('delivery scheduling is explicit and immediate remains the default', context => {
+  const f = fixture(context);
+  f.delivery.deliver(f.frame(), f.handle);
+  assert.equal(f.sent.length, 1);
+  assert.equal(f.allImmediates.length, 0);
+  const explicit = createNativeCpuFrameDelivery({ ...f.options, deliveryScheduling: 'immediate' });
+  explicit.deliver(f.frame(), f.handle);
+  assert.equal(f.sent.length, 2);
+  assert.equal(f.allImmediates.length, 0);
+  explicit.stop();
+  assert.throws(() => createNativeCpuFrameDelivery({ ...f.options, deliveryScheduling: 'other' as any }), TypeError);
+});
+
+test('yield snapshots three leases and sends exactly one FIFO frame per scheduled turn', context => {
+  const f = fixture(context, 'yield');
+  const observedHandles: Buffer[] = [];
+  f.hooks.read = handle => { observedHandles.push(Buffer.from(handle)); return new ArrayBuffer(12); };
+  const originals = Array.from({ length: 3 }, (_, slot) => f.frame({ slot, serial: slot + 1, timestamp: (slot + 1) * 1000 }));
+  for (const metadata of originals) f.delivery.deliver(metadata, f.handle);
+  assert.equal(f.reads.length, 0);
+  assert.equal(f.imported.length, 0);
+  assert.equal(f.sent.length, 0);
+  assert.equal(f.delivery.snapshot().inFlight, 3);
+  assert.equal(f.timers.size, 3);
+  assert.equal(f.immediates.size, 1);
+  assert.equal(f.delivery.acknowledge(originals[0]), false);
+  originals[0].slot = 2; originals[0].serial = 99; originals[0].timestamp = 99;
+  f.handle.fill(0);
+  f.at(7); f.runImmediate();
+  assert.equal(f.sent.length, 1);
+  assert.equal(f.sent[0].metadata.slot, 0);
+  assert.equal(f.sent[0].metadata.serial, 1);
+  assert.equal(Object.isFrozen(f.sent[0].metadata), true);
+  assert.deepEqual([...observedHandles[0]], Array(8).fill(1));
+  assert.deepEqual([...f.reads[0].handle], Array(8).fill(0));
+  assert.equal(f.timings[0].durationMs, 7);
+  assert.equal(f.immediates.size, 1);
+  assert.equal(f.delivery.acknowledge(originals[1]), false);
+  assert.equal(f.delivery.acknowledge(f.sent[0].metadata), true);
+  // A poll/IPC turn can free and enqueue a slot between the first and second sends.
+  f.delivery.deliver(f.frame({ slot: 0, serial: 4, timestamp: 4000 }), Buffer.alloc(8, 4));
+  assert.equal(f.delivery.snapshot().inFlight, 3);
+  for (const expectedSerial of [2, 3, 4]) {
+    const before = f.sent.length;
+    f.runImmediate();
+    assert.equal(f.sent.length, before + 1);
+    assert.equal(f.sent.at(-1)!.metadata.serial, expectedSerial);
+    assert.equal(f.delivery.acknowledge(f.sent.at(-1)!.metadata), true);
+  }
+  assert.equal(f.immediates.size, 0);
+  assert.equal(f.delivery.snapshot().inFlight, 0);
+  assert.equal(f.delivery.snapshot().released, 4);
+  assert.equal(f.timers.size, 0);
+  assert.deepEqual(f.failures, []);
+});
+
+function captureQueuedHandles(context: TestContext, source: Buffer): Buffer[] {
+  const copies: Buffer[] = [];
+  const originalFrom = Buffer.from;
+  context.mock.method(Buffer, 'from', ((...args: unknown[]) => {
+    const copy = Reflect.apply(originalFrom, Buffer, args) as Buffer;
+    if (args[0] === source) copies.push(copy);
+    return copy;
+  }) as typeof Buffer.from);
+  return copies;
+}
+
+for (const failure of ['stop', 'invalid frame', 'timeout', 'scheduler failure'] as const) {
+  test(`yield ${failure} cancels pending work, erases handles and rejects late callbacks`, context => {
+    const f = fixture(context, 'yield');
+    const copies = captureQueuedHandles(context, f.handle);
+    for (let slot = 0; slot < 3; slot++) f.delivery.deliver(f.frame({ slot, serial: slot + 1, timestamp: (slot + 1) * 1000 }), f.handle);
+    assert.equal(copies.length, 3);
+    assert.ok(copies.every(copy => copy.every(byte => byte === 1)));
+    const late = f.allImmediates[0];
+    if (failure === 'stop') f.delivery.stop();
+    if (failure === 'invalid frame') f.delivery.deliver(f.frame({ serial: 4, timestamp: 4000 }), f.handle);
+    if (failure === 'timeout') f.advance(1500);
+    if (failure === 'scheduler failure') {
+      f.options.scheduler!.setImmediate = () => { throw Error('schedule failure'); };
+      f.runImmediate();
+    }
+    assert.equal(f.immediates.size, 0);
+    assert.ok(copies.every(copy => copy.every(byte => byte === 0)));
+    assert.equal(f.delivery.snapshot().inFlight, 0);
+    assert.equal(f.timers.size, 0);
+    const reads = f.reads.length, sends = f.sent.length;
+    late.callback(); late.callback();
+    f.allTimers.forEach(timer => timer.callback());
+    assert.equal(f.reads.length, reads);
+    assert.equal(f.sent.length, sends);
+    assert.equal(f.credits.length, 0);
+    assert.deepEqual(f.failures, failure === 'stop' ? [] : [failure === 'timeout' ? 'cpu_ack_timeout' : 'cpu_frame_failed']);
+    if (failure !== 'scheduler failure') assert.equal(f.cancelledImmediates.length, 1);
+  });
+}
+
+test('yield checks its original deadline before reading even if no timer has fired', context => {
+  const f = fixture(context, 'yield');
+  const copies = captureQueuedHandles(context, f.handle);
+  f.delivery.deliver(f.frame(), f.handle);
+  f.at(1500); f.runImmediate();
+  assert.equal(f.reads.length, 0);
+  assert.equal(f.sent.length, 0);
+  assert.equal(f.timers.size, 0);
+  assert.ok(copies[0].every(byte => byte === 0));
+  assert.deepEqual(f.failures, ['cpu_ack_timeout']);
+});
+
+test('yield retains the original deadline across queue, copy, import and final ack', context => {
+  const f = fixture(context, 'yield');
+  f.delivery.deliver(f.frame(), f.handle);
+  f.at(1400);
+  f.hooks.read = () => { f.at(1450); return new ArrayBuffer(12); };
+  f.hooks.imported = () => { f.at(1499); return true; };
+  f.runImmediate();
+  assert.equal(f.sent.length, 1);
+  f.at(1500);
+  assert.equal(f.delivery.acknowledge(f.sent[0].metadata), false);
+  assert.deepEqual(f.failures, ['cpu_ack_timeout']);
+  assert.equal(f.credits.length, 0);
+  assert.equal(f.timers.size, 0);
+});
+
+test('yield accepts a synchronous final ack and defers reentrant delivery until another turn', context => {
+  const f = fixture(context, 'yield');
+  f.hooks.send = metadata => {
+    assert.equal(f.delivery.acknowledge(metadata), true);
+    assert.equal(f.delivery.acknowledge(metadata), false);
+  };
+  f.hooks.released = metadata => {
+    assert.equal(f.delivery.acknowledge(metadata), false);
+    if (metadata.serial === 1) f.delivery.deliver(f.frame({ serial: 2, timestamp: 2000 }), f.handle);
+    return true;
+  };
+  f.delivery.deliver(f.frame(), f.handle);
+  f.runImmediate();
+  assert.equal(f.sent.length, 1);
+  assert.equal(f.credits.length, 1);
+  assert.equal(f.immediates.size, 1);
+  assert.equal(f.delivery.snapshot().inFlight, 1);
+  // A duplicate old callback cannot steal the newly scheduled lease.
+  f.allImmediates[0].callback();
+  assert.equal(f.sent.length, 1);
+  f.runImmediate();
+  assert.equal(f.sent.length, 2);
+  assert.equal(f.credits.length, 2);
+  assert.equal(f.immediates.size, 0);
+  assert.equal(f.timers.size, 0);
+  assert.deepEqual(f.failures, []);
+});
+
+for (const stage of ['read', 'imported', 'send'] as const) {
+  test(`yield stop during ${stage} clears the remaining queue without reading another mapping`, context => {
+    const f = fixture(context, 'yield');
+    const copies = captureQueuedHandles(context, f.handle);
+    for (let slot = 0; slot < 3; slot++) f.delivery.deliver(f.frame({ slot, serial: slot + 1, timestamp: (slot + 1) * 1000 }), f.handle);
+    if (stage === 'read') f.hooks.read = () => { f.delivery.stop(); return new ArrayBuffer(12); };
+    if (stage === 'imported') f.hooks.imported = () => { f.delivery.stop(); return true; };
+    if (stage === 'send') f.hooks.send = () => f.delivery.stop();
+    f.runImmediate();
+    f.allImmediates.forEach(immediate => immediate.callback());
+    assert.equal(f.reads.length, 1);
+    assert.equal(f.sent.length, stage === 'send' ? 1 : 0);
+    assert.equal(f.credits.length, 0);
+    assert.equal(f.immediates.size, 0);
+    assert.equal(f.timers.size, 0);
+    assert.ok(copies.every(copy => copy.every(byte => byte === 0)));
+    assert.deepEqual(f.failures, []);
+  });
+}
+
+test('yield read failure clears every queued handle and schedules no later copy', context => {
+  const f = fixture(context, 'yield');
+  const copies = captureQueuedHandles(context, f.handle);
+  for (let slot = 0; slot < 3; slot++) f.delivery.deliver(f.frame({ slot, serial: slot + 1, timestamp: (slot + 1) * 1000 }), f.handle);
+  f.hooks.read = () => { throw Error('native read failure'); };
+  f.runImmediate();
+  assert.equal(f.reads.length, 1);
+  assert.equal(f.sent.length, 0);
+  assert.equal(f.immediates.size, 0);
+  assert.equal(f.timers.size, 0);
+  assert.ok(copies.every(copy => copy.every(byte => byte === 0)));
+  assert.deepEqual(f.failures, ['cpu_frame_failed']);
+});
+
+test('three queued handles stay bounded when a synchronous ACK reentrantly reuses its slot', context => {
+  const f = fixture(context, 'yield');
+  const copies = captureQueuedHandles(context, f.handle);
+  for (let slot = 0; slot < 3; slot++) f.delivery.deliver(f.frame({ slot, serial: slot + 1, timestamp: (slot + 1) * 1000 }), f.handle);
+  f.hooks.send = metadata => { assert.equal(f.delivery.acknowledge(metadata), true); };
+  f.hooks.released = metadata => {
+    if (metadata.serial === 1) {
+      assert.ok(copies[0].every(byte => byte === 0), 'wire bytes are retired before a synchronous ACK');
+      f.delivery.deliver(f.frame({ serial: 4, timestamp: 4000 }), f.handle);
+      assert.equal(copies.length, 4);
+      assert.equal(copies.filter(copy => copy.some(byte => byte !== 0)).length, 3);
+      assert.equal(f.delivery.snapshot().inFlight, 3);
+    }
+    return true;
+  };
+  for (let turn = 0; turn < 4; turn++) {
+    f.runImmediate();
+    assert.equal(f.sent.length, turn + 1);
+    assert.ok(copies.filter(copy => copy.some(byte => byte !== 0)).length <= 3);
+  }
+  assert.equal(f.delivery.snapshot().released, 4);
+  assert.ok(copies.every(copy => copy.every(byte => byte === 0)));
+  assert.equal(f.timers.size, 0); assert.equal(f.immediates.size, 0);
+  assert.deepEqual(f.failures, []);
+});
+
+test('yield validates the frozen snapshot when caller metadata accessors change during delivery', context => {
+  const f = fixture(context, 'yield');
+  let serialReads = 0;
+  const metadata = { ...f.frame(), get serial() { return ++serialReads < 3 ? 1 : 0; } };
+  f.delivery.deliver(metadata, f.handle);
+  assert.equal(f.reads.length, 0); assert.equal(f.immediates.size, 0); assert.equal(f.timers.size, 0);
+  assert.deepEqual(f.failures, ['cpu_frame_failed']);
+});
+
+test('yield clock reentry cannot overwrite a newer queued lease during registration', context => {
+  const f = fixture(context, 'yield');
+  let reenter = true;
+  const delivery = createNativeCpuFrameDelivery({ ...f.options, now() {
+    if (reenter) {
+      reenter = false;
+      delivery.deliver(f.frame({ serial: 2, timestamp: 2000 }), f.handle);
+    }
+    return 0;
+  } });
+  context.after(() => delivery.stop());
+  delivery.deliver(f.frame(), f.handle);
+  f.allImmediates.forEach(immediate => immediate.callback());
+  assert.equal(f.reads.length, 0); assert.equal(f.immediates.size, 0); assert.equal(f.timers.size, 0);
+  assert.equal(delivery.snapshot().inFlight, 0);
+  assert.deepEqual(f.failures, ['cpu_frame_failed']);
+});
+
+test('yield clock reentry during the pre-send deadline checks cannot send after stop', context => {
+  const f = fixture(context, 'yield');
+  let remainingClockReads = 0;
+  const delivery = createNativeCpuFrameDelivery({ ...f.options, now() {
+    if (remainingClockReads > 0 && --remainingClockReads === 0) delivery.stop();
+    return 0;
+  } });
+  context.after(() => delivery.stop());
+  f.hooks.imported = () => { remainingClockReads = 2; return true; };
+  delivery.deliver(f.frame(), f.handle);
+  f.runImmediate();
+  assert.equal(f.reads.length, 1); assert.equal(f.imported.length, 1); assert.equal(f.sent.length, 0);
+  assert.equal(f.immediates.size, 0); assert.equal(f.timers.size, 0);
+  assert.equal(delivery.snapshot().stopped, true);
   assert.deepEqual(f.failures, []);
 });
