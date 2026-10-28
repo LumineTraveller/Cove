@@ -4,6 +4,12 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #define _WIN32_WINNT 0x0A00
+#ifndef COVE_NATIVE_CAPTURE_NONBLOCKING_ACQUIRE
+#define COVE_NATIVE_CAPTURE_NONBLOCKING_ACQUIRE 0
+#endif
+#if COVE_NATIVE_CAPTURE_NONBLOCKING_ACQUIRE != 0 && COVE_NATIVE_CAPTURE_NONBLOCKING_ACQUIRE != 1
+#error COVE_NATIVE_CAPTURE_NONBLOCKING_ACQUIRE_must_be_0_or_1
+#endif
 #include <windows.h>
 #include <tlhelp32.h>
 #include <d3d11_4.h>
@@ -23,6 +29,8 @@
 #include <vector>
 
 using Microsoft::WRL::ComPtr;
+constexpr bool kNonblockingAcquire = COVE_NATIVE_CAPTURE_NONBLOCKING_ACQUIRE != 0;
+static const char* selectedAcquireMode() { return kNonblockingAcquire ? "poll" : "timeout"; }
 constexpr uint64_t kSafeInteger = 9007199254740991ULL;
 constexpr UINT kMaxDimension = 16384;
 constexpr UINT kMaxCursorDimension = 512;
@@ -180,10 +188,33 @@ struct StageTiming {
   uint64_t count = 0, totalUs = 0, maxUs = 0;
   void add(uint64_t elapsed) { ++count; totalUs += elapsed; maxUs = std::max(maxUs, elapsed); }
 };
+struct ResidenceTiming {
+  uint64_t count = 0, totalUs = 0, maxUs = 0;
+  std::array<uint64_t, 7> buckets{};
+  void add(uint64_t elapsed, uint64_t period) {
+    if (!period) return;
+    // Strict integer thresholds: <1T, <2T, <3T, <4T, <6T, <12T, remainder.
+    // Divide before comparing so even an extreme duration cannot overflow a
+    // period multiple. No per-frame metadata or unbounded sample list exists.
+    static constexpr uint64_t limits[]{1,2,3,4,6,12};
+    const uint64_t wholePeriods = elapsed / period;
+    size_t bucket = 0;
+    while (bucket < 6 && wholePeriods >= limits[bucket]) ++bucket;
+    ++count; totalUs += elapsed; maxUs = std::max(maxUs, elapsed); ++buckets[bucket];
+  }
+  void write(std::ostream& out) const {
+    out << "{\"count\":" << count << ",\"totalUs\":" << totalUs << ",\"maxUs\":" << maxUs << ",\"buckets\":[";
+    for (size_t index = 0; index < buckets.size(); ++index) {
+      if (index) out << ',';
+      out << buckets[index];
+    }
+    out << "]}";
+  }
+};
 struct CaptureTiming {
   enum Stage { Acquire, Draw, GpuWait, GpuFlush, GpuQuery, FrameRelease, Output,
     TickWork, TickLateness, TimerWait, TimerOvershoot, SlotCreditWait, CpuReadback,
-    GpuFenceCheck, GpuEventArm, GpuEventWait, CpuMapWait, StageCount };
+    GpuFenceCheck, GpuEventArm, GpuEventWait, CpuMapWait, AcquireSuccessWait, AcquireTimeoutWait, StageCount };
   bool enabled = false;
   CompletionMode selectedCompletion = CompletionMode::Query;
   uint64_t begin = 0, nextReport = 0, creditWaitBegin = 0, periodUs = 0;
@@ -194,22 +225,30 @@ struct CaptureTiming {
   uint64_t readinessSlotWaitWindows = 0, readinessPresentWaitWindows = 0;
   uint64_t readinessRecoveredSlot = 0, readinessRecoveredPresent = 0;
   uint64_t cpuMapAttempts = 0, cpuMapStillDrawing = 0, cpuMapCancelled = 0, cpuMapTimeouts = 0;
+  ResidenceTiming leaseResidence, importedResidence;
   std::array<StageTiming, StageCount> stages{};
   CaptureTiming() {
     wchar_t value[2]{};
     enabled = GetEnvironmentVariableW(L"COVE_NATIVE_GPU_CAPTURE_TIMING", value, 2) == 1 && value[0] == L'1';
   }
   void start(uint64_t now, uint64_t period) { begin = now; nextReport = now + 1000000; periodUs = period; }
+  void recordAcquireWait(HRESULT result, uint64_t elapsed) {
+    if (!enabled) return;
+    stages[Acquire].add(elapsed);
+    if (result == S_OK) stages[AcquireSuccessWait].add(elapsed);
+    else if (result == DXGI_ERROR_WAIT_TIMEOUT) stages[AcquireTimeoutWait].add(elapsed);
+  }
   void report(uint64_t now, bool final = false) {
     if (!enabled || (!final && now < nextReport)) return;
     nextReport = now + 1000000;
     static constexpr const char* names[]{"acquire", "draw", "gpuWait", "gpuFlush", "gpuQuery",
       "frameRelease", "output", "tickWork", "tickLateness", "timerWait", "timerOvershoot", "slotCreditWait", "cpuReadback",
-      "gpuFenceCheck", "gpuEventArm", "gpuEventWait", "cpuMapWait"};
+      "gpuFenceCheck", "gpuEventArm", "gpuEventWait", "cpuMapWait", "acquireSuccessWait", "acquireTimeoutWait"};
     static_assert(sizeof(names) / sizeof(names[0]) == StageCount, "timing stage names");
     std::ostringstream out;
     out << "COVE_NATIVE_CAPTURE_TIMING {\"schemaVersion\":1,\"final\":" << (final ? "true" : "false")
       << ",\"selectedCompletion\":\"" << completionName(selectedCompletion) << '"'
+      << ",\"selectedAcquireMode\":\"" << selectedAcquireMode() << '"'
       << ",\"elapsedUs\":" << now - begin << ",\"periodUs\":" << periodUs
       << ",\"ticks\":" << ticks << ",\"missedTicks\":" << missedTicks
       << ",\"acquireSuccess\":" << acquireSuccess << ",\"acquireTimeout\":" << acquireTimeout
@@ -225,7 +264,10 @@ struct CaptureTiming {
       << ",\"readinessRecoveredPresent\":" << readinessRecoveredPresent
       << ",\"cpuMapAttempts\":" << cpuMapAttempts << ",\"cpuMapStillDrawing\":" << cpuMapStillDrawing
       << ",\"cpuMapCancelled\":" << cpuMapCancelled << ",\"cpuMapTimeouts\":" << cpuMapTimeouts
-      << ",\"openSlotCreditWaitUs\":" << (creditWaitBegin ? now - creditWaitBegin : 0) << ",\"stages\":{";
+      << ",\"openSlotCreditWaitUs\":" << (creditWaitBegin ? now - creditWaitBegin : 0);
+    out << ",\"leaseResidence\":"; leaseResidence.write(out);
+    out << ",\"importedResidence\":"; importedResidence.write(out);
+    out << ",\"stages\":{";
     for (size_t i = 0; i < stages.size(); ++i) {
       if (i) out << ',';
       const auto& stage = stages[i];
@@ -280,6 +322,7 @@ public:
     std::ostringstream out;
     out << "COVE_NATIVE_CAPTURE_STARTUP {\"schemaVersion\":1,\"complete\":" << (complete ? "true" : "false")
       << ",\"selectedCompletion\":\"" << completionName(selectedCompletion_) << '"'
+      << ",\"selectedAcquireMode\":\"" << selectedAcquireMode() << '"'
       << ",\"phase\":\"" << names[phase_] << "\",\"elapsedUs\":" << now - begin_ << ",\"stages\":{";
     for (size_t i = 0; i < stages_.size(); ++i) {
       if (i) out << ',';
@@ -300,16 +343,20 @@ public:
 // are capped by the remaining budget, including the sub-millisecond tail.
 class ReadinessWindow {
   uint64_t deadline_;
+  bool nonblockingAcquire_;
   bool completed_ = false, cancelled_ = false;
 public:
   bool waitedSlot = false, waitedPresent = false;
   unsigned attempts = 0;
-  explicit ReadinessWindow(uint64_t deadline) : deadline_(deadline) {}
+  explicit ReadinessWindow(uint64_t deadline, bool nonblockingAcquire = false)
+      : deadline_(deadline), nonblockingAcquire_(nonblockingAcquire) {}
   uint64_t remaining(uint64_t now) const {
     return !completed_ && !cancelled_ && now < deadline_ ? deadline_ - now : 0;
   }
   bool open(uint64_t now) const { return remaining(now) != 0; }
-  UINT acquireTimeoutMs(uint64_t now) const { return UINT(std::min<uint64_t>(1, remaining(now) / 1000)); }
+  UINT acquireTimeoutMs(uint64_t now) const {
+    return nonblockingAcquire_ ? 0 : UINT(std::min<uint64_t>(1, remaining(now) / 1000));
+  }
   uint64_t waitUs(uint64_t now, uint64_t maximum) const { return std::min(remaining(now), maximum); }
   void complete() { require(!completed_ && !cancelled_, "invalid_readiness_completion"); completed_ = true; }
   void cancel() { require(!completed_, "invalid_readiness_cancellation"); cancelled_ = true; }
@@ -398,9 +445,28 @@ static Command parseCommand(const std::string& line) {
   require(result.serial > 0, "invalid_owner_command");
   return result;
 }
+template<class Now>
+static void applyLeaseCommand(const Command& command, Slot& slot, CaptureTiming* timing, Now&& now) {
+  // Contract application always precedes diagnostics. Invalid/duplicate ACKs
+  // retain their existing fixed failure and must not read the clock or record.
+  if (command.kind == Command::Imported) slot.lease.import(command.serial);
+  else if (command.kind == Command::Released) slot.lease.release(command.serial);
+  else throw Failure("invalid_owner_command");
+  if (!timing || !timing->enabled || !timing->periodUs) return;
+  const uint64_t observed = now();
+  if (observed < slot.sentAt) return; // Never turn an invalid origin into unsigned residence.
+  auto& metric = command.kind == Command::Imported ? timing->importedResidence : timing->leaseResidence;
+  metric.add(observed - slot.sentAt, timing->periodUs);
+}
 class Input {
   std::string pending_;
+  // Non-owning bindings. capture declares Clock/Timing before Input, and passes
+  // this same Input through pacing, GPU completion and CPU Map readiness waits.
+  const Clock* clock_ = nullptr;
+  CaptureTiming* timing_ = nullptr;
 public:
+  Input() = default; // Synthetic empty-lease input pumps do not need residence metrics.
+  Input(const Clock& clock, CaptureTiming& timing) : clock_(&clock), timing_(&timing) {}
   bool pump(HANDLE owner, std::array<Slot, 3>& slots) {
     require(ownerAlive(owner), "owner_exited");
     HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
@@ -423,11 +489,7 @@ public:
       const auto command = parseCommand(line);
       if (command.kind == Command::Stop) return false;
       auto& slot = slots[command.slot];
-      if (command.kind == Command::Imported) {
-        slot.lease.import(command.serial);
-      } else {
-        slot.lease.release(command.serial);
-      }
+      applyLeaseCommand(command, slot, timing_, [&] { return clock_->us(); });
     }
     require(pending_.size() <= 96, "owner_command_overflow");
     return true;
@@ -1024,7 +1086,7 @@ static void capture(const Options& option) {
     "dpi_context_unavailable");
   Clock clock; CaptureTiming timing; timing.selectedCompletion = option.completion;
   StartupTiming startup(clock, timing.enabled, option.completion);
-  Timer timer; Input input;
+  Timer timer; Input input(clock, timing);
   startup.next(StartupTiming::SourceLookup);
   auto output = primaryOutput();
   const Size source{UINT(output.desc.DesktopCoordinates.right), UINT(output.desc.DesktopCoordinates.bottom)};
@@ -1097,7 +1159,7 @@ static void capture(const Options& option) {
       nextDisplayCheck = now + 250000;
     } else validateOutputFast(output);
     auto available = slots.end();
-    ReadinessWindow window(nextTick);
+    ReadinessWindow window(nextTick, kNonblockingAcquire);
     bool frameReady = false, refresh = false, lastUnavailableSlot = false;
     while (window.open(clock.us())) {
       if (!input.pump(owner.value, slots)) { window.cancel(); running = false; break; }
@@ -1125,8 +1187,9 @@ static void capture(const Options& option) {
       if (!window.open(now)) break;
       const UINT acquireTimeout = window.acquireTimeoutMs(now);
       if (++window.attempts > 1 && timing.enabled) ++timing.readinessRetries;
-      { Measure acquireTiming(timing, CaptureTiming::Acquire, clock);
-        result = duplication->AcquireNextFrame(acquireTimeout, &info, resource.GetAddressOf()); }
+      const uint64_t acquireBegin = timing.enabled ? clock.us() : 0;
+      result = duplication->AcquireNextFrame(acquireTimeout, &info, resource.GetAddressOf());
+      if (timing.enabled) timing.recordAcquireWait(result, clock.us() - acquireBegin);
       if (timing.enabled && result == DXGI_ERROR_WAIT_TIMEOUT) ++timing.acquireTimeout;
       if (result != DXGI_ERROR_WAIT_TIMEOUT) {
         check(result, "desktop_acquire_failed"); acquired.hold();
@@ -1184,8 +1247,9 @@ static void capture(const Options& option) {
         window.waitedPresent = true;
         if (timing.enabled) ++timing.readinessPresentWaitWindows;
       }
-      // A zero-timeout tail still yields; repeated unsuccessful nonblocking
-      // Acquire calls must not turn the remaining budget into a busy loop.
+      // Poll mode always takes this bounded high-resolution yield when no frame
+      // is ready. Timeout mode retains the same yield in its zero-timeout tail.
+      // Both share this tick's existing deadline, without replay or busy spin.
       if (!acquireTimeout) {
         const uint64_t wait = window.waitUs(clock.us(), 250);
         if (wait) timer.wait(owner.value, wait, &timing, &clock);
@@ -1619,6 +1683,31 @@ static void selfTest() {
     AcquiredFrame frame(&frameOwner); frame.hold();
   }
   expect(frameOwner.releases == 5); // Best-effort destructor never throws.
+  CaptureTiming acquireWaits; acquireWaits.enabled = false;
+  acquireWaits.recordAcquireWait(S_OK, 10);
+  expect(acquireWaits.stages[CaptureTiming::Acquire].count == 0 &&
+    acquireWaits.stages[CaptureTiming::AcquireSuccessWait].count == 0);
+  acquireWaits.enabled = true;
+  acquireWaits.recordAcquireWait(S_OK, 10);
+  acquireWaits.recordAcquireWait(DXGI_ERROR_WAIT_TIMEOUT, 16200);
+  acquireWaits.recordAcquireWait(S_OK, 20);
+  expect(acquireWaits.stages[CaptureTiming::Acquire].count == 3 &&
+    acquireWaits.stages[CaptureTiming::Acquire].totalUs == 16230 &&
+    acquireWaits.stages[CaptureTiming::Acquire].maxUs == 16200);
+  expect(acquireWaits.stages[CaptureTiming::AcquireSuccessWait].count == 2 &&
+    acquireWaits.stages[CaptureTiming::AcquireSuccessWait].totalUs == 30 &&
+    acquireWaits.stages[CaptureTiming::AcquireSuccessWait].maxUs == 20);
+  expect(acquireWaits.stages[CaptureTiming::AcquireTimeoutWait].count == 1 &&
+    acquireWaits.stages[CaptureTiming::AcquireTimeoutWait].totalUs == 16200 &&
+    acquireWaits.stages[CaptureTiming::AcquireTimeoutWait].maxUs == 16200);
+  expect(acquireWaits.stages[CaptureTiming::Acquire].totalUs ==
+    acquireWaits.stages[CaptureTiming::AcquireSuccessWait].totalUs +
+    acquireWaits.stages[CaptureTiming::AcquireTimeoutWait].totalUs);
+  acquireWaits.recordAcquireWait(E_FAIL, 7); // Fatal outcomes remain only in aggregate acquire.
+  expect(acquireWaits.stages[CaptureTiming::Acquire].count == 4 &&
+    acquireWaits.stages[CaptureTiming::Acquire].totalUs == 16237 &&
+    acquireWaits.stages[CaptureTiming::AcquireSuccessWait].count == 2 &&
+    acquireWaits.stages[CaptureTiming::AcquireTimeoutWait].count == 1);
   ReadinessWindow readiness(8333);
   expect(readiness.open(0) && readiness.remaining(0) == 8333);
   expect(readiness.acquireTimeoutMs(0) == 1 && readiness.waitUs(0, 500) == 500);
@@ -1640,6 +1729,32 @@ static void selfTest() {
   expect(lateDeadline == 24999 && late.remaining(20000) == 4999);
   // A late wake gets only the remaining current phase, never historical work.
   expect(late.acquireTimeoutMs(24900) == 0 && late.waitUs(24900, 500) == 99);
+  ReadinessWindow poll(8333, true);
+  for (uint64_t now : {0ULL, 1ULL, 7333ULL, 7334ULL, 8332ULL, 8333ULL, 9000ULL})
+    expect(poll.acquireTimeoutMs(now) == 0);
+  expect(poll.remaining(0) == 8333 && poll.waitUs(0, 250) == 250);
+  expect(poll.waitUs(8200, 250) == 133 && poll.waitUs(8332, 250) == 1);
+  expect(poll.waitUs(8333, 250) == 0 && !poll.open(8333));
+  uint64_t pollNow = 0; unsigned pollAttempts = 0; bool boundedYields = true;
+  while (poll.open(pollNow)) {
+    const uint64_t yielded = poll.waitUs(pollNow, 250);
+    boundedYields = boundedYields && poll.acquireTimeoutMs(pollNow) == 0 && yielded > 0 && yielded <= 250;
+    require(yielded > 0 && ++pollAttempts <= 34, "self_test_poll_busy_loop");
+    pollNow += yielded;
+  }
+  expect(boundedYields && pollAttempts == 34 && pollNow == 8333 && !poll.open(pollNow));
+  ReadinessWindow pollCancelled(8333, true);
+  pollCancelled.cancel();
+  expect(pollCancelled.remaining(0) == 0 && pollCancelled.waitUs(0, 250) == 0 &&
+    pollCancelled.acquireTimeoutMs(0) == 0 && !pollCancelled.open(0));
+  rejects([&] { pollCancelled.complete(); }); ++checks;
+  ReadinessWindow pollComplete(8333, true); pollComplete.complete();
+  expect(pollComplete.remaining(0) == 0 && pollComplete.waitUs(0, 250) == 0);
+  ReadinessWindow pollLate(lateDeadline, true);
+  expect(pollLate.acquireTimeoutMs(20000) == 0 && pollLate.remaining(20000) == 4999 &&
+    pollLate.waitUs(20000, 250) == 250 && pollLate.waitUs(24900, 250) == 99);
+  ReadinessWindow compiledAcquire(8333, kNonblockingAcquire);
+  expect(compiledAcquire.acquireTimeoutMs(0) == (kNonblockingAcquire ? 0U : 1U));
   for (const auto& test : std::array<std::array<uint64_t, 4>, 9>{{
       {{100,99,10,100}}, {{100,100,10,110}}, {{100,103,10,110}},
       {{100,109,10,110}}, {{100,110,10,120}}, {{100,137,10,140}},
@@ -1682,6 +1797,70 @@ static void selfTest() {
   lease.import(1); rejects([&] { lease.import(1); }); ++checks;
   rejects([&] { lease.release(2); }); ++checks; lease.release(1); lease.issue(2); lease.import(2); lease.release(2);
   expect(!lease.busy);
+  ResidenceTiming residence;
+  residence.add(99, 0);
+  expect(residence.count == 0 && residence.totalUs == 0);
+  const std::array<std::array<uint64_t, 2>, 13> residenceEdges{{
+    {{0,0}}, {{9,0}}, {{10,1}}, {{19,1}}, {{20,2}}, {{29,2}}, {{30,3}},
+    {{39,3}}, {{40,4}}, {{59,4}}, {{60,5}}, {{119,5}}, {{120,6}}
+  }};
+  for (const auto& edge : residenceEdges) {
+    ResidenceTiming single; single.add(edge[0], 10);
+    expect(single.count == 1 && single.totalUs == edge[0] && single.maxUs == edge[0] && single.buckets[edge[1]] == 1);
+    residence.add(edge[0], 10);
+  }
+  expect(residence.count == 13 && residence.totalUs == 554 && residence.maxUs == 120 &&
+    residence.buckets == std::array<uint64_t, 7>{2,2,2,2,2,2,1});
+  ResidenceTiming exact120; exact120.add(8332, 8333); exact120.add(8333, 8333);
+  expect(exact120.buckets[0] == 1 && exact120.buckets[1] == 1 && exact120.totalUs == 16665);
+  ResidenceTiming extremeResidence; extremeResidence.add(std::numeric_limits<uint64_t>::max(), 1);
+  expect(extremeResidence.buckets[6] == 1 && extremeResidence.maxUs == std::numeric_limits<uint64_t>::max());
+  ResidenceTiming widePeriod; widePeriod.add(std::numeric_limits<uint64_t>::max() - 1, std::numeric_limits<uint64_t>::max());
+  expect(widePeriod.buckets[0] == 1); // No multiplication overflow in threshold comparisons.
+  ResidenceTiming overflowingMultiple;
+  overflowingMultiple.add(std::numeric_limits<uint64_t>::max(), std::numeric_limits<uint64_t>::max() / 2 + 1);
+  expect(overflowingMultiple.buckets[1] == 1); // Mathematically <2T even when 2T cannot fit uint64_t.
+  ResidenceTiming jsonResidence; jsonResidence.add(9, 10); jsonResidence.add(20, 10);
+  std::ostringstream residenceJson; jsonResidence.write(residenceJson);
+  expect(residenceJson.str() == "{\"count\":2,\"totalUs\":29,\"maxUs\":20,\"buckets\":[1,0,1,0,0,0,0]}");
+  CaptureTiming ackTiming; ackTiming.enabled = true; ackTiming.periodUs = 10;
+  Slot ackSlot; ackSlot.sentAt = 100; ackSlot.lease.issue(1);
+  unsigned ackClockReads = 0;
+  applyLeaseCommand({Command::Imported, 0, 1}, ackSlot, &ackTiming, [&] {
+    ++ackClockReads; expect(ackSlot.lease.imported && ackSlot.lease.busy); return uint64_t(111);
+  });
+  expect(ackTiming.importedResidence.count == 1 && ackTiming.importedResidence.totalUs == 11 &&
+    ackTiming.importedResidence.buckets[1] == 1 && ackTiming.leaseResidence.count == 0 && ackClockReads == 1);
+  const auto shouldNotReadAckClock = [&]() -> uint64_t {
+    ++ackClockReads; throw Failure("self_test_unexpected_ack_clock_read");
+  };
+  expectFailure([&] { applyLeaseCommand({Command::Imported, 0, 1}, ackSlot, &ackTiming, shouldNotReadAckClock); }, "invalid_import_ack");
+  expectFailure([&] { applyLeaseCommand({Command::Released, 0, 2}, ackSlot, &ackTiming, shouldNotReadAckClock); }, "invalid_release_ack");
+  expect(ackClockReads == 1 && ackSlot.lease.busy && ackTiming.leaseResidence.count == 0);
+  applyLeaseCommand({Command::Released, 0, 1}, ackSlot, &ackTiming, [&] {
+    ++ackClockReads; expect(!ackSlot.lease.busy); return uint64_t(145);
+  });
+  expect(ackTiming.leaseResidence.count == 1 && ackTiming.leaseResidence.totalUs == 45 &&
+    ackTiming.leaseResidence.maxUs == 45 && ackTiming.leaseResidence.buckets[4] == 1 && ackClockReads == 2);
+  expectFailure([&] { applyLeaseCommand({Command::Released, 0, 1}, ackSlot, &ackTiming, shouldNotReadAckClock); }, "invalid_release_ack");
+  expect(ackTiming.leaseResidence.count == 1 && ackTiming.importedResidence.count == 1 && ackClockReads == 2);
+  ackTiming.enabled = false; ackSlot.lease.issue(2);
+  applyLeaseCommand({Command::Imported, 0, 2}, ackSlot, &ackTiming, shouldNotReadAckClock);
+  applyLeaseCommand({Command::Released, 0, 2}, ackSlot, &ackTiming, shouldNotReadAckClock);
+  expect(!ackSlot.lease.busy && ackClockReads == 2 && ackTiming.leaseResidence.count == 1 && ackTiming.importedResidence.count == 1);
+  ackTiming.enabled = true; ackTiming.periodUs = 0; ackSlot.lease.issue(3);
+  applyLeaseCommand({Command::Imported, 0, 3}, ackSlot, &ackTiming, shouldNotReadAckClock);
+  applyLeaseCommand({Command::Released, 0, 3}, ackSlot, &ackTiming, shouldNotReadAckClock);
+  expect(!ackSlot.lease.busy && ackClockReads == 2 && ackTiming.leaseResidence.count == 1);
+  ackSlot.lease.issue(4);
+  applyLeaseCommand({Command::Imported, 0, 4}, ackSlot, nullptr, shouldNotReadAckClock);
+  applyLeaseCommand({Command::Released, 0, 4}, ackSlot, nullptr, shouldNotReadAckClock);
+  expect(!ackSlot.lease.busy && ackClockReads == 2);
+  ackTiming.periodUs = 10; ackSlot.lease.issue(5);
+  expectFailure([&] { applyLeaseCommand({Command::Released, 0, 5}, ackSlot, &ackTiming, shouldNotReadAckClock); }, "invalid_release_ack");
+  expect(ackSlot.lease.busy && !ackSlot.lease.imported && ackClockReads == 2 && ackTiming.leaseResidence.count == 1);
+  expectFailure([&] { applyLeaseCommand({Command::Stop, 0, 0}, ackSlot, &ackTiming, shouldNotReadAckClock); }, "invalid_owner_command");
+  expect(ackSlot.lease.busy && !ackSlot.lease.imported && ackClockReads == 2);
   const auto command = parseCommand("imported 2 9007199254740991");
   expect(command.kind == Command::Imported && command.slot == 2 && command.serial == kSafeInteger);
   for (const auto* invalid : {"released 3 1", "imported 0 0", "stop ", "released 0 1 extra", "imported  1"}) {
@@ -1731,7 +1910,8 @@ static void selfTest() {
   for (const auto colorSpace : {Nv12ColorSpace::Bt601Limited, Nv12ColorSpace::Bt709Limited}) {
     compile("nv12LumaMain", "ps_4_0", colorSpace); compile("nv12ChromaMain", "ps_4_0", colorSpace); checks += 2;
   }
-  std::cout << "{\"type\":\"self-test\",\"passed\":true,\"cpuOnly\":true,\"checks\":" << checks << "}" << std::endl;
+  std::cout << "{\"type\":\"self-test\",\"passed\":true,\"cpuOnly\":true,\"selectedAcquireMode\":\""
+    << selectedAcquireMode() << "\",\"checks\":" << checks << "}" << std::endl;
 }
 int main(int argc, char** argv) {
   try {
