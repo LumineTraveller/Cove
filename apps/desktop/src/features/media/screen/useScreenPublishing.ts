@@ -104,9 +104,21 @@ export interface useScreenPublishingDependencies {
 
 class CancelledScreenPublication extends Error {}
 
+interface ScreenUpdateQueue {
+  readonly isCurrent: () => boolean;
+  readonly candidates: Set<MediaStream>;
+  readonly release: () => void;
+  tail: Promise<void>;
+}
+
+function releaseScreenCaptureCandidate(stream: MediaStream) {
+  stream.getTracks().forEach((track) => { track.onended = null; track.stop(); });
+}
+
 export function useScreenPublishing(deps: useScreenPublishingDependencies) {
   const publicationGeneration = useRef(0);
   const pendingStart = useRef<{ operation: number; isCurrent: () => boolean } | null>(null);
+  const updateQueue = useRef<ScreenUpdateQueue | null>(null);
   const startScreenShare = useCallback(
     async (
       initPreset?: ScreenPreset,
@@ -248,6 +260,15 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
         if (!producer) throw lastProduceError ?? new Error('没有可用的屏幕共享视频编码器');
         deps.screenProducer.current = producer;
         deps.localScreenRef.current = stream;
+        // 用户在浏览器 UI 点"停止共享"
+        videoTrack.onended = () => {
+          if (isCurrent() && deps.localScreenRef.current === stream && deps.screenProducer.current === producer)
+            stopScreenShare();
+        };
+        if (videoTrack.readyState === 'ended') {
+          stopScreenShare();
+          return;
+        }
         deps.setLocalScreen(stream);
         deps.videoCounterPrev.current = null;
         deps.remoteLossPrev.current = null;
@@ -275,11 +296,6 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
 
         deps.setIsSharing(true);
 
-        // 用户在浏览器 UI 点"停止共享"
-        stream.getVideoTracks()[0].onended = () => {
-          if (isCurrent() && deps.localScreenRef.current === stream && deps.screenProducer.current === producer)
-            stopScreenShare();
-        };
       } catch (e) {
         const current = isCurrent();
         if (acquiredProducer) {
@@ -368,109 +384,157 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
         return;
       }
 
-      const previousStream = deps.localScreenRef.current;
-      let acquiredStream: MediaStream | null = null;
-      try {
-        const stream = await navigator.mediaDevices.getDisplayMedia({
-          video: screenCaptureVideoConstraints(currentFps),
-          audio: false,
-        });
-        acquiredStream = stream;
-        ensureCurrent();
-        const videoTrack = stream.getVideoTracks()[0];
-        if (!videoTrack) throw new Error('没有取得屏幕视频轨道');
-        videoTrack.contentHint = gameMode ? 'motion' : 'detail';
-        // The new getDisplayMedia request above already carries the preferred
-        // frame rate. Avoid restarting its Windows capture source before the
-        // existing producer can switch to it.
-        const settings = videoTrack.getSettings();
-        const plan = createScreenEncodingPlan({
-          preset,
-          maxFps: currentFps,
-          activity: gameMode ? 'motion' : 'active',
-          sourceWidth: settings.width,
-          sourceHeight: settings.height,
-          nativeResolution,
-        });
-
-        if (deps.screenProducer.current !== producer || producer.closed) {
-          stream.getTracks().forEach((track) => track.stop());
-          return;
-        }
-        await producer.replaceTrack({ track: videoTrack });
-        ensureCurrent();
-        if (producer.appData && typeof producer.appData === 'object')
-          Object.assign(producer.appData, {
-            adaptation: gameMode ? 'game' : 'content',
-            preset,
-            nativeResolution,
-            maxFps: currentFps,
-            outputWidth: plan.outputWidth,
-            outputHeight: plan.outputHeight,
-          });
-
-        if (previousStream && previousStream !== stream) {
-          previousStream.getVideoTracks().forEach((track) => {
-            track.onended = null;
-            track.stop();
-          });
-          previousStream.getAudioTracks().forEach((track) => track.stop());
-        }
-        deps.localScreenRef.current = stream;
-        deps.setLocalScreen(stream);
-        deps.videoCounterPrev.current = null;
-        deps.remoteLossPrev.current = null;
-        deps.setScreenPreset(preset);
-        deps.setFps(currentFps);
-        deps.setScreenGameMode(gameMode);
-        deps.setScreenNativeResolution(nativeResolution);
-        // Replace the previous guard timer too, so its callback cannot restore
-        // the old FPS/preset after a quick change during the startup grace period.
-        deps.armScreenRampGuard(preset, currentFps, nativeResolution);
-        deps.applyScreenActivity(
-          preset,
-          currentFps,
-          gameMode ? 'motion' : 'active',
-          nativeResolution,
-        );
-        if (gameMode) deps.stopScreenAnalysis();
-        else deps.startScreenAnalysis(stream, preset, currentFps, nativeResolution);
-
-        let hasScreenAudio = Boolean(deps.screenAudioProducer.current);
-        if (audio && !hasScreenAudio) {
-          try {
-            await deps.startScreenAudio(isCurrent);
-            ensureCurrent();
-            hasScreenAudio = Boolean(deps.screenAudioProducer.current);
-          } catch (error) {
-            ensureCurrent();
-            hasScreenAudio = false;
-            console.warn('[screen share] 更新共享音频失败:', error);
-            window.alert('屏幕画面已更新，但共享电脑音频启动失败。请稍后重试。');
-          }
-        } else if (!audio && hasScreenAudio) {
-          deps.closeScreenAudio();
-          hasScreenAudio = false;
-        }
-        deps.setShareAudio(audio && hasScreenAudio);
-        videoTrack.onended = () => {
-          if (isSessionCurrent() && deps.localScreenRef.current === stream) stopScreenShare();
+      let queue = updateQueue.current;
+      if (!queue?.isCurrent()) {
+        queue?.release();
+        const candidates = new Set<MediaStream>();
+        const release = () => {
+          producer.observer?.off('close', release);
+          candidates.forEach(releaseScreenCaptureCandidate);
+          candidates.clear();
         };
-        console.info('[screen share] 共享参数已更新', {
-          preset,
-          fps: currentFps,
-          gameMode,
-          nativeResolution,
-          audio: audio && hasScreenAudio,
-        });
-      } catch (error) {
-        acquiredStream?.getTracks().forEach((track) => { track.onended = null; track.stop(); });
-        if (!isCurrent() || error instanceof CancelledScreenPublication) return;
-        if (!(error instanceof DOMException && error.name === 'NotAllowedError'))
-          window.alert(
-            `无法更新屏幕共享：${error instanceof Error ? error.message : String(error)}`,
-          );
+        queue = { isCurrent, candidates, release, tail: Promise.resolve() };
+        updateQueue.current = queue;
+        // Leave/reset also closes the producer. Release ready captures even if
+        // an earlier picker or replaceTrack still keeps the commit queue busy.
+        producer.observer?.once('close', release);
       }
+      const currentQueue = queue;
+      // Invoke capture in the click's turn to retain transient activation.
+      // Consume rejection immediately, including while an earlier update waits.
+      const capture = (async (): Promise<{ stream: MediaStream | null; error?: unknown }> => {
+        try {
+          const stream = await navigator.mediaDevices.getDisplayMedia({
+            video: screenCaptureVideoConstraints(currentFps),
+            audio: false,
+          });
+          if (!isCurrent()) {
+            releaseScreenCaptureCandidate(stream);
+            return { stream: null, error: new CancelledScreenPublication() };
+          }
+          currentQueue.candidates.add(stream);
+          return { stream };
+        } catch (error) {
+          return { stream: null, error };
+        }
+      })();
+
+      const commitUpdate = async () => {
+        let acquiredStream: MediaStream | null = null;
+        try {
+          const captured = await capture;
+          acquiredStream = captured.stream;
+          ensureCurrent();
+          if (!acquiredStream) throw captured.error;
+          const stream = acquiredStream;
+          // Read ownership at commit time, after the preceding update completed.
+          const previousStream = deps.localScreenRef.current;
+          const videoTrack = stream.getVideoTracks()[0];
+          if (!videoTrack) throw new Error('没有取得屏幕视频轨道');
+          videoTrack.contentHint = gameMode ? 'motion' : 'detail';
+          // The new getDisplayMedia request above already carries the preferred
+          // frame rate. Avoid restarting its Windows capture source before the
+          // existing producer can switch to it.
+          const settings = videoTrack.getSettings();
+          const plan = createScreenEncodingPlan({
+            preset,
+            maxFps: currentFps,
+            activity: gameMode ? 'motion' : 'active',
+            sourceWidth: settings.width,
+            sourceHeight: settings.height,
+            nativeResolution,
+          });
+
+          ensureCurrent();
+          await producer.replaceTrack({ track: videoTrack });
+          ensureCurrent();
+
+          if (previousStream && previousStream !== stream) {
+            previousStream.getVideoTracks().forEach((track) => {
+              track.onended = null;
+              track.stop();
+            });
+            previousStream.getAudioTracks().forEach((track) => track.stop());
+          }
+          deps.localScreenRef.current = stream;
+          // The live publication now owns the attached track. Later failures or
+          // queue cleanup must never release it as an uncommitted candidate.
+          currentQueue.candidates.delete(stream);
+          acquiredStream = null;
+          videoTrack.onended = () => {
+            if (isSessionCurrent() && deps.localScreenRef.current === stream) stopScreenShare();
+          };
+          if (videoTrack.readyState === 'ended') {
+            stopScreenShare();
+            return;
+          }
+          deps.setLocalScreen(stream);
+          if (producer.appData && typeof producer.appData === 'object')
+            Object.assign(producer.appData, {
+              adaptation: gameMode ? 'game' : 'content',
+              preset,
+              nativeResolution,
+              maxFps: currentFps,
+              outputWidth: plan.outputWidth,
+              outputHeight: plan.outputHeight,
+            });
+          deps.videoCounterPrev.current = null;
+          deps.remoteLossPrev.current = null;
+          deps.setScreenPreset(preset);
+          deps.setFps(currentFps);
+          deps.setScreenGameMode(gameMode);
+          deps.setScreenNativeResolution(nativeResolution);
+          // Replace the previous guard timer too, so its callback cannot restore
+          // the old FPS/preset after a quick change during the startup grace period.
+          deps.armScreenRampGuard(preset, currentFps, nativeResolution);
+          deps.applyScreenActivity(
+            preset,
+            currentFps,
+            gameMode ? 'motion' : 'active',
+            nativeResolution,
+          );
+          if (gameMode) deps.stopScreenAnalysis();
+          else deps.startScreenAnalysis(stream, preset, currentFps, nativeResolution);
+
+          let hasScreenAudio = Boolean(deps.screenAudioProducer.current);
+          if (audio && !hasScreenAudio) {
+            try {
+              await deps.startScreenAudio(isCurrent);
+              ensureCurrent();
+              hasScreenAudio = Boolean(deps.screenAudioProducer.current);
+            } catch (error) {
+              ensureCurrent();
+              hasScreenAudio = false;
+              console.warn('[screen share] 更新共享音频失败:', error);
+              window.alert('屏幕画面已更新，但共享电脑音频启动失败。请稍后重试。');
+            }
+          } else if (!audio && hasScreenAudio) {
+            deps.closeScreenAudio();
+            hasScreenAudio = false;
+          }
+          deps.setShareAudio(audio && hasScreenAudio);
+          console.info('[screen share] 共享参数已更新', {
+            preset,
+            fps: currentFps,
+            gameMode,
+            nativeResolution,
+            audio: audio && hasScreenAudio,
+          });
+        } catch (error) {
+          if (acquiredStream && currentQueue.candidates.delete(acquiredStream))
+            releaseScreenCaptureCandidate(acquiredStream);
+          if (!isCurrent() || error instanceof CancelledScreenPublication) return;
+          if (!(error instanceof DOMException && error.name === 'NotAllowedError'))
+            window.alert(
+              `无法更新屏幕共享：${error instanceof Error ? error.message : String(error)}`,
+            );
+        }
+      };
+      // Only commits are serialized. Every explicit settings request completes
+      // in call order, and a failed/canceled request does not poison the queue.
+      const update = currentQueue.tail.then(commitUpdate);
+      currentQueue.tail = update.catch(() => {});
+      await update;
       // eslint-disable-next-line react-hooks/exhaustive-deps
     },
     [
@@ -494,6 +558,8 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
   const stopScreenShare = useCallback(() => {
     publicationGeneration.current += 1;
     pendingStart.current = null;
+    updateQueue.current?.release();
+    updateQueue.current = null;
     deps.stopScreenAnalysis();
     deps.clearScreenRampGuard();
     if (deps.screenProducer.current) {
