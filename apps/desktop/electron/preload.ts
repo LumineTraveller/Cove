@@ -15,6 +15,55 @@ const nativeEarlyPermits = new Set<string>();
 const nativeRequestId = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9_-]{8,80}$/.test(value);
 const nativeEnabled = process.platform === 'win32' && process.argv.includes('--cove-native-gpu-capture=1') &&
   typeof sharedTexture?.setSharedTextureReceiver === 'function';
+type NativeCpuFrameTimingStage = 'construct' | 'listener' | 'close' | 'handler';
+type NativeCpuFrameTimingAggregate = { count: number; totalMs: number; maxMs: number; buckets: number[] };
+const nativeCpuFrameTimingAggregate = (): NativeCpuFrameTimingAggregate =>
+  ({ count: 0, totalMs: 0, maxMs: 0, buckets: [0, 0, 0, 0, 0, 0, 0] });
+// Opt-in, process-local aggregates only. No frame, request or session data is
+// retained, and the default path never reads the diagnostic clock.
+const nativeCpuFrameTiming: Record<NativeCpuFrameTimingStage, NativeCpuFrameTimingAggregate> | null =
+  nativeEnabled && process.argv.includes('--cove-native-cpu-frame-timing=1') ? {
+    construct: nativeCpuFrameTimingAggregate(), listener: nativeCpuFrameTimingAggregate(),
+    close: nativeCpuFrameTimingAggregate(), handler: nativeCpuFrameTimingAggregate(),
+  } : null;
+const nativeCpuFrameTimingNow = (): number | undefined => {
+  if (!nativeCpuFrameTiming) return undefined;
+  try {
+    const now = performance.now();
+    return Number.isFinite(now) ? now : undefined;
+  } catch { return undefined; }
+};
+const nativeCpuFrameTimingRecord = (stage: NativeCpuFrameTimingStage, startedAt: number | undefined) => {
+  if (!nativeCpuFrameTiming || startedAt === undefined) return;
+  // Diagnostics must never change receiver retirement, close or final ACK.
+  try {
+    const endedAt = nativeCpuFrameTimingNow();
+    if (endedAt === undefined || endedAt < startedAt) return;
+    const elapsed = endedAt - startedAt;
+    if (!Number.isFinite(elapsed)) return;
+    const aggregate = nativeCpuFrameTiming[stage];
+    const bucket = elapsed < 0.5 ? 0 : elapsed < 1 ? 1 : elapsed < 2 ? 2 : elapsed < 4 ? 3 :
+      elapsed < 8 ? 4 : elapsed < 16 ? 5 : 6;
+    aggregate.count++;
+    aggregate.totalMs += elapsed;
+    aggregate.maxMs = Math.max(aggregate.maxMs, elapsed);
+    aggregate.buckets[bucket]++;
+  } catch { /* Diagnostics cannot affect the CPU frame ownership barrier. */ }
+};
+const getNativeCpuFrameTiming = () => {
+  const timing = nativeCpuFrameTiming;
+  if (!timing) return null;
+  const clone = (stage: NativeCpuFrameTimingStage) => {
+    const aggregate = timing[stage];
+    return Object.freeze({ count: aggregate.count, totalMs: aggregate.totalMs, maxMs: aggregate.maxMs,
+      buckets: Object.freeze([...aggregate.buckets]) });
+  };
+  return Object.freeze({
+    // Each upper bound is exclusive; the last bucket contains 16 ms and above.
+    bucketUpperBoundsMs: Object.freeze([0.5, 1, 2, 4, 8, 16, null]),
+    stages: Object.freeze({ construct: clone('construct'), listener: clone('listener'), close: clone('close'), handler: clone('handler') }),
+  });
+};
 const nativePermitKey = (metadata: NativeScreenFrame) => `${metadata.sessionId}:${metadata.serial}`;
 // The intrinsic getter checks the ArrayBuffer internal slot across realms. A
 // byteLength property or Symbol.toStringTag on an arbitrary object is not enough.
@@ -57,6 +106,8 @@ if (nativeEnabled) {
       }
       return;
     }
+    // Starts after metadata validation and ends after synchronous final ACK send.
+    const handlerStartedAt = nativeCpuFrameTimingNow();
     let frame: NativeCpuVideoFrame | undefined;
     let failed = false;
     const stopReceiver = () => {
@@ -74,26 +125,34 @@ if (nativeEnabled) {
         const CpuVideoFrame = (globalThis as { VideoFrame?: NativeCpuVideoFrameConstructor }).VideoFrame;
         if (typeof CpuVideoFrame !== 'function') throw new TypeError('native_cpu_video_frame_unavailable');
         const matrix = metadata.colorSpace === 'bt601-limited' ? 'smpte170m' : 'bt709';
-        frame = new CpuVideoFrame(data, {
-          format: 'NV12', codedWidth: metadata.width, codedHeight: metadata.height,
-          displayWidth: metadata.width, displayHeight: metadata.height, timestamp: metadata.timestamp,
-          layout: [{ offset: 0, stride: metadata.width }, { offset: metadata.width * metadata.height, stride: metadata.width }],
-          colorSpace: { primaries: matrix, transfer: matrix, matrix, fullRange: false },
-          // Implementations may consume the ArrayBuffer; correctness also holds
-          // when the constructor copies it and ignores this transfer hint.
-          transfer: [data],
-        });
-        await listener(frame, metadata);
+        const constructStartedAt = nativeCpuFrameTimingNow();
+        try {
+          frame = new CpuVideoFrame(data, {
+            format: 'NV12', codedWidth: metadata.width, codedHeight: metadata.height,
+            displayWidth: metadata.width, displayHeight: metadata.height, timestamp: metadata.timestamp,
+            layout: [{ offset: 0, stride: metadata.width }, { offset: metadata.width * metadata.height, stride: metadata.width }],
+            colorSpace: { primaries: matrix, transfer: matrix, matrix, fullRange: false },
+            // Implementations may consume the ArrayBuffer; correctness also holds
+            // when the constructor copies it and ignores this transfer hint.
+            transfer: [data],
+          });
+        } finally { nativeCpuFrameTimingRecord('construct', constructStartedAt); }
+        const listenerStartedAt = nativeCpuFrameTimingNow();
+        try { await listener(frame, metadata); }
+        finally { nativeCpuFrameTimingRecord('listener', listenerStartedAt); }
       }
     } catch (error) {
       console.warn('[native-screen] renderer_cpu_frame_error', error instanceof Error ? error.name : 'unknown');
       stopReceiver();
     } finally {
+      const closeStartedAt = frame ? nativeCpuFrameTimingNow() : undefined;
       try { frame?.close(); }
       catch { stopReceiver(); }
+      finally { nativeCpuFrameTimingRecord('close', closeStartedAt); }
       // Main owns the slot bytes independently. Only this CPU acknowledgment
       // returns that credit; it never participates in GPU release permits.
-      ipcRenderer.send('cove:native-screen:cpu-frame-done', metadata);
+      try { ipcRenderer.send('cove:native-screen:cpu-frame-done', metadata); }
+      finally { nativeCpuFrameTimingRecord('handler', handlerStartedAt); }
     }
   });
   sharedTexture.setSharedTextureReceiver(async ({ importedSharedTexture: imported }, metadata: NativeScreenFrame) => {
@@ -138,6 +197,7 @@ if (nativeEnabled) {
 }
 contextBridge.exposeInMainWorld('coveNativeScreen', {
   supported: nativeEnabled,
+  getCpuFrameTiming: getNativeCpuFrameTiming,
   start: (requestId: string, options: NativeScreenOptions): Promise<NativeScreenStartResult> =>
     nativeEnabled && nativeRequestId(requestId)
       ? ipcRenderer.invoke('cove:native-screen:start', requestId, options)

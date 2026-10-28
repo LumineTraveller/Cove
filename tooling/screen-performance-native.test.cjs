@@ -415,3 +415,11 @@ test('stock fallback continuous playback requires multiple decoded frames and ad
   const bad = sample(12, 101); bad.ownedPattern.markersMatched[0] = false;
   assert.equal(stockFallbackPlaybackEvidence(first, bad).playbackContinues, false);
 });
+
+
+test('broker snapshot only reports the actual fixed CPU scheduling mode', () => {
+  for (const mode of ['immediate', 'yield'])
+    assert.equal(nativeBrokerSnapshot({ snapshot: () => ({ cpuDeliveryScheduling: mode }) }).cpuDeliveryScheduling, mode);
+  for (const mode of [undefined, null, 'unknown', 'secret-source', 1, {}])
+    assert.equal(nativeBrokerSnapshot({ snapshot: () => ({ cpuDeliveryScheduling: mode }) }).cpuDeliveryScheduling, undefined);
+});

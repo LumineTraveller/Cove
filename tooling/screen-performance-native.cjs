@@ -228,6 +228,8 @@ function nativeBrokerSnapshot(controller) {
   if (typeof snapshot.disabled === 'boolean') safe.disabled = snapshot.disabled;
   safe.pixelFormat = ['bgra', 'nv12'].includes(snapshot.pixelFormat) ? snapshot.pixelFormat : null;
   safe.frameStorage = ['gpu', 'cpu'].includes(snapshot.frameStorage) ? snapshot.frameStorage : null;
+  if (['immediate', 'yield'].includes(snapshot.cpuDeliveryScheduling))
+    safe.cpuDeliveryScheduling = snapshot.cpuDeliveryScheduling;
   safe.failureCode = typeof snapshot.failureCode === 'string' && /^[a-z_]{1,50}$/.test(snapshot.failureCode)
     ? snapshot.failureCode : null;
   safe.lastEndReason = typeof snapshot.lastEndReason === 'string' && /^[a-z_]{1,50}$/.test(snapshot.lastEndReason)

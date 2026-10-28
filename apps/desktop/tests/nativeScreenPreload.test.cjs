@@ -11,7 +11,7 @@ function bridge(enabled = true, options = {}) {
   const api = {}, ipc = new EventEmitter(), calls = [], sent = [], events = [], cpuFrames = [], timers = new Map();
   let id = 0, receiver;
   ipc.invoke = async (...args) => { calls.push(args); events.push(['invoke', ...args]); return true; };
-  ipc.send = (...args) => { sent.push(args); events.push(['send', ...args]); };
+  ipc.send = (...args) => { sent.push(args); events.push(['send', ...args]); options.onSend?.(...args); };
   const VideoFrame = Object.hasOwn(options, 'VideoFrame') ? options.VideoFrame : class {
     constructor(data, init) {
       this.data = data; this.init = init; this.closed = 0;
@@ -22,9 +22,12 @@ function bridge(enabled = true, options = {}) {
   const electron = { contextBridge: { exposeInMainWorld: (name, value) => { api[name] = value; } },
     ipcRenderer: ipc, sharedTexture: options.sharedTexture === false ? {} : { setSharedTextureReceiver: callback => { receiver = callback; } } };
   vm.runInNewContext(source, { require: name => { assert.equal(name, 'electron'); return electron; }, exports: {},
-    process: { platform: options.platform ?? 'win32', env: {}, argv: enabled ? ['--cove-native-gpu-capture=1'] : [] },
+    process: { platform: options.platform ?? 'win32', env: {}, argv: [
+      ...(enabled ? ['--cove-native-gpu-capture=1'] : []), ...(options.argv ?? []),
+      ...(options.cpuFrameTiming ? ['--cove-native-cpu-frame-timing=1'] : []),
+    ] },
     setTimeout: callback => { timers.set(++id, callback); return id; }, clearTimeout: key => timers.delete(key),
-    console, Uint8Array, Buffer, VideoFrame });
+    console, Uint8Array, Buffer, VideoFrame, performance: options.performance });
   return { api: api.coveNativeScreen, ipc, calls, sent, events, cpuFrames, timers, receive: (...args) => receiver(...args),
     receiveCpu: (...args) => ipc.listeners('cove:native-screen:cpu-frame')[0]({}, ...args),
     hasReceiver: () => Boolean(receiver), hasCpuReceiver: () => ipc.listenerCount('cove:native-screen:cpu-frame') > 0 };
@@ -39,6 +42,158 @@ function texture() {
     release() { state.released++; } } };
 }
 const flush = () => new Promise(resolve => setImmediate(resolve));
+const plain = value => JSON.parse(JSON.stringify(value));
+
+test('CPU timing requires the exact opt-in flag and native support, with no default clock reads', async () => {
+  for (const [enabled, options] of [[true, {}], [true, { argv: ['--cove-native-cpu-frame-timing=0'] }],
+    [true, { argv: ['--cove-native-cpu-frame-timing=1-extra'] }], [false, { cpuFrameTiming: true }],
+    [true, { cpuFrameTiming: true, platform: 'linux' }], [true, { cpuFrameTiming: true, sharedTexture: false }]]) {
+    let reads = 0;
+    const b = bridge(enabled, { ...options, performance: { now() { reads++; throw Error('disabled_clock_read'); } } });
+    assert.equal(b.api.getCpuFrameTiming(), null);
+    if (b.hasCpuReceiver()) {
+      b.api.onFrame(metadata.requestId, async () => {});
+      await b.receiveCpu(cpuMetadata, cpuBytes());
+      assert.equal(b.cpuFrames[0].closed, 1); assert.equal(b.sent.length, 1); assert.equal(b.calls.length, 0);
+    }
+    assert.equal(b.api.getCpuFrameTiming(), null); assert.equal(reads, 0);
+  }
+});
+
+test('CPU timing measures construction, awaited listener, close and validated handler including final ACK', async () => {
+  let now = 0, finish, frame;
+  const b = bridge(true, { cpuFrameTiming: true, performance: { now: () => now },
+    VideoFrame: class {
+      constructor() { now += 0.25; this.closed = 0; frame = this; }
+      close() { now += 1.5; this.closed++; }
+    }, onSend: () => { now += 3; } });
+  b.api.onFrame(metadata.requestId, async () => {
+    await new Promise(resolve => { finish = () => { now += 0.75; resolve(); }; });
+  });
+  const completed = b.receiveCpu(cpuMetadata, cpuBytes()); await flush();
+  const pending = b.api.getCpuFrameTiming();
+  assert.equal(pending.stages.construct.count, 1); assert.equal(pending.stages.listener.count, 0);
+  assert.equal(pending.stages.close.count, 0); assert.equal(pending.stages.handler.count, 0);
+  assert.equal(frame.closed, 0); assert.equal(b.sent.length, 0);
+  finish(); await completed;
+  assert.deepEqual(plain(b.api.getCpuFrameTiming()), {
+    bucketUpperBoundsMs: [0.5, 1, 2, 4, 8, 16, null],
+    stages: {
+      construct: { count: 1, totalMs: 0.25, maxMs: 0.25, buckets: [1, 0, 0, 0, 0, 0, 0] },
+      listener: { count: 1, totalMs: 0.75, maxMs: 0.75, buckets: [0, 1, 0, 0, 0, 0, 0] },
+      close: { count: 1, totalMs: 1.5, maxMs: 1.5, buckets: [0, 0, 1, 0, 0, 0, 0] },
+      handler: { count: 1, totalMs: 5.5, maxMs: 5.5, buckets: [0, 0, 0, 0, 1, 0, 0] },
+    },
+  });
+  assert.equal(frame.closed, 1); assert.deepEqual(b.calls, []);
+  assert.deepEqual(b.sent, [['cove:native-screen:cpu-frame-done', cpuMetadata]]);
+});
+
+test('CPU timing uses all seven fixed buckets with exclusive bounds in every stage', async () => {
+  const durations = [0.25, 0.5, 1, 2, 4, 8, 16];
+  for (const stage of ['construct', 'listener', 'close', 'handler']) {
+    let now = 0, duration = 0;
+    const b = bridge(true, { cpuFrameTiming: true, performance: { now: () => now },
+      VideoFrame: class {
+        constructor() { if (stage === 'construct') now += duration; }
+        close() { if (stage === 'close') now += duration; }
+      }, onSend: () => { if (stage === 'handler') now += duration; } });
+    if (stage !== 'handler') b.api.onFrame(metadata.requestId, async () => { if (stage === 'listener') now += duration; });
+    for (const [index, elapsed] of durations.entries()) {
+      duration = elapsed;
+      await b.receiveCpu({ ...cpuMetadata, serial: index + 1 }, cpuBytes());
+    }
+    assert.deepEqual(plain(b.api.getCpuFrameTiming().stages[stage]),
+      { count: 7, totalMs: 31.75, maxMs: 16, buckets: [1, 1, 1, 1, 1, 1, 1] });
+    assert.equal(b.sent.length, 7); assert.deepEqual(b.calls, []);
+  }
+});
+
+test('CPU timing snapshots are detached, deeply read-only and limited to aggregate numbers', async () => {
+  let now = 0;
+  const b = bridge(true, { cpuFrameTiming: true, performance: { now: () => now++ } });
+  const initial = b.api.getCpuFrameTiming();
+  b.api.onFrame(metadata.requestId, async () => {});
+  await b.receiveCpu(cpuMetadata, cpuBytes());
+  const snapshot = b.api.getCpuFrameTiming(), clone = b.api.getCpuFrameTiming();
+  assert.deepEqual(Object.keys(snapshot).sort(), ['bucketUpperBoundsMs', 'stages']);
+  assert.deepEqual(Object.keys(snapshot.stages).sort(), ['close', 'construct', 'handler', 'listener']);
+  assert.ok(Object.isFrozen(snapshot)); assert.ok(Object.isFrozen(snapshot.bucketUpperBoundsMs));
+  assert.ok(Object.isFrozen(snapshot.stages));
+  for (const [stage, aggregate] of Object.entries(snapshot.stages)) {
+    assert.deepEqual(Object.keys(aggregate).sort(), ['buckets', 'count', 'maxMs', 'totalMs']);
+    assert.ok(Object.isFrozen(aggregate)); assert.ok(Object.isFrozen(aggregate.buckets));
+    assert.equal(Reflect.set(aggregate, 'count', 999), false);
+    assert.equal(Reflect.set(aggregate.buckets, '0', 999), false);
+    assert.notEqual(aggregate, clone.stages[stage]); assert.notEqual(aggregate.buckets, clone.stages[stage].buckets);
+    assert.equal(initial.stages[stage].count, 0); assert.equal(aggregate.count, 1);
+    assert.ok(Object.values(aggregate).every(value => Array.isArray(value) || typeof value === 'number'));
+  }
+  assert.notEqual(snapshot, clone); assert.notEqual(snapshot.stages, clone.stages);
+  assert.equal(JSON.stringify(snapshot).includes(cpuMetadata.requestId), false);
+  assert.equal(JSON.stringify(snapshot).includes(cpuMetadata.sessionId), false);
+  await b.receiveCpu({ ...cpuMetadata, serial: 2 }, cpuBytes());
+  assert.equal(snapshot.stages.handler.count, 1); assert.equal(b.api.getCpuFrameTiming().stages.handler.count, 2);
+});
+
+test('CPU timing excludes invalid metadata and counts the handler for invalid bytes or an absent listener', async () => {
+  let reads = 0;
+  const b = bridge(true, { cpuFrameTiming: true, performance: { now: () => reads++ } });
+  await b.receiveCpu({ ...cpuMetadata, width: 63 }, cpuBytes());
+  assert.equal(reads, 0); assert.equal(b.sent.length, 0);
+  assert.equal(b.api.getCpuFrameTiming().stages.handler.count, 0);
+  await b.receiveCpu(cpuMetadata, new ArrayBuffer(3));
+  await b.receiveCpu({ ...cpuMetadata, serial: 2 }, cpuBytes());
+  const snapshot = b.api.getCpuFrameTiming();
+  assert.equal(snapshot.stages.handler.count, 2);
+  for (const stage of ['construct', 'listener', 'close']) assert.equal(snapshot.stages[stage].count, 0);
+  assert.equal(b.sent.length, 2);
+  assert.deepEqual(b.calls, [
+    ['cove:native-screen:stop', metadata.requestId, 'receiver_failed'],
+    ['cove:native-screen:stop', metadata.requestId, 'receiver_failed'],
+  ]);
+});
+
+test('CPU timing records attempted stages when construction, listener or close throws and preserves stop/ACK order', async () => {
+  for (const failure of ['construct', 'listener', 'close', 'listener-and-close']) {
+    let now = 0, closes = 0;
+    const actions = [];
+    const b = bridge(true, { cpuFrameTiming: true, performance: { now: () => now++ },
+      VideoFrame: class {
+        constructor() { actions.push('construct'); if (failure === 'construct') throw Error('construct_failure'); }
+        close() { closes++; actions.push('close'); if (failure.includes('close')) throw Error('close_failure'); }
+      }, onSend: () => actions.push('ack') });
+    b.api.onFrame(metadata.requestId, async () => {
+      actions.push('listener');
+      if (failure.includes('listener')) throw Error('listener_failure');
+    });
+    await b.receiveCpu(cpuMetadata, cpuBytes());
+    const snapshot = b.api.getCpuFrameTiming();
+    assert.equal(snapshot.stages.construct.count, 1); assert.equal(snapshot.stages.handler.count, 1);
+    assert.equal(snapshot.stages.listener.count, failure === 'construct' ? 0 : 1);
+    assert.equal(snapshot.stages.close.count, failure === 'construct' ? 0 : 1);
+    assert.equal(closes, failure === 'construct' ? 0 : 1);
+    assert.deepEqual(actions, failure === 'construct' ? ['construct', 'ack'] : ['construct', 'listener', 'close', 'ack']);
+    assert.deepEqual(b.events.map(event => event[0]), ['invoke', 'send']);
+    assert.deepEqual(b.calls, [['cove:native-screen:stop', metadata.requestId, 'receiver_failed']]);
+    assert.deepEqual(b.sent, [['cove:native-screen:cpu-frame-done', cpuMetadata]]);
+  }
+});
+
+test('CPU timing clock failures and invalid samples cannot change cleanup or final ACK', async () => {
+  for (const read of [() => { throw Error('clock_failure'); }, () => NaN, () => Infinity, (() => {
+    let now = 100; return () => now--;
+  })()]) {
+    const b = bridge(true, { cpuFrameTiming: true, performance: { now: read } });
+    b.api.onFrame(metadata.requestId, async () => { throw Error('listener_failure'); });
+    await b.receiveCpu(cpuMetadata, cpuBytes());
+    assert.equal(b.cpuFrames[0].closed, 1);
+    assert.deepEqual(b.events.map(event => event[0]), ['construct', 'invoke', 'close', 'send']);
+    assert.deepEqual(b.calls, [['cove:native-screen:stop', metadata.requestId, 'receiver_failed']]);
+    assert.deepEqual(b.sent, [['cove:native-screen:cpu-frame-done', cpuMetadata]]);
+    for (const aggregate of Object.values(b.api.getCpuFrameTiming().stages)) assert.equal(aggregate.count, 0);
+  }
+});
 test('formal preload leaves native receiver disabled', () => {
   const b = bridge(false); assert.equal(b.api.supported, false); assert.equal(b.hasReceiver(), false);
   assert.equal(b.hasCpuReceiver(), false);
