@@ -315,9 +315,12 @@ export async function tryNativeScreenCapture(
           !Number.isSafeInteger(metadata.timestamp) || metadata.timestamp < 0 || metadata.timestamp < lastTimestamp ||
           typeof metadata.refresh !== 'boolean') return;
       const pixelFormat = session.pixelFormat ?? 'bgra';
+      const colorSpace = session.storage === 'cpu' ? session.colorSpace : 'bt709-limited';
+      const matrix = colorSpace === 'bt601-limited' ? 'smpte170m' : 'bt709';
       const formatMatches = (metadata.pixelFormat ?? 'bgra') === pixelFormat && metadata.storage === session.storage &&
-        (pixelFormat !== 'nv12' || (frame.format === 'NV12' && frame.colorSpace.primaries === 'bt709' &&
-          frame.colorSpace.transfer === 'bt709' && frame.colorSpace.matrix === 'bt709' && frame.colorSpace.fullRange === false));
+        (session.storage !== 'cpu' || (metadata.colorSpace === undefined ? 'bt709-limited' : metadata.colorSpace) === colorSpace) &&
+        (pixelFormat !== 'nv12' || (frame.format === 'NV12' && frame.colorSpace.primaries === matrix &&
+          frame.colorSpace.transfer === matrix && frame.colorSpace.matrix === matrix && frame.colorSpace.fullRange === false));
       if (!formatMatches || metadata.width !== session.width || metadata.height !== session.height ||
           frame.displayWidth !== session.width || frame.displayHeight !== session.height ||
           frame.timestamp !== metadata.timestamp) {
@@ -364,7 +367,8 @@ export async function tryNativeScreenCapture(
     if (stopped || !current()) { stop(false, currentStopReason); return outcome; }
     startIssued = true;
     attempt.bridgeStartMs = attemptElapsed();
-    void bridge.start(requestId, { maxWidth: options.maxWidth, maxHeight: options.maxHeight, fps: options.fps }).then((result) => {
+    void bridge.start(requestId, { maxWidth: options.maxWidth, maxHeight: options.maxHeight, fps: options.fps,
+      ...(options.colorSpace ? { colorSpace: options.colorSpace } : {}) }).then((result) => {
       attempt.helperResponseMs = attemptElapsed();
       attempt.helperResponseDurationMs = Math.max(0, attempt.helperResponseMs - attempt.bridgeStartMs!);
       attempt.helperResponseOk = result.ok === true;
@@ -374,10 +378,13 @@ export async function tryNativeScreenCapture(
       if (!result.ok || typeof result.sessionId !== 'string' || !result.sessionId ||
           (result.pixelFormat !== undefined && result.pixelFormat !== 'bgra' && result.pixelFormat !== 'nv12') ||
           (result.storage !== undefined && (result.storage !== 'cpu' || result.pixelFormat !== 'nv12')) ||
+          (result.colorSpace !== undefined && result.colorSpace !== 'bt601-limited' && result.colorSpace !== 'bt709-limited') ||
+          (result.storage === 'cpu' && ((result.colorSpace ?? 'bt709-limited') !== options.colorSpace)) ||
+          (result.storage !== 'cpu' && result.colorSpace !== undefined) ||
           !validDimensions(result.width, result.height, options)) {
         stop(false, result.ok ? 'invalid_start_result' : 'start_rejected'); return;
       }
-      session = result;
+      session = { ...result, ...(result.storage === 'cpu' ? { colorSpace: result.colorSpace ?? 'bt709-limited' } : {}) };
       attempt.phase = 'helper-ready';
       diagnostics.pixelFormat = result.pixelFormat ?? 'bgra';
       diagnostics.frameStorage = result.storage ?? 'gpu';

@@ -1,6 +1,7 @@
 import type { Producer } from '../desktopMediaSupport';
 import type { NativeCaptureCandidate, NativeScreenCaptureOptions } from './nativeScreenCapture';
 import { SCREEN_PRESETS, type ScreenEncodingPlan, type ScreenFps } from './screenCapture';
+import { nativeScreenColorSpaceForCodecs } from './nativeScreenColorPolicy';
 
 export interface NativeScreenUpgradeQueue {
   readonly candidates: Set<MediaStream>;
@@ -32,7 +33,7 @@ interface NativeScreenUpgradeOptions {
   readonly stockStream: MediaStream;
   readonly stockPlan: ScreenEncodingPlan;
   readonly maxFps: ScreenFps;
-  readonly producer: Pick<Producer, 'replaceTrack' | 'rtpSender'>;
+  readonly producer: Pick<Producer, 'replaceTrack' | 'rtpSender' | 'rtpParameters'>;
   readonly queue: NativeScreenUpgradeQueue;
   readonly signal: AbortSignal;
   readonly isIntentCurrent: () => boolean;
@@ -76,6 +77,8 @@ export async function upgradePublishedScreenCapture(options: NativeScreenUpgrade
   const ownsStock = () => options.isPublicationCurrent() && options.currentStream() === stockStream;
   const current = () => !signal.aborted && options.isIntentCurrent() && ownsStock() && isLive(stockTrack);
   if (!current() || !canUpgradeScreenCapture(producer, stockPlan)) return;
+  const colorSpace = nativeScreenColorSpaceForCodecs(producer.rtpParameters?.codecs);
+  const colorCurrent = () => nativeScreenColorSpaceForCodecs(producer.rtpParameters?.codecs) === colorSpace;
 
   let candidate: NativeCaptureCandidate | null = null;
   let removeAbort = () => {};
@@ -84,6 +87,7 @@ export async function upgradePublishedScreenCapture(options: NativeScreenUpgrade
       maxWidth: stockPlan.sourceWidth,
       maxHeight: stockPlan.sourceHeight,
       fps: options.maxFps,
+      ...(colorSpace ? { colorSpace } : {}),
       nativeResolution: stockPlan.nativeResolution,
       contentHint: stockTrack.contentHint === 'motion' ? 'motion' : 'detail',
       isCurrent: current,
@@ -102,7 +106,7 @@ export async function upgradePublishedScreenCapture(options: NativeScreenUpgrade
     const commit = async () => {
       const nativeTrack = ready.stream.getVideoTracks()[0];
       const dimensions = nativeTrack && candidateDimensions(nativeTrack, stockTrack, stockPlan);
-      if (!current() || !isLive(nativeTrack) || !dimensions ||
+      if (!current() || !colorCurrent() || !isLive(nativeTrack) || !dimensions ||
           !canUpgradeScreenCapture(producer, stockPlan)) { release(); return; }
       let attached = false;
       const retireStock = () => {
@@ -123,7 +127,7 @@ export async function upgradePublishedScreenCapture(options: NativeScreenUpgrade
         await producer.replaceTrack({ track: nativeTrack });
         attached = true;
         const committedDimensions = candidateDimensions(nativeTrack, stockTrack, stockPlan);
-        if (!current() || !isLive(nativeTrack) || !committedDimensions) { await restoreStock(); release(); return; }
+        if (!current() || !colorCurrent() || !isLive(nativeTrack) || !committedDimensions) { await restoreStock(); release(); return; }
         nativeTrack.onended = () => {
           if (options.isPublicationCurrent() && options.currentStream() === ready.stream)
             options.stopPublication();

@@ -23,7 +23,7 @@ type NativeCpuVideoFrame = { close(): void };
 type NativeCpuVideoFrameConstructor = new (data: ArrayBuffer, init: {
   format: 'NV12'; codedWidth: number; codedHeight: number; displayWidth: number; displayHeight: number; timestamp: number;
   layout: { offset: number; stride: number }[];
-  colorSpace: { primaries: 'bt709'; transfer: 'bt709'; matrix: 'bt709'; fullRange: false };
+  colorSpace: { primaries: 'bt709' | 'smpte170m'; transfer: 'bt709' | 'smpte170m'; matrix: 'bt709' | 'smpte170m'; fullRange: false };
   transfer: ArrayBuffer[];
 }) => NativeCpuVideoFrame;
 const nativeFrameValid = (value: NativeScreenFrame): boolean => Boolean(value && nativeRequestId(value.requestId) &&
@@ -33,7 +33,8 @@ const nativeFrameValid = (value: NativeScreenFrame): boolean => Boolean(value &&
   Number.isInteger(value.height) && value.height >= 2 && value.height <= 2560 &&
   Number.isSafeInteger(value.timestamp) && value.timestamp >= 0 && typeof value.refresh === 'boolean' &&
   (value.pixelFormat === undefined || value.pixelFormat === 'bgra' || value.pixelFormat === 'nv12') &&
-  (value.storage === undefined || value.storage === 'cpu'));
+  (value.storage === undefined || value.storage === 'cpu') &&
+  (value.colorSpace === undefined || value.colorSpace === 'bt601-limited' || value.colorSpace === 'bt709-limited'));
 
 if (nativeEnabled) {
   ipcRenderer.on('cove:native-screen:release-permit', (_event, metadata: NativeScreenFrame) => {
@@ -49,6 +50,7 @@ if (nativeEnabled) {
   });
   ipcRenderer.on('cove:native-screen:cpu-frame', async (_event, metadata: NativeScreenFrame, data: ArrayBuffer) => {
     if (!nativeFrameValid(metadata) || metadata.storage !== 'cpu' || metadata.pixelFormat !== 'nv12' ||
+        (metadata.colorSpace !== 'bt601-limited' && metadata.colorSpace !== 'bt709-limited') ||
         metadata.width % 2 !== 0 || metadata.height % 2 !== 0) {
       if (nativeRequestId(metadata?.requestId)) {
         void ipcRenderer.invoke('cove:native-screen:stop', metadata.requestId, 'receiver_failed').catch(() => {});
@@ -71,11 +73,12 @@ if (nativeEnabled) {
       if (listener) {
         const CpuVideoFrame = (globalThis as { VideoFrame?: NativeCpuVideoFrameConstructor }).VideoFrame;
         if (typeof CpuVideoFrame !== 'function') throw new TypeError('native_cpu_video_frame_unavailable');
+        const matrix = metadata.colorSpace === 'bt601-limited' ? 'smpte170m' : 'bt709';
         frame = new CpuVideoFrame(data, {
           format: 'NV12', codedWidth: metadata.width, codedHeight: metadata.height,
           displayWidth: metadata.width, displayHeight: metadata.height, timestamp: metadata.timestamp,
           layout: [{ offset: 0, stride: metadata.width }, { offset: metadata.width * metadata.height, stride: metadata.width }],
-          colorSpace: { primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', fullRange: false },
+          colorSpace: { primaries: matrix, transfer: matrix, matrix, fullRange: false },
           // Implementations may consume the ArrayBuffer; correctness also holds
           // when the constructor copies it and ignores this transfer hint.
           transfer: [data],

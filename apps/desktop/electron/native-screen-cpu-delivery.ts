@@ -1,7 +1,7 @@
 import { performance } from 'node:perf_hooks';
-import { NATIVE_SCREEN_POOL_SIZE, type NativeScreenFrame } from './native-screen-capture-protocol';
+import { NATIVE_SCREEN_POOL_SIZE, type NativeScreenFrame, type NativeScreenColorSpace } from './native-screen-capture-protocol';
 
-export type NativeCpuScreenFrame = NativeScreenFrame & { pixelFormat: 'nv12'; storage: 'cpu' };
+export type NativeCpuScreenFrame = NativeScreenFrame & { pixelFormat: 'nv12'; storage: 'cpu'; colorSpace: NativeScreenColorSpace };
 export type NativeCpuFrameFailure = 'cpu_frame_failed' | 'cpu_ack_timeout';
 export type NativeCpuFrameTimingStage = 'import' | 'transfer' | 'reference';
 
@@ -10,6 +10,7 @@ export interface NativeCpuFrameDeliveryOptions {
   sessionId: string;
   width: number;
   height: number;
+  colorSpace: NativeScreenColorSpace;
   /** Copies a verified child's mapping into an independent ArrayBuffer, using validated immutable lease metadata. */
   readFrame(handle: Buffer, expectedBytes: number, metadata: NativeCpuScreenFrame): ArrayBuffer;
   onImported(metadata: NativeCpuScreenFrame): boolean;
@@ -55,9 +56,11 @@ function positiveInteger(value: unknown): value is number {
  * a slot. Stop/failure deliberately leaves helper slot retirement to the session owner.
  */
 export function createNativeCpuFrameDelivery(options: NativeCpuFrameDeliveryOptions): NativeCpuFrameDelivery {
-  const { requestId, sessionId, width, height } = options;
+  const { requestId, sessionId, width, height, colorSpace } = options;
   if (typeof requestId !== 'string' || !requestId || typeof sessionId !== 'string' || !sessionId)
     throw new TypeError('CPU frame delivery requires a request and session');
+  if (colorSpace !== 'bt601-limited' && colorSpace !== 'bt709-limited')
+    throw new TypeError('CPU frame delivery requires a color space');
   const expectedBytes = width * height * 3 / 2;
   if (!positiveInteger(width) || !positiveInteger(height) || width % 2 || height % 2 ||
       !Number.isSafeInteger(expectedBytes) || expectedBytes > MAX_FRAME_BYTES)
@@ -101,7 +104,7 @@ export function createNativeCpuFrameDelivery(options: NativeCpuFrameDeliveryOpti
       Number.isInteger(frame.slot) && frame.slot >= 0 && frame.slot < NATIVE_SCREEN_POOL_SIZE &&
       positiveInteger(frame.serial) && positiveInteger(frame.timestamp) &&
       frame.width === width && frame.height === height && typeof frame.refresh === 'boolean' &&
-      frame.pixelFormat === 'nv12' && frame.storage === 'cpu';
+      frame.pixelFormat === 'nv12' && frame.storage === 'cpu' && frame.colorSpace === colorSpace;
   }
 
   function deliver(value: NativeScreenFrame, handle: Buffer): void {
@@ -116,7 +119,7 @@ export function createNativeCpuFrameDelivery(options: NativeCpuFrameDeliveryOpti
       // Snapshot the validated wire metadata so later caller mutation cannot alter the lease.
       const metadata: NativeCpuScreenFrame = Object.freeze({ requestId, sessionId, slot: value.slot,
         serial: value.serial, width, height, timestamp: value.timestamp, refresh: value.refresh,
-        pixelFormat: 'nv12', storage: 'cpu' });
+        pixelFormat: 'nv12', storage: 'cpu', colorSpace });
       const createdAt = now();
       const lease: Lease = { metadata, createdAt, sent: false,
         timer: setTimeout(() => { if (live(lease)) fail('cpu_ack_timeout'); }, ACK_TIMEOUT_MS) };

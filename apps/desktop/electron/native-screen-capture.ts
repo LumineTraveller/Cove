@@ -7,7 +7,7 @@ import { createNativeCpuFrameDelivery, type NativeCpuFrameDelivery } from './nat
 import {
   NATIVE_SCREEN_POOL_SIZE, NATIVE_SCREEN_START_TIMEOUT_MS, NATIVE_SCREEN_STOP_TIMEOUT_MS,
   validNativeScreenOptions, validNativeScreenRequestId,
-  type NativeScreenFrame, type NativeScreenOptions, type NativeScreenSourceSelection, type NativeScreenStartResult,
+  type NativeScreenFrame, type NativeScreenOptions, type NativeScreenSourceSelection, type NativeScreenStartResult, type NativeScreenColorSpace,
 } from './native-screen-capture-protocol';
 
 const MAX_LINE_BYTES = 8 * 1024;
@@ -24,7 +24,7 @@ function emptyTimingMetric(): TimingMetric { return { count: 0, totalMs: 0, maxM
 type FailureCode = 'helper_unavailable' | 'helper_failed' | 'invalid_protocol' | 'start_timeout' |
   'import_failed' | 'transfer_failed' | 'release_failed' | 'capture_stalled' | 'target_unavailable' | 'stopped' |
   'renderer_failed' | 'receiver_failed' | 'cpu_frame_failed' | 'cpu_ack_timeout';
-interface Ready { width: number; height: number; sourceWidth: number; sourceHeight: number; pixelFormat: 'bgra' | 'nv12'; storage: 'gpu' | 'cpu' }
+interface Ready { width: number; height: number; sourceWidth: number; sourceHeight: number; pixelFormat: 'bgra' | 'nv12'; storage: 'gpu' | 'cpu'; colorSpace?: NativeScreenColorSpace }
 export interface NativeScreenHandleBridge {
   supportsCpuFrames?: boolean;
   supportsCachedCpuFrames?: boolean;
@@ -118,6 +118,14 @@ export class NativeScreenCaptureController {
   async start(target: WebContents, requestId: string, options: NativeScreenOptions): Promise<NativeScreenStartResult> {
     if (!validNativeScreenRequestId(requestId) || !validNativeScreenOptions(options))
       return { ok: false, reason: 'invalid_request' };
+    // Unknown codecs cannot select a safe CPU YUV conversion. Reject before
+    // loading/opening the handle bridge or consuming the stock selection.
+    if (this.config.storage === 'cpu' && options.colorSpace === undefined)
+      return { ok: false, reason: 'color_space_required' };
+    // Electron's GPU import path still has its established BT709 contract.
+    // A VP8/BT601 request must keep stock until CPU conversion is available.
+    if (this.config.pixelFormat === 'nv12' && this.config.storage !== 'cpu' && options.colorSpace === 'bt601-limited')
+      return { ok: false, reason: 'unsupported_color_space' };
     if (!this.config.enabled || this.disabledAfterFailure || process.platform !== 'win32' || process.arch !== 'x64' ||
       !/^44\./.test(process.versions.electron || '') || typeof sharedTexture?.importSharedTexture !== 'function' ||
       typeof sharedTexture?.sendSharedTexture !== 'function') return { ok: false, reason: 'unavailable' };
@@ -150,6 +158,7 @@ export class NativeScreenCaptureController {
         '--max-width', String(options.maxWidth), '--max-height', String(options.maxHeight), '--fps', String(options.fps),
         ...(this.config.pixelFormat === 'nv12' ? ['--pixel-format', 'nv12'] : []),
         ...(this.config.storage === 'cpu' ? ['--frame-storage', 'cpu'] : []),
+        ...(this.config.storage === 'cpu' ? ['--color-space', options.colorSpace!] : []),
         ...(this.config.completion ? ['--completion', this.config.completion] : [])],
       { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     } catch {
@@ -300,8 +309,12 @@ export class NativeScreenCaptureController {
 
   private ready(session: Session, message: Record<string, unknown>): void {
     const bgra = message.protocol === 2 && (message.pixelFormat === undefined || message.pixelFormat === 'bgra');
-    const cpu = message.protocol === 4 && message.storage === 'cpu' && message.pixelFormat === 'nv12' && message.colorSpace === 'bt709-limited';
-    const nv12 = (message.protocol === 3 || cpu) && message.pixelFormat === 'nv12' && message.colorSpace === 'bt709-limited';
+    // Protocol-4 peers predating this contract emitted only BT709. An absent
+    // declaration can never satisfy a BT601 request.
+    const cpuColorSpace = message.colorSpace === undefined ? 'bt709-limited' : message.colorSpace;
+    const cpu = message.protocol === 4 && message.storage === 'cpu' && message.pixelFormat === 'nv12' &&
+      (cpuColorSpace === 'bt601-limited' || cpuColorSpace === 'bt709-limited') && cpuColorSpace === session.options.colorSpace;
+    const nv12 = cpu || (message.protocol === 3 && message.pixelFormat === 'nv12' && message.colorSpace === 'bt709-limited');
     const pixelFormat = nv12 ? 'nv12' : 'bgra';
     const storage = cpu ? 'cpu' : 'gpu';
     if (session.ready || (!bgra && !nv12) || pixelFormat !== (this.config.pixelFormat ?? 'bgra') ||
@@ -318,9 +331,11 @@ export class NativeScreenCaptureController {
     if (width < 2 || height < 2 || message.width !== width || message.height !== height) {
       this.retire(session, 'invalid_protocol', true); return;
     }
-    session.ready = { width, height, sourceWidth: message.sourceWidth, sourceHeight: message.sourceHeight, pixelFormat, storage };
+    session.ready = { width, height, sourceWidth: message.sourceWidth, sourceHeight: message.sourceHeight, pixelFormat, storage,
+      ...(cpu ? { colorSpace: cpuColorSpace as NativeScreenColorSpace } : {}) };
     if (cpu) {
       session.cpuDelivery = createNativeCpuFrameDelivery({ requestId: session.requestId, sessionId: session.sessionId, width, height,
+        colorSpace: session.ready.colorSpace!,
         readFrame: (handle, byteLength, metadata) => {
           const childHandles = session.childHandles!;
           if (this.handles?.supportsCachedCpuFramesInto === true && typeof childHandles.readFrameCachedInto === 'function') {
@@ -355,7 +370,7 @@ export class NativeScreenCaptureController {
     clearTimeout(session.startTimer); session.startTimer = undefined;
     this.watchHealth(session);
     session.resolveStart({ ok: true, sessionId: session.sessionId, width, height, ...(nv12 ? { pixelFormat: 'nv12' as const } : {}),
-      ...(cpu ? { storage: 'cpu' as const } : {}) });
+      ...(cpu ? { storage: 'cpu' as const, colorSpace: session.ready.colorSpace! } : {}) });
   }
 
   private frame(session: Session, message: Record<string, unknown>): void {
@@ -366,6 +381,7 @@ export class NativeScreenCaptureController {
       (session.ready.pixelFormat === 'nv12' ? message.pixelFormat !== 'nv12' :
         (message.pixelFormat !== undefined && message.pixelFormat !== 'bgra')) ||
       (session.ready.storage === 'cpu' ? message.storage !== 'cpu' || message.byteLength !== session.ready.width * session.ready.height * 3 / 2 : message.storage !== undefined) ||
+      (session.ready.storage === 'cpu' && (message.colorSpace === undefined ? 'bt709-limited' : message.colorSpace) !== session.ready.colorSpace) ||
       typeof message.handle !== 'string' || !/^0x[0-9a-f]{1,16}$/i.test(message.handle) ||
       BigInt(message.handle) === 0n || BigInt(message.handle) === 0xffffffffffffffffn) {
       this.retire(session, 'invalid_protocol', true); return;
@@ -374,7 +390,7 @@ export class NativeScreenCaptureController {
       serial: message.serial, width: session.ready.width, height: session.ready.height,
       timestamp: message.timestamp, refresh: message.refresh,
       ...(session.ready.pixelFormat === 'nv12' ? { pixelFormat: 'nv12' as const } : {}),
-      ...(session.ready.storage === 'cpu' ? { storage: 'cpu' as const } : {}) };
+      ...(session.ready.storage === 'cpu' ? { storage: 'cpu' as const, colorSpace: session.ready.colorSpace! } : {}) };
     if (session.ready.storage === 'cpu') {
       session.lastSerial = metadata.serial; session.lastTimestamp = metadata.timestamp;
       this.watchHealth(session);

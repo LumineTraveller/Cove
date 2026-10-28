@@ -37,7 +37,7 @@ function fixture(context: TestContext) {
     timing: (_stage: NativeCpuFrameTimingStage, _durationMs: number): void => {},
   };
   const options: NativeCpuFrameDeliveryOptions = {
-    requestId: 'request-1', sessionId: 'session-1', width: 4, height: 2,
+    requestId: 'request-1', sessionId: 'session-1', width: 4, height: 2, colorSpace: 'bt709-limited',
     now: () => time,
     readFrame(value, expectedBytes, metadata) {
       events.push('read'); reads.push({ handle: value, expectedBytes });
@@ -53,7 +53,7 @@ function fixture(context: TestContext) {
   context.after(() => delivery.stop());
   const frame = (patch: Partial<NativeCpuScreenFrame> = {}): NativeCpuScreenFrame => ({
     requestId: 'request-1', sessionId: 'session-1', slot: 0, serial: 1,
-    width: 4, height: 2, timestamp: 1_000, refresh: false, pixelFormat: 'nv12', storage: 'cpu', ...patch,
+    width: 4, height: 2, timestamp: 1_000, refresh: false, pixelFormat: 'nv12', storage: 'cpu', colorSpace: 'bt709-limited', ...patch,
   });
   return { delivery, options, frame, hooks, source, handle, events, reads, imported, sent, credits,
     failures, timings, timers, allTimers, get unrefs() { return unrefs; },
@@ -171,6 +171,21 @@ test('an existing two-argument reader remains compatible', context => {
   assert.deepEqual(f.failures, []);
 });
 
+test('BT601 session snapshots its matrix and rejects changed metadata before reading', context => {
+  const f = fixture(context);
+  const delivery = createNativeCpuFrameDelivery({ ...f.options, colorSpace: 'bt601-limited' });
+  context.after(() => delivery.stop());
+  const first = f.frame({ colorSpace: 'bt601-limited' });
+  delivery.deliver(first, f.handle);
+  first.colorSpace = 'bt709-limited';
+  assert.equal(f.sent[0].metadata.colorSpace, 'bt601-limited');
+  assert.equal(delivery.acknowledge(first), false);
+  assert.equal(delivery.acknowledge(f.sent[0].metadata), true);
+  delivery.deliver(f.frame({ serial: 2, timestamp: 2000 }), f.handle);
+  assert.equal(f.reads.length, 1); assert.deepEqual(f.failures, ['cpu_frame_failed']);
+  assert.equal(f.credits.length, 1); assert.equal(f.timers.size, 0);
+});
+
 test('constructor enforces even safe geometry and the 16 MiB stream bound', context => {
   const f = fixture(context);
   for (const [width, height] of [[0, 2], [-2, 2], [3, 2], [2, 3], [2.5, 2], [NaN, 2],
@@ -191,6 +206,7 @@ const invalidFrames: [string, Record<string, unknown>][] = [
   ['zero timestamp', { timestamp: 0 }], ['unsafe timestamp', { timestamp: Infinity }],
   ['width', { width: 6 }], ['height', { height: 4 }], ['refresh', { refresh: 1 }],
   ['pixel format', { pixelFormat: 'bgra' }], ['storage', { storage: 'gpu' }], ['absent storage', { storage: undefined }],
+  ['changed color space', { colorSpace: 'bt601-limited' }], ['absent color space', { colorSpace: undefined }],
 ];
 for (const [label, patch] of invalidFrames) {
   test(`invalid delivery ${label} fails without reading or giving credit`, context => {

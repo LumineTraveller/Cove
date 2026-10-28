@@ -1,8 +1,12 @@
 /** Native helper wire data. No credentials, content bytes or arbitrary handles from renderers. */
+export type NativeScreenColorSpace = 'bt601-limited' | 'bt709-limited';
+
 export interface NativeScreenOptions {
   maxWidth: number;
   maxHeight: number;
   fps: 30 | 60 | 120;
+  /** Required by CPU NV12 delivery; chosen from the already-published codec. */
+  colorSpace?: NativeScreenColorSpace;
 }
 
 export interface NativeScreenFrame {
@@ -18,10 +22,12 @@ export interface NativeScreenFrame {
   pixelFormat?: 'bgra' | 'nv12';
   /** Protocol 4 carries independent CPU bytes rather than a shared GPU import. */
   storage?: 'cpu';
+  /** CPU NV12 sessions carry their immutable conversion contract on every frame. */
+  colorSpace?: NativeScreenColorSpace;
 }
 
 export type NativeScreenStartResult =
-  | { ok: true; sessionId: string; width: number; height: number; pixelFormat?: 'bgra' | 'nv12'; storage?: 'cpu' }
+  | { ok: true; sessionId: string; width: number; height: number; pixelFormat?: 'bgra' | 'nv12'; storage?: 'cpu'; colorSpace?: NativeScreenColorSpace }
   | { ok: false; reason: string };
 
 export interface NativeScreenSourceSelection {
@@ -48,5 +54,6 @@ export function validNativeScreenOptions(value: unknown): value is NativeScreenO
   const options = value as NativeScreenOptions;
   return Number.isInteger(options.maxWidth) && Number.isInteger(options.maxHeight) &&
     options.maxWidth >= 2 && options.maxWidth <= 4096 && options.maxHeight >= 2 && options.maxHeight <= 2560 &&
-    [30, 60, 120].includes(options.fps);
+    [30, 60, 120].includes(options.fps) &&
+    (options.colorSpace === undefined || options.colorSpace === 'bt601-limited' || options.colorSpace === 'bt709-limited');
 }

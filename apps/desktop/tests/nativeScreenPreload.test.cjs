@@ -31,7 +31,7 @@ function bridge(enabled = true, options = {}) {
 }
 const metadata = { requestId: 'native_request_1', sessionId: 'session-1234', slot: 0, serial: 1,
   width: 64, height: 64, timestamp: 1000, refresh: false };
-const cpuMetadata = { ...metadata, storage: 'cpu', pixelFormat: 'nv12' };
+const cpuMetadata = { ...metadata, storage: 'cpu', pixelFormat: 'nv12', colorSpace: 'bt709-limited' };
 const cpuBytes = () => new ArrayBuffer(cpuMetadata.width * cpuMetadata.height * 3 / 2);
 function texture() {
   const state = { frames: 0, closed: 0, released: 0 };
@@ -105,6 +105,17 @@ test('CPU accepts a genuine cross-realm ArrayBuffer without relying on instanceo
   assert.equal(b.cpuFrames[0].data, data); assert.equal(b.cpuFrames[0].closed, 1); assert.equal(b.calls.length, 0);
 });
 
+test('CPU BT601 constructs limited SMPTE170M on every component and keeps the close/ACK barrier', async () => {
+  const b = bridge(), value = { ...cpuMetadata, colorSpace: 'bt601-limited' };
+  b.api.onFrame(value.requestId, async () => {});
+  await b.receiveCpu(value, cpuBytes());
+  assert.deepEqual({ ...b.cpuFrames[0].init.colorSpace },
+    { primaries: 'smpte170m', transfer: 'smpte170m', matrix: 'smpte170m', fullRange: false });
+  assert.deepEqual(b.events.map(event => event[0]), ['construct', 'close', 'send']);
+  assert.deepEqual(b.sent, [['cove:native-screen:cpu-frame-done', value]]);
+  assert.equal(b.timers.size, 0); assert.deepEqual(b.calls, []);
+});
+
 test('unsubscribed and late CPU frames are ACKed without constructing a VideoFrame', async () => {
   const b = bridge(true, { VideoFrame: undefined });
   const remove = b.api.onFrame(metadata.requestId, async () => assert.fail('unsubscribed listener'));
@@ -169,7 +180,8 @@ test('CPU metadata stays within the native session, slot, timestamp and even NV1
   const invalid = [{ requestId: 'bad' }, { sessionId: '../session' }, { slot: 3 }, { slot: -1 }, { serial: 0 },
     { serial: Number.MAX_SAFE_INTEGER + 1 }, { timestamp: -1 }, { timestamp: 0.5 }, { refresh: 1 },
     { width: 63 }, { height: 63 }, { width: 4098 }, { height: 2562 }, { storage: undefined },
-    { storage: 'gpu' }, { pixelFormat: undefined }, { pixelFormat: 'bgra' }, { pixelFormat: 'rgba' }];
+    { storage: 'gpu' }, { pixelFormat: undefined }, { pixelFormat: 'bgra' }, { pixelFormat: 'rgba' },
+    { colorSpace: undefined }, { colorSpace: 'bt2020-limited' }, { colorSpace: 'smpte170m' }];
   for (const patch of invalid) {
     const b = bridge(); b.api.onFrame(metadata.requestId, async () => assert.fail());
     await b.receiveCpu({ ...cpuMetadata, ...patch }, cpuBytes());

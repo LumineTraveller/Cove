@@ -112,7 +112,9 @@ function harness(overrides: { enabled?: boolean; platform?: string; electron?: s
   const controller = new module.exports.NativeScreenCaptureController({ enabled: overrides.enabled ?? true, helperPath: 'owned-helper.exe', timing: overrides.timing, pixelFormat: overrides.pixelFormat, storage: overrides.storage, completion: overrides.completion });
   const choose = (patch: Partial<protocol.NativeScreenSourceSelection> = {}) => controller.noteStockSelection({ sourceId: 'screen:0:0',
     displayId: '123', primaryDisplayId: '123', displayCount: 1, sourceWidth: 2560, sourceHeight: 1440, selectedAt: now, ...patch });
-  const start = (requestId = 'request_01') => { choose(); return controller.start(target as any, requestId, options); };
+  const start = (requestId = 'request_01', requested: protocol.NativeScreenOptions = {
+    ...options, ...(overrides.storage === 'cpu' ? { colorSpace: 'bt709-limited' as const } : {}),
+  }) => { choose(); return controller.start(target as any, requestId, requested); };
   return { controller, target, start, choose, children, imports, transfers, sent, duplicates, childHandles, cpuReads, timers, advance,
     failImport() { importError = true; }, failSend(sync = false) { sendError = true; sendThrows = sync; },
     failDuplicate() { duplicateError = true; }, failHandleClose() { closeError = true; },
@@ -219,6 +221,65 @@ test('a session cannot change frame pixel format or omit the negotiated NV12 for
 const cpuReady = { ...ready, protocol: 4, pixelFormat: 'nv12', storage: 'cpu', colorSpace: 'bt709-limited' };
 const cpuFrame = (serial = 1, slot = 0) => ({ ...frame(serial, slot), pixelFormat: 'nv12', storage: 'cpu', byteLength: 1920 * 1080 * 3 / 2 });
 
+test('CPU requires an explicit supported color request before opening any child handle', async () => {
+  const h = harness({ pixelFormat: 'nv12', storage: 'cpu' });
+  for (const colorSpace of [undefined, 'bt2020-limited', 'bt601', null]) {
+    assert.equal((await h.start('request_01', { ...options, colorSpace } as any)).ok, false);
+    assert.equal(h.children.length, 0); assert.equal(h.childHandles.length, 0);
+  }
+});
+
+test('BT601 CPU policy cannot accidentally enter the BT709 GPU NV12 import path', async () => {
+  const h = harness({ pixelFormat: 'nv12' });
+  assert.equal((await h.start('request_01', { ...options, colorSpace: 'bt601-limited' })).ok, false);
+  assert.equal(h.children.length, 0); assert.equal(h.childHandles.length, 0);
+  const bgra = harness(); const started = bgra.start('request_01', { ...options, colorSpace: 'bt601-limited' });
+  bgra.children[0].emitMessage(ready); assert.equal((await started).ok, true);
+  assert.equal(bgra.children[0].args.includes('--color-space'), false);
+  bgra.controller.reset(); bgra.children[0].close();
+});
+
+test('CPU ready must match its requested matrix; absent legacy color means only BT709', async () => {
+  for (const requested of ['bt601-limited', 'bt709-limited'] as const) {
+    for (const announced of ['bt601-limited', 'bt709-limited', undefined, 'bt2020-limited']) {
+      const h = harness({ pixelFormat: 'nv12', storage: 'cpu' });
+      const pending = h.start('request_01', { ...options, colorSpace: requested });
+      assert.deepEqual(Array.from(h.children[0].args.slice(-2)), ['--color-space', requested]);
+      h.children[0].emitMessage({ ...cpuReady, colorSpace: announced });
+      const result = await pending;
+      const matches = (announced ?? 'bt709-limited') === requested;
+      assert.equal(result.ok, matches);
+      assert.equal(h.cpuReads.length, 0); assert.equal(h.duplicates.length, 0); assert.equal(h.imports.length, 0);
+      if (result.ok) assert.equal(result.colorSpace, requested);
+      else assert.equal(h.controller.snapshot().failureCode, 'invalid_protocol');
+      h.controller.reset(); h.children[0].close();
+    }
+  }
+});
+
+test('CPU frame and final ACK cannot change the immutable session color contract', async () => {
+  for (const colorSpace of ['bt601-limited', 'bt709-limited'] as const) {
+    const other = colorSpace === 'bt601-limited' ? 'bt709-limited' : 'bt601-limited';
+    const h = harness({ pixelFormat: 'nv12', storage: 'cpu' });
+    const pending = h.start('request_01', { ...options, colorSpace });
+    h.children[0].emitMessage({ ...cpuReady, colorSpace }); await pending;
+    h.children[0].emitMessage({ ...cpuFrame(), colorSpace });
+    const sent = h.sent.find(entry => entry.channel === 'cove:native-screen:cpu-frame');
+    assert.equal(sent.data.colorSpace, colorSpace);
+    assert.equal(h.controller.acknowledgeCpuFrame(h.target as any, { ...sent.data, colorSpace: other }), false);
+    assert.equal(h.controller.acknowledgeCpuFrame(h.target as any, sent.data), true);
+    h.children[0].emitMessage({ ...cpuFrame(2, 1), colorSpace: other });
+    assert.equal(h.cpuReads.length, 1); assert.equal(h.controller.snapshot().failureCode, 'invalid_protocol');
+    h.children[0].close();
+  }
+  const h = harness({ pixelFormat: 'nv12', storage: 'cpu' });
+  const pending = h.start('request_01', { ...options, colorSpace: 'bt601-limited' });
+  h.children[0].emitMessage({ ...cpuReady, colorSpace: 'bt601-limited' }); await pending;
+  h.children[0].emitMessage(cpuFrame());
+  assert.equal(h.cpuReads.length, 0); assert.equal(h.controller.snapshot().failureCode, 'invalid_protocol');
+  h.children[0].close();
+});
+
 test('completion experiments are explicit and leave the default helper invocation unchanged', async () => {
   for (const completion of [undefined, 'query', 'fence'] as const) {
     const h = harness({ completion }); const pending = h.start();
@@ -269,7 +330,7 @@ test('CPU frame buffers are bounded to slots and only reused after matching comp
 
 test('protocol 4 CPU frames never enter GPU import and credit only the matching renderer completion', async () => {
   const h = harness({ pixelFormat: 'nv12', storage: 'cpu', timing: true }); const pending = h.start();
-  assert.deepEqual(Array.from(h.children[0].args.slice(-4)), ['--pixel-format', 'nv12', '--frame-storage', 'cpu']);
+  assert.deepEqual(Array.from(h.children[0].args.slice(-6)), ['--pixel-format', 'nv12', '--frame-storage', 'cpu', '--color-space', 'bt709-limited']);
   h.children[0].emitMessage(cpuReady); const started = await pending; assert.ok(started.ok);
   if (started.ok) assert.equal(started.storage, 'cpu');
   h.children[0].emitMessage(cpuFrame());

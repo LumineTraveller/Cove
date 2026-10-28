@@ -79,7 +79,8 @@ function fixture(context: TestContext) {
     start: async (id, options) => {
       requestId = id;
       events.push('start');
-      assert.deepEqual(options, { maxWidth: 1920, maxHeight: 1080, fps: 120 });
+      assert.deepEqual(options, { maxWidth: 1920, maxHeight: 1080, fps: 120,
+        ...(captureOptions.colorSpace ? { colorSpace: captureOptions.colorSpace } : {}) });
       return startImplementation();
     },
     stop: async (...args) => {
@@ -116,7 +117,7 @@ function fixture(context: TestContext) {
   replaceGlobal(context, 'MediaStream', FakeStream);
   replaceGlobal(context, 'MediaStreamTrackGenerator', FakeGenerator);
   context.after(() => controller.abort());
-  const options: NativeScreenCaptureOptions = {
+  const captureOptions: NativeScreenCaptureOptions = {
     maxWidth: 1920, maxHeight: 1080, fps: 120, nativeResolution: false, contentHint: 'motion',
     isCurrent: () => current, signal: controller.signal,
   };
@@ -130,7 +131,7 @@ function fixture(context: TestContext) {
     return value;
   }
   async function ready() {
-    const pending = tryNativeScreenCapture(stream, options);
+    const pending = tryNativeScreenCapture(stream, captureOptions);
     await flush();
     const firstFrame = await frame();
     const candidate = await pending;
@@ -138,7 +139,7 @@ function fixture(context: TestContext) {
     return { candidate, firstFrame };
   }
   return {
-    bridge, stock, stream, native, writes, stopRequests, stopFaults, stopArgumentCounts, events, options, controller,
+    bridge, stock, stream, native, writes, stopRequests, stopFaults, stopArgumentCounts, events, options: captureOptions, controller,
     flush, metadata, frame, ready,
     get aborts() { return aborts; }, get releases() { return releases; },
     get requestId() { return requestId; },
@@ -217,6 +218,7 @@ test('NV12 candidate preserves explicit limited BT709 frame metadata and uses th
 
 test('CPU NV12 delivery stays on the existing producer candidate contract and declares its storage', async context => {
   const f = fixture(context);
+  f.options.colorSpace = 'bt709-limited';
   f.setResult({ ok: true, sessionId: 'session-1', width: 1920, height: 1080, pixelFormat: 'nv12', storage: 'cpu' });
   const pending = tryNativeScreenCapture(f.stream, f.options); await f.flush();
   const frame = Object.assign(new FakeFrame(), { format: 'NV12', colorSpace: {
@@ -227,6 +229,56 @@ test('CPU NV12 delivery stays on the existing producer candidate contract and de
   assert.equal(frame.closes, 1); assert.equal(f.writes.length, 1);
   assert.equal(getNativeScreenCaptureDiagnostics(candidate.stream.getVideoTracks()[0])?.frameStorage, 'cpu');
   candidate.stop(); assert.equal(f.stock.stops, 0);
+});
+
+test('CPU BT601 validates session, per-frame contract and actual SMPTE170M before writing', async context => {
+  const f = fixture(context);
+  f.options.colorSpace = 'bt601-limited';
+  f.setResult({ ok: true, sessionId: 'session-1', width: 1920, height: 1080,
+    pixelFormat: 'nv12', storage: 'cpu', colorSpace: 'bt601-limited' });
+  const pending = tryNativeScreenCapture(f.stream, f.options); await f.flush();
+  const makeFrame = () => Object.assign(new FakeFrame(), { format: 'NV12', colorSpace: {
+    primaries: 'smpte170m', transfer: 'smpte170m', matrix: 'smpte170m', fullRange: false,
+  } });
+  await f.frame({ pixelFormat: 'nv12', storage: 'cpu', colorSpace: 'bt601-limited' }, makeFrame());
+  const candidate = await pending; assert.ok(candidate); candidate.commit();
+  assert.equal(f.writes.length, 1);
+  const changed = makeFrame(); changed.timestamp = 2000;
+  await f.frame({ serial: 2, timestamp: 2000, pixelFormat: 'nv12', storage: 'cpu', colorSpace: 'bt709-limited' }, changed);
+  assert.equal(f.writes.length, 1); assert.equal(changed.closes, 1);
+  assert.deepEqual(f.stopFaults, ['renderer_failed']); assert.equal(f.stock.stops, 0);
+});
+
+test('CPU startup rejects missing codec contract and BT601/BT709 mismatch without writing', async context => {
+  for (const [requested, announced] of [[undefined, 'bt709-limited'], ['bt601-limited', undefined],
+    ['bt601-limited', 'bt709-limited'], ['bt709-limited', 'bt601-limited']] as const) {
+    await context.test(`${requested}/${announced}`, async subcontext => {
+      const f = fixture(subcontext); f.options.colorSpace = requested;
+      f.setResult({ ok: true, sessionId: 'session-1', width: 1920, height: 1080,
+        pixelFormat: 'nv12', storage: 'cpu', colorSpace: announced });
+      assert.equal(await tryNativeScreenCapture(f.stream, f.options), null);
+      assert.equal(f.writes.length, 0); assert.equal(f.stock.stops, 0);
+      assert.deepEqual(f.stopFaults, [undefined]);
+    });
+  }
+});
+
+test('CPU rejects actual frame color metadata differing from its declared matrix', async context => {
+  for (const component of ['primaries', 'transfer', 'matrix', 'fullRange']) {
+    await context.test(component, async subcontext => {
+      const f = fixture(subcontext); f.options.colorSpace = 'bt601-limited';
+      f.setResult({ ok: true, sessionId: 'session-1', width: 1920, height: 1080,
+        pixelFormat: 'nv12', storage: 'cpu', colorSpace: 'bt601-limited' });
+      const pending = tryNativeScreenCapture(f.stream, f.options); await f.flush();
+      const value = Object.assign(new FakeFrame(), { format: 'NV12', colorSpace: {
+        primaries: 'smpte170m', transfer: 'smpte170m', matrix: 'smpte170m', fullRange: false,
+        [component]: component === 'fullRange' ? true : 'bt709',
+      } });
+      await f.frame({ pixelFormat: 'nv12', storage: 'cpu', colorSpace: 'bt601-limited' }, value);
+      assert.equal(await pending, null); assert.equal(f.writes.length, 0); assert.equal(value.closes, 1);
+      assert.deepEqual(f.stopFaults, ['renderer_failed']);
+    });
+  }
 });
 
 test('negotiated NV12 rejects missing format, wrong planes or changed color metadata before writing', async context => {

@@ -2,6 +2,18 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { canUpgradeScreenCapture, upgradePublishedScreenCapture, type NativeScreenUpgradeQueue } from '../src/features/media/screen/nativeScreenUpgrade';
 import { createScreenEncodingPlan, type ScreenFps } from '../src/features/media/screen/screenCapture';
+import { nativeScreenColorSpaceForCodecs } from '../src/features/media/screen/nativeScreenColorPolicy';
+
+test('CPU color policy follows the actual single media codec and ignores only RTX', () => {
+  assert.equal(nativeScreenColorSpaceForCodecs([{ mimeType: 'video/VP8' }, { mimeType: 'video/rtx' }]), 'bt601-limited');
+  assert.equal(nativeScreenColorSpaceForCodecs([{ mimeType: 'video/AV1' }]), 'bt709-limited');
+  assert.equal(nativeScreenColorSpaceForCodecs([{ mimeType: 'VIDEO/av1' }]), 'bt709-limited');
+  for (const codecs of [undefined, [], [{ mimeType: 'video/VP9' }], [{ mimeType: 'video/H264' }],
+    [{ mimeType: 'video/rtx' }], [{ mimeType: 'video/VP8' }, { mimeType: 'video/AV1' }],
+    [{ mimeType: 'video/VP8' }, { mimeType: 'audio/opus' }], [{ mimeType: 'video/VP8' }, {}]]) {
+    assert.equal(nativeScreenColorSpaceForCodecs(codecs as any), undefined);
+  }
+});
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -35,6 +47,7 @@ function fixture() {
   let replace = async (_track: unknown) => {};
   let adopt = (stream: MediaStream) => { currentStream = stream; };
   const producer = {
+    rtpParameters: { codecs: [{ mimeType: 'video/VP8' }, { mimeType: 'video/rtx' }] },
     rtpSender: { getParameters: () => ({ encodings: [{ scaleResolutionDownBy: scale }] }) },
     replaceTrack: async ({ track }: { track: unknown }) => { replacements.push(track); await replace(track); },
   } as any;
@@ -51,6 +64,8 @@ function fixture() {
     acquire: async (_stock, options) => {
       acquired++;
       assert.equal(options.maxWidth, stockPlan.sourceWidth); assert.equal(options.maxHeight, stockPlan.sourceHeight); assert.equal(options.fps, maxFps);
+      assert.equal(options.colorSpace, producer.rtpParameters.codecs[0]?.mimeType === 'video/VP8' ? 'bt601-limited' :
+        producer.rtpParameters.codecs[0]?.mimeType === 'video/AV1' ? 'bt709-limited' : undefined);
       return acquire();
     },
     onCommit: (stream, _track, width, height) => { committedDimensions.push([width, height]); adopt(stream); },
@@ -96,6 +111,38 @@ test('30 FPS publication retains live stock without acquiring a native candidate
   assert.deepEqual(f.replacements, []);
   assert.equal(f.commits(), 0);
   assert.equal(f.stopped(), 0);
+});
+
+test('upgrade passes the actual AV1 color contract without changing codec parameters', async () => {
+  const f = fixture();
+  f.producer.rtpParameters.codecs = [{ mimeType: 'video/AV1' }];
+  const original = JSON.stringify(f.producer.rtpParameters);
+  await f.run();
+  assert.equal(f.commits(), 1);
+  assert.equal(JSON.stringify(f.producer.rtpParameters), original);
+});
+
+test('unverified codecs do not invent a CPU color contract', async () => {
+  const f = fixture();
+  f.producer.rtpParameters.codecs = [{ mimeType: 'video/VP9' }];
+  f.acquire(async () => null as any); // The CPU broker rejects the missing color contract.
+  await f.run();
+  assert.equal(f.stock.track.stops, 0); assert.equal(f.commits(), 0);
+});
+
+test('a codec changing during preparation or replacement keeps the stock source', async () => {
+  for (const stage of ['queued', 'replace']) {
+    const f = fixture(), earlier = deferred<void>();
+    if (stage === 'queued') f.queue.tail = earlier.promise;
+    else f.replace(async () => { f.producer.rtpParameters.codecs = [{ mimeType: 'video/AV1' }]; });
+    const upgrade = f.run();
+    if (stage === 'queued') {
+      await flush(); f.producer.rtpParameters.codecs = [{ mimeType: 'video/AV1' }]; earlier.resolve();
+    }
+    await upgrade;
+    assert.equal(f.commits(), 0); assert.equal(f.stock.track.stops, 0); assert.equal(f.native.track.stops, 1);
+    assert.deepEqual(f.replacements, stage === 'replace' ? [f.native.track, f.stock.track] : []);
+  }
 });
 
 test('native acquisition failure keeps the already published stock source live', async () => {

@@ -93,13 +93,18 @@ static uint64_t decimal(const std::string& text, uint64_t maximum, const char* c
 }
 enum class CompletionMode { Query, Fence };
 static const char* completionName(CompletionMode mode) { return mode == CompletionMode::Fence ? "fence" : "query"; }
+enum class Nv12ColorSpace { Bt601Limited, Bt709Limited };
+static const char* nv12ColorSpaceName(Nv12ColorSpace colorSpace) {
+  return colorSpace == Nv12ColorSpace::Bt601Limited ? "bt601-limited" : "bt709-limited";
+}
 struct Options {
   DWORD owner = 0; UINT maxWidth = 0, maxHeight = 0, fps = 0;
   bool nv12 = false, cpu = false;
   CompletionMode completion = CompletionMode::Query;
+  Nv12ColorSpace colorSpace = Nv12ColorSpace::Bt709Limited;
 };
 static Options options(int argc, char** argv) {
-  require(argc >= 9 && argc <= 15 && argc % 2 == 1, "invalid_arguments");
+  require(argc >= 9 && argc <= 17 && argc % 2 == 1, "invalid_arguments");
   Options result;
   unsigned seen = 0;
   for (int i = 1; i < argc; i += 2) {
@@ -121,10 +126,16 @@ static Options options(int argc, char** argv) {
       bit = 64; const std::string value(argv[i + 1]);
       require(value == "query" || value == "fence", "invalid_arguments");
       result.completion = value == "fence" ? CompletionMode::Fence : CompletionMode::Query;
+    } else if (name == "--color-space") {
+      bit = 128; const std::string value(argv[i + 1]);
+      require(value == "bt601-limited" || value == "bt709-limited", "invalid_arguments");
+      result.colorSpace = value == "bt601-limited" ? Nv12ColorSpace::Bt601Limited : Nv12ColorSpace::Bt709Limited;
     } else require(false, "invalid_arguments");
     require(!(seen & bit), "invalid_arguments"); seen |= bit;
   }
-  require((!result.cpu || result.nv12) && (seen & ~64U) == ((result.nv12 ? 31U : 15U) | (result.cpu ? 32U : 0U)) &&
+  require((!result.cpu || result.nv12) &&
+    (result.colorSpace != Nv12ColorSpace::Bt601Limited || (result.cpu && result.nv12)) &&
+    (seen & ~(64U | 128U)) == ((result.nv12 ? 31U : 15U) | (result.cpu ? 32U : 0U)) &&
     result.owner && result.maxWidth >= 2 && result.maxHeight >= 2 &&
     (result.fps == 30 || result.fps == 60 || result.fps == 120), "invalid_arguments");
   return result;
@@ -608,26 +619,37 @@ float4 verticalMain(Vertex v) : SV_Target {
   return sum / (hi - lo);
 }
 // Optional output conversion samples the existing, fully composed BGRA8 area
-// result. Values stay gamma encoded; REC709 limited metadata accompanies NV12.
-float3 nv12Convert709(float3 rgb) {
+// result. Values stay gamma encoded. The compile-time matrix is also declared
+// in the output contract; selecting metadata alone never changes these pixels.
+float3 nv12Convert(float3 rgb) {
+#if COVE_NV12_BT601
+  float y = dot(rgb, float3(.299, .587, .114));
+  return float3(16 + 219 * y, 128 + 224 * (rgb.b - y) / (2 * (1 - .114)),
+    128 + 224 * (rgb.r - y) / (2 * (1 - .299))) / 255;
+#else
   float y = dot(rgb, float3(.2126, .7152, .0722));
   return float3(16 + 219 * y, 128 + 224 * (rgb.b - y) / (2 * (1 - .0722)),
     128 + 224 * (rgb.r - y) / (2 * (1 - .2126))) / 255;
+#endif
 }
 float4 nv12LumaMain(Vertex v) : SV_Target {
   float3 rgb = image.Load(int3(int2(v.position.xy), 0)).rgb;
-  return float4(nv12Convert709(rgb).x, 0, 0, 1);
+  return float4(nv12Convert(rgb).x, 0, 0, 1);
 }
 float4 nv12ChromaMain(Vertex v) : SV_Target {
   int2 p = int2(v.position.xy) * 2;
   float3 rgb = (image.Load(int3(p, 0)).rgb + image.Load(int3(p + int2(1,0), 0)).rgb
     + image.Load(int3(p + int2(0,1), 0)).rgb + image.Load(int3(p + int2(1,1), 0)).rgb) * .25;
-  return float4(nv12Convert709(rgb).yz, 0, 1);
+  return float4(nv12Convert(rgb).yz, 0, 1);
 }
 )HLSL";
-static ComPtr<ID3DBlob> compile(const char* entry, const char* target) {
+static ComPtr<ID3DBlob> compile(const char* entry, const char* target,
+    Nv12ColorSpace colorSpace = Nv12ColorSpace::Bt709Limited) {
   ComPtr<ID3DBlob> code, errors;
-  check(D3DCompile(kShader, std::strlen(kShader), "cove-native-area", nullptr, nullptr, entry, target,
+  const D3D_SHADER_MACRO macros[]{
+    {"COVE_NV12_BT601", colorSpace == Nv12ColorSpace::Bt601Limited ? "1" : "0"}, {nullptr, nullptr}
+  };
+  check(D3DCompile(kShader, std::strlen(kShader), "cove-native-area", macros, nullptr, entry, target,
     D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
     code.GetAddressOf(), errors.GetAddressOf()), "shader_compile_failed");
   return code;
@@ -661,7 +683,8 @@ class Pipeline {
 public:
   ComPtr<ID3D11Texture2D> desktop;
   Constants values;
-  Pipeline(ID3D11Device* device, Size source, Size target, bool nv12 = false)
+  Pipeline(ID3D11Device* device, Size source, Size target, bool nv12 = false,
+      Nv12ColorSpace colorSpace = Nv12ColorSpace::Bt709Limited)
       : values{source.width, source.height, target.width, target.height} {
     auto desc = textureDesc(source.width, source.height, DXGI_FORMAT_B8G8R8A8_UNORM, D3D11_BIND_SHADER_RESOURCE);
     check(device->CreateTexture2D(&desc, nullptr, desktop.GetAddressOf()), "desktop_texture_failed");
@@ -686,7 +709,8 @@ public:
       check(device->CreateTexture2D(&desc, nullptr, nv12Scratch_.GetAddressOf()), "nv12_scratch_failed");
       check(device->CreateShaderResourceView(nv12Scratch_.Get(), nullptr, nv12ScratchView_.GetAddressOf()), "nv12_scratch_view_failed");
       check(device->CreateRenderTargetView(nv12Scratch_.Get(), nullptr, nv12ScratchTarget_.GetAddressOf()), "nv12_scratch_target_failed");
-      const auto luma = compile("nv12LumaMain", "ps_4_0"), chroma = compile("nv12ChromaMain", "ps_4_0");
+      const auto luma = compile("nv12LumaMain", "ps_4_0", colorSpace),
+        chroma = compile("nv12ChromaMain", "ps_4_0", colorSpace);
       check(device->CreatePixelShader(luma->GetBufferPointer(), luma->GetBufferSize(), nullptr,
         luma_.GetAddressOf()), "nv12_luma_shader_failed");
       check(device->CreatePixelShader(chroma->GetBufferPointer(), chroma->GetBufferSize(), nullptr,
@@ -1013,7 +1037,7 @@ static void capture(const Options& option) {
     D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels, 1, D3D11_SDK_VERSION,
     device.GetAddressOf(), nullptr, context.GetAddressOf()), "hardware_device_failed");
   startup.next(StartupTiming::Pipeline);
-  Pipeline pipeline(device.Get(), source, size, option.nv12);
+  Pipeline pipeline(device.Get(), source, size, option.nv12, option.colorSpace);
   startup.next(StartupTiming::Slots);
   std::array<Slot, 3> slots;
   for (auto& slot : slots) createSlot(device.Get(), slot, size, option.nv12, option.cpu);
@@ -1039,7 +1063,8 @@ static void capture(const Options& option) {
   startup.next(StartupTiming::ReadyOutput);
   std::cout << "{\"type\":\"ready\",\"protocol\":" << (option.cpu ? 4 : option.nv12 ? 3 : 2);
   if (option.cpu) std::cout << ",\"storage\":\"cpu\"";
-  if (option.nv12) std::cout << ",\"pixelFormat\":\"nv12\",\"colorSpace\":\"bt709-limited\"";
+  if (option.nv12) std::cout << ",\"pixelFormat\":\"nv12\",\"colorSpace\":\""
+    << nv12ColorSpaceName(option.colorSpace) << '"';
   std::cout << ",\"width\":" << size.width << ",\"height\":" << size.height
     << ",\"sourceWidth\":" << source.width << ",\"sourceHeight\":" << source.height
     << ",\"poolSize\":3,\"cursorSupported\":true}" << std::endl;
@@ -1233,7 +1258,8 @@ static void capture(const Options& option) {
       << std::hex << uintptr_t(slot.local.value) << std::dec << "\",\"timestamp\":" << timestamp
       << ",\"width\":" << size.width << ",\"height\":" << size.height;
       if (option.nv12) std::cout << ",\"pixelFormat\":\"nv12\"";
-      if (option.cpu) std::cout << ",\"storage\":\"cpu\",\"byteLength\":" << slot.cpuView.byteLength;
+      if (option.cpu) std::cout << ",\"storage\":\"cpu\",\"byteLength\":" << slot.cpuView.byteLength
+        << ",\"colorSpace\":\"" << nv12ColorSpaceName(option.colorSpace) << '"';
       std::cout << ",\"refresh\":" << (refresh ? "true" : "false") << "}" << std::endl; }
     require(bool(std::cout), "owner_output_closed");
     if (refresh) ++refreshFrames; else ++newFrames;
@@ -1317,6 +1343,33 @@ static void selfTest() {
   rejects([&] { parseTestOptions(invalidCompletion); }); ++checks;
   invalidCompletion = bgraArguments; invalidCompletion[7] = "--completion"; invalidCompletion[8] = "fence";
   rejects([&] { parseTestOptions(invalidCompletion); }); ++checks;
+  for (const auto& arguments : {bgraArguments, nv12Arguments, cpuArguments}) {
+    expect(parseTestOptions(arguments).colorSpace == Nv12ColorSpace::Bt709Limited);
+    auto explicit709 = arguments; explicit709.insert(explicit709.end(), {"--color-space", "bt709-limited"});
+    expect(parseTestOptions(explicit709).colorSpace == Nv12ColorSpace::Bt709Limited);
+    auto explicit601 = arguments; explicit601.insert(explicit601.end(), {"--color-space", "bt601-limited"});
+    if (arguments == cpuArguments) {
+      expect(parseTestOptions(explicit601).colorSpace == Nv12ColorSpace::Bt601Limited);
+      explicit601.insert(explicit601.end(), {"--completion", "fence"});
+      expect(parseTestOptions(explicit601).completion == CompletionMode::Fence);
+    } else { rejects([&] { parseTestOptions(explicit601); }); ++checks; }
+  }
+  auto reordered601 = bgraArguments;
+  reordered601.insert(reordered601.end(), {"--color-space", "bt601-limited", "--frame-storage", "cpu", "--pixel-format", "nv12"});
+  expect(parseTestOptions(reordered601).colorSpace == Nv12ColorSpace::Bt601Limited);
+  for (const auto* invalid : {"bt601", "BT601-limited", "bt709-full", "", "bt2020-limited"}) {
+    auto invalidColor = cpuArguments; invalidColor.insert(invalidColor.end(), {"--color-space", invalid});
+    rejects([&] { parseTestOptions(invalidColor); }); ++checks;
+  }
+  auto duplicateColor = cpuArguments;
+  duplicateColor.insert(duplicateColor.end(), {"--color-space", "bt601-limited", "--color-space", "bt709-limited"});
+  rejects([&] { parseTestOptions(duplicateColor); }); ++checks;
+  auto incompleteColor = cpuArguments; incompleteColor.push_back("--color-space");
+  rejects([&] { parseTestOptions(incompleteColor); }); ++checks;
+  auto missingFps = cpuArguments; missingFps[7] = "--color-space"; missingFps[8] = "bt601-limited";
+  rejects([&] { parseTestOptions(missingFps); }); ++checks;
+  expect(std::string(nv12ColorSpaceName(Nv12ColorSpace::Bt601Limited)) == "bt601-limited" &&
+    std::string(nv12ColorSpaceName(Nv12ColorSpace::Bt709Limited)) == "bt709-limited");
   const auto expectFailure = [&](auto&& action, const char* code) {
     try { action(); } catch (const Failure& error) { expect(std::string(error.what()) == code); return; }
     throw Failure("self_test_expected_rejection");
@@ -1675,7 +1728,9 @@ static void selfTest() {
   expect(std::abs(originalSum / checker.size() - scaledSum / odd.size()) < 1e-9);
   // CPU compiler only. Shader compilation is not a GPU execution/quality test.
   compile("vertexMain", "vs_4_0"); compile("horizontalMain", "ps_4_0"); compile("verticalMain", "ps_4_0"); checks += 3;
-  compile("nv12LumaMain", "ps_4_0"); compile("nv12ChromaMain", "ps_4_0"); checks += 2;
+  for (const auto colorSpace : {Nv12ColorSpace::Bt601Limited, Nv12ColorSpace::Bt709Limited}) {
+    compile("nv12LumaMain", "ps_4_0", colorSpace); compile("nv12ChromaMain", "ps_4_0", colorSpace); checks += 2;
+  }
   std::cout << "{\"type\":\"self-test\",\"passed\":true,\"cpuOnly\":true,\"checks\":" << checks << "}" << std::endl;
 }
 int main(int argc, char** argv) {
