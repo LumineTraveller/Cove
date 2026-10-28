@@ -54,11 +54,11 @@ const mediaTransports: Array<{transport:MsTypes.Transport;initialFragment:string
   producers:MsTypes.Producer[];consumers:MsTypes.Consumer[]}> = [];
 for(const method of ['createSendTransport','createRecvTransport'] as const){
   const original=Device.prototype[method];
-  Device.prototype[method]=function(options:MsTypes.TransportOptions){
+  Device.prototype[method]=function<TransportAppData extends MsTypes.AppData=MsTypes.AppData>(this:Device,options:MsTypes.TransportOptions<TransportAppData>){
     const proxy=Number(params.get('iceProxy'));
     const actual=method==='createRecvTransport'&&Number.isInteger(proxy)&&proxy>=1024&&proxy<=65535
       ? {...options,iceCandidates:options.iceCandidates.filter(c=>c.protocol===proxyProtocol).map(c=>({...c,ip:'127.0.0.1',address:'127.0.0.1',port:proxy}))}:options;
-    const transport=original.call(this,actual);
+    const transport=original.bind(this)<TransportAppData>(actual);
     const record={transport,initialFragment:options.iceParameters.usernameFragment,restartCalls:0,changed:false,
       producers:[] as MsTypes.Producer[],consumers:[] as MsTypes.Consumer[]};
     mediaTransports.push(record);
@@ -116,19 +116,21 @@ function Fixture(){
   const control=useRef({requested:null as any,active:false,started:0,stopped:0});
   const video=useRef<HTMLVideoElement>(null);
   useEffect(()=>{
-    socket.on('connect',()=>{
+    const fixtureListeners:Array<{event:string;listener:(...args:any[])=>void}>=[];
+    const on=(event:string,listener:(...args:any[])=>void)=>{socket.on(event,listener);fixtureListeners.push({event,listener});};
+    on('connect',()=>{
       const epoch=++registrationEpoch.current;
       socket.timeout(8000).emit('user:register',{username:'Refactor',avatarUrl:null,clientId:'renderer-'+params.get('index'),authToken:params.get('token'),platform:'desktop',clientVersion:CLIENT_RELEASE_VERSIONS.desktop,remoteControlSupported:true},(cause:any,result:any)=>{
         if(epoch!==registrationEpoch.current||!socket.connected)return;
         if(cause||!result?.ok){setError(cause?.message||result?.error);return;}
         socket.timeout(8000).emit('room:join',params.get('room'),(cause:any,result:any)=>{if(epoch!==registrationEpoch.current||!socket.connected)return;cause||result?.error?setError(cause?.message||result.error):setReady(true);});
       });
-    });socket.on('disconnect',()=>{registrationEpoch.current++;setReady(false);});socket.on('connect_error',cause=>setError(cause.message));
-    socket.on('remote-control:requested',request=>{control.current.requested=request;});
-    socket.on('remote-control:started',()=>{control.current.active=true;control.current.started++;});
-    socket.on('remote-control:stopped',()=>{control.current.active=false;control.current.stopped++;});
+    });on('disconnect',()=>{registrationEpoch.current++;setReady(false);});on('connect_error',cause=>setError(cause.message));
+    on('remote-control:requested',request=>{control.current.requested=request;});
+    on('remote-control:started',()=>{control.current.active=true;control.current.started++;});
+    on('remote-control:stopped',()=>{control.current.active=false;control.current.stopped++;});
     socket.connect();
-    return()=>{rtc.leaveVoice();socket.disconnect();};
+    return()=>{rtc.leaveVoice();socket.disconnect();for(const {event,listener} of fixtureListeners)socket.off(event,listener);};
   },[socket]);
   useEffect(()=>{if(video.current){video.current.srcObject=rtc.remoteScreen?.stream||null;void video.current.play().catch(()=>{});}},[rtc.remoteScreen]);
   useEffect(()=>{(window as any).coveMediaQA={rtc,socket,ready,error,ice:iceQA,control:control.current,resources:()=>({...iceQA.resources(),socketListeners:Object.values((socket as any)._callbacks??{}).reduce((n:number,list:any)=>n+list.length,0)})};});
@@ -136,4 +138,8 @@ function Fixture(){
   return <><p>{ready?'Room ready':'Connecting'} {error}</p><video ref={video} autoPlay muted playsInline/><pre>{rtc.inVoice?'In voice':'Not in voice'}</pre></>;
 }
 if(floatingMode){localStorage.setItem('cove_server_url',params.get('base')!);void import('./floating-viewer-fixture').then(module=>{floatingFixture=module;const root=createRoot(document.getElementById('root')!);module.installFixtureUnmount(()=>{if(floatingPaint!==null)window.clearInterval(floatingPaint);root.unmount();});root.render(<Fixture/>);});}
-else createRoot(document.getElementById('root')!).render(<Fixture/>);
+else {
+  const root=createRoot(document.getElementById('root')!);
+  if(performanceMode){let unmounted=false;(window as any).covePerformanceUnmount=()=>{if(!unmounted){unmounted=true;root.unmount();}};}
+  root.render(<Fixture/>);
+}

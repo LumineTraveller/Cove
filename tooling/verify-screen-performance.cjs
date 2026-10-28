@@ -4,6 +4,7 @@
 const fs=require('node:fs'),path=require('node:path'),{pathToFileURL}=require('node:url');
 const {spawn}=require('node:child_process'),dgram=require('node:dgram');
 const crypto=require('node:crypto');
+const {cleanupOwnedTraceExports}=require('./analyze-screen-performance-trace.cjs');
 const root=path.resolve(__dirname,'..');
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 async function stop(child){
@@ -24,7 +25,7 @@ async function main(){
   const runtime=path.join(root,'runtime',runtimeName);fs.mkdirSync(runtime,{recursive:true});
   const label=process.env.COVE_FPS_LABEL||'baseline';if(!/^[a-z0-9-]{1,60}$/.test(label))throw Error('Invalid performance label');
   const directory=fs.mkdtempSync(path.join(runtime,label+'-'));
-  const sources=['apps/desktop/src/features/media/screen/screenCapture.ts','apps/desktop/src/features/media/screen/useScreenPublishing.ts','apps/desktop/src/features/media/screen/useScreenAnalysis.ts','apps/desktop/tests/ui/media-integration.tsx','apps/desktop/tests/ui/screen-performance-fixture.ts','apps/desktop/tests/ui/screen-performance.electron.cjs','apps/desktop/tests/ui/screen-performance-backend.cjs','tooling/verify-screen-performance.cjs','tooling/screen-performance-config.cjs'];
+  const sources=['apps/desktop/src/features/media/screen/screenCapture.ts','apps/desktop/src/features/media/screen/useScreenPublishing.ts','apps/desktop/src/features/media/screen/useScreenAnalysis.ts','apps/desktop/tests/ui/media-integration.tsx','apps/desktop/tests/ui/screen-performance-fixture.ts','apps/desktop/tests/ui/screen-performance.electron.cjs','apps/desktop/tests/ui/screen-performance-backend.cjs','tooling/verify-screen-performance.cjs','tooling/screen-performance-config.cjs','tooling/analyze-screen-performance-trace.cjs'];
   fs.writeFileSync(path.join(directory,'source.json'),JSON.stringify({startedAt:new Date().toISOString(),node:process.version,files:Object.fromEntries(sources.map(file=>[file,crypto.createHash('sha256').update(fs.readFileSync(path.join(root,file))).digest('hex')]))},null,2)+'\n');
   const env={...process.env,COVE_FPS_RUN_DIR:directory,COVE_TEST_NODE:process.execPath,COVE_QA_MEDIA_PORT:String(await port())};delete env.ELECTRON_RUN_AS_NODE;
   const dependencies=path.dirname(fs.realpathSync(path.join(root,'node_modules/vite')));
@@ -41,7 +42,19 @@ async function main(){
     if(code!==0)error='Electron exited '+code;
   }catch(cause){error=cause.stack||String(cause);}finally{await stop(electron);await stop(vite);process.off('SIGINT',onSignal);process.off('SIGTERM',onSignal);}
   const resultPath=path.join(directory,'result.json');const result=fs.existsSync(resultPath)?JSON.parse(fs.readFileSync(resultPath,'utf8')):null;
-  console.log(JSON.stringify({directory:path.relative(root,directory),passed:!error&&!interrupted&&result?.passed===true,error,interrupted,result},null,2));
+  if(result?.trace){
+    try{result.trace.postExitExportCleanup=cleanupOwnedTraceExports(directory,result.trace.options?.included_process_ids??[]);
+      result.trace.rawFileRetained=result.trace.postExitExportCleanup.rawFileRetained;
+      result.trace.postExitExportAuditRequired=false;
+      if(result.trace.rawFileRetained)error??='Owned trace exporter files remain after exit';
+    }catch(cause){result.trace.postExitExportCleanupError=cause.message;result.trace.rawFileRetained=null;error??='Owned trace export audit failed';}
+    fs.writeFileSync(resultPath,JSON.stringify(result,null,2)+'\n');
+  }
+  console.log(JSON.stringify({directory:path.relative(root,directory),passed:!error&&!interrupted&&result?.passed===true,error:error||result?.error||null,interrupted,
+    captureFeatures:result?.captureFeatures,disabledCaptureFeatures:result?.disabledCaptureFeatures,peerRenderMode:result?.peerRenderMode,
+    profilingOnly:result?.profilingOnly,trace:result?.trace,
+    cases:result?.cases?.map(c=>({config:c.config,summary:c.summary?Object.fromEntries(Object.entries(c.summary).filter(([key])=>!['senderLast','viewerLast'].includes(key))):null,nativeBaseline:c.nativeBaseline,comparisonContract:c.comparisonContract})),
+    cleanup:{timeouts:result?.cleanupTimeouts,passed:result?.cleanup?.passed,rendererResourcesZero:result?.cleanup?.rendererResourcesZero,backendResourcesZero:result?.cleanup?.backendResourcesZero,backendStopped:result?.backendStopped,finishedAt:result?.finishedAt}},null,2));
   process.exitCode=error||interrupted||!result?.passed?1:0;
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});
