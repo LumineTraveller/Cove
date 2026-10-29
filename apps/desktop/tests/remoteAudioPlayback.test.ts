@@ -19,7 +19,6 @@ function playbackHarness() {
   const signals = new Map<string, number>();
   const meters: any[] = [];
   const timers: Function[] = [];
-  const states: { initial: any; value: any }[] = [];
   let storageBlocked = false;
   class FakeAudio {
     muted = false;
@@ -86,10 +85,8 @@ function playbackHarness() {
   };
   function loadModule(moduleURL: URL): any {
   const exports: any = {};
-  const moduleText = fs.readFileSync(moduleURL, 'utf8').replace(
-    "new URL('./applicationAudioProcessor.js', import.meta.url).href",
-    JSON.stringify(new URL('./applicationAudioProcessor.js', moduleURL).href),
-  );
+  const moduleText = fs.readFileSync(moduleURL, 'utf8')
+    .replaceAll('import.meta.url', JSON.stringify(moduleURL.href));
   const compiled = ts.transpileModule(moduleText, { compilerOptions: {
     module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022,
   } }).outputText;
@@ -100,7 +97,6 @@ function playbackHarness() {
         useState: (initial: any) => {
           const value = typeof initial === 'function' ? initial() : initial;
           const state = { initial: value, value };
-          states.push(state);
           return [value, (next: any) => { state.value = typeof next === 'function' ? next(state.value) : next; }];
         },
         useRef: (initial: any) => ({ current: initial }),
@@ -126,6 +122,7 @@ function playbackHarness() {
       return {};
     },
     Audio: FakeAudio,
+    URL,
     MediaStream: class {
       constructor(public tracks: any[]) { streams.push(this); }
       getAudioTracks() { return this.tracks.filter(track => track.kind === 'audio'); }
@@ -167,8 +164,8 @@ function playbackHarness() {
     rtc, setup, consume, close, activations, streams, consumed, outputFor, audibleElementFor,
     context, meters, signals,
     tickMeters: () => timers.forEach(callback => callback()),
-    levels: () => states.find(state => state.initial === rtc.sharedAudioLevels)?.value,
-    voiceLevels: () => states.find(state => state.initial === rtc.speakingLevels)?.value,
+    levels: () => rtc.sharedAudioLevels,
+    voiceLevels: () => rtc.speakingLevels,
     blockStorage: () => { storageBlocked = true; },
     endTrack: (id: string) => consumerEvents.get(id)?.trackended?.(),
   };

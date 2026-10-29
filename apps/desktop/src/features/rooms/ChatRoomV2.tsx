@@ -26,8 +26,8 @@ import { resolveRoomAvatarUrl } from './appearance';
 import { GlobalSettingsV2 } from '../settings/components/GlobalSettingsV2';
 import { ChatPanelV2 } from '../chat/ChatPanelV2';
 import { NavigationRailV2 } from './components/NavigationRailV2';
-import { MemberAvatar, SharedBadges } from '../profiles/MemberAvatar';
-import { VolumeControl, VerticalVolume } from '../media/components/VolumeControl';
+import { SharedBadges } from '../profiles/MemberAvatar';
+import { MeteredMemberAvatar, MeteredVolumeControl, MeteredVerticalVolume } from '../media/components/AudioMeterBindings';
 import { ShareViewV2 } from '../media/screen/ShareViewV2';
 import { ControlBallV2 } from '../media/components/ControlBallV2';
 import { AudioShareMenuV2 } from '../media/application-audio/AudioShareMenuV2';
@@ -344,11 +344,9 @@ export default function ChatRoomV2({
                       ? inputVolume
                       : (rtc.memberVolumes[member.socketId] ?? 1) * 100;
                     const sharedVolume = getSharedAudioVolume(member, isSelf);
-                    const level =
-                      rtc.speakingLevels[member.socketId] ??
-                      (isSelf ? rtc.speakingLevels[rtc.localSocketId ?? ''] ?? 0 : 0);
-                    const speaking = Boolean(
-                      voice && level > 0.08 && !voice.isMuted && !(isSelf && rtc.isMuted),
+                    const fallbackSocketId = isSelf ? rtc.localSocketId ?? '' : undefined;
+                    const speakingEnabled = Boolean(
+                      voice && !voice.isMuted && !(isSelf && rtc.isMuted),
                     );
                     return (
                       <article
@@ -368,7 +366,7 @@ export default function ChatRoomV2({
                             isSelf ? setShowProfile(true) : setViewingProfile(member)
                           }
                         >
-                          <MemberAvatar
+                          <MeteredMemberAvatar
                             member={{
                               ...member,
                               ...(isSelf
@@ -389,7 +387,10 @@ export default function ChatRoomV2({
                               ),
                             }}
                             inVoice={Boolean(voice)}
-                            speaking={speaking}
+                            meters={rtc.audioMeters}
+                            socketId={member.socketId}
+                            fallbackSocketId={fallbackSocketId}
+                            speakingEnabled={speakingEnabled}
                           />
                           <span className="member-name">
                             <b>{isSelf ? `${displayName}（你）` : displayName}</b>
@@ -398,7 +399,7 @@ export default function ChatRoomV2({
                         </button>
                         {voice && (
                           <div className="member-audio-stack">
-                            <VolumeControl
+                            <MeteredVolumeControl
                               value={volume}
                               onChange={(value) =>
                                 isSelf
@@ -412,7 +413,10 @@ export default function ChatRoomV2({
                                   ? rtc.isMuted
                                   : (rtc.memberVolumes[member.socketId] ?? 1) === 0
                               }
-                              level={level}
+                              meters={rtc.audioMeters}
+                              channel="voice"
+                              socketId={member.socketId}
+                              fallbackSocketId={fallbackSocketId}
                               onMute={
                                 isSelf
                                   ? rtc.toggleMute
@@ -420,13 +424,15 @@ export default function ChatRoomV2({
                               }
                             />
                             {audio && (
-                              <VolumeControl
+                              <MeteredVolumeControl
                                 value={sharedVolume * 100}
                                 onChange={(value) =>
                                   setSharedAudioVolume(member, isSelf, value / 100)
                                 }
                                 icon="share"
-                                level={rtc.sharedAudioLevels[member.socketId] ?? 0}
+                                meters={rtc.audioMeters}
+                                channel="shared"
+                                socketId={member.socketId}
                                 muted={sharedVolume === 0}
                                 onMute={() => toggleSharedAudioMute(member, isSelf)}
                                 label={isSelf ? '共享发送音量' : `${displayName} 的共享音频音量`}
@@ -481,11 +487,9 @@ export default function ChatRoomV2({
                       profileRemarks,
                     );
                     const sharedVolume = getSharedAudioVolume(member, isSelf);
-                    const level =
-                      rtc.speakingLevels[member.socketId] ??
-                      (isSelf ? rtc.speakingLevels[rtc.localSocketId ?? ''] ?? 0 : 0);
-                    const speaking = Boolean(
-                      voice && level > 0.08 && !voice.isMuted && !(isSelf && rtc.isMuted),
+                    const fallbackSocketId = isSelf ? rtc.localSocketId ?? '' : undefined;
+                    const speakingEnabled = Boolean(
+                      voice && !voice.isMuted && !(isSelf && rtc.isMuted),
                     );
                     return (
                       <div className="strip-member" key={member.socketId}>
@@ -498,7 +502,7 @@ export default function ChatRoomV2({
                               : setViewingProfile(member)
                           }
                         >
-                          <MemberAvatar
+                          <MeteredMemberAvatar
                             member={{
                               ...member,
                               ...(isSelf
@@ -523,7 +527,10 @@ export default function ChatRoomV2({
                               ),
                             }}
                             inVoice={Boolean(voice)}
-                            speaking={speaking}
+                            meters={rtc.audioMeters}
+                            socketId={member.socketId}
+                            fallbackSocketId={fallbackSocketId}
+                            speakingEnabled={speakingEnabled}
                           />
                           <b>
                             {member.socketId === socket.id ? `${displayName}（你）` : displayName}
@@ -536,7 +543,7 @@ export default function ChatRoomV2({
                               draggingVolumeMember === member.socketId ? ' is-dragging' : ''
                             }`}
                           >
-                            <VerticalVolume
+                            <MeteredVerticalVolume
                               value={
                                 member.socketId === socket.id
                                   ? inputVolume
@@ -555,7 +562,10 @@ export default function ChatRoomV2({
                                   ? rtc.isMuted
                                   : (rtc.memberVolumes[member.socketId] ?? 1) === 0
                               }
-                              level={level}
+                              meters={rtc.audioMeters}
+                              channel="voice"
+                              socketId={member.socketId}
+                              fallbackSocketId={fallbackSocketId}
                               onMute={
                                 isSelf
                                   ? rtc.toggleMute
@@ -563,7 +573,7 @@ export default function ChatRoomV2({
                               }
                             />
                             {audio && (
-                              <VerticalVolume
+                              <MeteredVerticalVolume
                                 value={sharedVolume * 100}
                                 onChange={(value) =>
                                   setSharedAudioVolume(member, isSelf, value / 100)
@@ -572,7 +582,9 @@ export default function ChatRoomV2({
                                 onDraggingChange={onVolumeDraggingChange}
                                 colorClass="purple"
                                 icon="share"
-                                level={rtc.sharedAudioLevels[member.socketId] ?? 0}
+                                meters={rtc.audioMeters}
+                                channel="shared"
+                                socketId={member.socketId}
                                 muted={sharedVolume === 0}
                                 onMute={() => toggleSharedAudioMute(member, isSelf)}
                               />

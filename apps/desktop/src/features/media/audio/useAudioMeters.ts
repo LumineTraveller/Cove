@@ -1,5 +1,5 @@
 import { useCallback } from 'react';
-import { reuseAudioMeterLevels } from './audioMeterLevels';
+import type { AudioMeterStore } from './audioMeterLevels';
 
 import { applyAudioContextOutput } from './audioDevices';
 import { schedulePresenceTone } from './presenceTone';
@@ -24,12 +24,7 @@ export interface useAudioMetersDependencies {
     >
   >;
   readonly volumeTimer: import('react').MutableRefObject<number | null>;
-  readonly setSpeakingLevels: import('react').Dispatch<
-    import('react').SetStateAction<Record<string, number>>
-  >;
-  readonly setSharedAudioLevels: import('react').Dispatch<
-    import('react').SetStateAction<Record<string, number>>
-  >;
+  readonly audioMeters: AudioMeterStore;
 }
 
 export function useAudioMeters(deps: useAudioMetersDependencies) {
@@ -112,8 +107,7 @@ export function useAudioMeters(deps: useAudioMetersDependencies) {
     if (deps.volumeTimer.current) return;
     deps.volumeTimer.current = setInterval(() => {
       if (deps.analysers.current.size === 0) {
-        deps.setSpeakingLevels(previous => reuseAudioMeterLevels(previous, {}));
-        deps.setSharedAudioLevels(previous => reuseAudioMeterLevels(previous, {}));
+        deps.audioMeters.clear();
         return;
       }
       const levels: Record<string, number> = {};
@@ -139,8 +133,7 @@ export function useAudioMeters(deps: useAudioMetersDependencies) {
         const target = type === 'application' ? sharedLevels : levels;
         target[socketId] = Math.max(target[socketId] ?? 0, level);
       });
-      deps.setSpeakingLevels(previous => reuseAudioMeterLevels(previous, levels));
-      deps.setSharedAudioLevels(previous => reuseAudioMeterLevels(previous, sharedLevels));
+      deps.audioMeters.publish(levels, sharedLevels);
     }, 100);
   }, []);
 
@@ -149,8 +142,7 @@ export function useAudioMeters(deps: useAudioMetersDependencies) {
       clearInterval(deps.volumeTimer.current);
       deps.volumeTimer.current = null;
     }
-    deps.setSpeakingLevels(previous => reuseAudioMeterLevels(previous, {}));
-    deps.setSharedAudioLevels(previous => reuseAudioMeterLevels(previous, {}));
+    deps.audioMeters.clear();
   }, []);
   return {
     ensureAudioCtx,
