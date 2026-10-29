@@ -1,4 +1,5 @@
 import { useCallback } from 'react';
+import { reuseAudioMeterLevels } from './audioMeterLevels';
 
 import { applyAudioContextOutput } from './audioDevices';
 import { schedulePresenceTone } from './presenceTone';
@@ -111,8 +112,8 @@ export function useAudioMeters(deps: useAudioMetersDependencies) {
     if (deps.volumeTimer.current) return;
     deps.volumeTimer.current = setInterval(() => {
       if (deps.analysers.current.size === 0) {
-        deps.setSpeakingLevels({});
-        deps.setSharedAudioLevels({});
+        deps.setSpeakingLevels(previous => reuseAudioMeterLevels(previous, {}));
+        deps.setSharedAudioLevels(previous => reuseAudioMeterLevels(previous, {}));
         return;
       }
       const levels: Record<string, number> = {};
@@ -138,8 +139,8 @@ export function useAudioMeters(deps: useAudioMetersDependencies) {
         const target = type === 'application' ? sharedLevels : levels;
         target[socketId] = Math.max(target[socketId] ?? 0, level);
       });
-      deps.setSpeakingLevels(levels);
-      deps.setSharedAudioLevels(sharedLevels);
+      deps.setSpeakingLevels(previous => reuseAudioMeterLevels(previous, levels));
+      deps.setSharedAudioLevels(previous => reuseAudioMeterLevels(previous, sharedLevels));
     }, 100);
   }, []);
 
@@ -148,8 +149,8 @@ export function useAudioMeters(deps: useAudioMetersDependencies) {
       clearInterval(deps.volumeTimer.current);
       deps.volumeTimer.current = null;
     }
-    deps.setSpeakingLevels({});
-    deps.setSharedAudioLevels({});
+    deps.setSpeakingLevels(previous => reuseAudioMeterLevels(previous, {}));
+    deps.setSharedAudioLevels(previous => reuseAudioMeterLevels(previous, {}));
   }, []);
   return {
     ensureAudioCtx,
