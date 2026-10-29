@@ -64,3 +64,97 @@
 
 在普通客户端的真实路径提交和完整流验证之前，不把这项补丁称为 120 fps 修复，
 不替换已冻结的测试包，不发布。
+
+## 重启后的真实窗口与呈现对照
+
+诊断版本 `4b569dc` 使用原先隔离的开发配置重启后，已在普通房间 UI 确认
+GPU BGRA / Generator 路径实际 committed，视频为 live/readyState 4，未见播放错误。
+启动成功不能追溯证明旧版本 `start_rejected` 的具体原因；历史原因仍未知。
+
+- 864×540 的两个 5 秒区间：renderer 接收约 113/118 fps、写入约 107/111 fps。
+- 切换为 1080 高度后的两个 5 秒区间：实际 1728×1080，接收约 113 fps、
+  写入约 103 fps。普通 UI 的缺口仍存在，不能用隔离结果代替。
+- 有观看者的现场诊断中，编码/发送曾在约 76–88 fps；这是非受控观察，
+  不能用于计算优化幅度或认定硬件上限。
+
+随后同一原生 track 上执行有界预览绑定对照：8 秒正常预览、10 秒仅解除
+LocalScreenVideo 的 `srcObject`、8 秒恢复。没有停止采集/track、修改 producer、
+创建第二消费者或改变编码设置；finally 确认同一预览恢复 `playing`。
+
+| 阶段 | 接收 fps | 写入 fps | busy 丢帧 fps |
+| --- | ---: | ---: | ---: |
+| 预览基线 8.000 秒 | 108.25 | 98.75 | 9.50 |
+| 解除预览 10.003 秒 | 111.87 | 102.27 | 9.70 |
+| 恢复预览 8.002 秒 | 115.22 | 106.73 | 8.75 |
+
+完整区间均位于同一 60 秒合成动态窗口显示期内；源 rAF 约 236 fps，仅表示绘制
+回调频率，不是物理扫描输出。存在随时间变化的趋势，解除预览没有消除缺口或出现
+明确阶跃，因此不能把本地预览认定为主因。原始只读聚合位于
+`runtime/live-preview-detach-result.json`、`runtime/controlled-preview-source-giJGWJ/result.json`。
+
+隐藏窗口配对 SFU 对照使用产品 `LocalScreenVideo`、同一 track、相同
+1728×1080 / 120 / AV1、普通窗口且 publisher `backgroundThrottling:true`：
+
+| 12 秒对照目录后缀 | 本地预览 | helper 新帧 fps | 写入 fps | 编码 fps | 解码 fps |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `QJXYvx` | 关 | 119.99 | 120.02 | 119.33 | 119.43 |
+| `ogrbbe` | 开 | 120.03 | 120.11 | 119.03 | 119.07 |
+
+两组均通过颜色、逐帧序号推进/非未来、实际尺寸/codec 和资源回收守卫。但 hidden
+视频不等价于可见产品窗口合成，也没有完整房间 UI。下一层验证明确覆盖可见呈现、
+发送需求状态与 GPU 引用驻留；不得据此宣称普通 UI 已达到 120 fps。
+
+另修正旧报告配置边界：`91uHea` 虽未启用全局
+`disable-renderer-backgrounding`，其非最小化 publisher 仍显式使用
+`backgroundThrottling:false`；不能称为完全等同产品默认窗口策略。
+
+### 可见呈现层的进一步配对
+
+`COVE_FPS_VISIBLE_PRESENTATION=1` 使用居中占屏幕约 75% 的真实可见发布窗口，
+产品 CSS、`LocalScreenVideo` 与真实 `DiagnosticsOverlayV2`；动态源全屏在后，
+持续检查已拥有的发布窗口前台、实际几何、标记未遮挡、颜色、序号与完整链路尺寸。
+这是呈现层对照，仍不是完整房间 UI。默认测试布局不变。
+
+| 12 秒对照目录后缀 | 可见本地预览 | helper 新帧 fps | 写入 fps | 编码 fps | 解码 fps |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `uqjmV9` | 关 | 119.86 | 118.67 | 117.26 | 117.35 |
+| `alDBlG` | 开 | 119.78 | 118.86 | 117.61 | 117.83 |
+
+实际采样区间分别为 12.429 / 12.384 秒，均通过所有守卫及清理。开启预览时其播放
+计数约 118.52 fps、丢弃计数为 0；不代表物理扫描输出。两组源绘制回调约 240 fps。
+结果不支持“产品预览组件本身将帧率限制在 80”这一解释。
+
+可见测试曾在媒体启动前拒绝两次不可见窗口（`n0zsOc`、`W7HzSi`），没有当作性能
+数据。无媒体独立 A/B 确认 launcher 的 `windowsHide:true` 能造成
+`focused:true / visible:false`；只对显式可见实验改为 `windowsHide:false` 后资格
+守卫通过。默认 hidden 测试、Vite 与后台进程保持原策略；没有放宽可见性守卫。
+
+## 完整应用的显式底层计时
+
+```powershell
+$env:COVE_NATIVE_GPU_CAPTURE='1'
+$env:COVE_NATIVE_GPU_CAPTURE_TIMING='1'
+npm run dev -- --client --electron
+```
+
+该开关只增加观察：每 5 秒一条 `[native-screen-timing]`，从首个受信 start 开始，
+最多 119 条 sample 加 1 条 limited，10 分钟后停止 main 快照采样和输出。原生
+helper 已启用的计时及有界 stderr 解析持续到该采集结束；不停止或改变共享。
+退出应用清理观察器。默认关闭，无新增 IPC 或权限，不查询完整 GPU 驱动信息。
+
+只记录固定数值聚合与枚举；单块上限 64 KiB、单行 UTF-8 上限 16 KiB，仅保留
+一条最新 helper 样本。不得记录 request/session ID、句柄、凭据、SDP 或画面。
+观察、日志或异步回调失败不改变媒体生命周期、GPU lease 或 credit 条件。
+
+- 同一 `helperCaptureNumber` 且 `helperMatchesLatestStart:true` 才比较 helper
+  `counts.newFrames / elapsedUs` 的差分；helper 与 main 的采样边界不同。
+- `noSlot`、`leaseResidence/importedResidence` 与 broker `reference` 定位下游
+  引用归还背压；`reference.totalMs` 是总驻留墙钟时间，并非 GPU 执行时间。
+- `noPresent`、`missedTicks`、`stages.gpuWait/acquire/slotCreditWait` 区分源更新、
+  helper 串行工作和等待帧槽。不能把 `writer.write()`墙钟耗时直接当纯 GPU 时间。
+- 面板四值现明确标为“报告/源/编码/发送”：第一项来自轨道 getSettings，第二项
+  是 WebRTC 送入编码器前的 source 统计，均不等于原生 DXGI 裸取帧。
+
+验证入口：`npm run test:native-screen-capture -w cove-client`；工具纯测试可用
+`node --test tests/screen-performance-local-preview.test.cjs tests/screen-performance-visible-presentation.test.cjs`。
+关闭计时环境变量并重启该测试客户端即可回到原先默认观察策略；既有冻结包保持不变。

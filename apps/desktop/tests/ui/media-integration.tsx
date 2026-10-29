@@ -4,10 +4,14 @@ import {io} from 'socket.io-client';
 import {useWebRTC} from '../../src/features/media/useWebRTC';
 import {CLIENT_PROTOCOL_VERSION, CLIENT_RELEASE_VERSIONS} from '@cove/contracts';
 import {Device, type types as MsTypes} from 'mediasoup-client';
-import {installScreenPerformanceFixture} from './screen-performance-fixture';
+import {installScreenPerformanceFixture,screenPerformanceLocalPreviewEnabled,screenPerformanceVisiblePresentationEnabled} from './screen-performance-fixture';
+import {LocalScreenVideo} from '../../src/features/media/screen/ScreenVideo';
+import {DiagnosticsOverlayV2} from '../../src/features/media/diagnostics/DiagnosticsOverlayV2';
 const params=new URLSearchParams(location.search);
 const floatingMode=params.get('floating')==='1';
 const performanceMode=params.get('performance')==='1';
+const localPreviewEnabled=screenPerformanceLocalPreviewEnabled(params);
+const visiblePresentationEnabled=screenPerformanceVisiblePresentationEnabled(params);
 let floatingFixture:typeof import('./floating-viewer-fixture')|null=null;
 const proxyProtocol=params.get('iceProtocol')==='udp'?'udp':'tcp';
 const peerConnections=new Set<RTCPeerConnection>(),mediaTracks=new Set<MediaStreamTrack>();
@@ -112,6 +116,7 @@ function Fixture(){
   const socket=useMemo(()=>floatingFixture?.fixtureSocket(params.get('base')!)??io(params.get('base')!,{auth:{clientProtocol:CLIENT_PROTOCOL_VERSION,clientPlatform:'desktop',clientVersion:CLIENT_RELEASE_VERSIONS.desktop},autoConnect:false}),[]);
   const rtc=useWebRTC(socket,params.get('room')!);
   const [ready,setReady]=useState(false);const [error,setError]=useState('');
+  const [diagnosticsCompact,setDiagnosticsCompact]=useState(false);
   const registrationEpoch=useRef(0);
   const control=useRef({requested:null as any,active:false,started:0,stopped:0});
   const video=useRef<HTMLVideoElement>(null);
@@ -133,13 +138,28 @@ function Fixture(){
     return()=>{rtc.leaveVoice();socket.disconnect();for(const {event,listener} of fixtureListeners)socket.off(event,listener);};
   },[socket]);
   useEffect(()=>{if(video.current){video.current.srcObject=rtc.remoteScreen?.stream||null;void video.current.play().catch(()=>{});}},[rtc.remoteScreen]);
+  // This is the actual product collector and panel, including its 1 Hz local
+  // stats and isolated-SFU diagnostics requests. Do not substitute mock text.
+  useEffect(()=>{if(visiblePresentationEnabled&&ready&&!rtc.statsEnabled)rtc.toggleStats();},[ready]);
   useEffect(()=>{(window as any).coveMediaQA={rtc,socket,ready,error,ice:iceQA,control:control.current,resources:()=>({...iceQA.resources(),socketListeners:Object.values((socket as any)._callbacks??{}).reduce((n:number,list:any)=>n+list.length,0)})};});
   if(floatingFixture){const FloatingView=floatingFixture.FloatingView;return <><p>{ready?'Room ready':'Connecting'} {error}</p><FloatingView rtc={rtc} roomId={params.get('room')!}/></>;}
-  return <><p>{ready?'Room ready':'Connecting'} {error}</p><video ref={video} autoPlay muted playsInline/><pre>{rtc.inVoice?'In voice':'Not in voice'}</pre></>;
+  return <><p hidden={visiblePresentationEnabled}>{ready?'Room ready':'Connecting'} {error}</p><video ref={video} autoPlay muted playsInline hidden={visiblePresentationEnabled}/><pre hidden={visiblePresentationEnabled}>{rtc.inVoice?'In voice':'Not in voice'}</pre>
+    {visiblePresentationEnabled?<main className="cove-v2-page" data-cove-performance-presentation="1" style={{position:'fixed',inset:0}}>
+      <div className="share-view"><div className="video-surface"><div className="video-content">
+        {localPreviewEnabled&&rtc.localScreen&&<section data-cove-performance-local-preview="1" style={{width:'100%',height:'100%',minWidth:0,minHeight:0}}><LocalScreenVideo stream={rtc.localScreen}/></section>}
+      </div><DiagnosticsOverlayV2 rtc={rtc} compact={diagnosticsCompact} onToggleCompact={()=>setDiagnosticsCompact(value=>!value)}/></div></div>
+    </main>:localPreviewEnabled&&rtc.localScreen&&<section data-cove-performance-local-preview="1"><LocalScreenVideo stream={rtc.localScreen}/></section>}
+  </>;
 }
 if(floatingMode){localStorage.setItem('cove_server_url',params.get('base')!);void import('./floating-viewer-fixture').then(module=>{floatingFixture=module;const root=createRoot(document.getElementById('root')!);module.installFixtureUnmount(()=>{if(floatingPaint!==null)window.clearInterval(floatingPaint);root.unmount();});root.render(<Fixture/>);});}
 else {
   const root=createRoot(document.getElementById('root')!);
   if(performanceMode){let unmounted=false;(window as any).covePerformanceUnmount=()=>{if(!unmounted){unmounted=true;root.unmount();}};}
-  root.render(<Fixture/>);
+  if(visiblePresentationEnabled){
+    (window as any).covePerformanceProductStylesState='pending';
+    document.documentElement.dataset.theme='light';
+    void Promise.all([import('../../src/styles/index.css'),import('../../src/styles/ui-v2.css')]).then(()=>{
+      (window as any).covePerformanceProductStylesState='ready';root.render(<Fixture/>);
+    }).catch(()=>{(window as any).covePerformanceProductStylesState='failed';console.error('[visible-presentation] product_styles_failed');});
+  }else root.render(<Fixture/>);
 }

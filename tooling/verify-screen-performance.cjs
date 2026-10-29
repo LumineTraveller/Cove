@@ -6,6 +6,8 @@ const {spawn}=require('node:child_process'),dgram=require('node:dgram'),net=requ
 const crypto=require('node:crypto');
 const {cleanupOwnedTraceExports}=require('./analyze-screen-performance-trace.cjs');
 const {nativePerformanceEnabled,nativePerformancePaths,performanceDisplaySleepPrevention}=require('./screen-performance-native.cjs');
+const {performanceLocalPreviewEnabled,performanceProductSenderThrottling,publisherBackgroundThrottling,visiblePresentationOptions}=require('./screen-performance-local-preview.cjs');
+const {performanceDemandOptions}=require('./screen-performance-demand.cjs');
 const root=path.resolve(__dirname,'..');
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 async function stop(child){
@@ -18,7 +20,7 @@ async function stop(child){
   if(process.platform==='win32')await new Promise(resolve=>{const killer=spawn('taskkill',['/PID',String(child.pid),'/T','/F'],{windowsHide:true,stdio:'ignore'});killer.once('error',()=>{child.kill();resolve();});killer.once('close',resolve);});
   else child.kill('SIGKILL');
 }
-function logged(executable,args,env,file){const fd=fs.openSync(file,'w');const child=spawn(executable,args,{cwd:root,env,windowsHide:true,stdio:['ignore',fd,fd,'ipc']});child.once('close',()=>fs.closeSync(fd));return child;}
+function logged(executable,args,env,file,{windowsHide=true}={}){const fd=fs.openSync(file,'w');const child=spawn(executable,args,{cwd:root,env,windowsHide,stdio:['ignore',fd,fd,'ipc']});child.once('close',()=>fs.closeSync(fd));return child;}
 async function port(){
   let lastCode='unavailable';
   for(let attempt=0;attempt<32;attempt++){
@@ -44,9 +46,15 @@ async function port(){
   throw Error('No loopback port available for both TCP and UDP after 32 probes ('+lastCode+')');
 }
 async function main(){
+  performanceDemandOptions();
   // Reject an incompatible minimize/sleep-control combination in Node, before
   // creating an Electron process (whose bootstrap exception can leave a modal).
   performanceDisplaySleepPrevention(process.env,null,process.env.COVE_FPS_MINIMIZE_SENDER==='1');
+  const localPreviewEnabled=performanceLocalPreviewEnabled();
+  const visiblePresentation=visiblePresentationOptions();
+  const productSenderThrottling=performanceProductSenderThrottling();
+  publisherBackgroundThrottling({minimizeSender:process.env.COVE_FPS_MINIMIZE_SENDER==='1',
+    minimizedThrottling:process.env.COVE_FPS_MINIMIZED_THROTTLING!=='0',productSenderThrottling});
   const runtimeName=process.env.COVE_FPS_RUNTIME_NAME||'fps-candidate';
   if(!/^fps-(?:candidate|validation-[a-z0-9-]{1,60})$/.test(runtimeName))throw Error('Invalid performance runtime namespace');
   const baselineWriterFlag=process.env.COVE_FPS_BASELINE_FRAME_WRITER;
@@ -68,14 +76,15 @@ async function main(){
   const nativeHelperSourcePath=nativePaths?path.posix.join(path.posix.dirname(nativePaths.helper),'source.cpp'):null;
   const effectiveNativeHelperSource=nativeHelperSourcePath&&fs.existsSync(path.join(root,nativeHelperSourcePath))
     ?{path:nativeHelperSourcePath,sha256:crypto.createHash('sha256').update(fs.readFileSync(path.join(root,nativeHelperSourcePath))).digest('hex')}:null;
-  const sources=['apps/desktop/src/features/media/screen/screenCapture.ts','apps/desktop/src/features/media/screen/useScreenPublishing.ts','apps/desktop/src/features/media/screen/useScreenAnalysis.ts','apps/desktop/tests/ui/media-integration.tsx','apps/desktop/tests/ui/screen-performance-fixture.ts','apps/desktop/tests/ui/screen-performance.electron.cjs','apps/desktop/tests/ui/screen-performance-backend.cjs','tooling/verify-screen-performance.cjs','tooling/screen-performance-config.cjs','tooling/screen-performance-native.cjs','tooling/screen-performance-source-age.cjs','tooling/analyze-screen-performance-trace.cjs',
+  const sources=['apps/desktop/src/features/media/screen/screenCapture.ts','apps/desktop/src/features/media/screen/useScreenPublishing.ts','apps/desktop/src/features/media/screen/useScreenAnalysis.ts','apps/desktop/tests/ui/media-integration.tsx','apps/desktop/tests/ui/screen-performance-fixture.ts','apps/desktop/tests/ui/screen-performance.electron.cjs','apps/desktop/tests/ui/screen-performance-backend.cjs','tooling/verify-screen-performance.cjs','tooling/screen-performance-config.cjs','tooling/screen-performance-local-preview.cjs','apps/desktop/tests/ui/screen-performance-pattern-layouts.json','apps/desktop/src/styles/index.css','apps/desktop/src/styles/ui-v2.css','apps/desktop/src/features/media/diagnostics/DiagnosticsOverlayV2.tsx','apps/desktop/src/features/media/screen/ScreenVideo.tsx','apps/desktop/src/features/media/screen/screenVideoPlayback.ts','tooling/screen-performance-native.cjs','tooling/screen-performance-source-age.cjs','tooling/analyze-screen-performance-trace.cjs',
     'apps/desktop/electron/native-screen-capture-protocol.ts','apps/desktop/electron/native-screen-capture-helper.cpp','apps/desktop/electron/native-screen-handles.cpp','apps/desktop/electron/build-native-screen-capture.cjs','apps/desktop/electron/native-screen-capture.ts','apps/desktop/electron/native-screen-cpu-delivery.ts','apps/desktop/electron/native-screen-cpu-buffer-pipeline.ts','apps/desktop/electron/preload.ts','apps/desktop/src/features/media/screen/nativeScreenCapture.ts','apps/desktop/src/features/media/screen/nativeFrameWriteQueue.ts','apps/desktop/src/features/media/screen/nativeScreenUpgrade.ts','apps/desktop/src/features/media/screen/nativeScreenColorPolicy.ts'];
+  sources.push('tooling/screen-performance-demand.cjs','tests/screen-performance-demand.test.cjs');
   if(nativePaths)sources.push(...Object.values(nativePaths),'apps/desktop/dist-electron/native-screen-cpu-buffer-pipeline.js','apps/desktop/dist-electron/native-screen-cpu-delivery.js','apps/desktop/dist-electron/native-screen-capture-protocol.js');
   if(process.env.COVE_FPS_NATIVE_FRAME_SINK==='canvas')sources.push('apps/desktop/src/features/media/screen/nativeCanvasFrameSink.ts');
   if(effectiveNativeHelperSource)sources.push(effectiveNativeHelperSource.path);
   if(baselineFrameWriterOverride)sources.push(effectiveNativeFrameWriterPath);
   fs.writeFileSync(path.join(directory,'source.json'),JSON.stringify({startedAt:new Date().toISOString(),node:process.version,nativeGpuEnabled,
-    nativeArtifacts:nativePaths,effectiveNativeHelperSource,baselineFrameWriterOverride,effectiveNativeFrameWriter,
+    nativeArtifacts:nativePaths,effectiveNativeHelperSource,baselineFrameWriterOverride,effectiveNativeFrameWriter,localPreviewEnabled,productSenderThrottling,visiblePresentation,electronProcessWindowsHide:!visiblePresentation.enabled,
     files:Object.fromEntries(sources.map(file=>[file,crypto.createHash('sha256').update(fs.readFileSync(path.join(root,file))).digest('hex')]))},null,2)+'\n');
   const env={...process.env,COVE_FPS_RUN_DIR:directory,COVE_TEST_NODE:process.execPath,COVE_QA_MEDIA_PORT:String(await port())};delete env.ELECTRON_RUN_AS_NODE;
   const dependencies=path.dirname(fs.realpathSync(path.join(root,'node_modules/vite')));
@@ -92,7 +101,10 @@ async function main(){
   try{
     vite=logged(process.execPath,[bootstrap],env,path.join(directory,'vite.log'));
     const info=await new Promise((resolve,reject)=>{const timeout=setTimeout(()=>reject(Error('Vite startup timeout')),30000);vite.once('error',cause=>{clearTimeout(timeout);reject(cause);});vite.once('exit',code=>{clearTimeout(timeout);reject(Error('Vite exited '+code));});vite.on('message',m=>{if(m?.type==='ready'){clearTimeout(timeout);resolve(m);}});});
-    electron=logged(require(path.join(root,'apps/desktop/node_modules/electron')),[path.join(root,'apps/desktop/tests/ui/screen-performance.electron.cjs')],{...env,COVE_QA_RENDERER_URL:info.url},path.join(directory,'electron.log'));
+    // A Windows hidden-process STARTUPINFO can suppress a BrowserWindow's
+    // first show even while Electron reports focus. Only the explicit visible
+    // presentation is interactive; Vite/backend and old hidden runs stay hidden.
+    electron=logged(require(path.join(root,'apps/desktop/node_modules/electron')),[path.join(root,'apps/desktop/tests/ui/screen-performance.electron.cjs')],{...env,COVE_QA_RENDERER_URL:info.url},path.join(directory,'electron.log'),{windowsHide:!visiblePresentation.enabled});
     const code=await new Promise((resolve,reject)=>{const timeout=setTimeout(()=>reject(Error('Performance measurement timeout')),360000);electron.once('error',reject);electron.once('exit',code=>{clearTimeout(timeout);resolve(code);});});
     if(code!==0)error='Electron exited '+code;
   }catch(cause){error=cause.stack||String(cause);}finally{await stop(electron);await stop(vite);process.off('SIGINT',onSignal);process.off('SIGTERM',onSignal);}
@@ -107,10 +119,10 @@ async function main(){
   }
   console.log(JSON.stringify({directory:path.relative(root,directory),passed:!error&&!interrupted&&result?.passed===true,error:error||result?.error||null,interrupted,
     captureFeatures:result?.captureFeatures,disabledCaptureFeatures:result?.disabledCaptureFeatures,peerRenderMode:result?.peerRenderMode,
-    nativeGpu:result?.nativeGpu,
+    nativeGpu:result?.nativeGpu,localPreviewControl:result?.localPreviewControl,productSenderThrottlingControl:result?.productSenderThrottlingControl,visiblePresentation:result?.visiblePresentation,
     profilingOnly:result?.profilingOnly,trace:result?.trace,
     cases:result?.cases?.map(c=>({config:c.config,summary:c.summary?Object.fromEntries(Object.entries(c.summary).filter(([key])=>!['senderLast','viewerLast'].includes(key))):null,nativeBaseline:c.nativeBaseline,comparisonContract:c.comparisonContract,
-      nativeUpgradeRequired:c.nativeUpgradeRequired,nativeUpgradeSucceeded:c.nativeUpgradeSucceeded,nativeGpu:c.nativeGpu,nativeLifecycle:c.nativeLifecycle})),
+      nativeUpgradeRequired:c.nativeUpgradeRequired,nativeUpgradeSucceeded:c.nativeUpgradeSucceeded,nativeGpu:c.nativeGpu,nativeLifecycle:c.nativeLifecycle,demandComparison:c.demandComparison,localPreview:c.localPreview,visiblePresentation:c.visiblePresentation,senderWindowBeforeSampling:c.senderWindowBeforeSampling})),
     cleanup:{timeouts:result?.cleanupTimeouts,passed:result?.cleanup?.passed,rendererResourcesZero:result?.cleanup?.rendererResourcesZero,backendResourcesZero:result?.cleanup?.backendResourcesZero,nativeGpu:result?.cleanup?.nativeGpu,backendStopped:result?.backendStopped,finishedAt:result?.finishedAt}},null,2));
   process.exitCode=error||interrupted||!result?.passed?1:0;
 }

@@ -1,11 +1,13 @@
 // Test-only source and safe counters for the real two-peer/SFU media fixture.
 // Generated-source throughput does not measure Windows desktop capture.
 import * as nativeScreenCaptureDiagnostics from '../../src/features/media/screen/nativeScreenCapture';
+import patternLayouts from './screen-performance-pattern-layouts.json';
 type VideoGenerator = MediaStreamTrack & { writable: WritableStream<VideoFrame> };
 type GeneratorConstructor = new (options: { kind: 'video' }) => VideoGenerator;
 type SafeStat = Record<string, number | string | boolean | null>;
 type PatternRect = { x: number; y: number; width: number; height: number };
 type OwnedPatternRead = { markersMatched: boolean[]; capturedSequence: number | null;
+  patternLayout: keyof typeof patternLayouts;
   observerDrawCalls: number; observerDrawMs: number; observerReadMs: number;
   observerReadbackPixels: number; frameSnapshotCreated: boolean; frameSnapshotClosed: boolean;
   frameSnapshotMs: number; observerCopyMs: number; observerCopiedBytes: number;
@@ -51,6 +53,68 @@ function safeSettings(track: MediaStreamTrack) {
   return Object.fromEntries(['width', 'height', 'frameRate', 'aspectRatio', 'displaySurface']
     .map(key => [key, (settings as unknown as Record<string, unknown>)[key]])
     .filter(([, value]) => typeof value === 'number' || typeof value === 'string'));
+}
+
+/** The optional extra product video sink belongs to the publisher only. */
+export function screenPerformanceLocalPreviewEnabled(params: URLSearchParams) {
+  const value = params.get('localPreview');
+  if (value !== null && value !== '0' && value !== '1') throw new Error('Invalid local preview control');
+  if (value === '1' && (params.get('performance') !== '1' || params.get('index') !== '0'))
+    throw new Error('Local preview control requires the performance publisher');
+  return value === '1';
+}
+
+export function screenPerformanceVisiblePresentationEnabled(params: URLSearchParams) {
+  const value = params.get('visiblePresentation');
+  if (value !== null && value !== '0' && value !== '1') throw new Error('Invalid visible presentation control');
+  if (value === '1' && (params.get('performance') !== '1' || params.get('index') !== '0'))
+    throw new Error('Visible presentation belongs only to the performance publisher');
+  return value === '1';
+}
+
+export function screenPerformancePatternLayout(params: URLSearchParams): keyof typeof patternLayouts {
+  const value = params.get('patternLayout') ?? 'central-v1';
+  if (value !== 'central-v1' && value !== 'top-strip-v1') throw new Error('Invalid owned pattern layout');
+  if (value === 'top-strip-v1' && params.get('source') !== 'native') throw new Error('Top-strip layout requires native display capture');
+  return value;
+}
+
+/** No new track, consumer, audio graph, frame copy or per-frame observer. */
+export function createScreenPerformanceLocalPreviewBinding() {
+  // Weak keys at every level: observing a retired video must not retain its
+  // stream/track beyond the product component's own lifetime.
+  const videos = new WeakMap<HTMLVideoElement, WeakMap<MediaStream, WeakMap<MediaStreamTrack, number>>>();
+  let generation = 0;
+  return (video: HTMLVideoElement, stream: MediaStream, track: MediaStreamTrack) => {
+    let streams = videos.get(video);
+    if (!streams) { streams = new WeakMap(); videos.set(video, streams); }
+    let tracks = streams.get(stream);
+    if (!tracks) { tracks = new WeakMap(); streams.set(stream, tracks); }
+    let token = tracks.get(track);
+    if (token === undefined) { token = ++generation; tracks.set(track, token); }
+    return token;
+  };
+}
+
+export function screenPerformanceLocalPreviewSnapshot(
+  requested: boolean, video: HTMLVideoElement | null, localScreen: MediaStream | undefined,
+  senderTrack: MediaStreamTrack | undefined,
+  bindingToken: (video: HTMLVideoElement, stream: MediaStream, track: MediaStreamTrack) => number,
+) {
+  const previewStream = video?.srcObject instanceof MediaStream ? video.srcObject : null;
+  const previewTrack = previewStream?.getVideoTracks()[0];
+  let quality: VideoPlaybackQuality | null = null;
+  try { quality = video?.getVideoPlaybackQuality?.() ?? null; } catch { /* Closed video: counters unavailable. */ }
+  const count = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+  return { requested, timestamp: performance.now(), mounted: video?.isConnected === true,
+    streamMatchesLocalScreen: Boolean(previewStream && previewStream === localScreen),
+    matchesLiveSenderTrack: Boolean(previewTrack && previewTrack === senderTrack),
+    bindingToken: video && previewStream && previewTrack ? bindingToken(video, previewStream, previewTrack) : null,
+    trackState: previewTrack?.readyState ?? null, readyState: video ? count(video.readyState) : null,
+    paused: video?.paused ?? null, muted: video?.muted ?? null,
+    width: video ? count(video.videoWidth) : null, height: video ? count(video.videoHeight) : null,
+    cssWidth: video ? count(video.clientWidth) : null, cssHeight: video ? count(video.clientHeight) : null,
+    totalVideoFrames: count(quality?.totalVideoFrames), droppedVideoFrames: count(quality?.droppedVideoFrames) };
 }
 
 // Error stacks contain renderer URLs and their authentication query. Retain
@@ -121,6 +185,11 @@ export function installScreenPerformanceFixture(
 ) {
   if (params.get('performance') !== '1') return;
   const sourceMode = params.get('source') === 'native' ? 'native' : 'generated';
+  const localPreviewRequested = screenPerformanceLocalPreviewEnabled(params);
+  const localPreviewBinding = createScreenPerformanceLocalPreviewBinding();
+  const visiblePresentationRequested = screenPerformanceVisiblePresentationEnabled(params);
+  const patternLayoutId = screenPerformancePatternLayout(params);
+  const patternLayout = patternLayouts[patternLayoutId];
   const generatedNv12Flag = params.get('generatedNv12');
   if (generatedNv12Flag !== null && !['0', '1'].includes(generatedNv12Flag)) throw new Error('Invalid generated NV12 option');
   const stockCaptureKeepalive = params.get('stockCaptureKeepalive') === '1';
@@ -136,6 +205,9 @@ export function installScreenPerformanceFixture(
     nativeGpuCapture: params.get('nativeGpu') === '1',
     generatedNv12: generatedNv12Flag === '1',
     stockCaptureKeepalive,
+    localPreview: localPreviewRequested,
+    visiblePresentation: visiblePresentationRequested,
+    patternLayout: patternLayoutId,
   };
   if (configuration.generatedNv12 && (sourceMode !== 'generated' || configuration.nativeGpuCapture))
     throw new Error('Generated NV12 requires the generated source without native GPU capture');
@@ -221,7 +293,7 @@ export function installScreenPerformanceFixture(
   const patternSnapshotResources = { created: 0, closed: 0, active: 0, errors: 0 };
   async function readOwnedPatternSnapshot(source: HTMLVideoElement | HTMLCanvasElement,
     mode = patternReadbackMode, contentRect?: PatternRect): Promise<OwnedPatternRead> {
-    const measured: OwnedPatternRead = { markersMatched: [], capturedSequence: null,
+    const measured: OwnedPatternRead = { markersMatched: [], capturedSequence: null, patternLayout: patternLayoutId,
       observerDrawCalls: 0, observerDrawMs: 0, observerReadMs: 0, observerReadbackPixels: 0,
       frameSnapshotCreated: false, frameSnapshotClosed: false, frameSnapshotMs: 0,
       observerCopyMs: 0, observerCopiedBytes: 0, observerCopyCalls: 0, observerCopyMaxMs: 0,
@@ -242,8 +314,9 @@ export function installScreenPerformanceFixture(
         matrix: frame.colorSpace.matrix ?? null, fullRange: typeof frame.colorSpace.fullRange === 'boolean' ? frame.colorSpace.fullRange : null };
       measured.frameSnapshotMs = performance.now() - snapshotStarted;
       measured.frameSnapshotCreated = true; patternSnapshotResources.created++; patternSnapshotResources.active++;
-      const points = [[.05, .05], [.95, .05], [.05, .95], [.95, .95],
-        ...Array.from({ length: 16 }, (_, bit) => [.2 + (bit + .5) * .0375, .45])];
+      const bits = patternLayout.bits;
+      const points = [...patternLayout.corners,
+        ...Array.from({ length: bits.count }, (_, bit) => [bits.left + (bit + .5) * bits.width / bits.count, bits.sampleY])];
       const width = frame.visibleRect?.width ?? frame.codedWidth, height = frame.visibleRect?.height ?? frame.codedHeight;
       const originX = frame.visibleRect?.x ?? 0, originY = frame.visibleRect?.y ?? 0;
       const patternRect = contentRect ?? { x: 0, y: 0, width, height };
@@ -333,7 +406,9 @@ export function installScreenPerformanceFixture(
       }
       for (let bit = 0; bit < 16; bit++) {
         context.fillStyle = sequence & (1 << bit) ? '#fff' : '#000';
-        context.fillRect((.2 + bit * .0375) * canvas.width, .4 * canvas.height, .0375 * canvas.width, .1 * canvas.height);
+        const bits = patternLayout.bits;
+        context.fillRect((bits.left + bit * bits.width / bits.count) * canvas.width, bits.top * canvas.height,
+          bits.width / bits.count * canvas.width, bits.height * canvas.height);
       }
       const actual = await readOwnedPatternSnapshot(canvas, mode);
       cases.push({ mode, expectedSequence: sequence, actualSequence: actual.capturedSequence,
@@ -343,7 +418,7 @@ export function installScreenPerformanceFixture(
     }
     return { required: true, passed: cases.every(result => result.passed), width: canvas.width,
       height: canvas.height, cases, snapshotResources: { ...patternSnapshotResources },
-      selectedMode: patternReadbackMode,
+      selectedMode: patternReadbackMode, patternLayout: patternLayoutId,
       meaning: 'The selected mode decodes deterministic patterns before live capture; ROI also cross-checks full mode. Live native qualification requires nonfuture source-counter lag.' };
   }
   const analysisTiming = { drawCalls: 0, readCalls: 0, drawMs: 0, readMs: 0,
@@ -410,6 +485,9 @@ export function installScreenPerformanceFixture(
 
   function observeVideos() {
     for (const video of document.querySelectorAll('video')) {
+      // Keep the opt-in product sink free of the fixture's per-frame callback.
+      // Playback cumulative counters are read only by sample(), at roughly 1 Hz.
+      if (video.closest('[data-cove-performance-local-preview]')) continue;
       if (presentations.has(video)) continue;
       const state = {
         callbackId: null as number | null, callbacks: 0,
@@ -751,6 +829,33 @@ export function installScreenPerformanceFixture(
       timestamp: performance.now(), configuration, supportsGenerator,
       sourceKind: liveSource?.kind ?? null,
       nativeCaptureCounters: liveSource ? nativeScreenCaptureDiagnostics.getNativeScreenCaptureDiagnostics(liveSource.track) : null,
+      localPreview: screenPerformanceLocalPreviewSnapshot(localPreviewRequested,
+        document.querySelector<HTMLVideoElement>('[data-cove-performance-local-preview] video'),
+        fixtureWindow.coveMediaQA?.rtc?.localScreen, liveSource?.track, localPreviewBinding),
+      visiblePresentation: (() => {
+        const host = document.querySelector<HTMLElement>('[data-cove-performance-presentation]');
+        const preview = host?.querySelector<HTMLVideoElement>('[data-cove-performance-local-preview] video');
+        const overlay = host?.querySelector<HTMLElement>('.diagnostics-v2');
+        const rect = (element: Element | null | undefined) => {
+          if (!element) return null;
+          const value = element.getBoundingClientRect();
+          return { width: value.width, height: value.height };
+        };
+        const style = (element: Element | null | undefined) => element ? getComputedStyle(element) : null;
+        const overlayStyle = style(overlay), previewStyle = style(preview);
+        return { requested: visiblePresentationRequested,
+          stylesState: (window as unknown as { covePerformanceProductStylesState?: string }).covePerformanceProductStylesState ?? null,
+          mounted: Boolean(host?.isConnected), overlayMounted: Boolean(overlay?.isConnected),
+          statsEnabled: (fixtureWindow.coveMediaQA?.rtc as { statsEnabled?: boolean } | undefined)?.statsEnabled === true,
+          hostSize: rect(host), previewSize: rect(preview), overlaySize: rect(overlay),
+          viewport: { width: innerWidth, height: innerHeight },
+          videoObjectFit: previewStyle?.objectFit ?? null,
+          backdropFilter: overlayStyle?.backdropFilter ?? null,
+          overlayPosition: overlayStyle?.position ?? null,
+          documentVisibilityState: document.visibilityState,
+          layout: patternLayoutId };
+      })(),
+      documentVisibilityState: document.visibilityState,
       nativeCaptureStartupAttempt: (() => {
         // Older explicitly selected writer snapshots have no startup getter.
         const getter = (nativeScreenCaptureDiagnostics as unknown as { getLastNativeScreenCaptureAttempt?: () => unknown })

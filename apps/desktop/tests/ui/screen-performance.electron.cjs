@@ -8,6 +8,13 @@ const {validatePerformanceCases,screenShareStartArguments,linkedVideoReport,link
 const {TRACE_CATEGORIES,captureTraceOptions,sanitizeCaptureTrace,analyzeCaptureTrace,cleanupOwnedTraceExports}=require(path.join(root,'tooling/analyze-screen-performance-trace.cjs'));
 const {performanceSourceAgeEnabled,createSourceAgeRing,safeSourceAgeObservation}=require(path.join(root,'tooling/screen-performance-source-age.cjs'));
 const sourceAgeEnabled=performanceSourceAgeEnabled();
+const {performanceLocalPreviewEnabled,performanceProductSenderThrottling,publisherBackgroundThrottling,localPreviewSummary,visiblePresentationOptions,visiblePresentationGeometry,qualifyVisiblePresentationState,waitVisiblePresentationStartup}=require(path.join(root,'tooling/screen-performance-local-preview.cjs'));
+const {performanceDemandOptions,runDemandComparison}=require(path.join(root,'tooling/screen-performance-demand.cjs'));
+const demandOptions=performanceDemandOptions();
+const patternLayouts=require('./screen-performance-pattern-layouts.json');
+const localPreviewEnabled=performanceLocalPreviewEnabled();
+const visiblePresentation=visiblePresentationOptions();
+const productSenderThrottling=performanceProductSenderThrottling();
 const {nativePerformanceEnabled,nativePerformancePaths,nativeUpgradeRequired,nativeBrokerSnapshot,nativeResourcesReleased,nativeUpgradeEvidence,captureCpuSummary,createNativeTimingCollector,createNativeStartupCollector,nativePerformanceTracePhase,nativeProviderDiagnosticsDelta,nativePerformancePixelFormat,nativePerformanceStorage,nativePerformanceCompletion,nativeHelperCompletionEvidence,nativeStopRequestEvidence,performanceDisplaySleepPrevention,stockFallbackPlaybackEvidence}=require(path.join(root,'tooling/screen-performance-native.cjs'));
 const {nativeHelperTimingSnapshot,nativeHelperTimingSummary}=require(path.join(root,'tooling/screen-performance-native.cjs'));
 const nativeGpuEnabled=nativePerformanceEnabled(),nativePaths=nativeGpuEnabled?nativePerformancePaths(root):null;
@@ -77,6 +84,7 @@ if(minimizeSender&&peerRenderMode!=='hidden')throw Error('Minimized-sender check
 const minimizedThrottlingFlag=process.env.COVE_FPS_MINIMIZED_THROTTLING??'1';
 if(!['0','1'].includes(minimizedThrottlingFlag))throw Error('Invalid minimized background policy diagnostic');
 const minimizedThrottling=minimizedThrottlingFlag==='1';
+const senderBackgroundThrottling=publisherBackgroundThrottling({minimizeSender,minimizedThrottling,productSenderThrottling});
 const minimizedVisibilityMatches=value=>minimizedThrottling?value==='hidden':['hidden','visible'].includes(value);
 const minimizedViewerMode=process.env.COVE_FPS_MINIMIZED_VIEWER??'hidden';
 if(!['offscreen','hidden'].includes(minimizedViewerMode))throw Error('Invalid minimized observer mode');
@@ -104,6 +112,13 @@ app.commandLine.appendSwitch('autoplay-policy','no-user-gesture-required');
 app.on('window-all-closed',()=>{});
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const result={passed:false,startedAt:new Date().toISOString(),captureFeatures,disabledCaptureFeatures,peerRenderMode,profilingOnly:captureTraceEnabled,captureTracePhase,
+  demandComparisonRequested:demandOptions.enabled,
+  localPreviewControl:{requested:localPreviewEnabled,component:'product LocalScreenVideo',
+    meaning:'One additional publisher-local product video sink using the existing published stream. No additional track, consumer, audio playback, frame copy or per-frame observer. Publisher visibility/offscreen/background policy remains unchanged; hidden/occluded playback is not a full visible product UI equivalent.'},
+  productSenderThrottlingControl:{requested:productSenderThrottling,expectedPublisherBackgroundThrottling:senderBackgroundThrottling,
+    meaning:'Explicit publisher-only BrowserWindow backgroundThrottling control; receiver policy and global Chromium switches are unchanged. Actual window policy is recorded independently.'},
+  visiblePresentation:{...visiblePresentation,geometry:null,
+    meaning:'Opt-in centered visible publisher using product video/CSS/DiagnosticsOverlay with an owned exposed background pattern. This measures the visible recursive presentation scenario, not the complete room UI or isolated texture-reference cost. All existing pixel, advancing/nonfuture sequence, dimensions, codec and cleanup guards remain required.'},
   generatedNv12Enabled,generatedNv12Meaning:generatedNv12Enabled?'Controlled generated CPU NV12 source: full coded dimensions with equal 1728x1080 active content, no desktop capture claim.':null,
   minimizedSenderRequested:minimizeSender,rendererBackgroundingDisabled:app.commandLine.hasSwitch('disable-renderer-backgrounding'),
   minimizedSenderExpectedBackgroundThrottling:minimizeSender?minimizedThrottling:null,
@@ -128,6 +143,7 @@ const result={passed:false,startedAt:new Date().toISOString(),captureFeatures,di
   scope:'two real Chromium peers, product media hooks, isolated loopback SFU; changing generated/native source',endToEndLatencyMeasured:false,
   startupJournal:{maximumEntries:128,droppedEntries:0,entries:[]},lifecycleEvents:[],lifecycleEventsDropped:0,cases:[]};
 let backend,sourceWindow;const peers=[];let finished=false,shuttingDown=false;let nativeRequests=0;let captureTarget='window';let selectedCaptureSource=null;
+let presentationGeometry=null,presentationPrimaryDisplayId=null;
 let displaySleepBlockerId=null;
 const watchdog=setTimeout(()=>void finish(Error('Performance watchdog expired')),330000);
 process.on('message',message=>{if(message?.type==='stop')void finish(Error('Performance measurement was interrupted'));});
@@ -534,6 +550,28 @@ async function stopOwnedTrace(reason){
 function sourceWindowState(){return !sourceWindow||sourceWindow.isDestroyed()?null:{
   bounds:sourceWindow.getBounds(),contentBounds:sourceWindow.getContentBounds(),fullscreen:sourceWindow.isFullScreen(),
   visible:sourceWindow.isVisible(),minimized:sourceWindow.isMinimized(),focused:sourceWindow.isFocused(),alwaysOnTop:sourceWindow.isAlwaysOnTop()};}
+function ownedVisiblePresentationState(){
+  if(!visiblePresentation.enabled)return null;
+  const sender=peers[0],primary=screen.getPrimaryDisplay();
+  return {displayCount:screen.getAllDisplays().length,primaryDisplayUnchanged:primary.id===presentationPrimaryDisplayId,
+    displayBounds:primary.bounds,workArea:primary.workArea,scaleFactor:primary.scaleFactor,displayFrequency:primary.displayFrequency,
+    sender:sender&&!sender.isDestroyed()?{bounds:sender.getBounds(),contentBounds:sender.getContentBounds(),
+      visible:sender.isVisible(),minimized:sender.isMinimized(),focused:sender.isFocused(),
+      offscreen:sender.webContents.isOffscreen(),backgroundThrottling:sender.webContents.getBackgroundThrottling()}:null,
+    source:sourceWindow&&!sourceWindow.isDestroyed()?{...sourceWindowState(),backgroundThrottling:sourceWindow.webContents.getBackgroundThrottling()}:null};
+}
+function rejectOwnedVisiblePresentation(phase,state){
+  // A pre-media failure has no case/samples yet. Preserve the fixed owned
+  // window/display metadata at the top level before normal cleanup runs.
+  try{result.visiblePresentation.failure={phase,at:Date.now(),state};save();}catch{}
+  throw Error('Owned visible publisher foreground/display geometry contract was lost');
+}
+function assertOwnedVisiblePresentation(){
+  const state=ownedVisiblePresentationState();
+  if(visiblePresentation.enabled&&!qualifyVisiblePresentationState(presentationGeometry,state))
+    rejectOwnedVisiblePresentation('sampling',state);
+  return state;
+}
 let snapshotRequest=0;
 async function backendSnapshot(){
   if(!backend?.connected)return {error:'Owned backend IPC is unavailable'};
@@ -551,6 +589,7 @@ async function cleanupPeers(){
         if(window.covePerformanceCleanupPromise)return window.covePerformanceCleanupPromise;
         window.covePerformanceCleanupPromise=(async()=>{
           const qa=window.coveMediaQA,getResources=qa?.resources,started=performance.now();
+          const localPreviewVideo=document.querySelector('[data-cove-performance-local-preview] video');
           qa?.rtc.stopScreenShare();const fixture=await window.coveScreenPerformance?.cleanup();
           qa?.rtc.leaveVoice();qa?.socket.disconnect();
           const unmountAvailable=typeof window.covePerformanceUnmount==='function';
@@ -558,7 +597,10 @@ async function cleanupPeers(){
           const keys=['peerConnections','liveTracks','liveTransports','liveProducers','liveConsumers','audioContexts','analysisTaps','timeouts','intervals','socketListeners'];
           let product;
           do{await new Promise(r=>setTimeout(r,50));product=getResources?.();if(product&&keys.every(key=>product[key]===0))break;}while(performance.now()-started<1700);
-          return {fixture,product,unmountAvailable,unmounted:unmountAvailable,normalEffectsCleanupWaitMs:performance.now()-started};
+          const localPreview={mountedBeforeCleanup:Boolean(localPreviewVideo),
+            unmounted:!document.querySelector('[data-cove-performance-local-preview]'),
+            released:!localPreviewVideo||localPreviewVideo.srcObject===null};
+          return {fixture,product,localPreview,unmountAvailable,unmounted:unmountAvailable,normalEffectsCleanupWaitMs:performance.now()-started};
         })();
         return window.covePerformanceCleanupPromise;
       })()`,2000);
@@ -566,7 +608,7 @@ async function cleanupPeers(){
   }catch(error){renderers.push({index,error:error.message});}
   await delay(150);const backendResources=await backendSnapshot();
   const productKeys=['peerConnections','liveTracks','liveTransports','liveProducers','liveConsumers','audioContexts','analysisTaps','timeouts','intervals','socketListeners'];
-  const rendererResourcesZero=renderers.length===2&&renderers.every(renderer=>renderer.fixture?.passed===true&&renderer.unmountAvailable&&productKeys.every(key=>renderer.product?.[key]===0));
+  const rendererResourcesZero=renderers.length===2&&renderers.every(renderer=>renderer.fixture?.passed===true&&renderer.unmountAvailable&&renderer.localPreview?.unmounted===true&&renderer.localPreview?.released===true&&productKeys.every(key=>renderer.product?.[key]===0));
   const backendResourcesZero=['peers','transports','producers','consumers'].every(key=>backendResources[key]===0);
   let nativeGpu=null;
   if(nativeController){
@@ -657,6 +699,7 @@ function summary(samples){
   return {
     seconds,cpu: captureCpuSummary(samples,nativeGpuEnabled),nativeSourceRafFps:number((b.nativeSourceFrames-a.nativeSourceFrames)/seconds),
     sourceAge:sourceAgeSummary(samples),
+    localPreview:localPreviewSummary(samples),
     nativeHelper:helperTiming?{...helperTiming,nominalReportIntervalUs:1000000,
       meaning:'Unique helper capture rate is delta newFrames divided by delta helper elapsedUs, not the JS sample interval. Approximately 1 Hz reports: each endpoint nominally lags its JS sample by up to one report interval; scheduling/pipe delays can add more. These helper-clock endpoints are not synchronized with source/writer/encode/decode FPS intervals.'}:null,
     actualSenderEncodings:b.sender.connections.flatMap(connection=>connection.senders).find(sender=>sender.isLiveCaptureSource)?.encodings??null,
@@ -716,6 +759,13 @@ function qualifyGeneratedNv12(config,samples){
 }
 app.whenReady().then(async()=>{
   try{
+    // Display APIs are unavailable in plain Node. Validate here before creating
+    // any backend/window; caught errors use result JSON and app.quit, not a modal.
+    if(visiblePresentation.enabled){
+      presentationGeometry=visiblePresentationGeometry(screen.getAllDisplays());
+      presentationPrimaryDisplayId=screen.getPrimaryDisplay().id;
+      result.visiblePresentation.geometry=presentationGeometry;save();
+    }
     installPowerDiagnostics();
     console.log('[capture-features]',captureFeatures||'baseline defaults');
     result.environment={versions:process.versions,logTimezoneOffsetMinutes:new Date().getTimezoneOffset(),os:{platform:os.platform(),release:os.release(),arch:os.arch(),cpu:os.cpus()[0]?.model,logicalProcessors:os.cpus().length,memoryGB:Math.round(os.totalmem()/1024**3)},displays:screen.getAllDisplays().map(d=>({size:d.size,bounds:d.bounds,scaleFactor:d.scaleFactor,displayFrequency:d.displayFrequency})),gpu:await app.getGPUInfo('basic'),gpuFeatureStatus:app.getGPUFeatureStatus(),
@@ -728,7 +778,8 @@ app.whenReady().then(async()=>{
     sourceWindow=new BrowserWindow({width:Math.round(1920/scale),height:Math.round(1080/scale),useContentSize:true,frame:false,show:false,title:'Cove isolated moving source',webPreferences:{backgroundThrottling:false}});
     const sourceAgeSetup=sourceAgeEnabled?`const sourceAgeRing=(${createSourceAgeRing.toString()})();window.coveSourceAge=sourceAgeRing;`:'';
     const sourceAgeDraw=sourceAgeEnabled?'sourceAgeRing.record(frames,Number.isFinite(performance.timeOrigin)&&performance.timeOrigin>0&&Number.isFinite(t)&&t>=0?performance.timeOrigin+t:NaN);':'';
-    const source=generatedNv12Enabled?'<!doctype html><script>window.sourceFrames=0</script>':`<!doctype html><style>body{margin:0;overflow:hidden;background:#17324d}canvas{width:100vw;height:100vh;display:block}</style><canvas></canvas><script>const c=document.querySelector('canvas');c.width=1920;c.height=1080;const x=c.getContext('2d');let frames=0;${sourceAgeSetup}function draw(t){${nativeLifecycleEnabled?'if(window.sourceFrozen===true){return;}':''}frames++;${sourceAgeDraw}x.fillStyle=frames%2?'#17324d':'#18334e';x.fillRect(0,0,c.width,c.height);x.fillStyle='#fcba35';x.fillRect((t*.35)%1800,600,120,400);x.fillStyle='white';x.font='72px sans-serif';x.fillText(String(frames),240,100);for(const [color,a,b] of [['#e84a5f',0,0],['#41b3a3',1728,0],['#e8d0a9',0,972],['#4b2e83',1728,972]]){x.fillStyle=color;x.fillRect(a,b,192,108)}for(let bit=0;bit<16;bit++){x.fillStyle=frames&(1<<bit)?'#fff':'#000';x.fillRect(384+bit*72,432,72,108)}window.sourceFrames=frames;requestAnimationFrame(draw)}requestAnimationFrame(draw)</script>`;
+    const patternBits=patternLayouts[visiblePresentation.patternLayout].bits;
+    const source=generatedNv12Enabled?'<!doctype html><script>window.sourceFrames=0</script>':`<!doctype html><style>body{margin:0;overflow:hidden;background:#17324d}canvas{width:100vw;height:100vh;display:block}</style><canvas></canvas><script>const c=document.querySelector('canvas');c.width=1920;c.height=1080;const x=c.getContext('2d');let frames=0;${sourceAgeSetup}function draw(t){${nativeLifecycleEnabled?'if(window.sourceFrozen===true){return;}':''}frames++;${sourceAgeDraw}x.fillStyle=frames%2?'#17324d':'#18334e';x.fillRect(0,0,c.width,c.height);x.fillStyle='#fcba35';x.fillRect((t*.35)%1800,600,120,400);x.fillStyle='white';x.font='72px sans-serif';x.fillText(String(frames),240,100);for(const [color,a,b] of [['#e84a5f',0,0],['#41b3a3',1728,0],['#e8d0a9',0,972],['#4b2e83',1728,972]]){x.fillStyle=color;x.fillRect(a,b,192,108)}for(let bit=0;bit<16;bit++){x.fillStyle=frames&(1<<bit)?'#fff':'#000';x.fillRect(384+bit*72,${patternBits.top*1080},72,${patternBits.height*1080})}window.sourceFrames=frames;requestAnimationFrame(draw)}requestAnimationFrame(draw)</script>`;
     await sourceWindow.loadURL('data:text/html;charset=utf-8,'+encodeURIComponent(source));
     session.defaultSession.setDisplayMediaRequestHandler((request,callback)=>{
       try{nativeRequests++;console.log('[capture] owned native request',nativeRequests,captureTarget);
@@ -764,7 +815,7 @@ app.whenReady().then(async()=>{
     if(!Number.isInteger(sampleSeconds)||sampleSeconds<1||sampleSeconds>30||!Number.isInteger(warmupMs)||warmupMs<0||warmupMs>30000)throw Error('Invalid bounded sample duration');
     if(captureTraceEnabled&&(cases.length!==1||cases[0].source!=='native'||sampleSeconds>8||warmupMs>5000||process.env.COVE_FPS_RECOVERY_CHECKS==='1'))throw Error('Capture profiling requires one native case, at most 5s warmup/8s sample and no recovery injection');
     for(let index=0;index<2;index++){const offscreen=peerRenderMode==='offscreen'||(minimizeSender&&index===1&&minimizedViewerMode==='offscreen');
-      const win=new BrowserWindow({width:1000,height:760,show:minimizeSender&&index===0,webPreferences:{offscreen,backgroundThrottling:minimizeSender&&index===0&&minimizedThrottling,
+      const win=new BrowserWindow({...(visiblePresentation.enabled&&index===0?presentationGeometry.senderBounds:{width:1000,height:760}),show:minimizeSender&&index===0,webPreferences:{offscreen,backgroundThrottling:index===0&&senderBackgroundThrottling,
       ...(nativeGpuEnabled?{preload:path.join(root,nativePaths.preload),additionalArguments:index===0?['--cove-native-gpu-capture=1',...(preloadFrameTiming?['--cove-native-cpu-frame-timing=1']:[]),...(nativeFrameSink==='canvas'?['--cove-native-frame-sink=canvas']:[])]:[],contextIsolation:true,sandbox:true,nodeIntegration:false}:{})}});if(offscreen)win.webContents.setFrameRate(144);win.webContents.setAudioMuted(true);peers.push(win);observePeerLifecycle(win,index);win.webContents.on('console-message',(_e,level,msg)=>{if(msg.includes('Error')||msg.includes('error'))console.log('[peer]',msg);});}
     if(nativeController){
       const ownsEvent=event=>!peers[0].isDestroyed()&&event.sender===peers[0].webContents&&event.senderFrame===peers[0].webContents.mainFrame;
@@ -803,7 +854,7 @@ app.whenReady().then(async()=>{
         // Native runs are explicitly scheduled foreground tests. Showing
         // inactive can leave another app covering the supposed monitor source.
         sourceWindow.show();sourceWindow.focus();await delay(300);
-        sourceWindow.setAlwaysOnTop(true,'floating');sourceWindow.moveTop();
+        sourceWindow.setAlwaysOnTop(!visiblePresentation.enabled,'floating');if(!visiblePresentation.enabled)sourceWindow.moveTop();
       }else{sourceWindow.setAlwaysOnTop(false);sourceWindow.hide();}
       startOwnedDisplaySleepBlocker();
       let sourceSelection=null;selectedCaptureSource=null;
@@ -815,17 +866,26 @@ app.whenReady().then(async()=>{
         result.sourceSelections??=[];result.sourceSelections.push(sourceSelection);save();
       }
       for(let index=0;index<2;index++){
-        const query=new URLSearchParams({base:info.base,room:info.roomId,token:info.accounts[index].token,index:String(index),performance:'1',source:config.source,width:'1920',height:'1080',fps:String(config.fps),...(nativeGpuEnabled&&index===0?{nativeGpu:'1',...(stockCaptureKeepalive?{stockCaptureKeepalive:'1'}:{})}:{}),...(generatedNv12Enabled?{generatedNv12:'1'}:{}),...((config.source==='native'||generatedNv12Enabled)&&index===1?{ownedPattern:'1',ownedPatternReadback:patternReadbackMode,...(sourceAgeEnabled?{sourceAge:'1'}:{})}:{}),...(config.captureWidth?{captureWidth:String(config.captureWidth),captureHeight:String(config.captureHeight)}:{})});
-        await peers[index].loadURL(process.env.COVE_QA_RENDERER_URL+'/tests/ui/media-integration.html?'+query);await wait(peers[index],'Boolean(window.coveMediaQA?.ready)');await js(peers[index],"window.coveMediaQA.rtc.selectMicrophoneNoiseMode('system');window.coveMediaQA.rtc.joinVoice()");await wait(peers[index],'Boolean(window.coveMediaQA.rtc.inVoice)');
+        const query=new URLSearchParams({base:info.base,room:info.roomId,token:info.accounts[index].token,index:String(index),performance:'1',patternLayout:visiblePresentation.patternLayout,...(visiblePresentation.enabled&&index===0?{visiblePresentation:'1'}:{}),...(localPreviewEnabled&&index===0?{localPreview:'1'}:{}),source:config.source,width:'1920',height:'1080',fps:String(config.fps),...(nativeGpuEnabled&&index===0?{nativeGpu:'1',...(stockCaptureKeepalive?{stockCaptureKeepalive:'1'}:{})}:{}),...(generatedNv12Enabled?{generatedNv12:'1'}:{}),...((config.source==='native'||generatedNv12Enabled)&&index===1?{ownedPattern:'1',ownedPatternReadback:patternReadbackMode,...(sourceAgeEnabled?{sourceAge:'1'}:{})}:{}),...(config.captureWidth?{captureWidth:String(config.captureWidth),captureHeight:String(config.captureHeight)}:{})});
+        await peers[index].loadURL(process.env.COVE_QA_RENDERER_URL+'/tests/ui/media-integration.html?'+query);
+        if(visiblePresentation.enabled&&index===0){await wait(peers[index],"['ready','failed'].includes(window.covePerformanceProductStylesState)");if(await js(peers[index],"window.covePerformanceProductStylesState==='failed'"))throw Error('Product presentation stylesheet loading failed');}
+        await wait(peers[index],'Boolean(window.coveMediaQA?.ready)');await js(peers[index],"window.coveMediaQA.rtc.selectMicrophoneNoiseMode('system');window.coveMediaQA.rtc.joinVoice()");await wait(peers[index],'Boolean(window.coveMediaQA.rtc.inVoice)');
       }
       const [sender,viewer]=peers;
+      if(visiblePresentation.enabled){
+        sender.setBounds(presentationGeometry.senderBounds);sender.show();sender.focus();
+        const startup=await waitVisiblePresentationStartup(presentationGeometry,ownedVisiblePresentationState,{wait:delay});
+        result.visiblePresentation.startup=startup;save();
+        if(!startup.established)rejectOwnedVisiblePresentation('startup',startup.state);
+        await wait(sender,'document.visibilityState==="visible"');assertOwnedVisiblePresentation();
+      }
       if(config.source==='native'||generatedNv12Enabled){
         const readerCheck=await boundedJs(viewer,'window.coveScreenPerformance.verifyPatternReader()');
         result.patternReaderChecks??=[];result.patternReaderChecks.push(readerCheck);save();
         if(!readerCheck.passed)throw Error('Owned-pattern VideoFrame/ROI self-test failed before native capture');
       }
       const nativeRequestsBefore=nativeRequests;
-      if(config.source==='native')sourceWindow.moveTop();
+      if(config.source==='native'&&!visiblePresentation.enabled)sourceWindow.moveTop();
       if(captureTracePhase==='startup')await startOwnedTrace();
       await startOwnedScreenShare(sender,config,'initial-publication-returned');await wait(sender,'Boolean(window.coveMediaQA.rtc.localScreen)');await wait(viewer,'window.coveMediaQA.rtc.availableScreens.length===1');
       await wait(sender,`window.coveMediaQA.rtc.screenNativeResolution===${Boolean(config.nativeResolution)}`);
@@ -837,8 +897,13 @@ app.whenReady().then(async()=>{
         nativeGpu:nativeGpuEnabled?{eligible:requiresNativeUpgrade,brokerBeforeSampling:brokerSnapshot()}:null,
         comparisonContract:{passed:false},nativeBaseline:{required:config.source==='native',passed:false},
         generatedNv12Baseline:{required:generatedNv12Enabled,passed:!generatedNv12Enabled}};
+      if(visiblePresentation.enabled)measured.visiblePresentation={beforeWarmup:assertOwnedVisiblePresentation(),beforeSampling:null,afterSampling:null,sourceLimited:null};
       result.cases.push(measured);save();
       if(requiresNativeUpgrade)await waitNativeUpgrade(sender,viewer,measured,'initial-publication');
+      if(localPreviewEnabled){
+        await wait(sender,'window.coveScreenPerformance.sample().then(s=>s.localPreview.requested&&s.localPreview.mounted&&s.localPreview.streamMatchesLocalScreen&&s.localPreview.matchesLiveSenderTrack&&s.localPreview.readyState>=2&&s.localPreview.paused===false&&s.localPreview.muted===true)');
+        measured.localPreview={beforeWarmup:await boundedJs(sender,'window.coveScreenPerformance.sample().then(s=>s.localPreview)'),beforeSampling:null,afterSampling:null};
+      }
       await captureGpuAfterPublication();
       if(minimizeSender){
         // Only the publisher minimizes. Keep the receiver at the same ordinary
@@ -861,8 +926,11 @@ app.whenReady().then(async()=>{
         sourceWindow.focus();sourceWindow.moveTop();save();
       }
       await delay(warmupMs);
-      if(config.source==='native')sourceWindow.moveTop();
+      if(config.source==='native'&&!visiblePresentation.enabled)sourceWindow.moveTop();
       measured.sourceWindowBeforeSampling=sourceWindowState();
+      if(visiblePresentation.enabled)measured.visiblePresentation.beforeSampling=assertOwnedVisiblePresentation();
+      measured.senderWindowBeforeSampling={visible:sender.isVisible(),minimized:sender.isMinimized(),focused:sender.isFocused(),offscreen:sender.webContents.isOffscreen(),backgroundThrottling:sender.webContents.getBackgroundThrottling()};
+      if(localPreviewEnabled)measured.localPreview.beforeSampling=await boundedJs(sender,'window.coveScreenPerformance.sample().then(s=>s.localPreview)');
       if(captureTraceEnabled&&captureTracePhase==='native-steady'){
         const actualSender=await boundedJs(sender,'window.coveScreenPerformance.sample()'),nativeAtTraceStart=brokerSnapshot();
         const evidence=nativeEvidence(actualSender,nativeAtTraceStart);
@@ -871,12 +939,23 @@ app.whenReady().then(async()=>{
           configuredWarmupMs:warmupMs,ownedPixelsDuringSampling:null});
       }
       for(let n=0;n<=sampleSeconds;n++){
+        const visibleBefore=assertOwnedVisiblePresentation();
         const fullObservation=!lowObserverMode||n===0||n===sampleSeconds;
         const mainStages={jsWaitMs:null,brokerSnapshotMs:null,sourceFramesMs:null,sourceStateMs:null,metricsMs:null,
           save:{performed:false,serializeMs:null,writeMs:null,totalMs:null}};
         const sampleCode=minimizeSender?'(async()=>{const sample=await window.coveScreenPerformance.sample();return {...sample,documentVisibilityState:document.visibilityState}})()':'window.coveScreenPerformance.sample()';
         let stageStarted=performance.now();
         const [send,receive]=await Promise.all(peers.map(win=>boundedJs(win,sampleCode)));
+        const visibleAfter=assertOwnedVisiblePresentation();
+        if(visiblePresentation.enabled){
+          const pane=send.visiblePresentation;
+          if(!pane?.requested||pane.stylesState!=='ready'||!pane.mounted||!pane.overlayMounted||!pane.statsEnabled||
+            pane.documentVisibilityState!=='visible'||pane.layout!=='top-strip-v1'||pane.overlayPosition!=='absolute'||
+            typeof pane.backdropFilter!=='string'||!pane.backdropFilter.includes('blur(')||!(pane.hostSize?.width>0)||!(pane.hostSize?.height>0)||
+            (localPreviewEnabled&&(pane.videoObjectFit!=='contain'||!(pane.previewSize?.width>0)||!(pane.previewSize?.height>0))))
+            throw Error('Visible product video/CSS/real diagnostic presentation contract was not established');
+        }
+        if((config.source==='native'||generatedNv12Enabled)&&receive.ownedPattern?.patternLayout!==visiblePresentation.patternLayout)throw Error('Owned source/reader pattern layout mismatch');
         mainStages.jsWaitMs=performance.now()-stageStarted;stageStarted=performance.now();
         if(preloadFrameTiming&&(n===0||n===sampleSeconds)){
           send.preloadCpuFrameTiming=await boundedJs(sender,'window.coveNativeScreen?.getCpuFrameTiming?.()??null');
@@ -898,8 +977,12 @@ app.whenReady().then(async()=>{
           stageStarted=performance.now();sourceState=sourceWindowState();mainStages.sourceStateMs=performance.now()-stageStarted;
           stageStarted=performance.now();cpu=app.getAppMetrics().map(m=>({pid:m.pid,type:m.type,cpu:m.cpu,memory:m.memory}));mainStages.metricsMs=performance.now()-stageStarted;
         }
-        samples.push({at,sender:send,viewer:receive,nativeGpu,nativeHelperTiming,nativeSourceFrames,sourceWindowState:sourceState,cpu,
+        const senderWindowState=fullObservation?{visible:sender.isVisible(),minimized:sender.isMinimized(),focused:sender.isFocused(),offscreen:sender.webContents.isOffscreen(),backgroundThrottling:sender.webContents.getBackgroundThrottling(),documentVisibilityState:send.documentVisibilityState}:null;
+        samples.push({at,sender:send,viewer:receive,senderWindowState,visiblePresentation:visiblePresentation.enabled?{before:visibleBefore,after:visibleAfter}:null,nativeGpu,nativeHelperTiming,nativeSourceFrames,sourceWindowState:sourceState,cpu,
           fullMainObservation:fullObservation,mainStages,...(sourceAgeEnabled?{sourceAge}:{})});
+        if(send.localPreview?.requested!==localPreviewEnabled||receive.localPreview?.requested!==false)throw Error('Local preview publisher/receiver control mismatch');
+        if(localPreviewEnabled&&(!send.localPreview.mounted||!send.localPreview.streamMatchesLocalScreen||!send.localPreview.matchesLiveSenderTrack||send.localPreview.readyState<2||send.localPreview.paused||!send.localPreview.muted))throw Error('Product local preview lost its current published stream or playback binding');
+        if(!localPreviewEnabled&&send.localPreview.mounted)throw Error('An unrequested local preview was mounted');
         if(requiresNativeUpgrade&&!nativeEvidence(send,nativeGpu).passed){
           measured.nativeUpgradeSucceeded=false;measured.nativeGpu.failureCode=nativeGpu?.failureCode??'upgraded_track_lost';save();
           throw Error('Native GPU upgrade stopped during performance measurement');
@@ -911,6 +994,12 @@ app.whenReady().then(async()=>{
         if(samples.length>=2&&!measured.nativeBaseline.passed)throw Error('Owned native baseline failed: '+JSON.stringify(measured.nativeBaseline));
         if(samples.length>=2&&!measured.generatedNv12Baseline.passed)throw Error('Generated NV12 pixel/dimension qualification failed: '+JSON.stringify(measured.generatedNv12Baseline));
         if(n<sampleSeconds)await delay(1000);
+      }
+      if(localPreviewEnabled)measured.localPreview.afterSampling=samples.at(-1).sender.localPreview;
+      if(visiblePresentation.enabled){
+        measured.visiblePresentation.afterSampling=assertOwnedVisiblePresentation();
+        measured.visiblePresentation.sourceLimited=!(measured.summary?.nativeSourceRafFps>=config.fps);
+        if(measured.visiblePresentation.sourceLimited){save();throw Error('Owned background source cadence is below target; visible presentation experiment is source-limited');}
       }
       if(captureTraceEnabled){
         if(result.trace.actualNativeBaseline){result.trace.actualNativeBaseline.ownedPixelsDuringSampling=measured.nativeBaseline;
@@ -941,6 +1030,56 @@ app.whenReady().then(async()=>{
         if(config.expectCodec&&(outgoing?.codec!==config.expectCodec||incoming?.codec!==config.expectCodec))throw Error('Negotiated codec does not match required '+config.expectCodec);
       }}catch(error){measured.comparisonContract.error=error.message;save();throw error;}
       measured.comparisonContract.passed=true;save();console.log('[performance]',JSON.stringify({config,sourceFps:measured.summary.sourceFps,encodeFps:measured.summary.encodeFps,sendFps:measured.summary.sendFps,decodeFps:measured.summary.decodeFps,nativeRequests}));
+      if(demandOptions.enabled){
+        const ownedRoom=()=>{
+          try{return backend&&backend.exitCode===null&&backend.signalCode===null&&backend.connected&&
+            peers.length===2&&peers.every(win=>!win.isDestroyed()&&
+              new URL(win.webContents.getURL()).searchParams.get('room')===info.roomId);}
+          catch{return false;}
+        };
+        measured.demandComparison=await runDemandComparison({
+          getSnapshot:async()=>{
+            const [send,receive,state,viewState]=await Promise.all([
+              boundedJs(sender,'window.coveScreenPerformance.sample()',3000),
+              boundedJs(viewer,'window.coveScreenPerformance.sample()',3000),
+              nativeLifecyclePeerState(sender),nativeLifecyclePeerState(viewer)]);
+            const broker=brokerSnapshot(),capture=send.sources.find(source=>source.isLiveSenderSource===true);
+            const liveSender=send.connections.flatMap(connection=>connection.senders).find(value=>value.isLiveCaptureSource);
+            const encoding=liveSender?.encodings?.[0];
+            const producer=state.transports.flatMap(transport=>transport.producers).find(value=>value.id===state.localScreenProducerId);
+            return {ownedTestRoom:ownedRoom()&&state.inVoice&&viewState.inVoice&&state.isSharing&&state.localScreen,
+              roomToken:info.roomId,producerId:state.localScreenProducerId,trackToken:capture?.trackToken,nativeRequests,
+              sourceConfig:{preset:state.screenPreset,fps:state.fps,width:capture?.settings?.width??null,
+                height:capture?.settings?.height??null,contentHint:liveSender?.contentHint??null,sourceKind:send.sourceKind,
+                degradationPreference:liveSender?.degradationPreference??null,maxFramerate:encoding?.maxFramerate??null,
+                maxBitrate:encoding?.maxBitrate??null,scaleResolutionDownBy:encoding?.scaleResolutionDownBy??null},
+              producerPaused:producer?.paused,viewerWatching:viewState.isWatchingScreen,viewerCount:state.screenViewerCount,
+              sample:{at:Date.now(),sender:send,viewer:receive,nativeGpu:broker,nativeHelperTiming:currentNativeHelperTiming(broker),
+                nativeSourceFrames:await boundedJs(sourceWindow,'window.sourceFrames',2000),cpu:null}};
+          },
+          stopWatching:async({signal})=>{
+            if(signal?.aborted||!ownedRoom())throw Error('Demand test room is no longer owned');
+            await boundedJs(viewer,`(()=>{const qa=window.coveMediaQA;if(!qa?.ready||!qa.rtc.inVoice||
+              new URL(location.href).searchParams.get('room')!==${JSON.stringify(info.roomId)})throw Error('Demand room changed');
+              qa.rtc.stopWatchingScreen();})()`,2000);
+          },
+          watch:async(producerId,{signal})=>{
+            if(signal?.aborted||!ownedRoom())throw Error('Demand test room is no longer owned');
+            await boundedJs(viewer,`(()=>{const qa=window.coveMediaQA,publication=qa?.rtc.availableScreens.find(value=>
+              value.videoProducerId===${JSON.stringify(producerId)});if(!qa?.ready||!qa.socket.connected||!qa.rtc.inVoice||!publication||
+              new URL(location.href).searchParams.get('room')!==${JSON.stringify(info.roomId)})throw Error('Demand publication changed');
+              return qa.rtc.watchScreen(publication.socketId);})()`,4000);
+          },
+          wait:async(predicate,_label,limitMs)=>{
+            const end=Date.now()+limitMs;
+            do{if(await predicate())return;await delay(100);}while(Date.now()<end);
+            throw Error('Demand state did not settle');
+          },
+          delay,summarizeSamples:summary,
+        });
+        save();
+        if(!measured.demandComparison.passed)throw Error('Demand comparison failed: '+measured.demandComparison.error);
+      }
       if(process.env.COVE_FPS_RECOVERY_CHECKS==='1'||process.env.COVE_FPS_REPUBLISH_CHECKS==='1'){
         const before=samples.at(-1).viewer.currentVideo;if(!before)throw Error('Current receiver statistics are unavailable');
         measured.recovery={gpuProcessRestartRequested:process.env.COVE_FPS_RECOVERY_CHECKS==='1'};
