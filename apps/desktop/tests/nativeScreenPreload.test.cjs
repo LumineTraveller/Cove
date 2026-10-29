@@ -55,6 +55,17 @@ test('Canvas preference requires exact flag, qualified runtime and native suppor
   }
 });
 
+test('Worker preference requires its exact flag, qualified runtime and native support', () => {
+  assert.equal(bridge(true, { argv: ['--cove-native-frame-sink=worker'] }).api.preferredFrameSink, 'worker');
+  for (const [enabled, options] of [[true, {}], [false, { argv: ['--cove-native-frame-sink=worker'] }],
+    [true, { argv: ['--cove-native-frame-sink=worker-extra'] }],
+    [true, { argv: ['--cove-native-frame-sink=worker'], versions: { electron: '43.0.0' } }],
+    [true, { argv: ['--cove-native-frame-sink=worker'], platform: 'linux' }],
+    [true, { argv: ['--cove-native-frame-sink=worker'], sharedTexture: false }]]) {
+    assert.equal(bridge(enabled, options).api.preferredFrameSink, undefined);
+  }
+});
+
 test('CPU timing requires the exact opt-in flag and native support, with no default clock reads', async () => {
   for (const [enabled, options] of [[true, {}], [true, { argv: ['--cove-native-cpu-frame-timing=0'] }],
     [true, { argv: ['--cove-native-cpu-frame-timing=1-extra'] }], [false, { cpuFrameTiming: true }],

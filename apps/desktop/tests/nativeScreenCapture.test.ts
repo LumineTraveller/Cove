@@ -8,6 +8,7 @@ import {
   type NativeScreenCaptureOptions,
 } from '../src/features/media/screen/nativeScreenCapture';
 import type { NativeScreenFrame, NativeScreenStartResult } from '../electron/native-screen-capture-protocol';
+import type { NativeFrameWorkerCommand } from '../src/features/media/screen/nativeFrameWorkerProtocol';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -181,6 +182,135 @@ function fixture(context: TestContext) {
     ended(late = false) { (late ? lastEnded : activeEnded)?.('device-lost'); },
   };
 }
+
+function workerFixture(context: TestContext) {
+  const f = fixture(context);
+  const workers: FakeCaptureWorker[] = [];
+  class FakeCaptureWorker extends EventTarget {
+    posts: NativeFrameWorkerCommand[] = [];
+    generation = '';
+    terminations = 0;
+    constructor(url: URL, options: WorkerOptions) {
+      super(); assert.match(url.href, /nativeFrameWorker\.ts$/); assert.equal(options.type, 'module');
+      workers.push(this);
+    }
+    postMessage(message: NativeFrameWorkerCommand, transfer: Transferable[]) {
+      this.posts.push(message);
+      if (message.type === 'init') {
+        this.generation = message.generation; assert.deepEqual(transfer, [message.writable]);
+      }
+      if (message.type === 'frame') assert.deepEqual(transfer, [message.frame]);
+      if (message.type === 'stop') queueMicrotask(() => this.emit('stopped'));
+    }
+    terminate() { this.terminations++; }
+    emit(type: string, extra: Record<string, unknown> = {}) {
+      this.dispatchEvent(new MessageEvent('message', { data: { type, generation: this.generation, ...extra } }));
+    }
+    written(sequence: number) {
+      f.native[0].settings = { width: 1920, height: 1080 };
+      this.emit('ack', { sequence, result: 'written', timing: { writeMs: 2, queueAgeMs: 3, idleMs: 4 } });
+    }
+  }
+  replaceGlobal(context, 'Worker', FakeCaptureWorker);
+  Object.assign(f.bridge, { preferredFrameSink: 'worker' });
+  return Object.assign(f, { workers });
+}
+
+test('opt-in Worker transfers once, leaves the Window writer unlocked and preserves the published track contract', async context => {
+  const f = workerFixture(context);
+  const pending = tryNativeScreenCapture(f.stream, f.options); await f.flush();
+  assert.equal(f.workers.length, 1); assert.equal(f.writes.length, 0);
+  const worker = f.workers[0];
+  worker.emit('ready'); await f.flush();
+  const frame = new FakeFrame(); const received = f.frame({}, frame); await f.flush();
+  assert.equal(frame.closes, 0, 'Callback awaits Worker result; preload credit is still separate');
+  assert.equal(worker.posts.filter(message => message.type === 'frame').length, 1);
+  worker.written(1); await received;
+  const candidate = await pending; assert.ok(candidate); candidate.commit();
+  const diagnostics = getNativeScreenCaptureDiagnostics(candidate.stream.getVideoTracks()[0]);
+  assert.equal(diagnostics?.frameSink, 'worker'); assert.equal(diagnostics?.framesWritten, 1);
+  assert.equal(diagnostics?.totalWriteMs, 2); assert.equal(diagnostics?.totalQueueAgeMs, 3);
+  assert.equal(diagnostics?.totalWriteIdleMs, 4); assert.equal(diagnostics?.worker?.pending, 0);
+  assert.equal(frame.closes, 1); assert.equal(f.writes.length, 0);
+  candidate.stop(); await f.flush();
+  assert.equal(worker.terminations, 1); assert.equal(f.native[0].stops, 1);
+  assert.equal(f.stock.stops, 0); assert.deepEqual(f.stopFaults, [undefined]);
+  assert.equal(f.aborts, 0, 'Window must not abort a writer transferred to Worker');
+});
+
+test('unavailable bundled Worker setup retains stock and does not poison the native fault circuit', async context => {
+  const f = fixture(context); Object.assign(f.bridge, { preferredFrameSink: 'worker' });
+  replaceGlobal(context, 'Worker', undefined);
+  assert.equal(await tryNativeScreenCapture(f.stream, f.options), null);
+  assert.equal(f.stock.stops, 0); assert.equal(f.writes.length, 0);
+  assert.deepEqual(f.stopFaults, [undefined]);
+  assert.equal(getLastNativeScreenCaptureAttempt()?.stopReason, 'setup_error');
+});
+
+test('Worker readiness shares the remaining total startup deadline and late ready cannot revive it', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  let now = 0; replaceGlobal(context, 'performance', { now: () => now });
+  const f = workerFixture(context); const start = deferred<NativeScreenStartResult>();
+  f.setStart(() => start.promise);
+  const pending = tryNativeScreenCapture(f.stream, f.options);
+  now = 1000; context.mock.timers.tick(1000);
+  start.resolve({ ok: true, sessionId: 'session-1', width: 1920, height: 1080 }); await f.flush();
+  assert.equal(f.workers.length, 1);
+  now = 1500; context.mock.timers.tick(500); await f.flush();
+  assert.equal(await pending, null); assert.equal(f.native[0].stops, 1); assert.equal(f.stock.stops, 0);
+  const worker = f.workers[0]; worker.emit('ready');
+  const frame = await f.frame({}, new FakeFrame(), true);
+  assert.equal(frame.closes, 1); assert.equal(f.writes.length, 0);
+  assert.deepEqual(f.stopFaults, [undefined]); assert.equal(worker.terminations, 1);
+});
+
+test('cancel during Worker initialization synchronously preserves stock and retires late messages', async context => {
+  const f = workerFixture(context);
+  const pending = tryNativeScreenCapture(f.stream, f.options); await f.flush();
+  f.controller.abort(); assert.equal(await pending, null); await f.flush();
+  f.workers[0].emit('ready'); f.workers[0].written(1);
+  assert.equal(f.native[0].stops, 1); assert.equal(f.stock.stops, 0);
+  assert.equal(f.workers[0].terminations, 1); assert.deepEqual(f.stopFaults, [undefined]);
+});
+
+test('stop during Worker write settles the callback and cannot publish a late ACK', async context => {
+  const f = workerFixture(context);
+  const pending = tryNativeScreenCapture(f.stream, f.options); await f.flush();
+  const worker = f.workers[0]; worker.emit('ready'); await f.flush();
+  const frame = new FakeFrame(); const received = f.frame({}, frame); await f.flush();
+  f.controller.abort(); await received; assert.equal(await pending, null);
+  worker.written(1); await f.flush();
+  assert.equal(frame.closes, 1); assert.equal(f.native[0].stops, 1);
+  assert.equal(getNativeScreenCaptureDiagnostics(f.native[0] as unknown as MediaStreamTrack)?.framesWritten, 0);
+  assert.equal(f.stock.stops, 0); assert.equal(worker.terminations, 1);
+});
+
+test('Worker error after commit follows existing safe sharing teardown once', async context => {
+  const f = workerFixture(context);
+  const pending = tryNativeScreenCapture(f.stream, f.options); await f.flush();
+  const worker = f.workers[0]; worker.emit('ready'); await f.flush();
+  const received = f.frame(); await f.flush(); worker.written(1); await received;
+  const candidate = await pending; assert.ok(candidate); candidate.commit();
+  let ended = 0; f.native[0].addEventListener('ended', () => ended++);
+  worker.dispatchEvent(new Event('error')); await f.flush(); worker.dispatchEvent(new Event('error'));
+  assert.equal(ended, 1); assert.equal(f.native[0].stops, 1);
+  assert.equal(f.stock.stops, 0); assert.deepEqual(f.stopFaults, ['renderer_failed']);
+  assert.equal(worker.terminations, 1);
+});
+
+test('Worker preference never changes CPU NV12 ownership or writer semantics', async context => {
+  const f = workerFixture(context); f.options.colorSpace = 'bt709-limited';
+  f.setResult({ ok: true, sessionId: 'session-1', width: 1920, height: 1080, pixelFormat: 'nv12', storage: 'cpu' });
+  const pending = tryNativeScreenCapture(f.stream, f.options); await f.flush();
+  const frame = Object.assign(new FakeFrame(), { format: 'NV12', colorSpace: {
+    primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', fullRange: false,
+  } });
+  await f.frame({ pixelFormat: 'nv12', storage: 'cpu' }, frame);
+  const candidate = await pending; assert.ok(candidate);
+  assert.equal(f.workers.length, 0); assert.equal(f.writes.length, 1);
+  assert.equal(getNativeScreenCaptureDiagnostics(candidate.stream.getVideoTracks()[0])?.frameSink, 'generator');
+  candidate.stop(); await f.flush(); assert.equal(f.aborts, 1);
+});
 
 test('disabled, unsupported and ineligible sources retain stock without starting native', async (context) => {
   const f = fixture(context);

@@ -81,6 +81,9 @@ async function main(){
   sources.push('tooling/screen-performance-demand.cjs','tests/screen-performance-demand.test.cjs');
   if(nativePaths)sources.push(...Object.values(nativePaths),'apps/desktop/dist-electron/native-screen-cpu-buffer-pipeline.js','apps/desktop/dist-electron/native-screen-cpu-delivery.js','apps/desktop/dist-electron/native-screen-capture-protocol.js');
   if(process.env.COVE_FPS_NATIVE_FRAME_SINK==='canvas')sources.push('apps/desktop/src/features/media/screen/nativeCanvasFrameSink.ts');
+  if(process.env.COVE_FPS_NATIVE_FRAME_SINK==='worker')sources.push(...[
+    'nativeFrameWorkerProtocol.ts','nativeFrameWorkerRuntime.ts','nativeFrameWorker.ts','nativeWorkerFrameSink.ts',
+  ].map(file=>'apps/desktop/src/features/media/screen/'+file));
   if(effectiveNativeHelperSource)sources.push(effectiveNativeHelperSource.path);
   if(baselineFrameWriterOverride)sources.push(effectiveNativeFrameWriterPath);
   fs.writeFileSync(path.join(directory,'source.json'),JSON.stringify({startedAt:new Date().toISOString(),node:process.version,nativeGpuEnabled,

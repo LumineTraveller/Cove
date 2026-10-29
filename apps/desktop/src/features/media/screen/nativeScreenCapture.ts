@@ -6,10 +6,11 @@ import type {
 import { nativeScreenFailureReason, type NativeScreenFailureReason } from '../../../../electron/native-screen-capture-diagnostics';
 import { createNativeFrameWriteQueue } from './nativeFrameWriteQueue';
 import { createNativeCanvasFrameSink, getNativeCanvasFrameFailureCode, type NativeCanvasFrameSinkSnapshot } from './nativeCanvasFrameSink';
+import { createNativeWorkerFrameSink, type NativeWorkerFrameSinkSnapshot } from './nativeWorkerFrameSink';
 
 export interface NativeScreenBridge {
   readonly supported: boolean;
-  readonly preferredFrameSink?: 'canvas';
+  readonly preferredFrameSink?: 'canvas' | 'worker';
   start(requestId: string, options: NativeScreenOptions): Promise<NativeScreenStartResult>;
   stop(requestId: string, fault?: 'renderer_failed' | 'receiver_failed'): Promise<boolean>;
   onFrame(requestId: string, callback: (frame: VideoFrame, metadata: NativeScreenFrame) => Promise<void>): () => void;
@@ -32,7 +33,7 @@ export interface NativeScreenCaptureOptions extends NativeScreenOptions {
 
 export interface NativeScreenCaptureDiagnostics {
   backend: 'native-gpu';
-  frameSink: 'generator' | 'canvas';
+  frameSink: 'generator' | 'canvas' | 'worker';
   pixelFormat: 'bgra' | 'nv12';
   frameStorage: 'gpu' | 'cpu';
   framesReceived: number;
@@ -49,17 +50,20 @@ export interface NativeScreenCaptureDiagnostics {
   writesOverFramePeriod: number;
   /** On-demand aggregate observation; never populated by per-frame allocation. */
   canvas?: NativeCanvasFrameSinkSnapshot;
+  worker?: NativeWorkerFrameSinkSnapshot;
 }
 
 const captureDiagnostics = new WeakMap<MediaStreamTrack, NativeScreenCaptureDiagnostics>();
 const canvasDiagnostics = new WeakMap<MediaStreamTrack, () => NativeCanvasFrameSinkSnapshot>();
+const workerDiagnostics = new WeakMap<MediaStreamTrack, () => NativeWorkerFrameSinkSnapshot>();
 
 /** Aggregate metadata only. A caller cannot mutate the live counters. */
 export function getNativeScreenCaptureDiagnostics(track: MediaStreamTrack): NativeScreenCaptureDiagnostics | null {
   const diagnostics = captureDiagnostics.get(track);
   if (!diagnostics) return null;
   const canvas = canvasDiagnostics.get(track)?.();
-  return { ...diagnostics, ...(canvas ? { canvas } : {}) };
+  const worker = workerDiagnostics.get(track)?.();
+  return { ...diagnostics, ...(canvas ? { canvas } : {}), ...(worker ? { worker } : {}) };
 }
 
 export type NativeScreenCaptureAttemptPhase =
@@ -132,7 +136,7 @@ export async function tryNativeScreenCapture(
   let stockTrack: MediaStreamTrack;
   let track: GeneratorTrack;
   let stream: MediaStream;
-  let writer: WritableStreamDefaultWriter<VideoFrame>;
+  let writer: WritableStreamDefaultWriter<VideoFrame> | undefined;
   try {
     const candidateBridge = typeof window === 'undefined' ? undefined :
       (window as Window & { coveNativeScreen?: NativeScreenBridge }).coveNativeScreen;
@@ -155,7 +159,9 @@ export async function tryNativeScreenCapture(
     try {
       track.contentHint = options.contentHint;
       stream = new MediaStream([track]);
-      writer = track.writable.getWriter();
+      // A Worker preference must transfer the unlocked writable directly once.
+      // Every other route retains its existing Window writer.
+      if (bridge.preferredFrameSink !== 'worker') writer = track.writable.getWriter();
     } catch {
       track.stop();
       finishAttempt('setup_error');
@@ -180,6 +186,8 @@ export async function tryNativeScreenCapture(
   let ready = false;
   let lastWriteCompletedAt: number | undefined;
   let canvasSink: ReturnType<typeof createNativeCanvasFrameSink> | undefined;
+  let workerSink: ReturnType<typeof createNativeWorkerFrameSink> | undefined;
+  let workerReady = false;
   let startIssued = false;
   let lastSerial = 0;
   let lastTimestamp = -1;
@@ -220,6 +228,7 @@ export async function tryNativeScreenCapture(
     finishAttempt(reason);
     writeQueue.stop();
     canvasSink?.stop();
+    workerSink?.stop();
     if (deadline !== undefined) clearTimeout(deadline);
     if (settingsPoll !== undefined) clearTimeout(settingsPoll);
     settingsPoll = undefined;
@@ -230,12 +239,15 @@ export async function tryNativeScreenCapture(
     try { unsubscribeEnded(); } catch { /* Continue releasing the other resources. */ }
     try { originalStop(); } catch { /* Still release the helper if a track is already invalid. */ }
     // Do not block stock fallback on an IPC or WritableStream promise.
-    try {
-      void writer.abort().catch(() => {}).finally(() => {
-        try { writer.releaseLock(); } catch { /* A browser may already have released it. */ }
-      });
-    } catch {
-      try { writer.releaseLock(); } catch { /* No owned writer remains usable. */ }
+    if (writer) {
+      const ownedWriter = writer;
+      try {
+        void ownedWriter.abort().catch(() => {}).finally(() => {
+          try { ownedWriter.releaseLock(); } catch { /* A browser may already have released it. */ }
+        });
+      } catch {
+        try { ownedWriter.releaseLock(); } catch { /* No owned writer remains usable. */ }
+      }
     }
     if (startIssued) stopBridge(unexpected);
     resolveCandidate(null);
@@ -268,6 +280,7 @@ export async function tryNativeScreenCapture(
       diagnostics.totalWriteIdleMs += idleMs;
       diagnostics.maxWriteIdleMs = Math.max(diagnostics.maxWriteIdleMs, idleMs);
     }
+    if (!writer) return Promise.reject(new Error('Native Window writer unavailable'));
     return writer.write(frame);
   }
   const writeQueue = createNativeFrameWriteQueue<VideoFrame>({
@@ -360,6 +373,16 @@ export async function tryNativeScreenCapture(
         await canvasSink.submit(frame, metadata.timestamp);
         return;
       }
+      if (workerSink) {
+        // The ACK releases this callback only. Imported texture credit still
+        // waits for preload's permit and Electron allReferencesReleased.
+        if (await workerSink.submit(frame) !== 'written') return;
+        if (stopped) return;
+        if (!current()) { stop(false, currentStopReason); return; }
+        if (track.readyState !== 'live') { stop(true, 'native_ended'); return; }
+        if (!ready) checkFirstFrameSettings();
+        return;
+      }
       // Retain only the latest pending frame while one conversion/write runs.
       // The callback stays pending until written, superseded or cancelled, so
       // preload and allReferencesReleased still own the actual GPU slot credit.
@@ -381,7 +404,8 @@ export async function tryNativeScreenCapture(
   try {
     // Existing publisher stop paths must also release the helper and writer.
     track.stop = () => stop();
-    deadline = setTimeout(() => stop(false, 'deadline_timeout'), START_TIMEOUT_MS);
+    deadline = setTimeout(() => stop(false, 'deadline_timeout'),
+      bridge.preferredFrameSink === 'worker' ? Math.max(0, START_TIMEOUT_MS - attemptElapsed()) : START_TIMEOUT_MS);
     options.signal.addEventListener('abort', onCancelled, { once: true });
     stockTrack.addEventListener('ended', onCancelled, { once: true });
     track.addEventListener('ended', onTrackEnded, { once: true });
@@ -417,6 +441,37 @@ export async function tryNativeScreenCapture(
       attempt.phase = 'helper-ready';
       diagnostics.pixelFormat = result.pixelFormat ?? 'bgra';
       diagnostics.frameStorage = result.storage ?? 'gpu';
+      if (bridge.preferredFrameSink === 'worker') {
+        if (result.storage === undefined && (result.pixelFormat ?? 'bgra') === 'bgra') {
+          try {
+            workerSink = createNativeWorkerFrameSink({
+              writable: track.writable, width: result.width, height: result.height, fps: options.fps,
+              startupTimeoutMs: START_TIMEOUT_MS - attemptElapsed(),
+              onWritten(timing) {
+                if (stopped) return;
+                diagnostics.totalWriteIdleMs += timing.idleMs;
+                diagnostics.maxWriteIdleMs = Math.max(diagnostics.maxWriteIdleMs, timing.idleMs);
+                onWritten(timing.writeMs, timing.queueAgeMs);
+              },
+              onDropped,
+              onFailure(reason) {
+                console.warn('[native-screen] worker_frame_error', reason);
+                stop(workerReady, workerReady ? 'frame_error' : 'setup_error');
+              },
+            });
+            diagnostics.frameSink = 'worker';
+            workerDiagnostics.set(track, workerSink.snapshot);
+            void workerSink.ready.then(() => { workerReady = true; }, () => {});
+            if (stopped) workerSink.stop();
+          } catch {
+            stop(false, 'setup_error');
+          }
+        } else {
+          // CPU NV12 and unqualified formats keep the existing Window writer.
+          try { writer = track.writable.getWriter(); }
+          catch { stop(false, 'setup_error'); }
+        }
+      }
       // This route preserves the already-published AV1/BT709 contract. VP8's
       // verified CPU601 path and every unqualified format retain their writer.
       if (bridge.preferredFrameSink === 'canvas' && options.colorSpace === 'bt709-limited' &&

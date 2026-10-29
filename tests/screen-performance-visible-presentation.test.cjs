@@ -34,19 +34,30 @@ test('visible presentation is opt-in, keeps the old central layout, and permits 
   for(const value of ['true','',1,true])assert.throws(()=>visiblePresentationOptions({...base,COVE_FPS_VISIBLE_PRESENTATION:value}));
 });
 
+test('visible presentation explicitly admits the qualified Worker while rejecting Canvas and unknown sinks',()=>{
+  for(const sink of ['generator','worker'])
+    assert.deepEqual(visiblePresentationOptions({...base,COVE_FPS_NATIVE_FRAME_SINK:sink}),
+      {enabled:true,patternLayout:'top-strip-v1'});
+  for(const sink of ['canvas','worker-extra','Worker','','unknown',true])
+    assert.throws(()=>visiblePresentationOptions({...base,COVE_FPS_NATIVE_FRAME_SINK:sink}));
+});
+
 test('conflicting modes and unowned/unsupported cases fail before Electron startup',()=>{
+  for(const sink of ['generator','worker']){
+  const qualified={...base,COVE_FPS_NATIVE_FRAME_SINK:sink};
   for(const flag of ['COVE_FPS_MINIMIZE_SENDER','COVE_FPS_NATIVE_LIFECYCLE_CHECKS','COVE_FPS_RECOVERY_CHECKS',
     'COVE_FPS_REPUBLISH_CHECKS','COVE_FPS_CONTENT_TRACE','COVE_FPS_GENERATED_NV12','COVE_FPS_DISABLE_RENDERER_BACKGROUNDING'])
-    assert.throws(()=>visiblePresentationOptions({...base,[flag]:'1'}));
+    assert.throws(()=>visiblePresentationOptions({...qualified,[flag]:'1'}));
   for(const change of [{COVE_FPS_PEER_RENDER_MODE:'offscreen'},{COVE_FPS_PRODUCT_SENDER_THROTTLING:'0'},
     {COVE_FPS_NATIVE_GPU:'0'},{COVE_DISABLE_NATIVE_GPU_CAPTURE:'1'},
     {COVE_FPS_NATIVE_STORAGE:'cpu'},{COVE_FPS_NATIVE_PIXEL_FORMAT:'nv12'},{COVE_FPS_NATIVE_FRAME_SINK:'canvas'},
-    {COVE_FPS_CASES:'['},{COVE_FPS_CASES:'[]'}])assert.throws(()=>visiblePresentationOptions({...base,...change}));
+    {COVE_FPS_CASES:'['},{COVE_FPS_CASES:'[]'}])assert.throws(()=>visiblePresentationOptions({...qualified,...change}));
   const config=JSON.parse(base.COVE_FPS_CASES)[0];
   for(const change of [{source:'generated'},{captureTarget:'window'},{fps:60},{game:false},
     {nativeResolution:true},{nativeWindowPath:true}])
-    assert.throws(()=>visiblePresentationOptions({...base,COVE_FPS_CASES:JSON.stringify([{...config,...change}])}));
-  assert.throws(()=>visiblePresentationOptions({...base,COVE_FPS_CASES:JSON.stringify([config,config])}));
+    assert.throws(()=>visiblePresentationOptions({...qualified,COVE_FPS_CASES:JSON.stringify([{...config,...change}])}));
+  assert.throws(()=>visiblePresentationOptions({...qualified,COVE_FPS_CASES:JSON.stringify([config,config])}));
+  }
 });
 
 test('75 percent center geometry exposes all twenty taskbar-safe pattern probes',()=>{

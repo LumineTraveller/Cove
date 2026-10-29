@@ -10,7 +10,7 @@ function visiblePresentationOptions(env=process.env){
     if(env.COVE_FPS_PEER_RENDER_MODE!=='hidden'||env.COVE_FPS_PRODUCT_SENDER_THROTTLING!=='1'||
       env.COVE_FPS_NATIVE_GPU!=='1'||env.COVE_DISABLE_NATIVE_GPU_CAPTURE==='1'||
       (env.COVE_FPS_NATIVE_STORAGE??'gpu')!=='gpu'||(env.COVE_FPS_NATIVE_PIXEL_FORMAT??'bgra')!=='bgra'||
-      (env.COVE_FPS_NATIVE_FRAME_SINK??'generator')!=='generator')
+      !['generator','worker'].includes(env.COVE_FPS_NATIVE_FRAME_SINK??'generator'))
       throw Error('Visible presentation requires an ordinary product-throttled native GPU BGRA publisher');
     for(const flag of ['COVE_FPS_MINIMIZE_SENDER','COVE_FPS_NATIVE_LIFECYCLE_CHECKS','COVE_FPS_RECOVERY_CHECKS',
       'COVE_FPS_REPUBLISH_CHECKS','COVE_FPS_CONTENT_TRACE','COVE_FPS_GENERATED_NV12','COVE_FPS_DISABLE_RENDERER_BACKGROUNDING'])

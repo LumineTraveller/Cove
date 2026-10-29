@@ -90,6 +90,9 @@ const isNativeCaptureLabBuild = buildFlavor === 'native-capture-lab';
 const nativeCaptureEnabled = process.platform === 'win32' && process.arch === 'x64' &&
   process.env.COVE_DISABLE_NATIVE_GPU_CAPTURE !== '1' &&
   (isNativeCaptureLabBuild || process.env.COVE_NATIVE_GPU_CAPTURE === '1');
+const nativeWorkerWriterEnabled = nativeCaptureEnabled && process.versions.electron === '44.0.0' &&
+  process.env.COVE_NATIVE_FRAME_SINK === 'worker' && process.env.COVE_NATIVE_GPU_CAPTURE_CPU_FRAMES !== '1' &&
+  process.env.COVE_NATIVE_GPU_CAPTURE_PIXEL_FORMAT !== 'nv12';
 const isAnnotationFixBuild = buildFlavor === 'annotation-fix';
 const isMediaFixBuild = buildFlavor === 'media-fix';
 const isNetworkLabBuild = buildFlavor === 'network-lab' || isAnnotationFixBuild || isMediaFixBuild || isNativeCaptureLabBuild;
@@ -196,7 +199,8 @@ function createWindow() {
       nodeIntegration: false,
       contextIsolation: true,
       preload: path.join(__dirname, "preload.js"),
-      additionalArguments: nativeCaptureEnabled ? ['--cove-native-gpu-capture=1'] : [],
+      additionalArguments: nativeCaptureEnabled ? ['--cove-native-gpu-capture=1',
+        ...(nativeWorkerWriterEnabled ? ['--cove-native-frame-sink=worker'] : [])] : [],
     },
   });
   mainWindow = win;

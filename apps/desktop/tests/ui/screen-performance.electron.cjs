@@ -21,9 +21,9 @@ const nativeGpuEnabled=nativePerformanceEnabled(),nativePaths=nativeGpuEnabled?n
 const nativePixelFormat=nativePerformancePixelFormat();
 const nativeStorage=nativePerformanceStorage(process.env,nativePixelFormat);
 const nativeFrameSink=process.env.COVE_FPS_NATIVE_FRAME_SINK??'generator';
-if(!['generator','canvas'].includes(nativeFrameSink))throw Error('Invalid native frame sink');
-if(nativeFrameSink==='canvas'&&(!nativeGpuEnabled||nativeStorage!=='gpu'||nativePixelFormat!=='bgra'))
-  throw Error('Canvas handoff requires explicit native GPU BGRA measurement');
+if(!['generator','canvas','worker'].includes(nativeFrameSink))throw Error('Invalid native frame sink');
+if((nativeFrameSink==='canvas'||nativeFrameSink==='worker')&&(!nativeGpuEnabled||nativeStorage!=='gpu'||nativePixelFormat!=='bgra'))
+  throw Error('Experimental frame handoff requires explicit native GPU BGRA measurement');
 const stockCaptureKeepaliveFlag=process.env.COVE_FPS_STOCK_CAPTURE_KEEPALIVE??'0';
 if(!['0','1'].includes(stockCaptureKeepaliveFlag))throw Error('Invalid stock capture keepalive diagnostic');
 const stockCaptureKeepalive=stockCaptureKeepaliveFlag==='1';
@@ -816,7 +816,7 @@ app.whenReady().then(async()=>{
     if(captureTraceEnabled&&(cases.length!==1||cases[0].source!=='native'||sampleSeconds>8||warmupMs>5000||process.env.COVE_FPS_RECOVERY_CHECKS==='1'))throw Error('Capture profiling requires one native case, at most 5s warmup/8s sample and no recovery injection');
     for(let index=0;index<2;index++){const offscreen=peerRenderMode==='offscreen'||(minimizeSender&&index===1&&minimizedViewerMode==='offscreen');
       const win=new BrowserWindow({...(visiblePresentation.enabled&&index===0?presentationGeometry.senderBounds:{width:1000,height:760}),show:minimizeSender&&index===0,webPreferences:{offscreen,backgroundThrottling:index===0&&senderBackgroundThrottling,
-      ...(nativeGpuEnabled?{preload:path.join(root,nativePaths.preload),additionalArguments:index===0?['--cove-native-gpu-capture=1',...(preloadFrameTiming?['--cove-native-cpu-frame-timing=1']:[]),...(nativeFrameSink==='canvas'?['--cove-native-frame-sink=canvas']:[])]:[],contextIsolation:true,sandbox:true,nodeIntegration:false}:{})}});if(offscreen)win.webContents.setFrameRate(144);win.webContents.setAudioMuted(true);peers.push(win);observePeerLifecycle(win,index);win.webContents.on('console-message',(_e,level,msg)=>{if(msg.includes('Error')||msg.includes('error'))console.log('[peer]',msg);});}
+      ...(nativeGpuEnabled?{preload:path.join(root,nativePaths.preload),additionalArguments:index===0?['--cove-native-gpu-capture=1',...(preloadFrameTiming?['--cove-native-cpu-frame-timing=1']:[]),...(nativeFrameSink!=='generator'?['--cove-native-frame-sink='+nativeFrameSink]:[])]:[],contextIsolation:true,sandbox:true,nodeIntegration:false}:{})}});if(offscreen)win.webContents.setFrameRate(144);win.webContents.setAudioMuted(true);peers.push(win);observePeerLifecycle(win,index);win.webContents.on('console-message',(_e,level,msg)=>{if(msg.includes('Error')||msg.includes('error'))console.log('[peer]',msg);});}
     if(nativeController){
       const ownsEvent=event=>!peers[0].isDestroyed()&&event.sender===peers[0].webContents&&event.senderFrame===peers[0].webContents.mainFrame;
       // Product preload also exposes native audio cleanup. This video-only
