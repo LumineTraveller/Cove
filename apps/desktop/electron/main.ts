@@ -18,6 +18,7 @@ import { AccountPasswordStore } from './account-password-store';
 import { screenCaptureFeaturePolicy } from './screen-capture-features';
 import { NativeScreenCaptureController } from './native-screen-capture';
 import { nativeScreenStartDiagnostic } from './native-screen-capture-diagnostics';
+import { createNativeScreenTimingLogger } from './native-screen-capture-timing';
 import { registerAccountPasswordIpc } from './account-password-ipc';
 import { ServerAccessStore } from './server-access-store';
 import { registerServerAccessIpc } from './server-access-ipc';
@@ -107,14 +108,25 @@ const devRendererURL = process.env.COVE_DEV_RENDERER_URL || 'http://127.0.0.1:55
 let updaterController: AutoUpdaterController | null = null;
 let integrityController: ReturnType<typeof createInstallationIntegrityController> | null = null;
 let mainWindow: BrowserWindow | null = null;
+const nativeTimingEnabled = nativeCaptureEnabled && process.env.COVE_NATIVE_GPU_CAPTURE_TIMING === '1';
+let nativeTimingLogger: ReturnType<typeof createNativeScreenTimingLogger> | undefined;
 const nativeScreenCapture = new NativeScreenCaptureController({
   enabled: nativeCaptureEnabled,
+  timing: nativeTimingEnabled,
+  onHelperTiming: nativeTimingEnabled ? (sample, captureNumber) => nativeTimingLogger?.helper(sample, captureNumber) : undefined,
   pixelFormat: process.env.COVE_NATIVE_GPU_CAPTURE_PIXEL_FORMAT === 'nv12' ? 'nv12' : 'bgra',
   storage: process.env.COVE_NATIVE_GPU_CAPTURE_CPU_FRAMES === '1' ? 'cpu' : 'gpu',
   completion: process.env.COVE_NATIVE_GPU_CAPTURE_COMPLETION === 'fence' ? 'fence' : undefined,
   helperPath: app.isPackaged ? path.join(process.resourcesPath, 'native-screen-capture-helper.exe') :
     path.join(__dirname, '../build/native-screen-capture-helper.exe'),
 });
+if (nativeTimingEnabled) {
+  nativeTimingLogger = createNativeScreenTimingLogger({
+    snapshot: () => nativeScreenCapture.snapshot(),
+    log: value => console.info('[native-screen-timing]', JSON.stringify({ ...value as object, observedAtEpochMs: Date.now() })),
+  });
+  app.once('before-quit', () => nativeTimingLogger?.stop());
+}
 const annotationOverlay = new AnnotationOverlayController((token, reason) => {
   mainWindow?.webContents.send('cove:annotation-overlay:failure', { token, reason });
 }, (token, input) => {
@@ -337,6 +349,7 @@ app.whenReady().then(() => {
     event.sender === mainWindow?.webContents && event.senderFrame === mainWindow?.webContents.mainFrame;
   ipcMain.handle('cove:native-screen:start', async (event, requestId, options) => {
     if (!integritySender(event)) return { ok: false, reason: 'untrusted_sender' };
+    nativeTimingLogger?.start();
     const result = await nativeScreenCapture.start(event.sender, requestId, options);
     try {
       console.info('[native-screen-start]', JSON.stringify(nativeScreenStartDiagnostic(result, nativeScreenCapture.snapshot())));

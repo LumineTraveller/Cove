@@ -6,6 +6,7 @@ import { sharedTexture, type WebContents, type WebFrameMain, type SharedTextureI
 import { createNativeCpuFrameDelivery, type NativeCpuFrameDelivery, type NativeCpuDeliveryScheduling } from './native-screen-cpu-delivery';
 import { createNativeCpuBufferPipeline, type NativeCpuBufferPipeline, type NativeCpuOwnership,
   type NativeCpuPipelineCounters } from './native-screen-cpu-buffer-pipeline';
+import { createNativeScreenHelperTimingCollector, type NativeScreenHelperTiming } from './native-screen-capture-timing';
 import {
   NATIVE_SCREEN_POOL_SIZE, NATIVE_SCREEN_START_TIMEOUT_MS, NATIVE_SCREEN_STOP_TIMEOUT_MS,
   validNativeScreenOptions, validNativeScreenRequestId,
@@ -112,7 +113,7 @@ export class NativeScreenCaptureController {
   private readonly cpuOwnershipCounters: NativeCpuPipelineCounters = { sourceCopied: 0, sourceDiscarded: 0,
     sourceReleased: 0, mainSent: 0, finalAck: 0, pendingSuperseded: 0, pendingExpired: 0 };
 
-  constructor(private readonly config: { enabled: boolean; helperPath: string; handles?: NativeScreenHandleBridge; timing?: boolean; pixelFormat?: 'bgra' | 'nv12'; storage?: 'gpu' | 'cpu'; completion?: 'query' | 'fence'; cpuDeliveryScheduling?: NativeCpuDeliveryScheduling; cpuOwnership?: NativeCpuOwnership }) {
+  constructor(private readonly config: { enabled: boolean; helperPath: string; handles?: NativeScreenHandleBridge; timing?: boolean; onHelperTiming?: (sample: Readonly<NativeScreenHelperTiming>, captureNumber: number) => void; pixelFormat?: 'bgra' | 'nv12'; storage?: 'gpu' | 'cpu'; completion?: 'query' | 'fence'; cpuDeliveryScheduling?: NativeCpuDeliveryScheduling; cpuOwnership?: NativeCpuOwnership }) {
     this.handles = config.handles;
   }
 
@@ -181,6 +182,19 @@ export class NativeScreenCaptureController {
       leases: new Map(), resolveStart, stopPromise, resolveStop, detach: () => {} };
     this.sessions.add(session);
     this.started++;
+    const captureNumber = this.started;
+    let timingCollector: ReturnType<typeof createNativeScreenHelperTimingCollector> | undefined;
+    if (this.config.timing && this.config.onHelperTiming) {
+      try {
+        timingCollector = createNativeScreenHelperTimingCollector(sample => {
+          try { void Promise.resolve(this.config.onHelperTiming?.(sample, captureNumber)).catch(() => {}); }
+          catch { /* Observer only. */ }
+        });
+      } catch { /* Keep the normal stderr-drain path if observation cannot start. */ }
+    }
+    const timingData = timingCollector ? (chunk: Buffer) => {
+      try { timingCollector?.write(chunk); } catch { /* Never turn diagnostic parsing into capture failure. */ }
+    } : undefined;
     const failed = () => { if (session.active) this.retire(session, 'helper_failed', true); };
     const closed = () => {
       if (session.active) this.retire(session, 'helper_failed', true);
@@ -195,8 +209,11 @@ export class NativeScreenCaptureController {
     child.stdout.on('end', failed);
     child.stdout.on('error', failed);
     child.stderr.on('error', failed);
-    // stderr is drained without retaining text or disclosing helper internals.
-    child.stderr.resume();
+    // Default: drain without retention. Opt-in: bounded fixed numeric summaries only.
+    if (timingData) {
+      try { child.stderr.on('data', timingData); }
+      catch { timingCollector?.close(); timingCollector = undefined; child.stderr.resume(); }
+    } else child.stderr.resume();
     child.stdin.on('error', failed);
     child.on('error', failed);
     child.once('close', closed);
@@ -206,6 +223,8 @@ export class NativeScreenCaptureController {
     session.detach = () => {
       child.stdout.off('data', data).off('end', failed).off('error', failed);
       child.stderr.off('error', failed);
+      if (timingData) child.stderr.off('data', timingData);
+      timingCollector?.close();
       child.stdin.off('error', failed);
       child.off('error', failed).off('close', closed);
       target.off('destroyed', destroy).off('render-process-gone', destroy).off('did-start-navigation', navigation);

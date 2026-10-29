@@ -46,7 +46,13 @@ export function DiagnosticsOverlayV2({
       ) : (
         <>
           <div>
-            <span>帧率</span>
+            <span
+              title={rtc.localScreen
+                ? '报告为轨道 getSettings().frameRate；源为 WebRTC 送入编码器前的帧统计，不代表底层 DXGI 取帧速度。'
+                : '接收和解码分别表示对应阶段的视频帧率。'}
+            >
+              {rtc.localScreen ? '报告/源/编码/发送' : '接收/解码'}
+            </span>
             <b>
               {rtc.localScreen
                 ? `${rtc.stats.trackFps ?? '—'} / ${rtc.stats.captureFps ?? '—'} / ${

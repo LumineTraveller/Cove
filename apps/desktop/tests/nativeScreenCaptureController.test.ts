@@ -6,6 +6,7 @@ import vm from 'node:vm';
 import path from 'node:path';
 import ts from 'typescript';
 import * as protocol from '../electron/native-screen-capture-protocol';
+import * as captureTiming from '../electron/native-screen-capture-timing';
 import type * as cpuDelivery from '../electron/native-screen-cpu-delivery';
 import type * as cpuPipeline from '../electron/native-screen-cpu-buffer-pipeline';
 import type { NativeScreenCaptureController } from '../electron/native-screen-capture';
@@ -28,9 +29,13 @@ const frame = (serial = 1, slot = 0) => ({ type: 'frame', serial, slot, width: 1
   timestamp: serial * 1000, handle: '0xabcd', refresh: false });
 const cpuReady = { ...ready, protocol: 4, pixelFormat: 'nv12', storage: 'cpu', colorSpace: 'bt709-limited' };
 const cpuFrame = (serial = 1, slot = 0) => ({ ...frame(serial, slot), pixelFormat: 'nv12', storage: 'cpu', byteLength: 1920 * 1080 * 3 / 2 });
+const helperTimingLine = () => Buffer.from('COVE_NATIVE_CAPTURE_TIMING ' + JSON.stringify({
+  schemaVersion: 1, elapsedUs: 1_000_000, periodUs: 8333, newFrames: 115,
+  stages: { gpuWait: { count: 115, totalUs: 1000, maxUs: 100 } }, secret: 'private',
+}) + '\n');
 const flush = async () => { for (let n = 0; n < 6; n++) await Promise.resolve(); };
 
-function harness(overrides: { enabled?: boolean; platform?: string; electron?: string; missingBridge?: boolean; timing?: boolean; pixelFormat?: 'bgra' | 'nv12'; storage?: 'gpu' | 'cpu'; completion?: 'query' | 'fence'; cpuDeliveryScheduling?: cpuDelivery.NativeCpuDeliveryScheduling; cpuOwnership?: cpuPipeline.NativeCpuOwnership; supportsCpuFrames?: boolean; supportsCachedCpuFrames?: boolean; supportsCachedCpuFramesInto?: boolean; missingReadInto?: boolean } = {}) {
+function harness(overrides: { enabled?: boolean; platform?: string; electron?: string; missingBridge?: boolean; timing?: boolean; onHelperTiming?: (sample: Readonly<captureTiming.NativeScreenHelperTiming>, captureNumber: number) => void; pixelFormat?: 'bgra' | 'nv12'; storage?: 'gpu' | 'cpu'; completion?: 'query' | 'fence'; cpuDeliveryScheduling?: cpuDelivery.NativeCpuDeliveryScheduling; cpuOwnership?: cpuPipeline.NativeCpuOwnership; supportsCpuFrames?: boolean; supportsCachedCpuFrames?: boolean; supportsCachedCpuFramesInto?: boolean; missingReadInto?: boolean } = {}) {
   let now = 100_000, uuid = 0, importError = false, sendError = false, sendThrows = false, sendFrameError = false;
   let duplicateError = false, closeError = false, openError = false;
   let cpuReadError = false;
@@ -148,12 +153,13 @@ function harness(overrides: { enabled?: boolean; platform?: string; electron?: s
         return handles;
       }
       if (name === './native-screen-capture-protocol') return protocol;
+      if (name === './native-screen-capture-timing') return captureTiming;
       if (name === './native-screen-cpu-delivery') return cpuModule.exports;
       if (name === './native-screen-cpu-buffer-pipeline') return pipelineModule.exports;
       throw Error(`Unexpected import ${name}`);
     },
   });
-  const config = { enabled: overrides.enabled ?? true, helperPath: 'owned-helper.exe', timing: overrides.timing, pixelFormat: overrides.pixelFormat, storage: overrides.storage, completion: overrides.completion, cpuDeliveryScheduling: overrides.cpuDeliveryScheduling, cpuOwnership: overrides.cpuOwnership };
+  const config = { enabled: overrides.enabled ?? true, helperPath: 'owned-helper.exe', timing: overrides.timing, onHelperTiming: overrides.onHelperTiming, pixelFormat: overrides.pixelFormat, storage: overrides.storage, completion: overrides.completion, cpuDeliveryScheduling: overrides.cpuDeliveryScheduling, cpuOwnership: overrides.cpuOwnership };
   const controller = new module.exports.NativeScreenCaptureController(config);
   const choose = (patch: Partial<protocol.NativeScreenSourceSelection> = {}) => controller.noteStockSelection({ sourceId: 'screen:0:0',
     displayId: '123', primaryDisplayId: '123', displayCount: 1, sourceWidth: 2560, sourceHeight: 1440, selectedAt: now, ...patch });
@@ -167,6 +173,48 @@ function harness(overrides: { enabled?: boolean; platform?: string; electron?: s
     failCpuRead() { cpuReadError = true; },
     failTargetSend() { sendFrameError = true; } };
 }
+
+test('helper timing stays on the default drain path unless explicitly enabled', async () => {
+  let samples = 0;
+  const f = harness({ onHelperTiming: () => { samples++; } });
+  const pending = f.start(); f.children[0].emitMessage(ready); assert.equal((await pending).ok, true);
+  assert.equal(f.children[0].stderr.listenerCount('data'), 0);
+  f.children[0].stderr.emit('data', helperTimingLine());
+  assert.equal(samples, 0);
+  assert.equal(f.controller.snapshot().timing, null);
+  const stopping = f.controller.stop(f.target as any, 'request_01'); f.children[0].close(); await stopping;
+});
+
+test('opt-in helper timing forwards only sanitized aggregates and removes its listener on close', async () => {
+  const samples: { sample: Readonly<captureTiming.NativeScreenHelperTiming>; captureNumber: number }[] = [];
+  const f = harness({ timing: true, onHelperTiming: (sample, captureNumber) => samples.push({ sample, captureNumber }) });
+  const pending = f.start(); f.children[0].emitMessage(ready); assert.equal((await pending).ok, true);
+  assert.equal(f.children[0].stderr.listenerCount('data'), 1);
+  f.children[0].stderr.emit('data', helperTimingLine());
+  assert.equal(samples.length, 1);
+  assert.equal(samples[0].captureNumber, 1);
+  assert.equal(samples[0].sample.counts.newFrames, 115);
+  assert.equal(JSON.stringify(samples).includes('private'), false);
+  const stopping = f.controller.stop(f.target as any, 'request_01'); f.children[0].close(); await stopping;
+  assert.equal(f.children[0].stderr.listenerCount('data'), 0);
+  f.children[0].stderr.emit('data', helperTimingLine());
+  assert.equal(samples.length, 1);
+});
+
+test('malformed helper observations and observer exceptions cannot retire active capture', async () => {
+  let calls = 0;
+  const f = harness({ timing: true, onHelperTiming: () => { calls++; throw Error('private'); } });
+  const pending = f.start(); f.children[0].emitMessage(ready); assert.equal((await pending).ok, true);
+  assert.doesNotThrow(() => {
+    f.children[0].stderr.emit('data', Buffer.alloc(65_537, 120));
+    f.children[0].stderr.emit('data', Buffer.concat([Buffer.from('discarded tail\n'), helperTimingLine(), helperTimingLine()]));
+  });
+  assert.equal(calls, 2);
+  assert.equal(f.controller.snapshot().activeSessions, 1);
+  assert.equal(f.controller.snapshot().disabled, false);
+  assert.equal(f.children[0].killed, false);
+  const stopping = f.controller.stop(f.target as any, 'request_01'); f.children[0].close(); await stopping;
+});
 
 test('disabled, unsupported platform/version, malformed inputs and absent selection stay on stock', async () => {
   for (const config of [{ enabled: false }, { platform: 'linux' }, { electron: '43.0.0' }, { missingBridge: true }]) {
