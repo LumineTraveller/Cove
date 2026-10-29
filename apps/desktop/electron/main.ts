@@ -17,6 +17,7 @@ import path from "path";
 import { AccountPasswordStore } from './account-password-store';
 import { screenCaptureFeaturePolicy } from './screen-capture-features';
 import { NativeScreenCaptureController } from './native-screen-capture';
+import { nativeScreenStartDiagnostic } from './native-screen-capture-diagnostics';
 import { registerAccountPasswordIpc } from './account-password-ipc';
 import { ServerAccessStore } from './server-access-store';
 import { registerServerAccessIpc } from './server-access-ipc';
@@ -334,9 +335,14 @@ function createWindow() {
 app.whenReady().then(() => {
   const integritySender = (event: Electron.IpcMainInvokeEvent) =>
     event.sender === mainWindow?.webContents && event.senderFrame === mainWindow?.webContents.mainFrame;
-  ipcMain.handle('cove:native-screen:start', (event, requestId, options) => integritySender(event)
-    ? nativeScreenCapture.start(event.sender, requestId, options)
-    : { ok: false, reason: 'untrusted_sender' });
+  ipcMain.handle('cove:native-screen:start', async (event, requestId, options) => {
+    if (!integritySender(event)) return { ok: false, reason: 'untrusted_sender' };
+    const result = await nativeScreenCapture.start(event.sender, requestId, options);
+    try {
+      console.info('[native-screen-start]', JSON.stringify(nativeScreenStartDiagnostic(result, nativeScreenCapture.snapshot())));
+    } catch { /* Observability must never change capture or fallback behavior. */ }
+    return result;
+  });
   ipcMain.handle('cove:native-screen:stop', (event, requestId, fault) => integritySender(event)
     ? nativeScreenCapture.stop(event.sender, requestId, fault) : false);
   ipcMain.on('cove:native-screen:cpu-frame-done', (event, metadata) => {

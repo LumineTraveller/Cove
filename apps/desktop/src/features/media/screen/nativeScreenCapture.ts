@@ -3,6 +3,7 @@ import type {
   NativeScreenOptions,
   NativeScreenStartResult,
 } from '../../../../electron/native-screen-capture-protocol';
+import { nativeScreenFailureReason, type NativeScreenFailureReason } from '../../../../electron/native-screen-capture-diagnostics';
 import { createNativeFrameWriteQueue } from './nativeFrameWriteQueue';
 import { createNativeCanvasFrameSink, getNativeCanvasFrameFailureCode, type NativeCanvasFrameSinkSnapshot } from './nativeCanvasFrameSink';
 
@@ -74,6 +75,8 @@ export interface NativeScreenCaptureAttempt {
   helperResponseMs: number | null;
   helperResponseDurationMs: number | null;
   helperResponseOk: boolean | null;
+  startFailureReason: NativeScreenFailureReason | null;
+  backendEndReason: NativeScreenFailureReason | null;
   firstFrameMs: number | null;
   firstWriteMs: number | null;
   settingsReadyMs: number | null;
@@ -115,6 +118,7 @@ export async function tryNativeScreenCapture(
   const attempt: CaptureAttemptState = {
     startedAt: performance.now(), phase: 'starting', bridgeStartMs: null,
     helperResponseMs: null, helperResponseDurationMs: null, helperResponseOk: null,
+    startFailureReason: null, backendEndReason: null,
     firstFrameMs: null, firstWriteMs: null, settingsReadyMs: null, committedMs: null,
     stoppedMs: null, stopReason: null,
   };
@@ -383,7 +387,10 @@ export async function tryNativeScreenCapture(
     track.addEventListener('ended', onTrackEnded, { once: true });
     unsubscribeFrame = bridge.onFrame(requestId, onFrame);
     if (stopped) unsubscribeFrame();
-    unsubscribeEnded = bridge.onEnded(requestId, () => stop(true, 'native_ended'));
+    unsubscribeEnded = bridge.onEnded(requestId, (reason) => {
+      if (!stopped) attempt.backendEndReason = nativeScreenFailureReason(reason);
+      stop(true, 'native_ended');
+    });
     if (stopped) unsubscribeEnded();
     if (stopped || !current()) { stop(false, currentStopReason); return outcome; }
     startIssued = true;
@@ -393,6 +400,7 @@ export async function tryNativeScreenCapture(
       attempt.helperResponseMs = attemptElapsed();
       attempt.helperResponseDurationMs = Math.max(0, attempt.helperResponseMs - attempt.bridgeStartMs!);
       attempt.helperResponseOk = result.ok === true;
+      if (!result.ok) attempt.startFailureReason = nativeScreenFailureReason(result.reason);
       // A helper may finish starting after the cancellation IPC. Retire that late session too.
       if (stopped) { if (result.ok) stopBridge(); return; }
       if (!current()) { stop(false, currentStopReason); return; }

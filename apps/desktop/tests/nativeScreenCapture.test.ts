@@ -759,10 +759,12 @@ test('startup attempt snapshots retain stage times without exposing identifiers 
   const starting = getLastNativeScreenCaptureAttempt()!;
   assert.equal(starting.phase, 'starting'); assert.equal(starting.bridgeStartMs, 0);
   assert.equal(starting.helperResponseMs, null); assert.equal(starting.stopReason, null);
+  assert.equal(starting.startFailureReason, null); assert.equal(starting.backendEndReason, null);
   assert.ok(Object.isFrozen(starting));
   assert.throws(() => Object.assign(starting, { phase: 'stopped' }), TypeError);
   assert.deepEqual(Object.keys(starting).sort(), [
     'phase', 'elapsedMs', 'bridgeStartMs', 'helperResponseMs', 'helperResponseDurationMs', 'helperResponseOk',
+    'startFailureReason', 'backendEndReason',
     'firstFrameMs', 'firstWriteMs', 'settingsReadyMs', 'committedMs', 'stoppedMs', 'stopReason',
   ].sort(), 'only fixed stage metadata is exposed');
   now = 40; start.resolve({ ok: true, sessionId: 'session-1', width: 1920, height: 1080 });
@@ -817,10 +819,97 @@ test('late responses, frames and ended callbacks from a predecessor cannot overw
   assert.equal(current.phase, 'starting'); assert.equal(current.elapsedMs, 5);
   assert.equal(current.helperResponseMs, null); assert.equal(current.firstFrameMs, null);
   assert.equal(current.stopReason, null); assert.equal(oldSnapshot.helperResponseMs, null);
+  assert.equal(current.startFailureReason, null); assert.equal(current.backendEndReason, null);
   now = 1_600; newStart.resolve({ ok: true, sessionId: 'session-1', width: 1920, height: 1080 });
   await f.flush(); await f.frame();
   const candidate = await newPending; assert.ok(candidate);
   assert.equal(getLastNativeScreenCaptureAttempt()?.helperResponseMs, 95);
   assert.equal(getLastNativeScreenCaptureAttempt()?.phase, 'settings-ready');
+  candidate.stop();
+});
+
+test('a rejected native start retains only the fixed failure reason and preserves stock', async context => {
+  const f = fixture(context);
+  f.setResult({ ok: false, reason: 'source_ineligible' });
+  assert.equal(await tryNativeScreenCapture(f.stream, f.options), null);
+  const attempt = getLastNativeScreenCaptureAttempt()!;
+  assert.equal(attempt.stopReason, 'start_rejected');
+  assert.equal(attempt.helperResponseOk, false);
+  assert.equal(attempt.startFailureReason, 'source_ineligible');
+  assert.equal(attempt.backendEndReason, null);
+  assert.equal(f.stock.stops, 0);
+  assert.equal(f.writes.length, 0);
+  assert.deepEqual(f.stopFaults, [undefined]);
+});
+
+test('unknown start rejection text is not retained in diagnostic snapshots', async context => {
+  const f = fixture(context);
+  const privateText = 'driver detail /private/source?token=secret';
+  f.setResult({ ok: false, reason: privateText });
+  assert.equal(await tryNativeScreenCapture(f.stream, f.options), null);
+  const attempt = getLastNativeScreenCaptureAttempt()!;
+  assert.equal(attempt.startFailureReason, 'unknown_failure');
+  assert.equal(attempt.stopReason, 'start_rejected');
+  assert.equal(JSON.stringify(attempt).includes(privateText), false);
+  assert.equal(JSON.stringify(attempt).includes('secret'), false);
+});
+
+test('backend termination retains a fixed reason without changing committed failure cleanup', async context => {
+  const f = fixture(context);
+  const { candidate } = await f.ready(); candidate.commit();
+  let ended = 0;
+  candidate.stream.getVideoTracks()[0].addEventListener('ended', () => ended++);
+  const onEnded = f.endedCallback!;
+  onEnded('capture_stalled');
+  const attempt = getLastNativeScreenCaptureAttempt()!;
+  assert.equal(attempt.stopReason, 'native_ended');
+  assert.equal(attempt.startFailureReason, null);
+  assert.equal(attempt.backendEndReason, 'capture_stalled');
+  assert.equal(ended, 1);
+  assert.deepEqual(f.stopFaults, ['renderer_failed']);
+  onEnded('helper_failed'); candidate.stop();
+  assert.deepEqual(getLastNativeScreenCaptureAttempt(), attempt, 'late backend events cannot replace the terminal reason');
+  assert.equal(ended, 1);
+  assert.deepEqual(f.stopFaults, ['renderer_failed']);
+});
+
+test('unknown backend termination text is reduced to the fixed fallback code', async context => {
+  const f = fixture(context);
+  const { candidate } = await f.ready(); candidate.commit();
+  const privateText = 'capture failed at /private/source?token=secret';
+  f.endedCallback!(privateText);
+  const attempt = getLastNativeScreenCaptureAttempt()!;
+  assert.equal(attempt.backendEndReason, 'unknown_failure');
+  assert.equal(attempt.stopReason, 'native_ended');
+  assert.equal(JSON.stringify(attempt).includes('secret'), false);
+  assert.equal(f.stock.stops, 0);
+  assert.deepEqual(f.stopFaults, ['renderer_failed']);
+});
+
+test('a successor attempt is not polluted by late predecessor rejection or backend reason', async context => {
+  replaceGlobal(context, 'performance', { now: () => 0 });
+  const f = fixture(context);
+  const oldStart = deferred<NativeScreenStartResult>(); f.setStart(() => oldStart.promise);
+  const oldController = new AbortController();
+  const oldPending = tryNativeScreenCapture(f.stream, { ...f.options, signal: oldController.signal });
+  const oldEnded = f.endedCallback!;
+  oldController.abort();
+  assert.equal(await oldPending, null);
+  const predecessor = getLastNativeScreenCaptureAttempt()!;
+  assert.equal(predecessor.startFailureReason, null);
+  assert.equal(predecessor.backendEndReason, null);
+
+  f.setStart(async () => ({ ok: true, sessionId: 'session-1', width: 1920, height: 1080 }));
+  const { candidate } = await f.ready();
+  const successor = getLastNativeScreenCaptureAttempt()!;
+  oldStart.resolve({ ok: false, reason: 'helper_unavailable' });
+  oldEnded('capture_stalled');
+  await f.flush();
+  assert.deepEqual(getLastNativeScreenCaptureAttempt(), successor);
+  assert.equal(predecessor.startFailureReason, null, 'a detached earlier snapshot never changes');
+  assert.equal(predecessor.backendEndReason, null);
+  assert.equal(successor.startFailureReason, null);
+  assert.equal(successor.backendEndReason, null);
+  assert.equal(f.stock.stops, 0);
   candidate.stop();
 });

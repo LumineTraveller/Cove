@@ -16,7 +16,7 @@ import {
   videoCounterSample,
 } from './mediaDiagnostics';
 import { SCREEN_MAX_BITRATE_BPS, type ScreenEncodingPlan } from '../screen/screenCapture';
-import { getNativeScreenCaptureDiagnostics } from '../screen/nativeScreenCapture';
+import { getNativeScreenCaptureDiagnostics, getLastNativeScreenCaptureAttempt } from '../screen/nativeScreenCapture';
 
 import {
   Transport,
@@ -312,6 +312,7 @@ export function useMediaDiagnostics(deps: useMediaDiagnosticsDependencies) {
         stats: next,
         trackSettings,
         captureProvider: videoTrack ? getNativeScreenCaptureDiagnostics(videoTrack) : null,
+        lastNativeAttempt: sendingScreen ? getLastNativeScreenCaptureAttempt() : null,
         rawVideoCounters: diagnosticVideoCounters(rtpStat, mediaSource),
         encodingPlan: deps.screenEncodingPlan,
         contentHint: videoTrack?.contentHint ?? null,
@@ -367,6 +368,7 @@ export function useMediaDiagnostics(deps: useMediaDiagnosticsDependencies) {
         encodingPlan: deps.screenEncodingPlan,
         trackSettings: diagnosticTrackSettings(producer?.track?.getSettings()),
         captureProvider: producer?.track ? getNativeScreenCaptureDiagnostics(producer.track) : null,
+        lastNativeAttempt: producer ? getLastNativeScreenCaptureAttempt() : null,
         senderParameters: diagnosticSenderParameters(producer?.rtpSender?.getParameters()),
       },
       samples: deps.diagnosticHistory.current,
