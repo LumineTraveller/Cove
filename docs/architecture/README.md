@@ -96,3 +96,10 @@ $env:COVE_TEST_NODE = (Get-Command node).Source
 架构门禁核对 HTTP/Socket 入口清单、依赖边界、原生源码指纹、外部依赖锁定版本和更新清单兼容副本。`tooling/verify-original.cjs` 是本次交付用只读检查，不应作为永久 CI 门禁阻止用户继续开发原目录。
 
 `tooling/extract-*`、`reorganize`、`repair-*` 等是本次迁移记录，不是日常命令，其中部分不是幂等脚本，禁止在完成的目录上盲目重跑。
+
+
+## Audio meter UI and full-room throughput
+
+See [audio meter ownership and leaf subscriptions](audio-meter-ui.md) for the
+rendering/resource boundary, and [measured full-room qualification](../diagnostics/native-audio-ui-throughput-20261029.md)
+for active-audio comparisons, stage-specific FPS, resource cleanup and limits.

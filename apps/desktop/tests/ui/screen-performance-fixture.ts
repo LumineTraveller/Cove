@@ -35,6 +35,71 @@ const VIDEO_FIELDS = [
   'contentType', 'scalabilityMode',
 ] as const;
 
+const NETWORK_STATS_LIMIT = 8;
+const CANDIDATE_PAIR_FIELDS = [
+  'currentRoundTripTime', 'totalRoundTripTime', 'responsesReceived',
+  'availableOutgoingBitrate', 'availableIncomingBitrate', 'bytesSent', 'bytesReceived',
+  'packetsSent', 'packetsReceived', 'requestsSent', 'responsesSent',
+  'packetsDiscardedOnSend', 'bytesDiscardedOnSend',
+] as const;
+const REMOTE_INBOUND_FIELDS = [
+  'roundTripTime', 'totalRoundTripTime', 'roundTripTimeMeasurements',
+  'fractionLost', 'packetsReceived', 'jitter', 'reportsReceived',
+] as const;
+
+/**
+ * Reuses the already collected report. No candidate/transport/track identifiers,
+ * addresses, URLs or raw stats leave this helper. RTT is in seconds and is not
+ * an end-to-end capture/presentation delay. Arrays are capped independently.
+ */
+export function screenPerformanceNetworkSnapshot(report: RTCStatsReport) {
+  const selectedIds = new Set<string>();
+  for (const stat of report.values()) {
+    if (stat.type === 'transport' && typeof stat.selectedCandidatePairId === 'string' && selectedIds.size < NETWORK_STATS_LIMIT)
+      selectedIds.add(stat.selectedCandidatePairId);
+  }
+  const candidatePairs: SafeStat[] = [], remoteInboundVideo: SafeStat[] = [];
+  let candidatePairCount = 0, remoteInboundVideoCount = 0;
+  const copyNumbers = (stat: Record<string, unknown>, fields: readonly string[]) => {
+    const result: SafeStat = {};
+    for (const field of fields) {
+      const value = stat[field];
+      if (typeof value === 'number' && Number.isFinite(value) && value >= 0) result[field] = value;
+    }
+    return result;
+  };
+  // Prefer the selected pair so a full, changing candidate list cannot hide it.
+  // Selection identifiers are used only to correlate this one in-memory report.
+  for (const selected of [true, false]) for (const stat of report.values()) {
+    if (stat.type !== 'candidate-pair') continue;
+    const isSelected = selectedIds.has(stat.id) || stat.selected === true;
+    if (isSelected !== selected) continue;
+    candidatePairCount++;
+    if (candidatePairs.length >= NETWORK_STATS_LIMIT) continue;
+    const pair: SafeStat = { selected: isSelected, ...copyNumbers(stat, CANDIDATE_PAIR_FIELDS) };
+    const candidate = typeof stat.localCandidateId === 'string' ? report.get(stat.localCandidateId) : undefined;
+    if (candidate?.type === 'local-candidate' && ['udp', 'tcp'].includes(candidate.protocol)) pair.protocol = candidate.protocol;
+    if (typeof stat.nominated === 'boolean') pair.nominated = stat.nominated;
+    if (['frozen', 'waiting', 'in-progress', 'failed', 'succeeded'].includes(stat.state)) pair.state = stat.state;
+    candidatePairs.push(pair);
+  }
+  for (const stat of report.values()) {
+    if (stat.type !== 'remote-inbound-rtp') continue;
+    const local = typeof stat.localId === 'string' ? report.get(stat.localId) : undefined;
+    if ((stat.kind ?? stat.mediaType ?? (local?.type === 'outbound-rtp' ? local.kind ?? local.mediaType : null)) !== 'video') continue;
+    remoteInboundVideoCount++;
+    if (remoteInboundVideo.length >= NETWORK_STATS_LIMIT) continue;
+    const remote = copyNumbers(stat, REMOTE_INBOUND_FIELDS);
+    // Duplicate/reordered RTP can produce a negative cumulative loss estimate.
+    if (typeof stat.packetsLost === 'number' && Number.isSafeInteger(stat.packetsLost)) remote.packetsLost = stat.packetsLost;
+    remoteInboundVideo.push(remote);
+  }
+  return { candidatePairs, remoteInboundVideo, candidatePairCount, remoteInboundVideoCount,
+    limitPerType: NETWORK_STATS_LIMIT,
+    candidatePairsTruncated: candidatePairCount > candidatePairs.length,
+    remoteInboundVideoTruncated: remoteInboundVideoCount > remoteInboundVideo.length };
+}
+
 function positiveParameter(params: URLSearchParams, name: string, fallback: number, maximum: number) {
   const value = Number(params.get(name));
   return Number.isFinite(value) && value > 0 && value <= maximum ? value : fallback;
@@ -179,11 +244,26 @@ export function createGeneratedNv12Painter(width: number, height: number) {
   };
 }
 
+// Test-only finite AudioParam envelope. No timer, extra track or audio context.
+export function screenPerformanceSyntheticVoice(params: URLSearchParams) {
+  const mode = params.get('fullVoice') ?? 'muted';
+  if (!['muted', 'synthetic-varying'].includes(mode)) throw new Error('Invalid fixture voice mode');
+  if (mode === 'synthetic-varying' && (params.get('fullProductUi') !== '1' || params.get('performance') !== '1'))
+    throw new Error('Varying voice requires the isolated full App fixture');
+  const varying = mode === 'synthetic-varying';
+  const gainMin = varying ? 0.005 : 0.03, gainMax = varying ? 0.05 : 0.03;
+  const curveSeconds = varying ? 120 : 0;
+  const curve = varying ? Float32Array.from({ length: 2401 }, (_, index) =>
+    gainMin + (gainMax - gainMin) * (0.5 - 0.5 * Math.cos(2 * Math.PI * index / 40))) : null;
+  return { mode, gainMin, gainMax, curveSeconds, curve };
+}
+
 export function installScreenPerformanceFixture(
   params: URLSearchParams,
   peerConnections: Set<RTCPeerConnection>,
 ) {
   if (params.get('performance') !== '1') return;
+  const syntheticVoice = screenPerformanceSyntheticVoice(params);
   const sourceMode = params.get('source') === 'native' ? 'native' : 'generated';
   const localPreviewRequested = screenPerformanceLocalPreviewEnabled(params);
   const localPreviewBinding = createScreenPerformanceLocalPreviewBinding();
@@ -466,18 +546,21 @@ export function installScreenPerformanceFixture(
   };
   const originalUserMedia = navigator.mediaDevices.getUserMedia;
   const originalEnumeration = navigator.mediaDevices.enumerateDevices;
-  const testAudio: Array<{ context: AudioContext; oscillator: OscillatorNode; track: MediaStreamTrack }> = [];
+  const testAudio: Array<{ context: AudioContext; oscillator: OscillatorNode; gain: GainNode;
+    startedAtContextTime: number; track: MediaStreamTrack }> = [];
   // A global Chromium fake-device flag would also fake display capture. Keep
   // native screen capture real while never opening the physical microphone.
   const syntheticUserMedia: typeof navigator.mediaDevices.getUserMedia = async () => {
     const context = new AudioContext({ sinkId: { type: 'none' } } as AudioContextOptions);
     const oscillator = context.createOscillator();
     const gain = context.createGain(); gain.gain.value = 0.03;
+    const startedAtContextTime = context.currentTime;
+    if (syntheticVoice.curve) gain.gain.setValueCurveAtTime(syntheticVoice.curve, startedAtContextTime, syntheticVoice.curveSeconds);
     const destination = context.createMediaStreamDestination();
     oscillator.connect(gain).connect(destination); oscillator.start();
     await context.resume();
     const track = destination.stream.getAudioTracks()[0];
-    testAudio.push({ context, oscillator, track });
+    testAudio.push({ context, oscillator, gain, startedAtContextTime, track });
     return destination.stream;
   };
   navigator.mediaDevices.getUserMedia = syntheticUserMedia;
@@ -777,7 +860,8 @@ export function installScreenPerformanceFixture(
           isLiveCaptureSource: track === liveSource?.track, contentHint: track.contentHint,
           degradationPreference, encodings };
       });
-      return { index, connectionState: connection.connectionState, stats, senders };
+      return { index, connectionState: connection.connectionState, stats, senders,
+        network: screenPerformanceNetworkSnapshot(report) };
     }));
     // Bind recovery checks to the receiver currently feeding the video element.
     // Full-PC stats can retain closed consumers' cumulative inbound counters.
@@ -827,6 +911,12 @@ export function installScreenPerformanceFixture(
       ? await readOwnedPatternSnapshot(video, patternReadbackMode, patternRect) : null;
     return {
       timestamp: performance.now(), configuration, supportsGenerator,
+      syntheticAudio: { provider: 'screen-performance-fixture', mode: syntheticVoice.mode,
+        gainMin: syntheticVoice.gainMin, gainMax: syntheticVoice.gainMax, curveSeconds: syntheticVoice.curveSeconds,
+        physicalMicrophone: false, humanVoice: false, speakerOutput: false,
+        sources: testAudio.map(({ context, gain, startedAtContextTime, track }) => ({
+          contextState: context.state, trackState: track.readyState, trackEnabled: track.enabled,
+          gainValue: gain.gain.value, elapsedSeconds: context.currentTime - startedAtContextTime })) },
       sourceKind: liveSource?.kind ?? null,
       nativeCaptureCounters: liveSource ? nativeScreenCaptureDiagnostics.getNativeScreenCaptureDiagnostics(liveSource.track) : null,
       localPreview: screenPerformanceLocalPreviewSnapshot(localPreviewRequested,

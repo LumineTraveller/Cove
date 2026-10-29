@@ -1,0 +1,10 @@
+<!doctype html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><base href="/"><title>Cove isolated full App</title></head><body><div id="root"></div><script type="module">
+window.covePerformanceProductStylesState='pending';
+// Explicit location.href ignores the product asset base and query parameters.
+import(/* @vite-ignore */ new URL('./renderer.tsx',location.href).href).catch(()=>{
+  window.covePerformanceProductStylesState='failed';
+  window.coveFullProductStartup={phase:'renderer-module',failed:true};
+  console.error('[full-product-startup:error] renderer-module');
+});
+</script></body></html>
