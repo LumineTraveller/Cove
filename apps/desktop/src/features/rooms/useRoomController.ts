@@ -691,12 +691,12 @@ export function useRoomController({ profile, accountId, serverURL, sessionReady,
       ),
     [roomMembers, rtc.voiceMembers, rtc.localSocketId],
   );
-  const sendMessage = () => {
+  const sendMessage = useCallback(() => {
     if (!input.trim() || !roomId) return;
     socket.emit('message:send', { roomId, content: input.trim() });
     setInput('');
-  };
-  const sendImages = async (files: FileList | File[] | null) => {
+  }, [input, roomId]);
+  const sendImages = useCallback(async (files: FileList | File[] | null) => {
     const images = files ? collectChatImageFiles(files) : [];
     if (!images.length || !roomId || imageBusy.current) return;
     if (images.length > CHAT_IMAGE_MAX_BATCH) {
@@ -732,7 +732,7 @@ export function useRoomController({ profile, accountId, serverURL, sessionReady,
     } finally {
       imageBusy.current = false;
     }
-  };
+  }, [roomId, serverURL]);
   const closeAudioModal = () => {
     setShowAudioModal(false);
   };

@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef } from 'react';
+import { useCallback, useLayoutEffect, useRef } from 'react';
 import { useRoomController, type ChatRoomProps } from './useRoomController';
 import { useSharedChatLayout } from './useSharedChatLayout';
 
@@ -183,6 +183,14 @@ export default function ChatRoomV2({
     onThemeChange,
   });
 
+  const getMemberAvatar = useCallback(
+    (userId?: string | null, username?: string) =>
+      roomMembers.find((member) =>
+        userId ? member.userId === userId : member.username === username,
+      )?.avatarUrl,
+    [roomMembers],
+  );
+  const dismissImageError = useCallback(() => setImageError(null), [setImageError]);
   const chatSlotRef = useRef<HTMLDivElement>(null);
   const chatToggleRef = useRef<HTMLButtonElement>(null);
   const shellRef = useRef<HTMLDivElement>(null);
@@ -627,17 +635,13 @@ export default function ChatRoomV2({
             roomForeground={foreground === 'light' ? '#fff' : '#15191f'}
             currentUserId={roomMembers.find((member) => member.socketId === socket.id)?.userId}
             profileRemarks={profileRemarks}
-            getMemberAvatar={(userId, username) =>
-              roomMembers.find((member) =>
-                userId ? member.userId === userId : member.username === username,
-              )?.avatarUrl
-            }
+            getMemberAvatar={getMemberAvatar}
             input={input}
             setInput={setInput}
             onSend={sendMessage}
             onSendImages={sendImages}
             imageError={imageError}
-            onDismissImageError={() => setImageError(null)}
+            onDismissImageError={dismissImageError}
             onImageError={setImageError}
             compact={shareLayout}
             unread={unread}

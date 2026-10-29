@@ -13,6 +13,7 @@ import {
 } from '@phosphor-icons/react';
 import {
   Fragment,
+  memo,
   type MouseEvent,
   type PointerEvent as ReactPointerEvent,
   useCallback,
@@ -33,7 +34,7 @@ import {
 import { CHAT_IMAGE_MAX_BATCH, collectChatImageFiles, validateChatImageFile } from './chatImages';
 import { parseChatText } from './chatLinks';
 
-export function ChatPanelV2({
+export const ChatPanelV2 = memo(function ChatPanelV2({
   messages,
   profile,
   serverURL,
@@ -775,7 +776,7 @@ export function ChatPanelV2({
         )}
     </aside>
   );
-}
+});
 
 export function ChatImagePreview({
   src,
