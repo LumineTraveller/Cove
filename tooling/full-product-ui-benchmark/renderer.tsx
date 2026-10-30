@@ -8,6 +8,7 @@ import {createRtcMeterObservation} from './rtc-meter-observation';
 import {snapshotDomMeters} from './dom-meter-observation';
 import {installMeterTransitionDiagnostic} from './meter-transition-diagnostic';
 import {createMotionObservation} from './motion-observation';
+import {installFlatDiagnostics} from './flat-diagnostics';
 
 const targetWindow=window as any;
 targetWindow.covePerformanceProductStylesState='pending';
@@ -33,6 +34,11 @@ const motionFlag=params.get('fullMotionSwitch')??'0';
 if(!['0','1'].includes(motionFlag)||(motionFlag==='1'&&(!fullStats||voiceMode!=='muted')))
   throw Error('Motion/switch requires actual product stats and muted synthetic voice');
 const motionObservation=createMotionObservation(motionFlag==='1');
+const flatDiagnosticsFlag=params.get('fullFlatDiagnostics')??'0';
+if(!['0','1'].includes(flatDiagnosticsFlag)||(flatDiagnosticsFlag==='1'&&
+    (motionFlag!=='1'||!fullStats||voiceMode!=='muted'||meterDiagnosticFlag!=='0')))
+  throw Error('Invalid isolated flat diagnostics control');
+const flatDiagnostics=installFlatDiagnostics(flatDiagnosticsFlag==='1');
 targetWindow.coveFullProductMeterTransitionSample=(index:number)=>meterDiagnostic.setSampleIndex(index);
 // Each BrowserWindow has its own nonpersistent Electron partition. The fixture
 // account is seeded before the App/socket module can select a server or identity.
@@ -128,6 +134,7 @@ function snapshot(){return {ready:targetWindow.coveMediaQA.ready,controllerCommi
   ...rtcMeterObservation.snapshot(),
   verticalMeterDom:snapshotDomMeters(),
   meterTransitionDiagnostic:meterDiagnostic.snapshot(),
+  flatDiagnostics:flatDiagnostics.snapshot(),
   motionStability:motionObservation.snapshot(latest?.rtc),
   controlledInput:{...controlledInput},selfMuted:latest?.rtc?.isMuted===true,inVoice:latest?.rtc?.inVoice===true,statsEnabled:latest?.rtc?.statsEnabled===true,
   chatAriaHidden:document.querySelector('.chat-slot')?.getAttribute('aria-hidden')??null,
@@ -138,13 +145,14 @@ const cleanup=performanceFixture.cleanup.bind(performanceFixture);
 performanceFixture.cleanup=async()=>{
   rtcMeterObservation.stop();
   meterDiagnostic.dispose();
+  flatDiagnostics.dispose();
   motionObservation.dispose();
   syntheticMicrophone.release();
   const evidence=await cleanup();
-  return {...evidence,meterTransitionDiagnostic:meterDiagnostic.snapshot(),motionObservation:motionObservation.resources(),syntheticMicrophone:{...syntheticMicrophone.snapshot(),
+  return {...evidence,meterTransitionDiagnostic:meterDiagnostic.snapshot(),flatDiagnostics:flatDiagnostics.snapshot(),motionObservation:motionObservation.resources(),syntheticMicrophone:{...syntheticMicrophone.snapshot(),
     liveTracks:evidence.liveSyntheticAudioTracks,openContexts:evidence.openSyntheticAudioContexts}};
 };
-targetWindow.covePerformanceUnmount=()=>{if(cancelled)return;cancelled=true;rtcMeterObservation.stop();motionObservation.dispose();root?.unmount();for(const stop of stopGlobalEffects)stop();
+targetWindow.covePerformanceUnmount=()=>{if(cancelled)return;cancelled=true;rtcMeterObservation.stop();motionObservation.dispose();flatDiagnostics.dispose();root?.unmount();for(const stop of stopGlobalEffects)stop();
   void performanceFixture.cleanup();socket.disconnect();iceQA.disposeDevelopmentHeartbeat();};
 stage('app-modules');
 const [{default:App},{installAutoHideScrollbars},{installViewportResizeState},{applyTheme}]=await Promise.all([

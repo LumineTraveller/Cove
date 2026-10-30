@@ -285,6 +285,12 @@ test('owned peers block supported native mouse events without retaining coordina
   assert.ok(source.includes("wc.off('before-mouse-event',blockMouse)"));
   assert.ok(source.includes('blockedMouse=Math.min(1000,state.inputIsolation.blockedMouse+1)'));
   assert.ok(source.includes("input.key==='Escape'"));
+  const getter=source.match(/isCancelled\(\)\{return state\.inputIsolation\.abortRequested===true;\}/)?.[0];
+  assert.ok(getter);
+  const state={inputIsolation:{abortRequested:false}},api=vm.runInNewContext('({'+getter+'})',{state});
+  assert.equal(api.isCancelled(),false);state.inputIsolation.abortRequested=true;
+  assert.equal(api.isCancelled(),true);assert.equal(state.inputIsolation.abortRequested,true);
+  assert.equal(/throw|event|input\.key/.test(getter),false);
   assert.equal(/\b(?:mouse|event)\.(?:x|y|movementX|movementY)\b/.test(source),false);
 });
 test('real RTC store observer pre-subscribes UI keys, survives root silence and never re-subscribes unchanged keys',()=>{

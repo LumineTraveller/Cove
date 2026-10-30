@@ -237,6 +237,7 @@ than one is a guard failure, and unknown handles remain counted.
 ## Optional same-session CSS diagnostic
 
 Set COVE_FULL_UI_METER_TRANSITION_DIAGNOSTIC=1 and exactly 24 sample seconds.
+
 Samples 0..7 retain normal CSS, 8..15 inject only transition:none!important on
 .cove-shell .volume-live-level and .cove-shell .vertical-live-level, and 16..24
 remove the owned style. No RMS, React, popover, geometry, blur or encoding setting
@@ -248,3 +249,24 @@ This marks the result diagnosticOnly. **The mixed overall 24-second summary is
 not a product performance improvement.** Compare separate phase deltas excluding
 switch boundaries and inspect the final restored phase for time trends. This
 probe does not justify changing product CSS without supporting evidence.
+
+For a fixed full-motion backdrop-filter control, set `COVE_FULL_UI_MOTION_SWITCH=1`
+and `COVE_FULL_UI_FLAT_DIAGNOSTICS=1` (default `0`). This requires stats enabled,
+muted synthetic voice and the meter transition diagnostic disabled. The original
+four 48-second phases, producer, preview, background, layout, counters and LOW
+history remain unchanged. The fixture only injects scoped `backdrop-filter:none`
+and `-webkit-backdrop-filter:none`; each sample checks the explicit switch,
+actual filter and single mounted diagnostics overlay. Cleanup removes the owned
+style. Compare separate otherwise identical runs; no mixed-mode total is a
+product performance result. Product styles are unchanged by this control.
+
+Set `COVE_FULL_UI_FOREGROUND_GATE=1` (default `0`) to pause after visible startup
+and the owned-pattern reader self-test, before initial screen sharing. The current
+run directory receives `foreground-ready.json` with fixed non-secret metadata.
+Prepare the owned source/publisher foreground order, then create an empty
+`foreground-continue` file in that same directory. The fixture waits asynchronously
+at 50ms intervals for at most 60 seconds, immediately rechecks the original
+foreground/display geometry contract and records the actual wait in
+`result.foregroundGate`. It never changes focus during the gate or measurement;
+the existing 330-second overall watchdog is unchanged. Default-off runs create
+neither marker file.

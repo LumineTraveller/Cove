@@ -8,6 +8,10 @@ exports.installOwnedFullProductMain=({root,peers,rendererOrigin,backendOrigin,re
   const meterDiagnostic=process.env.COVE_FULL_UI_METER_TRANSITION_DIAGNOSTIC==='1';
   const state={enabled:true,syntheticMessages:200,voiceMode,expectedSelfMuted:voiceMode==='muted',statsEnabled:process.env.COVE_FULL_UI_STATS==='1',
     frameSink:process.env.COVE_FULL_UI_FRAME_SINK??'generator',codec:process.env.COVE_FULL_UI_CODEC??'av1',
+    flatDiagnostics:{enabled:process.env.COVE_FULL_UI_FLAT_DIAGNOSTICS==='1',diagnosticOnly:process.env.COVE_FULL_UI_FLAT_DIAGNOSTICS==='1',
+      meaning:'Fixed backdrop-filter-only fixture control; same original four motion phases and continuous LOW history.'},
+    foregroundGate:{enabled:process.env.COVE_FULL_UI_FOREGROUND_GATE==='1',timeoutMs:60000,pollMs:50,
+      meaning:'Optional pre-publication readiness only; the original foreground and geometry guards run after continue.'},
     syntheticMicrophone:{provider:'screen-performance-fixture',gainMin:voiceMode==='muted'?0.03:0.005,gainMax:voiceMode==='muted'?0.03:0.05,curveSeconds:voiceMode==='muted'?0:120,physicalMicrophone:false,humanVoice:false,speakerOutput:false},
     devToolsOpened:false,blockedNetworkRequests:0,samples:[],
     inputIsolation:{enabled:true,blockedKeyboard:0,blockedMouse:0,abortRequested:false},
@@ -52,7 +56,7 @@ exports.installOwnedFullProductMain=({root,peers,rendererOrigin,backendOrigin,re
     wc.on('will-navigate',(event,url)=>{let same=false;try{same=new URL(url).origin===rendererOrigin;}catch{}if(!same){state.blockedNetworkRequests++;event.preventDefault();}});
     wc.on('devtools-opened',()=>{state.devToolsOpened=true;});
     // Scope input isolation to these disposable benchmark peers. Escape cancels
-    // on the next assertion; typed content is never retained.
+    // on the next assertion or foreground-gate poll; typed content is never retained.
     wc.on('before-input-event',(event,input)=>{
       event.preventDefault();
       if(input.type==='keyDown'&&input.key==='Escape')state.inputIsolation.abortRequested=true;
@@ -74,6 +78,7 @@ exports.installOwnedFullProductMain=({root,peers,rendererOrigin,backendOrigin,re
     });
   }
   return {setCaptureSource:source=>overlay.setCaptureSource(source),
+    isCancelled(){return state.inputIsolation.abortRequested===true;},
     assert(){if(state.inputIsolation.abortRequested)throw Error('Owned benchmark cancelled by Escape');
       if(state.devToolsOpened||state.blockedNetworkRequests)throw Error('Full App external-network/no-DevTools contract was lost');},
     dispose(){overlay.setCaptureSource(null);for(const stop of stopOwnedInputs)stop();for(const channel of channels)ipcMain.removeHandler(channel);},
