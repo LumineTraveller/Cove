@@ -11,11 +11,14 @@ const args = process.argv.slice(2);
 let output = path.resolve(__dirname, '../../../runtime/native-screen-capture/helper.exe');
 let handlesOutput;
 let selfTest = false;
+let acquireMode;
 for (let i = 0; i < args.length; ++i) {
   if (args[i] === '--output' && args[i + 1]) output = path.resolve(args[++i]);
   else if (args[i] === '--handles-output' && args[i + 1]) handlesOutput = path.resolve(args[++i]);
   else if (args[i] === '--self-test') selfTest = true;
-  else throw new Error('Expected --output PATH, --handles-output PATH and/or --self-test');
+  else if (args[i] === '--acquire-mode' && acquireMode === undefined &&
+      (args[i + 1] === 'timeout' || args[i + 1] === 'poll')) acquireMode = args[++i];
+  else throw new Error('Expected --output PATH, --handles-output PATH, --self-test and/or --acquire-mode timeout|poll');
 }
 handlesOutput ||= path.join(path.dirname(output), 'native-screen-handles.node');
 if (path.resolve(output).toLowerCase() === path.resolve(handlesOutput).toLowerCase()) {
@@ -39,6 +42,7 @@ if (target.status !== 0 || target.stdout.trim() !== 'x86_64-w64-mingw32') {
 fs.mkdirSync(path.dirname(output), { recursive: true });
 const result = spawnSync(compiler, [
   '-std=c++17', '-O2', '-Wall', '-Wextra', '-Werror', '-static',
+  ...(acquireMode === undefined ? [] : [`-DCOVE_NATIVE_CAPTURE_NONBLOCKING_ACQUIRE=${acquireMode === 'poll' ? 1 : 0}`]),
   path.join(__dirname, 'native-screen-capture-helper.cpp'), '-o', output,
   '-ld3d11', '-ld3dcompiler', '-ldxgi', '-lkernel32', '-luser32', '-lgdi32',
 ], { stdio: 'inherit', windowsHide: true });
@@ -56,7 +60,10 @@ if (selfTest) {
   const check = spawnSync(output, ['--self-test'], { stdio: 'inherit', windowsHide: true });
   if (check.error || check.status !== 0) throw new Error('Native screen capture self-test failed');
 }
-console.log(JSON.stringify({ output, bytes: fs.statSync(output).size,
+console.log(JSON.stringify({ output, selectedAcquireMode: acquireMode || 'timeout',
+  helperSourceSha256: crypto.createHash('sha256').update(
+    fs.readFileSync(path.join(__dirname, 'native-screen-capture-helper.cpp'))).digest('hex'),
+  bytes: fs.statSync(output).size,
   sha256: crypto.createHash('sha256').update(fs.readFileSync(output)).digest('hex'),
   handlesOutput, handlesBytes: fs.statSync(handlesOutput).size,
   handlesSha256: crypto.createHash('sha256').update(fs.readFileSync(handlesOutput)).digest('hex') }));

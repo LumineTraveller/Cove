@@ -12,6 +12,45 @@ const broker = () => ({ activeSessions: 1, sessions: 1, frames: 120, busySlots: 
   started: 1, stopped: 0, disabled: false, failureCode: null, lastEndReason: null,
   pixelFormat: 'bgra', frameStorage: 'gpu',
   timing: { reference: { count: 118, totalMs: 2000, maxMs: 32, buckets: [0, 1, 2, 3, 4, 5, 103] } } });
+const tail = (elapsedUs = 1_000_000, gapUs = 20_000) => ({ elapsedUs, gapUs, tickLatenessUs: 123,
+  acquireUs: 50, acquireTimeoutUs: 1000, gpuWaitUs: 2000, drawUs: 10,
+  noPresent: 1, noSlot: 0, missedTicks: 1, sourcePresents: 2, refresh: false });
+const delivery = (events = [tail()]) => ({ count: 119, totalGapUs: 1_000_000, maxGapUs: 30_000,
+  buckets: [10, 100, 5, 1, 1, 1, 1], tailCandidates: 9, tailRetained: events.length, tail: events });
+
+test('delivery tail is a bounded deeply frozen numeric whitelist', () => {
+  const raw = { ...helper(), delivery: { ...delivery(), secret: 'private',
+    tail: [{ ...tail(), token: 'private', source: 'private' }] } };
+  const safe = nativeScreenHelperTiming(raw)!;
+  assert.equal(safe.delivery?.tail[0].gapUs, 20_000);
+  assert.equal(JSON.stringify(safe).includes('private'), false);
+  assert.ok(Object.isFrozen(safe.delivery));
+  assert.ok(Object.isFrozen(safe.delivery?.buckets));
+  assert.ok(Object.isFrozen(safe.delivery?.tail));
+  assert.ok(Object.isFrozen(safe.delivery?.tail[0]));
+  raw.delivery.tail[0].gapUs = 99_999;
+  assert.equal(safe.delivery?.tail[0].gapUs, 20_000);
+  for (const invalid of [
+    { ...delivery(), tail: Array.from({ length: 9 }, () => tail()), tailRetained: 9 },
+    { ...delivery(), tailRetained: 0 }, { ...delivery(), buckets: [1] },
+    { ...delivery(), tail: [{ ...tail(), refresh: 1 }] },
+    { ...delivery(), tail: [{ ...tail(), gapUs: 0 }] },
+    { ...delivery(), tail: [{ ...tail(), acquireTimeoutUs: Number.MAX_SAFE_INTEGER + 1 }] },
+  ]) assert.equal(nativeScreenHelperTiming({ ...helper(), delivery: invalid })!.delivery, undefined);
+});
+
+test('maximum safe delivery report fits collector byte limit and preserves no raw fields', () => {
+  const events = Array.from({ length: 8 }, (_, i) => ({ ...Object.fromEntries(Object.keys(tail())
+    .filter(key => key !== 'refresh').map(key => [key, Number.MAX_SAFE_INTEGER - i])), refresh: false }));
+  const bytes = Buffer.from('COVE_NATIVE_CAPTURE_TIMING ' + JSON.stringify({ ...helper(),
+    delivery: { ...delivery(), tail: events, tailRetained: 8 } }) + '\n');
+  assert.ok(bytes.byteLength < 16_384);
+  const samples: unknown[] = [];
+  const collector = createNativeScreenHelperTimingCollector(sample => samples.push(sample));
+  collector.write(bytes);
+  assert.equal(samples.length, 1);
+  assert.equal(collector.snapshot().rejected, 0);
+});
 
 test('helper timing copies only fixed numeric fields and freezes residence buckets', () => {
   const raw = { ...helper(), token: 'private', source: 'private',
@@ -128,6 +167,30 @@ function loggerFixture(overrides: { snapshot?: () => unknown; log?: (value: unkn
   return { logger, rows, tick(elapsedMs = 5000) { now += elapsedMs; callback?.(); },
     state: () => ({ nowCalls, cleared, unrefs, snapshotCalls }) };
 }
+
+test('logger merges every helper tail between outputs without replaying or mixing captures', () => {
+  const f = loggerFixture(); f.logger.start();
+  const send = (capture: number, elapsed: number, gap: number) => f.logger.helper(nativeScreenHelperTiming({
+    ...helper(), elapsedUs: elapsed, delivery: delivery([tail(elapsed, gap)]),
+  })!, capture);
+  for (let i = 1; i <= 10; i++) send(1, i * 1_000_000, i * 10_000);
+  send(1, 10_000_000, 999_999); // Duplicate report is not a new observation.
+  send(1, 9_000_000, 999_999); // Late report cannot replace newer counters.
+  f.tick();
+  const rows = f.rows as { helper: { counts: { elapsedUs: number }; delivery: ReturnType<typeof delivery> } }[];
+  assert.equal(rows[0].helper.counts.elapsedUs, 10_000_000);
+  assert.deepEqual(rows[0].helper.delivery.tail.map(event => event.gapUs),
+    [100_000, 90_000, 80_000, 70_000, 60_000, 50_000, 40_000, 30_000]);
+  assert.equal(rows[0].helper.delivery.tailRetained, 8);
+  f.tick();
+  assert.deepEqual(rows[1].helper.delivery.tail, [], 'old one-second tails are not replayed');
+  send(1, 11_000_000, 200_000);
+  send(2, 1_000_000, 20_000);
+  send(1, 12_000_000, 999_999);
+  f.tick();
+  assert.deepEqual(rows[2].helper.delivery.tail.map(event => event.gapUs), [20_000]);
+  f.logger.stop();
+});
 
 test('logger is dormant until start and emits only five-second fixed summaries', () => {
   const f = loggerFixture();

@@ -18,6 +18,35 @@ const duration = (value: unknown): value is number => typeof value === 'number' 
 
 interface HelperStage { count: number; totalUs: number; maxUs: number }
 interface Residence extends HelperStage { buckets: readonly number[] }
+const DELIVERY_FIELDS = ['elapsedUs', 'gapUs', 'tickLatenessUs', 'acquireUs', 'acquireTimeoutUs',
+  'gpuWaitUs', 'drawUs', 'noPresent', 'noSlot', 'missedTicks', 'sourcePresents'] as const;
+interface DeliveryTail extends Readonly<Record<typeof DELIVERY_FIELDS[number], number>> { readonly refresh: boolean }
+interface DeliveryTiming {
+  readonly count: number;
+  readonly totalGapUs: number;
+  readonly maxGapUs: number;
+  readonly buckets: readonly number[];
+  readonly tailCandidates: number;
+  readonly tailRetained: number;
+  readonly tail: readonly Readonly<DeliveryTail>[];
+}
+function deliveryTiming(value: unknown): Readonly<DeliveryTiming> | undefined {
+  if (!record(value) || !count(value.count) || !count(value.totalGapUs) || !count(value.maxGapUs) ||
+      !count(value.tailCandidates) || !count(value.tailRetained) ||
+      !Array.isArray(value.buckets) || value.buckets.length !== 7 || !value.buckets.every(count) ||
+      !Array.isArray(value.tail) || value.tail.length > 8 || value.tailRetained !== value.tail.length ||
+      value.tailCandidates < value.tailRetained) return undefined;
+  const tail: Readonly<DeliveryTail>[] = [];
+  for (const event of value.tail) {
+    if (!record(event) || !DELIVERY_FIELDS.every(key => count(event[key])) ||
+        event.gapUs === 0 || typeof event.refresh !== 'boolean') return undefined;
+    const safe = Object.fromEntries(DELIVERY_FIELDS.map(key => [key, event[key]])) as unknown as DeliveryTail;
+    tail.push(Object.freeze({ ...safe, refresh: event.refresh }));
+  }
+  return Object.freeze({ count: value.count, totalGapUs: value.totalGapUs, maxGapUs: value.maxGapUs,
+    buckets: Object.freeze([...value.buckets]), tailCandidates: value.tailCandidates,
+    tailRetained: value.tailRetained, tail: Object.freeze(tail) });
+}
 export interface NativeScreenHelperTiming {
   schemaVersion: 1;
   final: boolean;
@@ -27,6 +56,7 @@ export interface NativeScreenHelperTiming {
   stages: Readonly<Partial<Record<typeof HELPER_STAGES[number], Readonly<HelperStage>>>>;
   leaseResidence?: Readonly<Residence>;
   importedResidence?: Readonly<Residence>;
+  delivery?: Readonly<DeliveryTiming>;
 }
 
 /** Copy fixed numeric aggregates only. Unknown helper text never reaches a log. */
@@ -54,6 +84,8 @@ export function nativeScreenHelperTiming(value: unknown): Readonly<NativeScreenH
       safe[key] = Object.freeze({ count: residence.count, totalUs: residence.totalUs, maxUs: residence.maxUs,
         buckets: Object.freeze([...residence.buckets]) });
   }
+  const delivery = deliveryTiming(value.delivery);
+  if (delivery) safe.delivery = delivery;
   return Object.freeze(safe);
 }
 
@@ -134,6 +166,7 @@ export function createNativeScreenTimingLogger(options: TimingLoggerOptions) {
   const maximumRecords = 120, maximumDurationMs = 600_000;
   let interval: TimerHandle | undefined, startedAt: number | undefined, stopped = false, records = 0;
   let latestHelper: { captureNumber: number; sample: Readonly<NativeScreenHelperTiming> } | null = null;
+  let deliveryTails: Readonly<DeliveryTail>[] = [];
   const output = (value: unknown) => {
     records++;
     try { void Promise.resolve(options.log(value)).catch(() => {}); } catch { /* Logging is never capture policy. */ }
@@ -142,6 +175,7 @@ export function createNativeScreenTimingLogger(options: TimingLoggerOptions) {
     stopped = true;
     if (interval) { try { clearTimer(interval); } catch { /* Observer cleanup only. */ } interval = undefined; }
     latestHelper = null;
+    deliveryTails = [];
   }
   function tick() {
     if (stopped || startedAt === undefined) return;
@@ -156,10 +190,16 @@ export function createNativeScreenTimingLogger(options: TimingLoggerOptions) {
         stop(); return;
       }
       const broker = nativeScreenBrokerTiming(options.snapshot());
+      const helper = latestHelper?.sample;
+      // Retain slow examples from all one-second helper reports in this five-second output.
+      // Cumulative histograms remain those of the newest report; examples are interval-local.
+      const mergedHelper = helper?.delivery ? { ...helper, delivery: { ...helper.delivery,
+        tailRetained: deliveryTails.length, tail: deliveryTails } } : helper ?? null;
+      deliveryTails = [];
       output({ event: 'sample', limited: false, elapsedMs, broker,
         helperCaptureNumber: latestHelper?.captureNumber ?? null,
         helperMatchesLatestStart: Boolean(latestHelper && broker?.started === latestHelper.captureNumber),
-        helper: latestHelper?.sample ?? null });
+        helper: mergedHelper });
     } catch {
       output({ event: 'limited', limited: true, reason: 'observer_error', recordLimit: maximumRecords,
         durationLimitMs: maximumDurationMs });
@@ -182,8 +222,22 @@ export function createNativeScreenTimingLogger(options: TimingLoggerOptions) {
       try {
         const safe = nativeScreenHelperTiming({ ...sample.counts, schemaVersion: sample.schemaVersion,
           final: sample.final, selectedCompletion: sample.selectedCompletion, selectedAcquireMode: sample.selectedAcquireMode,
-          stages: sample.stages, leaseResidence: sample.leaseResidence, importedResidence: sample.importedResidence });
-        if (safe) latestHelper = { captureNumber, sample: safe };
+          stages: sample.stages, leaseResidence: sample.leaseResidence, importedResidence: sample.importedResidence,
+          delivery: sample.delivery });
+        if (safe) {
+          if (latestHelper?.captureNumber === captureNumber && count(safe.counts.elapsedUs) &&
+              count(latestHelper.sample.counts.elapsedUs) &&
+              safe.counts.elapsedUs <= latestHelper.sample.counts.elapsedUs) return;
+          if (latestHelper?.captureNumber !== captureNumber) deliveryTails = [];
+          if (safe.delivery) {
+            const merged = [...deliveryTails, ...safe.delivery.tail];
+            const seen = new Set<string>();
+            deliveryTails = merged.sort((a, b) => b.gapUs - a.gapUs || a.elapsedUs - b.elapsedUs)
+              .filter(event => { const key = `${event.elapsedUs}:${event.gapUs}`;
+                if (seen.has(key)) return false; seen.add(key); return true; }).slice(0, 8);
+          }
+          latestHelper = { captureNumber, sample: safe };
+        }
       } catch { /* A malformed observation never changes capture. */ }
     },
     stop,

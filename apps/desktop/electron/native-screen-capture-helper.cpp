@@ -182,8 +182,8 @@ static uint64_t advanceTick(uint64_t due, uint64_t now, uint64_t period) {
   require(now <= std::numeric_limits<uint64_t>::max() - gap, "capture_deadline_exhausted");
   return now + gap;
 }
-// Opt-in, bounded cumulative timings. No per-frame records or desktop metadata
-// are retained, and the normal stdout protocol is never used for diagnostics.
+// Opt-in, bounded cumulative timings and at most eight slow delivery examples
+// per report. No desktop metadata enters the diagnostic-only stderr protocol.
 struct StageTiming {
   uint64_t count = 0, totalUs = 0, maxUs = 0;
   void add(uint64_t elapsed) { ++count; totalUs += elapsed; maxUs = std::max(maxUs, elapsed); }
@@ -211,6 +211,104 @@ struct ResidenceTiming {
     out << "]}";
   }
 };
+static uint64_t diagnosticInteger(uint64_t value) { return std::min(value, kSafeInteger); }
+static uint64_t diagnosticSum(uint64_t total, uint64_t value) {
+  total = diagnosticInteger(total);
+  return total + std::min(value, kSafeInteger - total);
+}
+// The snapshot endpoint is the actual sentAt clock sample, before stdout work.
+// Reports never reset this baseline: a delivery gap can span skipped ticks and
+// several reports. Stage times overlap (GpuWait, for example, contains polling).
+struct DeliverySnapshot {
+  uint64_t acquireUs = 0, acquireTimeoutUs = 0, gpuWaitUs = 0, drawUs = 0;
+  uint64_t noPresent = 0, noSlot = 0, missedTicks = 0, sourcePresents = 0;
+  uint64_t tickLatenessUs = 0;
+};
+struct DeliveryEvent {
+  uint64_t elapsedUs = 0, gapUs = 0, tickLatenessUs = 0;
+  uint64_t acquireUs = 0, acquireTimeoutUs = 0, gpuWaitUs = 0, drawUs = 0;
+  uint64_t noPresent = 0, noSlot = 0, missedTicks = 0, sourcePresents = 0;
+  bool refresh = false;
+  void write(std::ostream& out) const {
+    out << "{\"elapsedUs\":" << elapsedUs << ",\"gapUs\":" << gapUs
+      << ",\"tickLatenessUs\":" << tickLatenessUs << ",\"acquireUs\":" << acquireUs
+      << ",\"acquireTimeoutUs\":" << acquireTimeoutUs << ",\"gpuWaitUs\":" << gpuWaitUs
+      << ",\"drawUs\":" << drawUs << ",\"noPresent\":" << noPresent << ",\"noSlot\":" << noSlot
+      << ",\"missedTicks\":" << missedTicks << ",\"sourcePresents\":" << sourcePresents
+      << ",\"refresh\":" << (refresh ? "true" : "false") << '}';
+  }
+};
+struct DeliveryTiming {
+  static constexpr size_t kTailCapacity = 8;
+  uint64_t count = 0, totalGapUs = 0, maxGapUs = 0, tailCandidates = 0;
+  std::array<uint64_t, 7> buckets{};
+  std::array<DeliveryEvent, kTailCapacity> tail{};
+  size_t tailRetained = 0;
+  bool havePrevious = false;
+  uint64_t previousSentAt = 0;
+  DeliverySnapshot previous{};
+  void observe(uint64_t sentAt, uint64_t begin, uint64_t period,
+      bool refresh, const DeliverySnapshot& current) {
+    if (!period || sentAt < begin || (havePrevious && sentAt < previousSentAt)) return;
+    if (havePrevious) {
+      const uint64_t rawGap = sentAt - previousSentAt;
+      const uint64_t wholePeriods = rawGap / period, remainder = rawGap % period;
+      // Strict bounds: <1T, <1.1T, <1.25T, <1.5T, <2T, <4T, remainder.
+      // Compare remainders to avoid multiplying either extreme clock value.
+      size_t bucket = 6;
+      if (!wholePeriods) bucket = 0;
+      else if (wholePeriods == 1) {
+        if (remainder <= (period - 1) / 10) bucket = 1;
+        else if (remainder <= (period - 1) / 4) bucket = 2;
+        else if (remainder <= (period - 1) / 2) bucket = 3;
+        else bucket = 4;
+      } else if (wholePeriods < 4) bucket = 5;
+      count = diagnosticSum(count, 1); totalGapUs = diagnosticSum(totalGapUs, rawGap);
+      maxGapUs = std::max(maxGapUs, diagnosticInteger(rawGap));
+      buckets[bucket] = diagnosticSum(buckets[bucket], 1);
+      // Strictly greater than 1.1T; floor(11T/10) is never multiplied.
+      if (wholePeriods > 1 || (wholePeriods == 1 && remainder > period / 10)) {
+        tailCandidates = diagnosticSum(tailCandidates, 1);
+        DeliveryEvent event;
+        event.elapsedUs = diagnosticInteger(sentAt - begin); event.gapUs = diagnosticInteger(rawGap);
+        event.tickLatenessUs = diagnosticInteger(current.tickLatenessUs);
+        event.acquireUs = diagnosticInteger(current.acquireUs - previous.acquireUs);
+        event.acquireTimeoutUs = diagnosticInteger(current.acquireTimeoutUs - previous.acquireTimeoutUs);
+        event.gpuWaitUs = diagnosticInteger(current.gpuWaitUs - previous.gpuWaitUs);
+        event.drawUs = diagnosticInteger(current.drawUs - previous.drawUs);
+        event.noPresent = diagnosticInteger(current.noPresent - previous.noPresent);
+        event.noSlot = diagnosticInteger(current.noSlot - previous.noSlot);
+        event.missedTicks = diagnosticInteger(current.missedTicks - previous.missedTicks);
+        event.sourcePresents = diagnosticInteger(current.sourcePresents - previous.sourcePresents);
+        event.refresh = refresh;
+        size_t index = 0;
+        // Earlier events win equal-gap ties; all per-delivery work is O(8).
+        while (index < tailRetained && tail[index].gapUs >= event.gapUs) ++index;
+        if (index < tail.size()) {
+          const size_t last = std::min(tailRetained, tail.size() - 1);
+          for (size_t move = last; move > index; --move) tail[move] = tail[move - 1];
+          tail[index] = event; tailRetained = std::min(tailRetained + 1, tail.size());
+        }
+      }
+    }
+    havePrevious = true; previousSentAt = sentAt; previous = current;
+  }
+  void clearReportedTail() { tailRetained = 0; tail.fill({}); }
+  void write(std::ostream& out) const {
+    out << "{\"count\":" << count << ",\"totalGapUs\":" << totalGapUs << ",\"maxGapUs\":" << maxGapUs
+      << ",\"buckets\":[";
+    for (size_t index = 0; index < buckets.size(); ++index) {
+      if (index) out << ',';
+      out << buckets[index];
+    }
+    out << "],\"tailCandidates\":" << tailCandidates << ",\"tailRetained\":" << tailRetained << ",\"tail\":[";
+    for (size_t index = 0; index < tailRetained; ++index) {
+      if (index) out << ',';
+      tail[index].write(out);
+    }
+    out << "]}";
+  }
+};
 struct CaptureTiming {
   enum Stage { Acquire, Draw, GpuWait, GpuFlush, GpuQuery, FrameRelease, Output,
     TickWork, TickLateness, TimerWait, TimerOvershoot, SlotCreditWait, CpuReadback,
@@ -226,6 +324,8 @@ struct CaptureTiming {
   uint64_t readinessRecoveredSlot = 0, readinessRecoveredPresent = 0;
   uint64_t cpuMapAttempts = 0, cpuMapStillDrawing = 0, cpuMapCancelled = 0, cpuMapTimeouts = 0;
   ResidenceTiming leaseResidence, importedResidence;
+  DeliveryTiming delivery;
+  uint64_t currentTickLatenessUs = 0;
   std::array<StageTiming, StageCount> stages{};
   CaptureTiming() {
     wchar_t value[2]{};
@@ -238,8 +338,17 @@ struct CaptureTiming {
     if (result == S_OK) stages[AcquireSuccessWait].add(elapsed);
     else if (result == DXGI_ERROR_WAIT_TIMEOUT) stages[AcquireTimeoutWait].add(elapsed);
   }
-  void report(uint64_t now, bool final = false) {
-    if (!enabled || (!final && now < nextReport)) return;
+  DeliverySnapshot deliverySnapshot() const {
+    if (!enabled) return {};
+    return {stages[Acquire].totalUs, stages[AcquireTimeoutWait].totalUs,
+      stages[GpuWait].totalUs, stages[Draw].totalUs,
+      noPresent, noSlot, missedTicks, sourcePresents, currentTickLatenessUs};
+  }
+  void recordDelivery(uint64_t sentAt, bool refresh, const DeliverySnapshot& current) {
+    if (enabled) delivery.observe(sentAt, begin, periodUs, refresh, current);
+  }
+  bool report(uint64_t now, bool final = false, std::ostream& destination = std::cerr) {
+    if (!enabled || (!final && now < nextReport)) return false;
     nextReport = now + 1000000;
     static constexpr const char* names[]{"acquire", "draw", "gpuWait", "gpuFlush", "gpuQuery",
       "frameRelease", "output", "tickWork", "tickLateness", "timerWait", "timerOvershoot", "slotCreditWait", "cpuReadback",
@@ -267,6 +376,7 @@ struct CaptureTiming {
       << ",\"openSlotCreditWaitUs\":" << (creditWaitBegin ? now - creditWaitBegin : 0);
     out << ",\"leaseResidence\":"; leaseResidence.write(out);
     out << ",\"importedResidence\":"; importedResidence.write(out);
+    out << ",\"delivery\":"; delivery.write(out);
     out << ",\"stages\":{";
     for (size_t i = 0; i < stages.size(); ++i) {
       if (i) out << ',';
@@ -275,7 +385,13 @@ struct CaptureTiming {
         << ",\"maxUs\":" << stage.maxUs << '}';
     }
     out << "}}\n";
-    std::cerr << out.str();
+    const auto line = out.str();
+    // Also guard the protocol bound if the fixed schema grows in the future.
+    if (line.size() >= 16384) return false;
+    destination << line;
+    if (!destination) return false;
+    delivery.clearReportedTail();
+    return true;
   }
 };
 class Measure {
@@ -1149,7 +1265,8 @@ static void capture(const Options& option) {
     Measure tickTiming(timing, CaptureTiming::TickWork, clock);
     if (timing.enabled) {
       ++timing.ticks; timing.missedTicks += (now - nextTick) / period;
-      timing.stages[CaptureTiming::TickLateness].add(now - nextTick);
+      timing.currentTickLatenessUs = now - nextTick;
+      timing.stages[CaptureTiming::TickLateness].add(timing.currentTickLatenessUs);
     }
     // One latest update per due tick; skip missed ticks and preserve the original
     // phase. Readiness retries share this tick's strictly future phase deadline.
@@ -1314,6 +1431,7 @@ static void capture(const Options& option) {
     validateOutputFast(output);
     require(serial < kSafeInteger, "serial_exhausted");
     slot.lease.issue(++serial); slot.sentAt = clock.us();
+    const auto deliverySnapshot = timing.deliverySnapshot();
     const uint64_t timestamp = std::max(lastTimestamp + 1, slot.sentAt);
     require(timestamp <= kSafeInteger, "timestamp_exhausted"); lastTimestamp = timestamp;
     const auto index = size_t(std::distance(slots.begin(), available));
@@ -1326,6 +1444,7 @@ static void capture(const Options& option) {
         << ",\"colorSpace\":\"" << nv12ColorSpaceName(option.colorSpace) << '"';
       std::cout << ",\"refresh\":" << (refresh ? "true" : "false") << "}" << std::endl; }
     require(bool(std::cout), "owner_output_closed");
+    timing.recordDelivery(slot.sentAt, refresh, deliverySnapshot);
     if (refresh) ++refreshFrames; else ++newFrames;
     if (timing.enabled) { if (refresh) ++timing.refreshFrames; else ++timing.newFrames; }
     dirty = false; lastSent = slot.sentAt;
@@ -1708,6 +1827,125 @@ static void selfTest() {
     acquireWaits.stages[CaptureTiming::Acquire].totalUs == 16237 &&
     acquireWaits.stages[CaptureTiming::AcquireSuccessWait].count == 2 &&
     acquireWaits.stages[CaptureTiming::AcquireTimeoutWait].count == 1);
+  CaptureTiming deliveries; deliveries.enabled = false; deliveries.start(100, 10);
+  deliveries.stages[CaptureTiming::Acquire].add(90);
+  deliveries.recordDelivery(150, false, deliveries.deliverySnapshot());
+  expect(!deliveries.delivery.havePrevious && deliveries.delivery.count == 0 &&
+    deliveries.delivery.tailRetained == 0 && deliveries.deliverySnapshot().acquireUs == 0);
+  std::ostringstream disabledReport;
+  expect(!deliveries.report(2000000, true, disabledReport) && disabledReport.str().empty());
+  deliveries.enabled = true;
+  deliveries.stages[CaptureTiming::AcquireTimeoutWait].add(80);
+  deliveries.currentTickLatenessUs = 9;
+  deliveries.noPresent = 7; deliveries.noSlot = 2; deliveries.missedTicks = 3; deliveries.sourcePresents = 4;
+  deliveries.recordDelivery(150, false, deliveries.deliverySnapshot());
+  expect(deliveries.delivery.havePrevious && deliveries.delivery.count == 0 &&
+    deliveries.delivery.previousSentAt == 150 && deliveries.delivery.previous.acquireUs == 90);
+  // A skipped tick and its no-present/acquire work survive an intervening
+  // report. The current tick's lateness is not the lifetime stage maximum.
+  deliveries.stages[CaptureTiming::Acquire].add(13);
+  deliveries.stages[CaptureTiming::AcquireTimeoutWait].add(11);
+  ++deliveries.noPresent; ++deliveries.missedTicks;
+  std::ostringstream beforeDeliveryReport;
+  expect(deliveries.report(160, true, beforeDeliveryReport) && deliveries.delivery.previousSentAt == 150);
+  deliveries.stages[CaptureTiming::Acquire].add(2);
+  deliveries.stages[CaptureTiming::GpuWait].add(5); deliveries.stages[CaptureTiming::Draw].add(3);
+  ++deliveries.noSlot; ++deliveries.sourcePresents; deliveries.currentTickLatenessUs = 2;
+  const auto endpointSnapshot = deliveries.deliverySnapshot();
+  deliveries.stages[CaptureTiming::Acquire].add(4); // Work after sentAt belongs to the next interval.
+  deliveries.recordDelivery(175, true, endpointSnapshot);
+  const auto& firstTail = deliveries.delivery.tail[0];
+  expect(deliveries.delivery.count == 1 && deliveries.delivery.totalGapUs == 25 &&
+    deliveries.delivery.maxGapUs == 25 && deliveries.delivery.buckets[5] == 1 &&
+    deliveries.delivery.tailCandidates == 1 && deliveries.delivery.tailRetained == 1);
+  expect(firstTail.elapsedUs == 75 && firstTail.gapUs == 25 && firstTail.tickLatenessUs == 2 &&
+    firstTail.acquireUs == 15 && firstTail.acquireTimeoutUs == 11 && firstTail.gpuWaitUs == 5 &&
+    firstTail.drawUs == 3 && firstTail.noPresent == 1 && firstTail.noSlot == 1 &&
+    firstTail.missedTicks == 1 && firstTail.sourcePresents == 1 && firstTail.refresh);
+  std::ostringstream failedDeliveryReport; failedDeliveryReport.setstate(std::ios::badbit);
+  expect(!deliveries.report(180, true, failedDeliveryReport) && deliveries.delivery.tailRetained == 1);
+  std::ostringstream firstDeliveryReport;
+  expect(deliveries.report(180, true, firstDeliveryReport) && deliveries.delivery.tailRetained == 0 &&
+    deliveries.delivery.count == 1 && deliveries.delivery.tailCandidates == 1 &&
+    deliveries.delivery.previousSentAt == 175 && deliveries.delivery.tail[0].gapUs == 0);
+  expect(firstDeliveryReport.str().find("\"delivery\":{\"count\":1,\"totalGapUs\":25,\"maxGapUs\":25,") != std::string::npos &&
+    firstDeliveryReport.str().find("\"tailCandidates\":1,\"tailRetained\":1,\"tail\":[{\"elapsedUs\":75") != std::string::npos);
+  deliveries.recordDelivery(195, false, deliveries.deliverySnapshot());
+  expect(deliveries.delivery.count == 2 && deliveries.delivery.totalGapUs == 45 &&
+    deliveries.delivery.tail[0].acquireUs == 4 && deliveries.delivery.tail[0].acquireTimeoutUs == 0);
+  const std::array<std::array<uint64_t, 3>, 17> deliveryEdges{{
+    {{100,99,0}}, {{100,100,1}}, {{100,109,1}}, {{100,110,2}}, {{100,124,2}},
+    {{100,125,3}}, {{100,149,3}}, {{100,150,4}}, {{100,199,4}}, {{100,200,5}},
+    {{100,399,5}}, {{100,400,6}}, {{10,11,2}}, {{10,12,2}}, {{10,13,3}},
+    {{8333,9166,1}}, {{8333,9167,2}}
+  }};
+  for (const auto& edge : deliveryEdges) {
+    DeliveryTiming single; single.observe(0, 0, edge[0], false, {});
+    single.observe(edge[1], 0, edge[0], false, {});
+    expect(single.count == 1 && single.buckets[edge[2]] == 1 && single.maxGapUs == edge[1]);
+    expect(single.tailCandidates == (edge[1] > edge[0] + edge[0] / 10 ? 1U : 0U));
+  }
+  DeliveryTiming topDelivery; uint64_t deliveryTime = 0;
+  topDelivery.observe(deliveryTime, 0, 10, false, {});
+  for (uint64_t gap = 12; gap <= 21; ++gap) {
+    deliveryTime += gap; topDelivery.observe(deliveryTime, 0, 10, false, {});
+  }
+  expect(topDelivery.count == 10 && topDelivery.tailCandidates == 10 && topDelivery.tailRetained == 8);
+  for (size_t index = 0; index < topDelivery.tail.size(); ++index)
+    expect(topDelivery.tail[index].gapUs == 21 - index);
+  const uint64_t earliestEqual = topDelivery.tail[7].elapsedUs;
+  deliveryTime += 14; topDelivery.observe(deliveryTime, 0, 10, true, {});
+  expect(topDelivery.tail[7].gapUs == 14 && topDelivery.tail[7].elapsedUs == earliestEqual);
+  deliveryTime += 22; topDelivery.observe(deliveryTime, 0, 10, true, {});
+  expect(topDelivery.tail[0].gapUs == 22 && topDelivery.tail[0].refresh &&
+    topDelivery.tail[7].gapUs == 15 && topDelivery.tailRetained == 8 && topDelivery.tailCandidates == 12);
+  const uint64_t diagnosticMaximum = std::numeric_limits<uint64_t>::max();
+  DeliveryTiming extremeDelivery;
+  extremeDelivery.observe(0, 0, 1, false, {});
+  DeliverySnapshot extremeSnapshot{diagnosticMaximum, diagnosticMaximum, diagnosticMaximum, diagnosticMaximum,
+    diagnosticMaximum, diagnosticMaximum, diagnosticMaximum, diagnosticMaximum, diagnosticMaximum};
+  extremeDelivery.count = extremeDelivery.totalGapUs = extremeDelivery.tailCandidates = kSafeInteger;
+  extremeDelivery.buckets[6] = kSafeInteger;
+  extremeDelivery.observe(diagnosticMaximum, 0, 1, true, extremeSnapshot);
+  const auto& extremeTail = extremeDelivery.tail[0];
+  expect(extremeDelivery.count == kSafeInteger && extremeDelivery.totalGapUs == kSafeInteger &&
+    extremeDelivery.maxGapUs == kSafeInteger && extremeDelivery.tailCandidates == kSafeInteger &&
+    extremeDelivery.buckets[6] == kSafeInteger && extremeTail.elapsedUs == kSafeInteger &&
+    extremeTail.gapUs == kSafeInteger && extremeTail.acquireUs == kSafeInteger &&
+    extremeTail.acquireTimeoutUs == kSafeInteger && extremeTail.gpuWaitUs == kSafeInteger &&
+    extremeTail.drawUs == kSafeInteger && extremeTail.noPresent == kSafeInteger &&
+    extremeTail.noSlot == kSafeInteger && extremeTail.missedTicks == kSafeInteger &&
+    extremeTail.sourcePresents == kSafeInteger && extremeTail.tickLatenessUs == kSafeInteger);
+  DeliveryTiming wideDelivery; wideDelivery.observe(0, 0, diagnosticMaximum, false, {});
+  wideDelivery.observe(diagnosticMaximum - 1, 0, diagnosticMaximum, false, {});
+  expect(wideDelivery.buckets[0] == 1 && wideDelivery.tailRetained == 0);
+  DeliveryTiming invalidDelivery; invalidDelivery.observe(10, 0, 0, false, {});
+  invalidDelivery.observe(10, 11, 10, false, {});
+  expect(!invalidDelivery.havePrevious && invalidDelivery.count == 0);
+  invalidDelivery.observe(10, 0, 10, false, {}); invalidDelivery.observe(9, 0, 10, false, {});
+  expect(invalidDelivery.previousSentAt == 10 && invalidDelivery.count == 0);
+  CaptureTiming boundedReport; boundedReport.enabled = true; boundedReport.start(0, 8333);
+  boundedReport.ticks = boundedReport.missedTicks = boundedReport.acquireSuccess = boundedReport.acquireTimeout =
+    boundedReport.noPresent = boundedReport.noSlot = boundedReport.sourcePresents = boundedReport.pointerOnly =
+    boundedReport.accumulatedFrames = boundedReport.maxAccumulatedFrames = boundedReport.newFrames = boundedReport.refreshFrames =
+    boundedReport.readinessRetries = boundedReport.readinessExpired = boundedReport.readinessCancelled =
+    boundedReport.readinessSlotWaitWindows = boundedReport.readinessPresentWaitWindows = boundedReport.readinessRecoveredSlot =
+    boundedReport.readinessRecoveredPresent = boundedReport.cpuMapAttempts = boundedReport.cpuMapStillDrawing =
+    boundedReport.cpuMapCancelled = boundedReport.cpuMapTimeouts = diagnosticMaximum;
+  for (auto& stage : boundedReport.stages) stage = {diagnosticMaximum, diagnosticMaximum, diagnosticMaximum};
+  for (auto* residenceMetric : {&boundedReport.leaseResidence, &boundedReport.importedResidence}) {
+    residenceMetric->count = residenceMetric->totalUs = residenceMetric->maxUs = diagnosticMaximum;
+    residenceMetric->buckets.fill(diagnosticMaximum);
+  }
+  boundedReport.delivery = extremeDelivery;
+  boundedReport.delivery.buckets.fill(kSafeInteger);
+  boundedReport.delivery.tail.fill(extremeTail); boundedReport.delivery.tailRetained = DeliveryTiming::kTailCapacity;
+  std::ostringstream boundedJson;
+  const bool boundedWritten = boundedReport.report(kSafeInteger, true, boundedJson);
+  const auto boundedLine = boundedJson.str();
+  expect(boundedWritten && boundedLine.size() < 16384 &&
+    boundedLine.find("\"tailRetained\":8") != std::string::npos &&
+    std::count(boundedLine.begin(), boundedLine.end(), '\n') == 1);
   ReadinessWindow readiness(8333);
   expect(readiness.open(0) && readiness.remaining(0) == 8333);
   expect(readiness.acquireTimeoutMs(0) == 1 && readiness.waitUs(0, 500) == 500);
