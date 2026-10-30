@@ -321,12 +321,18 @@ test('completion selection is strict and fence acceptance requires current-helpe
   for (const completion of ['', 'FENCE', 'auto', '../query'])
     assert.throws(() => nativePerformanceCompletion({ COVE_FPS_NATIVE_COMPLETION: completion }, true), /Invalid/);
   assert.equal(nativeHelperCompletionEvidence([], undefined, 1).matched, true);
+  assert.equal(nativeHelperCompletionEvidence([{ sessionIndex: 1, selectedCompletion: 'fence' }], undefined, 1).matched, true,
+    'an omitted completion request permits the helper auto policy to select a supported fence');
+  assert.equal(nativeHelperCompletionEvidence([{ sessionIndex: 1, selectedCompletion: 'query' }], undefined, 1).matched, true);
+  assert.equal(nativeHelperCompletionEvidence([{ sessionIndex: 1, selectedCompletion: 'query' },
+    { sessionIndex: 1, selectedCompletion: 'fence' }], undefined, 1).matched, false,
+    'auto chooses once before capture and cannot switch barriers within a session');
   assert.equal(nativeHelperCompletionEvidence([], 'fence', 1).matched, false);
   const fence = [{ sessionIndex: 1, selectedCompletion: 'fence' }];
   assert.equal(nativeHelperCompletionEvidence(fence, 'fence', 1).matched, true);
   assert.equal(nativeHelperCompletionEvidence(fence, 'fence', 2).matched, false);
   assert.equal(nativeHelperCompletionEvidence(fence, 'query', 1).matched, false);
-  assert.equal(nativeHelperCompletionEvidence(fence, undefined, 1).matched, false);
+  assert.equal(nativeHelperCompletionEvidence(fence, undefined, 1).matched, true);
   assert.equal(nativeHelperCompletionEvidence([...fence, { sessionIndex: 1, selectedCompletion: 'query' }], 'fence', 1).matched, false);
 });
 

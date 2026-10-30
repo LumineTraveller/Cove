@@ -29,7 +29,11 @@ async function port(){
       // Start with a TCP-assigned port: Windows can repeatedly allocate a UDP
       // ephemeral port inside a TCP-excluded range. Probe the other protocol
       // while holding the first, without changing exclusions or socket policy.
-      await new Promise((resolve,reject)=>{tcp.once('error',reject);tcp.listen({port:0,host:'127.0.0.1',exclusive:true},resolve);});
+      // TCP/UDP reservations differ. Windows can hand out a sequential TCP
+      // block reserved for UDP for all 32 attempts; after eight OS choices,
+      // spread candidates across the user-port range and still probe both.
+      const candidate=attempt<8?0:crypto.randomInt(49152,65336);
+      await new Promise((resolve,reject)=>{tcp.once('error',reject);tcp.listen({port:candidate,host:'127.0.0.1',exclusive:true},resolve);});
       const value=tcp.address().port;
       // The real SFU worker reserves the configured base + 1 through base +
       // 200 (apps/server/src/features/media/ms.ts). A valid ephemeral base
@@ -81,6 +85,7 @@ async function main(){
   sources.push('tooling/screen-performance-demand.cjs','tests/screen-performance-demand.test.cjs');
   if(nativePaths)sources.push(...Object.values(nativePaths),'apps/desktop/dist-electron/native-screen-cpu-buffer-pipeline.js','apps/desktop/dist-electron/native-screen-cpu-delivery.js','apps/desktop/dist-electron/native-screen-capture-protocol.js');
   if(process.env.COVE_FPS_NATIVE_FRAME_SINK==='canvas')sources.push('apps/desktop/src/features/media/screen/nativeCanvasFrameSink.ts');
+  if(process.env.COVE_FPS_NATIVE_FRAME_SINK==='gpu-snapshot')sources.push('apps/desktop/src/features/media/screen/nativeGpuSnapshotFrameSink.ts');
   if(process.env.COVE_FPS_NATIVE_FRAME_SINK==='worker')sources.push(...[
     'nativeFrameWorkerProtocol.ts','nativeFrameWorkerRuntime.ts','nativeFrameWorker.ts','nativeWorkerFrameSink.ts',
   ].map(file=>'apps/desktop/src/features/media/screen/'+file));

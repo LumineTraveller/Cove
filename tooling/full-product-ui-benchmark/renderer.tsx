@@ -7,6 +7,7 @@ import {createMeterObservation} from './meter-observation';
 import {createRtcMeterObservation} from './rtc-meter-observation';
 import {snapshotDomMeters} from './dom-meter-observation';
 import {installMeterTransitionDiagnostic} from './meter-transition-diagnostic';
+import {createMotionObservation} from './motion-observation';
 
 const targetWindow=window as any;
 targetWindow.covePerformanceProductStylesState='pending';
@@ -28,6 +29,10 @@ const expectedSelfMuted=voiceMode==='muted';
 const meterDiagnosticFlag=params.get('fullMeterDiagnostic')??'0';
 if(!['0','1'].includes(meterDiagnosticFlag))throw Error('Invalid meter transition diagnostic control');
 const meterDiagnostic=installMeterTransitionDiagnostic(meterDiagnosticFlag==='1');
+const motionFlag=params.get('fullMotionSwitch')??'0';
+if(!['0','1'].includes(motionFlag)||(motionFlag==='1'&&(!fullStats||voiceMode!=='muted')))
+  throw Error('Motion/switch requires actual product stats and muted synthetic voice');
+const motionObservation=createMotionObservation(motionFlag==='1');
 targetWindow.coveFullProductMeterTransitionSample=(index:number)=>meterDiagnostic.setSampleIndex(index);
 // Each BrowserWindow has its own nonpersistent Electron partition. The fixture
 // account is seeded before the App/socket module can select a server or identity.
@@ -115,7 +120,7 @@ targetWindow.coveFullProductLeaveRoom=async()=>{
   while(roomMounted&&performance.now()<until)await delay(25);
   return {requested:true,completed:!roomMounted,socketConnected:socket.connected,waitMs:performance.now()-started};
 };
-const resources=()=>({...iceQA.resources(),...rtcMeterObservation.resources(),syntheticMicrophone:syntheticMicrophone.snapshot(),
+const resources=()=>({...iceQA.resources(),...rtcMeterObservation.resources(),...motionObservation.resources(),syntheticMicrophone:syntheticMicrophone.snapshot(),
   socketListenerNames:Object.entries((socket as any)._callbacks??{}).filter(([,list]:any)=>list.length>0).map(([name])=>/^\$?[a-z][a-z0-9:_-]{0,63}$/i.test(name)?name:'other').slice(0,16),
   socketListeners:Object.values((socket as any)._callbacks??{}).reduce((n:number,list:any)=>n+list.length,0)});
 targetWindow.coveMediaQA={get rtc(){return latest?.rtc;},socket,get ready(){return prepared&&!cancelled&&Boolean(latest?.roomSynced)&&!error;},get error(){return error;},ice:iceQA,resources};
@@ -123,6 +128,7 @@ function snapshot(){return {ready:targetWindow.coveMediaQA.ready,controllerCommi
   ...rtcMeterObservation.snapshot(),
   verticalMeterDom:snapshotDomMeters(),
   meterTransitionDiagnostic:meterDiagnostic.snapshot(),
+  motionStability:motionObservation.snapshot(latest?.rtc),
   controlledInput:{...controlledInput},selfMuted:latest?.rtc?.isMuted===true,inVoice:latest?.rtc?.inVoice===true,statsEnabled:latest?.rtc?.statsEnabled===true,
   chatAriaHidden:document.querySelector('.chat-slot')?.getAttribute('aria-hidden')??null,
   debugPanelMounted:Boolean(document.querySelector('.diagnostics-v2')),syntheticMicrophone:syntheticMicrophone.snapshot(),devToolsRequested:false};}
@@ -132,12 +138,13 @@ const cleanup=performanceFixture.cleanup.bind(performanceFixture);
 performanceFixture.cleanup=async()=>{
   rtcMeterObservation.stop();
   meterDiagnostic.dispose();
+  motionObservation.dispose();
   syntheticMicrophone.release();
   const evidence=await cleanup();
-  return {...evidence,meterTransitionDiagnostic:meterDiagnostic.snapshot(),syntheticMicrophone:{...syntheticMicrophone.snapshot(),
+  return {...evidence,meterTransitionDiagnostic:meterDiagnostic.snapshot(),motionObservation:motionObservation.resources(),syntheticMicrophone:{...syntheticMicrophone.snapshot(),
     liveTracks:evidence.liveSyntheticAudioTracks,openContexts:evidence.openSyntheticAudioContexts}};
 };
-targetWindow.covePerformanceUnmount=()=>{if(cancelled)return;cancelled=true;rtcMeterObservation.stop();root?.unmount();for(const stop of stopGlobalEffects)stop();
+targetWindow.covePerformanceUnmount=()=>{if(cancelled)return;cancelled=true;rtcMeterObservation.stop();motionObservation.dispose();root?.unmount();for(const stop of stopGlobalEffects)stop();
   void performanceFixture.cleanup();socket.disconnect();iceQA.disposeDevelopmentHeartbeat();};
 stage('app-modules');
 const [{default:App},{installAutoHideScrollbars},{installViewportResizeState},{applyTheme}]=await Promise.all([

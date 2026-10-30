@@ -34,16 +34,16 @@ test('visible presentation is opt-in, keeps the old central layout, and permits 
   for(const value of ['true','',1,true])assert.throws(()=>visiblePresentationOptions({...base,COVE_FPS_VISIBLE_PRESENTATION:value}));
 });
 
-test('visible presentation explicitly admits the qualified Worker while rejecting Canvas and unknown sinks',()=>{
-  for(const sink of ['generator','worker'])
+test('visible presentation explicitly admits qualified handoff candidates while rejecting Canvas and unknown sinks',()=>{
+  for(const sink of ['generator','worker','gpu-snapshot'])
     assert.deepEqual(visiblePresentationOptions({...base,COVE_FPS_NATIVE_FRAME_SINK:sink}),
       {enabled:true,patternLayout:'top-strip-v1'});
-  for(const sink of ['canvas','worker-extra','Worker','','unknown',true])
+  for(const sink of ['canvas','worker-extra','gpu-snapshot-extra','Worker','','unknown',true])
     assert.throws(()=>visiblePresentationOptions({...base,COVE_FPS_NATIVE_FRAME_SINK:sink}));
 });
 
 test('conflicting modes and unowned/unsupported cases fail before Electron startup',()=>{
-  for(const sink of ['generator','worker']){
+  for(const sink of ['generator','worker','gpu-snapshot']){
   const qualified={...base,COVE_FPS_NATIVE_FRAME_SINK:sink};
   for(const flag of ['COVE_FPS_MINIMIZE_SENDER','COVE_FPS_NATIVE_LIFECYCLE_CHECKS','COVE_FPS_RECOVERY_CHECKS',
     'COVE_FPS_REPUBLISH_CHECKS','COVE_FPS_CONTENT_TRACE','COVE_FPS_GENERATED_NV12','COVE_FPS_DISABLE_RENDERER_BACKGROUNDING'])
@@ -101,6 +101,44 @@ test('foreground qualification requires the owned visible publisher and unchange
   assert.equal(qualifyVisiblePresentationState(geometry,moved),false);
 });
 
+test('explicit publisher throttling expectation matches only the actual boolean policy',()=>{
+  const geometry=visiblePresentationGeometry([display()]);
+  for(const expected of [true,false])for(const actual of [true,false]){
+    const current=state(geometry);current.sender.backgroundThrottling=actual;
+    assert.equal(qualifyVisiblePresentationState(geometry,current,
+      {expectedPublisherBackgroundThrottling:expected}),actual===expected);
+  }
+  const current=state(geometry);current.sender.backgroundThrottling=false;
+  assert.equal(qualifyVisiblePresentationState(geometry,current),false);
+  assert.equal(qualifyVisiblePresentationState(geometry,state(geometry)),true);
+  for(const expected of [null,'false','true',0,1,{},[],()=>false])
+    assert.equal(qualifyVisiblePresentationState(geometry,current,
+      {expectedPublisherBackgroundThrottling:expected}),false);
+  for(const actual of [undefined,null,'false',0]){
+    current.sender.backgroundThrottling=actual;
+    assert.equal(qualifyVisiblePresentationState(geometry,current,
+      {expectedPublisherBackgroundThrottling:false}),false);
+  }
+});
+
+test('explicit unthrottled expectation preserves focus, geometry and owned-source qualification',()=>{
+  const geometry=visiblePresentationGeometry([display()]),options={expectedPublisherBackgroundThrottling:false};
+  const unthrottled=()=>{const current=state(geometry);current.sender.backgroundThrottling=false;return current;};
+  assert.equal(qualifyVisiblePresentationState(geometry,unthrottled(),options),true);
+  for(const [group,key,value] of [['sender','focused',false],['sender','visible',false],['sender','minimized',true],
+    ['sender','offscreen',true],['source','visible',false],['source','minimized',true],
+    ['source','fullscreen',false],['source','alwaysOnTop',true],['source','backgroundThrottling',true]]){
+    const current=unthrottled();current[group][key]=value;
+    assert.equal(qualifyVisiblePresentationState(geometry,current,options),false);
+  }
+  for(const change of [{displayCount:2},{primaryDisplayUnchanged:false},{scaleFactor:1.25},{displayFrequency:144}])
+    assert.equal(qualifyVisiblePresentationState(geometry,{...unthrottled(),...change},options),false);
+  for(const [group,key] of [['sender','bounds'],['source','bounds'],['source','contentBounds']]){
+    const current=unthrottled();current[group][key]={...current[group][key],x:99};
+    assert.equal(qualifyVisiblePresentationState(geometry,current,options),false);
+  }
+});
+
 test('startup observes delayed focus after one request without changing state or reacquiring focus',async()=>{
   const geometry=visiblePresentationGeometry([display()]);let time=0,reads=0,waits=0;
   const result=await waitVisiblePresentationStartup(geometry,()=>{reads++;const current=state(geometry);
@@ -109,6 +147,20 @@ test('startup observes delayed focus after one request without changing state or
   assert.equal(result.established,true);assert.equal(result.elapsedMs,200);
   assert.equal(result.observations,5);assert.equal(reads,5);assert.equal(waits,4);
   assert.equal(result.state.sender.focused,true);
+});
+
+test('startup forwards explicit unthrottled expectation without changing its default policy',async()=>{
+  const geometry=visiblePresentationGeometry([display()]);
+  for(const [options,established] of [[{},false],[{expectedPublisherBackgroundThrottling:true},false],
+    [{expectedPublisherBackgroundThrottling:false},true],[{expectedPublisherBackgroundThrottling:'false'},false]]){
+    let time=0;
+    const result=await waitVisiblePresentationStartup(geometry,()=>{const current=state(geometry);
+      current.sender.backgroundThrottling=false;return current;},
+      {...options,now:()=>time,wait:async ms=>{time+=ms;}});
+    assert.equal(result.established,established);
+    assert.equal(result.elapsedMs,established?0:2000);
+    assert.equal(result.state.sender.backgroundThrottling,false);
+  }
 });
 
 test('startup expires after two seconds and returns its final failed owned state',async()=>{

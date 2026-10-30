@@ -38,8 +38,10 @@ function launcher(source){
     `  sources.push('apps/desktop/src/app/App.tsx','apps/desktop/src/features/rooms/ChatRoomV2.tsx','apps/desktop/src/features/rooms/useRoomController.ts','apps/desktop/src/features/chat/ChatPanelV2.tsx','apps/desktop/src/features/media/audio/useAudioMeters.ts',...fs.readdirSync(path.join(root,'${relative}')).filter(file=>/\\.(?:cjs|ts|tsx|html)$/.test(file)).map(file=>'${relative}/'+file));\n  fs.writeFileSync(path.join(directory,'source.json'),JSON.stringify({fullProductUi:{enabled:true,syntheticMessages:200,frameSink:process.env.COVE_FULL_UI_FRAME_SINK??'generator',codec:process.env.COVE_FULL_UI_CODEC??'av1',voiceMode:process.env.COVE_FULL_UI_VOICE??'muted',expectedSelfMuted:process.env.COVE_FULL_UI_VOICE!=='synthetic-varying',syntheticMicrophone:{provider:'screen-performance-fixture',gainMin:process.env.COVE_FULL_UI_VOICE==='synthetic-varying'?0.005:0.03,gainMax:process.env.COVE_FULL_UI_VOICE==='synthetic-varying'?0.05:0.03,curveSeconds:process.env.COVE_FULL_UI_VOICE==='synthetic-varying'?120:0,physicalMicrophone:false,humanVoice:false,speakerOutput:false},stats:process.env.COVE_FULL_UI_STATS==='1',devTools:false,hmr:false},`,'source provenance');
   source=replaceOnce(source,"'apps/desktop/src/features/media/audio/useAudioMeters.ts',",
     "'apps/desktop/src/features/media/audio/useAudioMeters.ts','apps/desktop/src/features/media/useWebRTC.ts','apps/desktop/src/features/media/audio/audioMeterLevels.ts','apps/desktop/src/features/media/components/AudioMeterBindings.tsx',",'audio meter source provenance');
+  source=replaceOnce(source,'visiblePresentation:c.visiblePresentation,senderWindowBeforeSampling:',
+    'visiblePresentation:c.visiblePresentation,motionScenario:c.motionScenario,senderWindowBeforeSampling:','motion phase console result');
   return replaceOnce(source,'fullProductUi:{enabled:true,syntheticMessages:200,',
-    "fullProductUi:{enabled:true,syntheticMessages:200,meterTransitionDiagnostic:{enabled:process.env.COVE_FULL_UI_METER_TRANSITION_DIAGNOSTIC==='1',diagnosticOnly:process.env.COVE_FULL_UI_METER_TRANSITION_DIAGNOSTIC==='1',phases:[{sampleIndex:0,phase:'normal-a'},{sampleIndex:8,phase:'transition-none'},{sampleIndex:16,phase:'normal-a2'}],meaning:'Same-session CSS A/B/A diagnostic; mixed total summary is not product performance evidence.'},",'diagnostic source provenance');
+    `fullProductUi:{enabled:true,syntheticMessages:200,motionSwitch:require(path.join(root,'${relative}/motion-scenario.cjs')).motionOptions(process.env),captureActivityPolicy:{requested:process.env.COVE_FULL_UI_KEEP_CAPTURE_ACTIVE==='1',defaultBackgroundThrottling:true,scope:'Only the active native publisher renderer lease; original policy must restore on stop.'},meterTransitionDiagnostic:{enabled:process.env.COVE_FULL_UI_METER_TRANSITION_DIAGNOSTIC==='1',diagnosticOnly:process.env.COVE_FULL_UI_METER_TRANSITION_DIAGNOSTIC==='1',phases:[{sampleIndex:0,phase:'normal-a'},{sampleIndex:8,phase:'transition-none'},{sampleIndex:16,phase:'normal-a2'}],meaning:'Same-session CSS A/B/A diagnostic; mixed total summary is not product performance evidence.'},`,'diagnostic source provenance');
 }
 function electron(source){
   source=source.replace(/\r\n/g,'\n');
@@ -100,7 +102,87 @@ function electron(source){
   const originalResourceKeys="'timeouts','intervals','socketListeners'";
   if(source.split(originalResourceKeys).length!==3)throw Error('Full App adapter source contract changed: both cleanup resource lists');
   source=source.replaceAll(originalResourceKeys,originalResourceKeys+",'meterStoreSubscriptions','harnessMeterSubscriptions'");
+  return motionElectron(source);
+}
+function motionElectron(source){
+  source=replaceOnce(source,'let fullUiMain=null;',
+    `const {motionOptions,createMotionScenario,motionSourceHtml}=require(path.join(root,'${relative}/motion-scenario.cjs'));\nconst fullUiMotionOptions=motionOptions(),fullUiKeepCaptureActive=fullUiMotionOptions.keepCaptureActive;\nfunction fullUiExpectedPublisherThrottling(){return !(fullUiKeepCaptureActive&&(brokerSnapshot()?.rendererActivityLeases??0)>0);}\nlet fullUiMotion=null;\nlet fullUiMain=null;`,'bounded motion/switch module');
+  source=replaceOnce(source,'const fullUiMotionOptions=motionOptions(),',
+    `const {visiblePresentationFailureContext}=require(path.join(root,'${relative}/source-adapters.cjs'));\nconst fullUiMotionOptions=motionOptions(),`,'bounded presentation failure context helper');
+  source=replaceOnce(source,'storage:nativeStorage,cpuDeliveryScheduling,cpuOwnership,',
+    'storage:nativeStorage,cpuDeliveryScheduling,cpuOwnership,keepRendererActive:fullUiKeepCaptureActive,','capture-scoped renderer activity candidate');
+  source=replaceOnce(source,'    meaning:\'Explicit publisher-only BrowserWindow backgroundThrottling control;',
+    '    captureActivityPolicy:{requested:fullUiKeepCaptureActive,defaultBackgroundThrottling:true,expectedWhileLeaseActive:false,restoreOnStop:true},\n    meaning:\'Explicit publisher-only BrowserWindow backgroundThrottling control;','capture activity policy evidence');
+  source=replaceOnce(source,'if(visiblePresentation.enabled&&!qualifyVisiblePresentationState(presentationGeometry,state))',
+    'if(visiblePresentation.enabled&&!(fullUiMotion?fullUiMotion.qualify(state,qualifyVisiblePresentationState,fullUiExpectedPublisherThrottling()):qualifyVisiblePresentationState(presentationGeometry,state,{expectedPublisherBackgroundThrottling:fullUiExpectedPublisherThrottling()})))','phase-specific owned presentation qualification');
+  const start=source.indexOf('    const source=generatedNv12Enabled?');
+  const end=source.indexOf('\n    await sourceWindow.loadURL(',start);
+  if(start<0||end<start)throw Error('Full App adapter source contract changed: motion source HTML');
+  source=source.slice(0,start)+source.slice(start,end).replace('const source=generatedNv12Enabled?',
+    'const source=fullUiMotionOptions.enabled?motionSourceHtml({sourceAgeSetup,sourceAgeDraw,patternBits}):generatedNv12Enabled?')+source.slice(end);
+  source=replaceOnce(source,'sampleSeconds>30||!Number.isInteger(warmupMs)',
+    'sampleSeconds>(fullUiMotionOptions.enabled?fullUiMotionOptions.sampleSeconds:30)||!Number.isInteger(warmupMs)','bounded extended motion sample duration');
+  source=replaceOnce(source,'        sender.setBounds(presentationGeometry.senderBounds);sender.show();sender.focus();',
+    '        if(fullUiMotionOptions.enabled)sourceWindow.moveTop();\n        sender.setBounds(presentationGeometry.senderBounds);sender.show();sender.focus();','one-shot owned background stacking before visible startup');
+  source=replaceOnce(source,"'&fullProductUi=1&fullMeterDiagnostic='",
+    "'&fullProductUi=1&fullMotionSwitch='+(fullUiMotionOptions.enabled?'1':'0')+'&fullMeterDiagnostic='",'motion renderer control');
+  source=replaceOnce(source,'    helperTiming:{enabled:nativeTimingEnabled,schemaVersion:1,maximumSamples:120,',
+    '    helperTiming:{enabled:nativeTimingEnabled,schemaVersion:1,maximumSamples:fullUiMotionOptions.enabled?360:120,','bounded longer helper timing coverage');
+  source=replaceOnce(source,'nativeHelperTimingSummary(samples.map(sample=>sample.nativeHelperTiming))',
+    'nativeHelperTimingSummary(samples.map(sample=>sample.nativeHelperTiming),fullUiMotionOptions.enabled?fullUiMotionOptions.sampleSeconds+1:31)','bounded longer helper summary coverage');
+  source=replaceOnce(source,'nativeHelperTimingSnapshot(result.nativeGpu.helperTiming.records,activeNativeHelperIndex(),mode)',
+    'nativeHelperTimingSnapshot(result.nativeGpu.helperTiming.records,activeNativeHelperIndex(),mode,fullUiMotionOptions.enabled?360:120)','bounded longer helper snapshot coverage');
+  source=replaceOnce(source,'      for(let n=0;n<=sampleSeconds;n++){',
+    `      const motionNativeStart=fullUiMotionOptions.enabled?brokerSnapshot()?.started:null;\n      if(fullUiMotionOptions.enabled)fullUiMotion=await createMotionScenario({BrowserWindow,geometry:presentationGeometry,sender,sourceWindow,result:measured,keepCaptureActive:fullUiKeepCaptureActive});\n      for(let n=0;n<=sampleSeconds;n++){\n        await fullUiMotion?.beforeSample(n);`,'motion phases with continuous producer');
+  source=replaceOnce(source,'        const fullObservation=!lowObserverMode||n===0||n===sampleSeconds;',
+    '        const fullObservation=fullUiMotionOptions.enabled||!lowObserverMode||n===0||n===sampleSeconds;','per-phase actual CPU/window evidence');
+  source=replaceOnce(source,'        if(!lowObserverMode)save(mainStages.save);',
+    '        if(!fullUiMotionOptions.enabled&&!lowObserverMode)save(mainStages.save);','motion sampling defers growing full-result serialization until final or failure');
+  source=replaceOnce(source,"            pane.documentVisibilityState!=='visible'||pane.layout!=='top-strip-v1'",
+    "            (!fullUiMotionOptions.enabled&&pane.documentVisibilityState!=='visible')||pane.layout!=='top-strip-v1'",'record occlusion visibility without forcing it');
+  source=replaceOnce(source,"            throw Error('Visible product video/CSS/real diagnostic presentation contract was not established');",
+    "            {measured.visiblePresentation.failure??=visiblePresentationFailureContext(pane,{at:Date.now(),sampleIndex:n,mainClockMs:performance.now(),fullUiStats,nativeTimingEnabled,liveGpuInfo,nativeCompletion:nativeCompletion??null,sampleSeconds,warmupMs,motionEnabled:fullUiMotionOptions.enabled,keepCaptureActive:fullUiKeepCaptureActive,motionPhase:fullUiMotion?.sample()??null});save();throw Error('Visible product video/CSS/real diagnostic presentation contract was not established');}",'save actual bounded presentation context before unchanged rejection');
+  source=replaceOnce(source,'        samples.push({at,sender:send,viewer:receive,',
+    '        if(fullUiMotionOptions.enabled&&(!send.fullProductUi?.motionStability?.sameProducer||!send.fullProductUi?.motionStability?.sameTrack||nativeRequests!==measured.nativeRequests||nativeGpu?.started!==motionNativeStart))throw Error(\'Motion/switch capture producer or native session changed\');\n        if(fullUiKeepCaptureActive&&(nativeGpu?.keepRendererActive!==true||nativeGpu.rendererActivityLeases!==1||sender.webContents.getBackgroundThrottling()!==false))throw Error(\'Capture activity candidate did not establish exactly one publisher renderer lease\');\n        samples.push({at,motionPhase:fullUiMotion?.sample()??null,sender:send,viewer:receive,','capture producer continuity and phase sample');
+  source=replaceOnce(source,'    nativeController.reset();const afterReset=await waitNativeResources();',
+    '    const rendererActivityAfterProductStop={leases:afterProductCleanup.rendererActivityLeases??null,backgroundThrottling:peers[0]?.isDestroyed()?null:peers[0]?.webContents.getBackgroundThrottling()??null};\n    nativeController.reset();const afterReset=await waitNativeResources();\n    const rendererActivityAfterReset={leases:afterReset.rendererActivityLeases??null,backgroundThrottling:peers[0]?.isDestroyed()?null:peers[0]?.webContents.getBackgroundThrottling()??null};','actual renderer policy after normal stop and reset');
+  source=replaceOnce(source,'    nativeGpu={afterRendererCleanup,afterProductCleanup,afterReset,',
+    '    nativeGpu={afterRendererCleanup,afterProductCleanup,afterReset,rendererActivity:{requested:fullUiKeepCaptureActive,originalBackgroundThrottling:senderBackgroundThrottling,afterProductStop:rendererActivityAfterProductStop,afterReset:rendererActivityAfterReset,restored:rendererActivityAfterProductStop.leases===0&&rendererActivityAfterReset.leases===0&&rendererActivityAfterProductStop.backgroundThrottling===senderBackgroundThrottling&&rendererActivityAfterReset.backgroundThrottling===senderBackgroundThrottling},','capture activity restoration evidence');
+  source=replaceOnce(source,'passed:rendererResourcesZero&&backendResourcesZero&&(!nativeGpu||(nativeGpu.productResourcesReleased&&nativeGpu.resetResourcesReleased))',
+    'passed:rendererResourcesZero&&backendResourcesZero&&(!nativeGpu||(nativeGpu.productResourcesReleased&&nativeGpu.resetResourcesReleased&&(!fullUiKeepCaptureActive||nativeGpu.rendererActivity.restored)))','candidate cleanup requires actual original renderer policy restoration');
+  source=replaceOnce(source,'      if(localPreviewEnabled)measured.localPreview.afterSampling=',
+    '      if(fullUiMotion){fullUiMotion.finish(samples,summary);save();}\n      if(localPreviewEnabled)measured.localPreview.afterSampling=','phase summaries including transition and pure LOW');
+  source=replaceOnce(source,'      measured.cleanup=await cleanupPeers();save();',
+    '      fullUiMotion?.dispose();\n      measured.cleanup=await cleanupPeers();save();','normal fixture window cleanup');
+  source=replaceOnce(source,'  fullUiMain?.dispose();',
+    '  fullUiMotion?.dispose();\n  fullUiMain?.dispose();','failure fixture window cleanup');
+  source=replaceOnce(source,'renderer.fixture?.passed===true&&renderer.fixture?.meterTransitionDiagnostic?.disposed===true&&',
+    'renderer.fixture?.passed===true&&renderer.fixture?.motionObservation?.motionObservationDisposed===true&&renderer.fixture?.motionObservation?.motionNativeObservers===0&&renderer.fixture?.meterTransitionDiagnostic?.disposed===true&&','native LOW observer cleanup guard');
+  // Logging a closed redirected pipe must not crash the observation or bypass
+  // normal owned-resource teardown. Other stream errors still reach finish().
+  source=replaceOnce(source,"process.on('message',message=>",
+    "for(const stream of [process.stdout,process.stderr])stream.on('error',error=>{if(error.code!=='EPIPE')void finish(error);});\nprocess.on('message',message=>",'bounded EPIPE cleanup guard');
   return source;
+}
+function visiblePresentationFailureContext(pane,context){
+  const numeric=value=>Number.isFinite(value)&&value>=0&&value<=Number.MAX_SAFE_INTEGER?value:null;
+  const boolean=value=>typeof value==='boolean'?value:null;
+  const choice=(value,allowed)=>value==null?null:allowed.includes(value)?value:'other';
+  const size=value=>value&&Number.isFinite(value.width)&&value.width>=0&&value.width<=16384&&Number.isFinite(value.height)&&value.height>=0&&value.height<=16384
+    ?{width:value.width,height:value.height}:null;
+  const filter=pane?.backdropFilter;
+  const safeFilter=filter==null?null:typeof filter==='string'&&filter.length<=128&&/^(?:none|blur\([0-9.]+(?:px|rem|em)\))$/.test(filter)?filter:'other';
+  return {at:numeric(context.at),sampleIndex:numeric(context.sampleIndex),mainClockMs:numeric(context.mainClockMs),
+    fullUiStats:boolean(context.fullUiStats),timing:{nativeTimingEnabled:boolean(context.nativeTimingEnabled),liveGpuInfo:boolean(context.liveGpuInfo),
+      nativeCompletion:choice(context.nativeCompletion,['query','fence']),sampleSeconds:numeric(context.sampleSeconds),warmupMs:numeric(context.warmupMs)},
+    motion:{enabled:boolean(context.motionEnabled),keepCaptureActive:boolean(context.keepCaptureActive),
+      phaseIndex:numeric(context.motionPhase?.index),phase:choice(context.motionPhase?.name,['motion-visible','motion-visible-switches','motion-occluded-switches','motion-visible-restored']),
+      requestedOccluded:boolean(context.motionPhase?.requestedOccluded)},
+    pane:pane?{requested:boolean(pane.requested),stylesState:choice(pane.stylesState,['pending','ready','failed']),mounted:boolean(pane.mounted),
+      overlayMounted:boolean(pane.overlayMounted),statsEnabled:boolean(pane.statsEnabled),hostSize:size(pane.hostSize),previewSize:size(pane.previewSize),
+      overlaySize:size(pane.overlaySize),viewport:size(pane.viewport),videoObjectFit:choice(pane.videoObjectFit,['contain','cover','fill','none','scale-down']),
+      backdropFilter:safeFilter,overlayPosition:choice(pane.overlayPosition,['absolute','relative','fixed','static','sticky']),
+      documentVisibilityState:choice(pane.documentVisibilityState,['visible','hidden','prerender']),layout:choice(pane.layout,['top-strip-v1','central-v1'])}:null};
 }
 function observedPrelude(source){
   source=source.replace(/\r\n/g,'\n');
@@ -121,4 +203,4 @@ let developmentHeartbeat={observed:0,disposed:0,passed:true};`,'bounded interval
   if(start<0||end<start)throw Error('Full App observer source contract changed');
   return `import {Device,type types as MsTypes} from 'mediasoup-client';\nimport {classifyIntervalOwner,disposeDevelopmentHeartbeat} from './development-heartbeat';\nconst params=new URLSearchParams(location.search);\nconst proxyProtocol='tcp';\n`+source.slice(start,end)+`\nexport {peerConnections,iceQA};\n`;
 }
-module.exports={root,relative,replaceOnce,qualifyFullProductDisplay,launcher,electron,productController,productChat,fixtureObserver,observedPrelude};
+module.exports={root,relative,replaceOnce,qualifyFullProductDisplay,launcher,electron,productController,productChat,fixtureObserver,observedPrelude,visiblePresentationFailureContext};

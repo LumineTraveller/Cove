@@ -21,8 +21,8 @@ const nativeGpuEnabled=nativePerformanceEnabled(),nativePaths=nativeGpuEnabled?n
 const nativePixelFormat=nativePerformancePixelFormat();
 const nativeStorage=nativePerformanceStorage(process.env,nativePixelFormat);
 const nativeFrameSink=process.env.COVE_FPS_NATIVE_FRAME_SINK??'generator';
-if(!['generator','canvas','worker'].includes(nativeFrameSink))throw Error('Invalid native frame sink');
-if((nativeFrameSink==='canvas'||nativeFrameSink==='worker')&&(!nativeGpuEnabled||nativeStorage!=='gpu'||nativePixelFormat!=='bgra'))
+if(!['generator','canvas','worker','gpu-snapshot'].includes(nativeFrameSink))throw Error('Invalid native frame sink');
+if((nativeFrameSink==='canvas'||nativeFrameSink==='worker'||nativeFrameSink==='gpu-snapshot')&&(!nativeGpuEnabled||nativeStorage!=='gpu'||nativePixelFormat!=='bgra'))
   throw Error('Experimental frame handoff requires explicit native GPU BGRA measurement');
 const stockCaptureKeepaliveFlag=process.env.COVE_FPS_STOCK_CAPTURE_KEEPALIVE??'0';
 if(!['0','1'].includes(stockCaptureKeepaliveFlag))throw Error('Invalid stock capture keepalive diagnostic');

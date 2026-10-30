@@ -10,7 +10,7 @@ function visiblePresentationOptions(env=process.env){
     if(env.COVE_FPS_PEER_RENDER_MODE!=='hidden'||env.COVE_FPS_PRODUCT_SENDER_THROTTLING!=='1'||
       env.COVE_FPS_NATIVE_GPU!=='1'||env.COVE_DISABLE_NATIVE_GPU_CAPTURE==='1'||
       (env.COVE_FPS_NATIVE_STORAGE??'gpu')!=='gpu'||(env.COVE_FPS_NATIVE_PIXEL_FORMAT??'bgra')!=='bgra'||
-      !['generator','worker'].includes(env.COVE_FPS_NATIVE_FRAME_SINK??'generator'))
+      !['generator','worker','gpu-snapshot'].includes(env.COVE_FPS_NATIVE_FRAME_SINK??'generator'))
       throw Error('Visible presentation requires an ordinary product-throttled native GPU BGRA publisher');
     for(const flag of ['COVE_FPS_MINIMIZE_SENDER','COVE_FPS_NATIVE_LIFECYCLE_CHECKS','COVE_FPS_RECOVERY_CHECKS',
       'COVE_FPS_REPUBLISH_CHECKS','COVE_FPS_CONTENT_TRACE','COVE_FPS_GENERATED_NV12','COVE_FPS_DISABLE_RENDERER_BACKGROUNDING'])
@@ -48,12 +48,13 @@ function visiblePresentationGeometry(displays){
     scaleFactor:display.scaleFactor,displayFrequency:display.displayFrequency,patternLayout:'top-strip-v1'};
 }
 
-function qualifyVisiblePresentationState(geometry,state){
+function qualifyVisiblePresentationState(geometry,state,{expectedPublisherBackgroundThrottling=true}={}){
   const near=(a,b)=>a&&b&&['x','y','width','height'].every(key=>Number.isFinite(a[key])&&Math.abs(a[key]-b[key])<=2);
-  return Boolean(state?.displayCount===1&&state.primaryDisplayUnchanged===true&&near(state.displayBounds,geometry.displayBounds)&&
+  return Boolean(typeof expectedPublisherBackgroundThrottling==='boolean'&&
+    state?.displayCount===1&&state.primaryDisplayUnchanged===true&&near(state.displayBounds,geometry.displayBounds)&&
     near(state.workArea,geometry.workArea)&&Math.abs(state.scaleFactor-geometry.scaleFactor)<.01&&
     Math.abs(state.displayFrequency-geometry.displayFrequency)<1&&state.displayFrequency>=120&&
-    state.sender?.visible===true&&state.sender.minimized===false&&state.sender.focused===true&&state.sender.offscreen===false&&state.sender.backgroundThrottling===true&&
+    state.sender?.visible===true&&state.sender.minimized===false&&state.sender.focused===true&&state.sender.offscreen===false&&state.sender.backgroundThrottling===expectedPublisherBackgroundThrottling&&
     near(state.sender.bounds,geometry.senderBounds)&&state.source?.visible===true&&state.source.minimized===false&&state.source.fullscreen===true&&
     state.source.alwaysOnTop===false&&state.source.backgroundThrottling===false&&near(state.source.bounds,geometry.displayBounds)&&
     near(state.source.contentBounds,geometry.displayBounds));
@@ -61,6 +62,7 @@ function qualifyVisiblePresentationState(geometry,state){
 
 async function waitVisiblePresentationStartup(geometry,readState,{
   now=()=>performance.now(),wait=ms=>new Promise(resolve=>setTimeout(resolve,ms)),
+  expectedPublisherBackgroundThrottling=true,
 }={}){
   const started=now(),maximumMs=2000,intervalMs=50;
   let state=null,observations=0;
@@ -69,7 +71,7 @@ async function waitVisiblePresentationStartup(geometry,readState,{
     const elapsedMs=now()-started;
     // show()/focus() is requested once by the caller. Only observe here: never
     // steal focus, extend the deadline or accept a late observation.
-    if(elapsedMs<=maximumMs&&qualifyVisiblePresentationState(geometry,state))
+    if(elapsedMs<=maximumMs&&qualifyVisiblePresentationState(geometry,state,{expectedPublisherBackgroundThrottling}))
       return {established:true,elapsedMs,observations,state};
     if(elapsedMs>=maximumMs)return {established:false,elapsedMs,observations,state};
     await wait(Math.min(intervalMs,maximumMs-elapsedMs));

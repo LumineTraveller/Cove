@@ -30,7 +30,7 @@ another binary. Do not install or alter global tools for this fixture.
 From the repository root:
 
 ~~~powershell
-node --test --test-isolation=none tooling/full-product-ui-benchmark/static.test.cjs tooling/full-product-ui-benchmark/development-heartbeat.test.cjs
+node --test --test-isolation=none tooling/full-product-ui-benchmark/static.test.cjs tooling/full-product-ui-benchmark/development-heartbeat.test.cjs tooling/full-product-ui-benchmark/motion-scenario.test.cjs tests/screen-performance-native-delivery.test.cjs
 node node_modules/typescript/bin/tsc -p tooling/full-product-ui-benchmark/tsconfig.json --noEmit
 ~~~
 
@@ -43,6 +43,85 @@ node -e "require('./tooling/full-product-ui-benchmark/run.cjs').prepare()"
 ~~~
 
 CPU checks do not establish real GPU/media performance or functional acceptance.
+
+## Sustained motion, focus switches and publisher occlusion
+
+The explicit `COVE_FULL_UI_MOTION_SWITCH=1` scenario keeps one native capture
+producer and one real SFU publication for four phases. Each phase lasts at least
+48 one-second sample periods: moving background with the publisher focused;
+the same background while focus alternates between two small owned fixture
+windows below the visible publisher; the same switches with opaque fixtures
+covering the publisher surface; and the publisher focused and visible again.
+Switches occur every three seconds and use only those fixture windows. A lost
+owned focus aborts the run; the harness does not focus over a user application.
+Each requested focus change has a bounded two-second acknowledgement window.
+
+Use the same helper source revision, dimensions, codec and completion setting
+for matched native variants, running one at a time:
+
+~~~powershell
+$env:COVE_FULL_UI_MOTION_SWITCH='1'
+$env:COVE_FULL_UI_KEEP_CAPTURE_ACTIVE='0' # default baseline; 1 is the explicit capture-scoped activity candidate
+$env:COVE_FULL_UI_STATS='1'
+$env:COVE_FULL_UI_VOICE='muted'
+$env:COVE_FPS_SAMPLE_SECONDS='192' # fixed only for this scenario
+$env:COVE_NATIVE_GPU_CAPTURE_TIMING='1'
+$env:COVE_FPS_NATIVE_VARIANT='pacing-timeout' # exact prebuilt matched variant
+$env:COVE_FPS_NATIVE_COMPLETION='query'
+$env:COVE_FPS_LABEL='motion-timeout-query'
+node tooling/full-product-ui-benchmark/run.cjs
+~~~
+
+The scenario requires actual product stats and muted synthetic voice (the
+separate varying-voice fixture has a 120-second curve). Publisher
+`backgroundThrottling` starts true. The default-off
+`COVE_FULL_UI_KEEP_CAPTURE_ACTIVE=1` control is allowed only in the motion
+scenario and passes `keepRendererActive` to the native controller. The candidate
+requires exactly one active renderer policy lease and actual publisher
+`backgroundThrottling=false` during every measured sample. Qualification takes
+an explicit expected policy without rewriting the actual state. Before capture,
+and after normal product stop and safety reset, actual policy must be true again
+with zero leases. Fixture windows retain their original true policy. Use the
+same timeout/query helper and all other inputs to compare flag 0 and flag 1.
+
+All existing real pixel/advancing
+sequence/nonfuture sequence, actual 1728x1080 capture/encode/decode/render
+dimensions, codec and media cleanup guards remain active. New fixtures stay
+clear of source marker/sequence probes. Bounds and stacking request an opaque
+publisher cover; they do not prove the OS occlusion decision. Actual native
+window focus/visibility, document visibility, policy and CPU counters are
+recorded independently at every sample. The physical desktop may not present
+every source canvas rAF draw; helper source-present counters provide separate
+evidence.
+
+`cases[].motionScenario` retains timestamped phase markers and focus requests,
+per-phase `includingTransition` throughput and rolling LOW snapshots, and a
+separate `phasePure` result. The latter uses only the last 15 snapshots taken at
+least 32 seconds after a phase transition completed. A numeric LOW is included
+only when its observed interval span plus last-frame age fits within the phase
+age with a two-millisecond clock margin; per-metric `phaseHistory` counts
+verified, unknown and crossing histories. `phasePureComplete` means that 15
+candidate snapshots were retained, not that every preview LOW was available or
+verified. Switches within a phase remain included. No LOW history
+is reset or transition gap removed. A numeric native observer supplies an exact
+sample-time snapshot; the existing product preview reader is reused without a
+second presentation binding. Actual cached product
+`nativeDeliveryStability`/`presentationStability` snapshots are retained too.
+Unavailable or incomplete preview LOW remains unavailable or incomplete,
+including when document visibility resets its observation.
+
+Helper timing collection has a scenario-only bound of 360 reports; ordinary
+runs retain their existing 120-report and 30-second limits. The existing
+330-second Electron watchdog and 360-second launcher watchdog remain unchanged.
+Motion samples remain in a bounded in-memory list during measurement; the
+growing full result is serialized and written only after measurement or on
+failure. Per-sample `mainStages.save.performed` therefore remains false in this
+scenario, including when the ordinary low-overhead observer flag is off. Earlier
+motion trials that serialized the entire growing JSON on every sample are
+observer-interference trials and cannot establish a product tail regression.
+All focus timers, fixture windows and the additional native numeric observer
+are released on normal completion and failure. Failed runs retain raw
+observations and are not performance successes.
 
 ## Real local run
 

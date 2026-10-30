@@ -182,7 +182,8 @@ test('explicit active voice keeps size/codec policy and rejects invalid modes',(
   const env={COVE_FULL_UI_VOICE:'synthetic-varying'};configure(env);
   assert.equal(env.COVE_FULL_UI_VOICE,'synthetic-varying');assert.equal(JSON.parse(env.COVE_FPS_CASES)[0].expectCodec,'video/AV1');
   const source=a.electron(read('apps/desktop/tests/ui/screen-performance.electron.cjs'));
-  assert.ok(source.includes('fullProductUi=1&fullMeterDiagnostic='));
+  assert.ok(source.includes('fullProductUi=1&fullMotionSwitch='));
+  assert.ok(source.includes("'&fullMeterDiagnostic='"));
   assert.ok(source.includes("'&fullVoice='+fullUiVoice"));
   assert.ok(source.includes('full.selfMuted!==fullUiSelfMuted'));
   assert.ok(source.includes('last.meterValueChanges>first.meterValueChanges'));
