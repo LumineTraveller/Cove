@@ -8,7 +8,11 @@
 
 ## 诊断与候选
 
-先用同一份 helper 源码分别构建原有 timeout 与非阻塞 poll acquire，保持默认 timeout；支持时另测已有 fence 完成模式。只有实测对照与清理验证支持的候选才改变默认行为。不能把请求 1ms 的 DXGI timeout 当作实际只花 1ms。
+用同一份 helper 源码分别构建原有 timeout 与非阻塞 poll acquire，并对照 query/fence 完成模式。当前候选默认是 poll + Auto：启动时优先构造 fence，只在可选接口/构造失败且设备健康时回退 query。显式 `--completion query` 和 `--completion fence` 保持原语义；运行中的 GPU 失败不会切换屏障。不能把请求 1ms 的 DXGI timeout 当作实际只花 1ms。
+
+`ReadinessWindow` 管有界取帧等待，`selectCompletion` 管启动选择，`GpuCompletion.complete` 管实际完成屏障。构造 fence 的局部资源先全部完成再提交；失败时先清理、核对设备、再构造 query。设备移除、显式 fence 失败和运行时完成失败继续终止该原生尝试。实际选中的模式在构造成功后才进入诊断。
+
+原有 Generator writer 仍为默认。`gpu-snapshot` 和 renderer activity lease 仅供显式对照，均未显示足够一致的收益，不自动启用。UI、编码与 SFU 协议没有新增策略。
 
 开启既有原生 timing 诊断时，额外记录累计交付间隔直方图与每份报告最慢的至多八个间隔。七个区间为 `<1T`、`<1.1T`、`<1.25T`、`<1.5T`、`<2T`、`<4T`、其余；T 是目标帧周期。候选阈值为 gap 大于 `floor(1.1T)`。
 
