@@ -49,6 +49,24 @@ test('helper delivery strips unknown private fields at every report level', () =
   assert.doesNotMatch(JSON.stringify(output), /private|handle|windowTitle|sourceId|"pid"|"url"/);
 });
 
+test('optional slot-credit wait survives both sanitizer passes without inventing an old-helper value', () => {
+  for (const slotCreditWaitUs of [0, 6000, Number.MAX_SAFE_INTEGER]) {
+    const input = report();
+    Object.assign(input.delivery.tail[0], { slotCreditWaitUs, noSlot: 0, privateWait: 'private' });
+    const output = safeNativeHelperTiming(safeNativeHelperTiming(input));
+    assert.equal(output.delivery.tail[0].slotCreditWaitUs, slotCreditWaitUs);
+    assert.equal(output.delivery.tail[0].noSlot, 0);
+    assert.deepEqual(Object.keys(output.delivery.tail[0]).sort(), [...fields, 'slotCreditWaitUs', 'refresh'].sort());
+    assert.doesNotMatch(JSON.stringify(output), /private/);
+    input.delivery.tail[0].slotCreditWaitUs = 123;
+    assert.equal(output.delivery.tail[0].slotCreditWaitUs, slotCreditWaitUs, 'the optional value is copied');
+  }
+  for (const legacy of [event(), { ...event(), slotCreditWaitUs: undefined }]) {
+    const output = safeNativeHelperTiming(report({ ...delivery(), tail: [legacy] }));
+    assert.equal(Object.hasOwn(output.delivery.tail[0], 'slotCreditWaitUs'), false);
+  }
+});
+
 test('invalid optional delivery is omitted while valid timing remains available', () => {
   const malformed = [null, [], {}, { ...delivery(), buckets: [0, 0] },
     { ...delivery(), buckets: Array(7) }, { ...delivery(), tail: 'private' },
@@ -65,6 +83,8 @@ test('invalid optional delivery is omitted while valid timing remains available'
     for (const invalid of [-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, '1', undefined])
       malformed.push({ ...delivery(), tail: [{ ...event(), [key]: invalid }] });
   }
+  for (const invalid of [-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, '1', null, {}, []])
+    malformed.push({ ...delivery(), tail: [{ ...event(), slotCreditWaitUs: invalid }] });
   malformed.push({ ...delivery(), tail: [{ ...event(), gapUs: 0 }] });
   for (const invalid of [0, 1, 'false', null, undefined])
     malformed.push({ ...delivery(), tail: [{ ...event(), refresh: invalid }] });
@@ -81,12 +101,17 @@ test('invalid optional delivery is omitted while valid timing remains available'
 test('bounded helper line collector retains sanitized delivery across chunk boundaries', () => {
   const samples = [], collector = createNativeTimingCollector(sample => samples.push(sample), 1);
   const input = report(delivery(8)); input.delivery.tail[0].secret = 'private';
+  for (const item of input.delivery.tail) {
+    for (const field of [...fields, 'slotCreditWaitUs']) item[field] = Number.MAX_SAFE_INTEGER;
+  }
   const line = 'COVE_NATIVE_CAPTURE_TIMING ' + JSON.stringify(input) + '\n';
+  assert.ok(Buffer.byteLength(line) < 16384);
   collector.write(Buffer.from(line.slice(0, 53)));
   assert.equal(samples.length, 0);
   collector.write(Buffer.from(line.slice(53)));
   assert.equal(samples.length, 1);
   assert.equal(samples[0].delivery.tail.length, 8);
+  assert.equal(samples[0].delivery.tail[0].slotCreditWaitUs, Number.MAX_SAFE_INTEGER);
   assert.doesNotMatch(JSON.stringify(samples), /secret|private/);
   collector.write(Buffer.from(line));
   assert.equal(samples.length, 1);

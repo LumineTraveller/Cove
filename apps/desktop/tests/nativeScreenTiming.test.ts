@@ -14,6 +14,7 @@ const broker = () => ({ activeSessions: 1, sessions: 1, frames: 120, busySlots: 
   timing: { reference: { count: 118, totalMs: 2000, maxMs: 32, buckets: [0, 1, 2, 3, 4, 5, 103] } } });
 const tail = (elapsedUs = 1_000_000, gapUs = 20_000) => ({ elapsedUs, gapUs, tickLatenessUs: 123,
   acquireUs: 50, acquireTimeoutUs: 1000, gpuWaitUs: 2000, drawUs: 10,
+  slotCreditWaitUs: 8000,
   noPresent: 1, noSlot: 0, missedTicks: 1, sourcePresents: 2, refresh: false });
 const delivery = (events = [tail()]) => ({ count: 119, totalGapUs: 1_000_000, maxGapUs: 30_000,
   buckets: [10, 100, 5, 1, 1, 1, 1], tailCandidates: 9, tailRetained: events.length, tail: events });
@@ -23,20 +24,42 @@ test('delivery tail is a bounded deeply frozen numeric whitelist', () => {
     tail: [{ ...tail(), token: 'private', source: 'private' }] } };
   const safe = nativeScreenHelperTiming(raw)!;
   assert.equal(safe.delivery?.tail[0].gapUs, 20_000);
+  assert.equal(safe.delivery?.tail[0].slotCreditWaitUs, 8000);
   assert.equal(JSON.stringify(safe).includes('private'), false);
   assert.ok(Object.isFrozen(safe.delivery));
   assert.ok(Object.isFrozen(safe.delivery?.buckets));
   assert.ok(Object.isFrozen(safe.delivery?.tail));
   assert.ok(Object.isFrozen(safe.delivery?.tail[0]));
   raw.delivery.tail[0].gapUs = 99_999;
+  raw.delivery.tail[0].slotCreditWaitUs = 99_999;
   assert.equal(safe.delivery?.tail[0].gapUs, 20_000);
+  assert.equal(safe.delivery?.tail[0].slotCreditWaitUs, 8000);
   for (const invalid of [
     { ...delivery(), tail: Array.from({ length: 9 }, () => tail()), tailRetained: 9 },
     { ...delivery(), tailRetained: 0 }, { ...delivery(), buckets: [1] },
     { ...delivery(), tail: [{ ...tail(), refresh: 1 }] },
     { ...delivery(), tail: [{ ...tail(), gapUs: 0 }] },
     { ...delivery(), tail: [{ ...tail(), acquireTimeoutUs: Number.MAX_SAFE_INTEGER + 1 }] },
+    ...[-1, 0.5, Number.MAX_SAFE_INTEGER + 1, NaN, Infinity, null, '8000'].map(slotCreditWaitUs =>
+      ({ ...delivery(), tail: [{ ...tail(), slotCreditWaitUs }] })),
   ]) assert.equal(nativeScreenHelperTiming({ ...helper(), delivery: invalid })!.delivery, undefined);
+});
+
+test('delivery tails preserve slot-credit wait without noSlot ticks and accept old helper fields', () => {
+  const { slotCreditWaitUs: _omitted, ...oldTail } = tail(2_000_000, 25_000);
+  const events = [{ ...tail(), noSlot: 2, slotCreditWaitUs: 25_000 },
+    { ...tail(1_500_000), noSlot: 0, slotCreditWaitUs: 6000 }, oldTail];
+  const rawDelivery = { ...delivery(), tailRetained: events.length, tail: events };
+  const safe = nativeScreenHelperTiming({ ...helper(), delivery: rawDelivery })!;
+  assert.deepEqual(safe.delivery?.tail.map(event => [event.noSlot, event.slotCreditWaitUs]),
+    [[2, 25_000], [0, 6000], [0, undefined]]);
+  assert.equal(Object.prototype.hasOwnProperty.call(safe.delivery!.tail[2], 'slotCreditWaitUs'), false);
+  const samples: unknown[] = [];
+  const collector = createNativeScreenHelperTimingCollector(sample => samples.push(sample));
+  collector.write(Buffer.from('COVE_NATIVE_CAPTURE_TIMING ' + JSON.stringify({ ...helper(),
+    delivery: rawDelivery }) + '\n'));
+  assert.equal(samples.length, 1);
+  assert.equal(collector.snapshot().rejected, 0);
 });
 
 test('maximum safe delivery report fits collector byte limit and preserves no raw fields', () => {

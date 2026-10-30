@@ -20,7 +20,10 @@ interface HelperStage { count: number; totalUs: number; maxUs: number }
 interface Residence extends HelperStage { buckets: readonly number[] }
 const DELIVERY_FIELDS = ['elapsedUs', 'gapUs', 'tickLatenessUs', 'acquireUs', 'acquireTimeoutUs',
   'gpuWaitUs', 'drawUs', 'noPresent', 'noSlot', 'missedTicks', 'sourcePresents'] as const;
-interface DeliveryTail extends Readonly<Record<typeof DELIVERY_FIELDS[number], number>> { readonly refresh: boolean }
+interface DeliveryTail extends Readonly<Record<typeof DELIVERY_FIELDS[number], number>> {
+  readonly slotCreditWaitUs?: number;
+  readonly refresh: boolean;
+}
 interface DeliveryTiming {
   readonly count: number;
   readonly totalGapUs: number;
@@ -39,9 +42,12 @@ function deliveryTiming(value: unknown): Readonly<DeliveryTiming> | undefined {
   const tail: Readonly<DeliveryTail>[] = [];
   for (const event of value.tail) {
     if (!record(event) || !DELIVERY_FIELDS.every(key => count(event[key])) ||
-        event.gapUs === 0 || typeof event.refresh !== 'boolean') return undefined;
+        event.gapUs === 0 || typeof event.refresh !== 'boolean' ||
+        (event.slotCreditWaitUs !== undefined && !count(event.slotCreditWaitUs))) return undefined;
     const safe = Object.fromEntries(DELIVERY_FIELDS.map(key => [key, event[key]])) as unknown as DeliveryTail;
-    tail.push(Object.freeze({ ...safe, refresh: event.refresh }));
+    tail.push(Object.freeze({ ...safe,
+      ...(event.slotCreditWaitUs === undefined ? {} : { slotCreditWaitUs: event.slotCreditWaitUs }),
+      refresh: event.refresh }));
   }
   return Object.freeze({ count: value.count, totalGapUs: value.totalGapUs, maxGapUs: value.maxGapUs,
     buckets: Object.freeze([...value.buckets]), tailCandidates: value.tailCandidates,

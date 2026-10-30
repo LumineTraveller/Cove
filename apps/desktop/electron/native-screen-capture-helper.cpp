@@ -227,17 +227,19 @@ struct DeliverySnapshot {
   uint64_t acquireUs = 0, acquireTimeoutUs = 0, gpuWaitUs = 0, drawUs = 0;
   uint64_t noPresent = 0, noSlot = 0, missedTicks = 0, sourcePresents = 0;
   uint64_t tickLatenessUs = 0;
+  uint64_t slotCreditWaitUs = 0;
 };
 struct DeliveryEvent {
   uint64_t elapsedUs = 0, gapUs = 0, tickLatenessUs = 0;
-  uint64_t acquireUs = 0, acquireTimeoutUs = 0, gpuWaitUs = 0, drawUs = 0;
+  uint64_t acquireUs = 0, acquireTimeoutUs = 0, gpuWaitUs = 0, drawUs = 0, slotCreditWaitUs = 0;
   uint64_t noPresent = 0, noSlot = 0, missedTicks = 0, sourcePresents = 0;
   bool refresh = false;
   void write(std::ostream& out) const {
     out << "{\"elapsedUs\":" << elapsedUs << ",\"gapUs\":" << gapUs
       << ",\"tickLatenessUs\":" << tickLatenessUs << ",\"acquireUs\":" << acquireUs
       << ",\"acquireTimeoutUs\":" << acquireTimeoutUs << ",\"gpuWaitUs\":" << gpuWaitUs
-      << ",\"drawUs\":" << drawUs << ",\"noPresent\":" << noPresent << ",\"noSlot\":" << noSlot
+      << ",\"drawUs\":" << drawUs << ",\"slotCreditWaitUs\":" << slotCreditWaitUs
+      << ",\"noPresent\":" << noPresent << ",\"noSlot\":" << noSlot
       << ",\"missedTicks\":" << missedTicks << ",\"sourcePresents\":" << sourcePresents
       << ",\"refresh\":" << (refresh ? "true" : "false") << '}';
   }
@@ -280,6 +282,8 @@ struct DeliveryTiming {
         event.acquireTimeoutUs = diagnosticInteger(current.acquireTimeoutUs - previous.acquireTimeoutUs);
         event.gpuWaitUs = diagnosticInteger(current.gpuWaitUs - previous.gpuWaitUs);
         event.drawUs = diagnosticInteger(current.drawUs - previous.drawUs);
+        event.slotCreditWaitUs = diagnosticInteger(current.slotCreditWaitUs >= previous.slotCreditWaitUs ?
+          current.slotCreditWaitUs - previous.slotCreditWaitUs : 0);
         event.noPresent = diagnosticInteger(current.noPresent - previous.noPresent);
         event.noSlot = diagnosticInteger(current.noSlot - previous.noSlot);
         event.missedTicks = diagnosticInteger(current.missedTicks - previous.missedTicks);
@@ -344,9 +348,12 @@ struct CaptureTiming {
   }
   DeliverySnapshot deliverySnapshot() const {
     if (!enabled) return {};
+    // Delivery requires an available slot, which already closes creditWaitBegin.
+    // Its accumulated duration includes waits that recover before a noSlot tick.
     return {stages[Acquire].totalUs, stages[AcquireTimeoutWait].totalUs,
       stages[GpuWait].totalUs, stages[Draw].totalUs,
-      noPresent, noSlot, missedTicks, sourcePresents, currentTickLatenessUs};
+      noPresent, noSlot, missedTicks, sourcePresents, currentTickLatenessUs,
+      stages[SlotCreditWait].totalUs};
   }
   void recordDelivery(uint64_t sentAt, bool refresh, const DeliverySnapshot& current) {
     if (enabled) delivery.observe(sentAt, begin, periodUs, refresh, current);
@@ -2010,6 +2017,37 @@ static void selfTest() {
   deliveries.recordDelivery(195, false, deliveries.deliverySnapshot());
   expect(deliveries.delivery.count == 2 && deliveries.delivery.totalGapUs == 45 &&
     deliveries.delivery.tail[0].acquireUs == 4 && deliveries.delivery.tail[0].acquireTimeoutUs == 0);
+  CaptureTiming slotWaitDeliveries; slotWaitDeliveries.enabled = true; slotWaitDeliveries.start(0, 10);
+  slotWaitDeliveries.stages[CaptureTiming::SlotCreditWait].add(7);
+  slotWaitDeliveries.recordDelivery(100, false, slotWaitDeliveries.deliverySnapshot());
+  slotWaitDeliveries.creditWaitBegin = 105;
+  ++slotWaitDeliveries.noSlot; // No delivery on this or the next unavailable tick.
+  ++slotWaitDeliveries.noSlot;
+  std::ostringstream openCreditReport;
+  expect(slotWaitDeliveries.report(120, true, openCreditReport) &&
+    slotWaitDeliveries.deliverySnapshot().slotCreditWaitUs == 7 &&
+    openCreditReport.str().find("\"openSlotCreditWaitUs\":15") != std::string::npos);
+  // The available-slot branch closes the entire wait before the next delivery.
+  slotWaitDeliveries.stages[CaptureTiming::SlotCreditWait].add(25);
+  slotWaitDeliveries.creditWaitBegin = 0;
+  slotWaitDeliveries.recordDelivery(135, false, slotWaitDeliveries.deliverySnapshot());
+  expect(slotWaitDeliveries.delivery.tail[0].slotCreditWaitUs == 25 &&
+    slotWaitDeliveries.delivery.tail[0].noSlot == 2);
+  // A deadline-local recovery records wait time despite no skipped noSlot tick.
+  slotWaitDeliveries.stages[CaptureTiming::SlotCreditWait].add(6);
+  const auto recoveredSlotSnapshot = slotWaitDeliveries.deliverySnapshot();
+  slotWaitDeliveries.stages[CaptureTiming::SlotCreditWait].add(4); // After the endpoint belongs to the next gap.
+  slotWaitDeliveries.recordDelivery(150, false, recoveredSlotSnapshot);
+  expect(slotWaitDeliveries.delivery.tail[1].slotCreditWaitUs == 6 &&
+    slotWaitDeliveries.delivery.tail[1].noSlot == 0);
+  slotWaitDeliveries.recordDelivery(163, false, slotWaitDeliveries.deliverySnapshot());
+  expect(slotWaitDeliveries.delivery.tail[2].slotCreditWaitUs == 4 &&
+    slotWaitDeliveries.delivery.tail[2].noSlot == 0);
+  DeliveryTiming regressedCredit;
+  DeliverySnapshot priorCredit{}, resetCredit{}; priorCredit.slotCreditWaitUs = 9; resetCredit.slotCreditWaitUs = 3;
+  regressedCredit.observe(0, 0, 10, false, priorCredit);
+  regressedCredit.observe(12, 0, 10, false, resetCredit);
+  expect(regressedCredit.tail[0].slotCreditWaitUs == 0); // Never unsigned-underflow into a false long wait.
   const std::array<std::array<uint64_t, 3>, 17> deliveryEdges{{
     {{100,99,0}}, {{100,100,1}}, {{100,109,1}}, {{100,110,2}}, {{100,124,2}},
     {{100,125,3}}, {{100,149,3}}, {{100,150,4}}, {{100,199,4}}, {{100,200,5}},
@@ -2040,7 +2078,7 @@ static void selfTest() {
   DeliveryTiming extremeDelivery;
   extremeDelivery.observe(0, 0, 1, false, {});
   DeliverySnapshot extremeSnapshot{diagnosticMaximum, diagnosticMaximum, diagnosticMaximum, diagnosticMaximum,
-    diagnosticMaximum, diagnosticMaximum, diagnosticMaximum, diagnosticMaximum, diagnosticMaximum};
+    diagnosticMaximum, diagnosticMaximum, diagnosticMaximum, diagnosticMaximum, diagnosticMaximum, diagnosticMaximum};
   extremeDelivery.count = extremeDelivery.totalGapUs = extremeDelivery.tailCandidates = kSafeInteger;
   extremeDelivery.buckets[6] = kSafeInteger;
   extremeDelivery.observe(diagnosticMaximum, 0, 1, true, extremeSnapshot);
@@ -2050,7 +2088,7 @@ static void selfTest() {
     extremeDelivery.buckets[6] == kSafeInteger && extremeTail.elapsedUs == kSafeInteger &&
     extremeTail.gapUs == kSafeInteger && extremeTail.acquireUs == kSafeInteger &&
     extremeTail.acquireTimeoutUs == kSafeInteger && extremeTail.gpuWaitUs == kSafeInteger &&
-    extremeTail.drawUs == kSafeInteger && extremeTail.noPresent == kSafeInteger &&
+    extremeTail.drawUs == kSafeInteger && extremeTail.slotCreditWaitUs == kSafeInteger && extremeTail.noPresent == kSafeInteger &&
     extremeTail.noSlot == kSafeInteger && extremeTail.missedTicks == kSafeInteger &&
     extremeTail.sourcePresents == kSafeInteger && extremeTail.tickLatenessUs == kSafeInteger);
   DeliveryTiming wideDelivery; wideDelivery.observe(0, 0, diagnosticMaximum, false, {});

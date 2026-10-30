@@ -198,8 +198,11 @@ function safeNativeHelperDelivery(value) {
   const tail = [];
   for (const event of value.tail) {
     if (!record(event) || !HELPER_DELIVERY_FIELDS.every(key => safeNonnegativeInteger(event[key])) ||
-        event.gapUs === 0 || typeof event.refresh !== 'boolean') return null;
-    tail.push({ ...Object.fromEntries(HELPER_DELIVERY_FIELDS.map(key => [key, event[key]])), refresh: event.refresh });
+        event.gapUs === 0 || typeof event.refresh !== 'boolean' ||
+        (event.slotCreditWaitUs !== undefined && !safeNonnegativeInteger(event.slotCreditWaitUs))) return null;
+    tail.push({ ...Object.fromEntries(HELPER_DELIVERY_FIELDS.map(key => [key, event[key]])),
+      ...(event.slotCreditWaitUs === undefined ? {} : { slotCreditWaitUs: event.slotCreditWaitUs }),
+      refresh: event.refresh });
   }
   return { count: value.count, totalGapUs: value.totalGapUs, maxGapUs: value.maxGapUs,
     buckets: [...value.buckets], tailCandidates: value.tailCandidates, tailRetained: value.tailRetained, tail };
