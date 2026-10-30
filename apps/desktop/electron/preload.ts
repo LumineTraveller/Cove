@@ -163,17 +163,19 @@ if (nativeEnabled) {
     const key = nativePermitKey(metadata);
     let permitTimer: ReturnType<typeof setTimeout> | undefined;
     let timedOut = false;
-    const permit = new Promise<void>((resolve) => {
-      if (nativeEarlyPermits.delete(key)) { resolve(); return; }
-      nativeReleasePermits.set(key, resolve);
+    let permitSettled = nativeEarlyPermits.delete(key);
+    let resolvePermit: (() => void) | undefined;
+    if (!permitSettled) {
+      const settlePermit = () => { permitSettled = true; resolvePermit?.(); };
+      nativeReleasePermits.set(key, settlePermit);
       permitTimer = setTimeout(() => {
         timedOut = true;
         nativeReleasePermits.delete(key);
         // No credit is fabricated on a timeout. Main retires this session.
         void ipcRenderer.invoke('cove:native-screen:stop', metadata.requestId, 'receiver_failed').catch(() => {});
-        resolve();
+        settlePermit();
       }, 1500);
-    });
+    }
     try {
       const listener = nativeFrameListeners.get(metadata.requestId);
       if (listener) {
@@ -185,7 +187,9 @@ if (nativeEnabled) {
       void ipcRenderer.invoke('cove:native-screen:stop', metadata.requestId, 'receiver_failed').catch(() => {});
     } finally {
       frame?.close();
-      await permit;
+      // Usually transfer has already settled while the listener was writing.
+      // Keep the same barrier without allocating/awaiting a resolved promise.
+      if (!permitSettled) await new Promise<void>(resolve => { resolvePermit = resolve; });
       clearTimeout(permitTimer);
       nativeReleasePermits.delete(key);
       // sendSharedTexture owns another main-process reference until transfer

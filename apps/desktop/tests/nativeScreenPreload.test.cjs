@@ -8,7 +8,7 @@ const source = ts.transpileModule(fs.readFileSync(require.resolve('../electron/p
   compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS },
 }).outputText;
 function bridge(enabled = true, options = {}) {
-  const api = {}, ipc = new EventEmitter(), calls = [], sent = [], events = [], cpuFrames = [], timers = new Map();
+  const api = {}, ipc = new EventEmitter(), calls = [], sent = [], events = [], cpuFrames = [], timers = new Map(), timerDelays = new Map();
   let id = 0, receiver;
   ipc.invoke = async (...args) => { calls.push(args); events.push(['invoke', ...args]); return true; };
   ipc.send = (...args) => { sent.push(args); events.push(['send', ...args]); options.onSend?.(...args); };
@@ -26,9 +26,11 @@ function bridge(enabled = true, options = {}) {
       ...(enabled ? ['--cove-native-gpu-capture=1'] : []), ...(options.argv ?? []),
       ...(options.cpuFrameTiming ? ['--cove-native-cpu-frame-timing=1'] : []),
     ] },
-    setTimeout: callback => { timers.set(++id, callback); return id; }, clearTimeout: key => timers.delete(key),
-    console, Uint8Array, Buffer, VideoFrame, performance: options.performance });
-  return { api: api.coveNativeScreen, ipc, calls, sent, events, cpuFrames, timers, receive: (...args) => receiver(...args),
+    setTimeout: (callback, delay) => { timers.set(++id, callback); timerDelays.set(id, delay); return id; },
+    clearTimeout: key => { timers.delete(key); timerDelays.delete(key); },
+    console, Uint8Array, Buffer, VideoFrame, performance: options.performance,
+    ...(options.Promise ? { Promise: options.Promise } : {}) });
+  return { api: api.coveNativeScreen, ipc, calls, sent, events, cpuFrames, timers, timerDelays, receive: (...args) => receiver(...args),
     receiveCpu: (...args) => ipc.listeners('cove:native-screen:cpu-frame')[0]({}, ...args),
     hasReceiver: () => Boolean(receiver), hasCpuReceiver: () => ipc.listenerCount('cove:native-screen:cpu-frame') > 0 };
 }
@@ -246,6 +248,97 @@ test('early permit is matched and an unsubscribed frame still releases', async (
   b.ipc.emit('cove:native-screen:release-permit', {}, metadata);
   await b.receive(t, metadata);
   assert.equal(t.state.frames, 0); assert.equal(t.state.released, 1); assert.equal(b.timers.size, 0);
+});
+function countedPermitPromises() {
+  let count = 0;
+  const constructor = new Proxy(Promise, {
+    construct(target, args) { count++; return Reflect.construct(target, args, target); },
+  });
+  return { constructor, get count() { return count; } };
+}
+test('an early GPU permit needs no permit Promise or timer', async () => {
+  const promises = countedPermitPromises(), b = bridge(true, { Promise: promises.constructor }), t = texture();
+  b.api.onFrame(metadata.requestId, async () => {});
+  b.ipc.emit('cove:native-screen:release-permit', {}, metadata);
+  await b.receive(t, metadata);
+  assert.equal(promises.count, 0); assert.equal(t.state.closed, 1); assert.equal(t.state.released, 1);
+  assert.equal(b.timers.size, 0); assert.deepEqual(b.calls, []);
+});
+test('a GPU permit received during the listener skips one Promise and releases in the close continuation', async () => {
+  const promises = countedPermitPromises(), b = bridge(true, { Promise: promises.constructor }), t = texture();
+  let finish, releasedAtNextMicrotask;
+  t.importedSharedTexture.getVideoFrame = () => {
+    t.state.frames++;
+    return { close() {
+      t.state.closed++;
+      queueMicrotask(() => { releasedAtNextMicrotask = t.state.released; });
+    } };
+  };
+  b.api.onFrame(metadata.requestId, () => new Promise(resolve => { finish = resolve; }));
+  const completed = b.receive(t, metadata);
+  assert.equal(promises.count, 0); assert.equal(b.timers.size, 1);
+  b.ipc.emit('cove:native-screen:release-permit', {}, metadata);
+  assert.equal(t.state.closed, 0); assert.equal(t.state.released, 0);
+  assert.equal(b.timers.size, 1, 'the original listener timeout must remain armed');
+  finish(); await completed;
+  assert.equal(promises.count, 0, 'the prior eager permit barrier allocated one Promise here');
+  assert.equal(releasedAtNextMicrotask, 1, 'close and release must not be separated by an already-settled await');
+  assert.equal(t.state.closed, 1); assert.equal(t.state.released, 1); assert.equal(b.timers.size, 0);
+});
+test('a GPU permit still missing after listener completion constructs exactly one awaited barrier', async () => {
+  const promises = countedPermitPromises(), b = bridge(true, { Promise: promises.constructor }), t = texture();
+  b.api.onFrame(metadata.requestId, async () => {});
+  const completed = b.receive(t, metadata); await flush();
+  assert.equal(promises.count, 1); assert.equal(t.state.closed, 1); assert.equal(t.state.released, 0);
+  b.ipc.emit('cove:native-screen:release-permit', {}, { ...metadata, sessionId: 'session-other' });
+  b.ipc.emit('cove:native-screen:release-permit', {}, { ...metadata, serial: 2 });
+  await flush(); assert.equal(t.state.released, 0); assert.equal(promises.count, 1);
+  b.ipc.emit('cove:native-screen:release-permit', {}, metadata); await completed;
+  b.ipc.emit('cove:native-screen:release-permit', {}, metadata);
+  assert.equal(t.state.released, 1); assert.equal(promises.count, 1); assert.equal(b.timers.size, 0);
+});
+test('the original 1500ms GPU timeout survives an arrived permit while its listener hangs', async () => {
+  const promises = countedPermitPromises(), b = bridge(true, { Promise: promises.constructor }), t = texture();
+  let finish;
+  b.api.onFrame(metadata.requestId, () => new Promise(resolve => { finish = resolve; }));
+  const completed = b.receive(t, metadata), timer = [...b.timers.entries()][0];
+  assert.equal(b.timerDelays.get(timer[0]), 1500);
+  b.ipc.emit('cove:native-screen:release-permit', {}, metadata);
+  assert.equal(b.timers.get(timer[0]), timer[1], 'permit arrival must neither replace nor clear the original timer');
+  timer[1]();
+  assert.deepEqual(b.calls, [['cove:native-screen:stop', metadata.requestId, 'receiver_failed']]);
+  assert.equal(t.state.closed, 0); assert.equal(t.state.released, 0); assert.equal(promises.count, 0);
+  finish(); await completed;
+  assert.equal(t.state.closed, 1); assert.equal(t.state.released, 1); assert.equal(b.timers.size, 0);
+});
+test('an already-arrived GPU permit does not hide a listener rejection or change close/release order', async () => {
+  const promises = countedPermitPromises(), b = bridge(true, { Promise: promises.constructor }), t = texture();
+  let reject;
+  t.importedSharedTexture.release = () => {
+    assert.equal(t.state.closed, 1); assert.equal(b.calls.length, 1); t.state.released++;
+  };
+  b.api.onFrame(metadata.requestId, () => new Promise((_resolve, no) => { reject = no; }));
+  const completed = b.receive(t, metadata);
+  b.ipc.emit('cove:native-screen:release-permit', {}, metadata);
+  reject(Error('writer_failed')); await completed;
+  assert.deepEqual(b.calls, [['cove:native-screen:stop', metadata.requestId, 'receiver_failed']]);
+  assert.equal(t.state.closed, 1); assert.equal(t.state.released, 1); assert.equal(promises.count, 0);
+  assert.equal(b.timers.size, 0);
+});
+test('stopping a GPU listener and old-session permits cannot bypass another import barrier', async () => {
+  const b = bridge(), old = texture(), current = texture();
+  const newer = { ...metadata, sessionId: 'session-newer' }; let finish;
+  const remove = b.api.onFrame(metadata.requestId, () => new Promise(resolve => { finish = resolve; }));
+  const oldCompleted = b.receive(old, metadata); remove(); await b.api.stop(metadata.requestId);
+  const newCompleted = b.receive(current, newer); await flush();
+  assert.equal(old.state.closed, 0); assert.equal(old.state.released, 0);
+  assert.equal(current.state.released, 0);
+  b.ipc.emit('cove:native-screen:release-permit', {}, metadata); finish(); await oldCompleted;
+  b.ipc.emit('cove:native-screen:release-permit', {}, metadata); await flush();
+  assert.equal(old.state.closed, 1); assert.equal(old.state.released, 1); assert.equal(current.state.released, 0);
+  b.ipc.emit('cove:native-screen:release-permit', {}, newer); await newCompleted;
+  assert.equal(current.state.released, 1); assert.equal(b.timers.size, 0);
+  assert.deepEqual(b.calls, [['cove:native-screen:stop', metadata.requestId, undefined]]);
 });
 test('callback rejection retires its session but still waits for transfer', async () => {
   const b = bridge(), t = texture();

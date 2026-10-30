@@ -566,7 +566,8 @@ export class NativeScreenCaptureController {
   }
 
   private watchHealth(session: Session): void {
-    clearTimeout(session.healthTimer);
+    // Preserve the last-frame deadline without allocating a timer on every frame.
+    if (session.healthTimer) { session.healthTimer.refresh(); return; }
     session.healthTimer = setTimeout(() => this.retire(session, 'capture_stalled', true), CAPTURE_STALL_TIMEOUT_MS);
     session.healthTimer.unref();
   }

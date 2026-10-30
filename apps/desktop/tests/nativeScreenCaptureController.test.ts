@@ -42,6 +42,7 @@ function harness(overrides: { enabled?: boolean; platform?: string; electron?: s
   let cpuReadError = false;
   let spawnError = false;
   const timers = new Map<any, { due: number; callback: () => void }>();
+  const timerAllocations: { milliseconds: number; callback: () => void; refreshes: number; unrefs: number; cancelled: boolean }[] = [];
   const immediates = new Set<{ callback(): void }>();
   const allImmediates: { callback(): void }[] = [];
   const setImmediate = (callback: () => void) => {
@@ -53,8 +54,17 @@ function harness(overrides: { enabled?: boolean; platform?: string; electron?: s
     immediates.delete(immediate); immediate.callback();
   };
   const setTimer = (callback: () => void, milliseconds: number) => {
-    const id = { unref() {} }; timers.set(id, { due: now + milliseconds, callback }); return id;
+    const id = { milliseconds, callback, refreshes: 0, unrefs: 0, cancelled: false,
+      unref() { id.unrefs++; return id; },
+      refresh() {
+        id.refreshes++;
+        // Node refresh reactivates an expired timer, but never a cleared timer.
+        if (!id.cancelled) timers.set(id, { due: now + milliseconds, callback });
+        return id;
+      } };
+    timerAllocations.push(id); timers.set(id, { due: now + milliseconds, callback }); return id;
   };
+  const clearTimer = (id: any) => { if (id) id.cancelled = true; timers.delete(id); };
   const advance = (milliseconds: number) => {
     const until = now + milliseconds;
     while (true) {
@@ -124,7 +134,7 @@ function harness(overrides: { enabled?: boolean; platform?: string; electron?: s
   const cpuModule = { exports: {} as typeof cpuDelivery };
   const pipelineModule = { exports: {} as typeof cpuPipeline };
   vm.runInNewContext(compiledCpuPipeline, { exports: pipelineModule.exports, Buffer, ArrayBuffer,
-    setTimeout: setTimer, clearTimeout: (id: any) => timers.delete(id),
+    setTimeout: setTimer, clearTimeout: clearTimer,
     setImmediate, clearImmediate: (id: any) => immediates.delete(id),
     require(name: string) {
       if (name === 'node:perf_hooks') return { performance: { now: () => now } };
@@ -133,7 +143,7 @@ function harness(overrides: { enabled?: boolean; platform?: string; electron?: s
     },
   });
   vm.runInNewContext(compiledCpuDelivery, { exports: cpuModule.exports, Buffer, ArrayBuffer,
-    setTimeout: setTimer, clearTimeout: (id: any) => timers.delete(id),
+    setTimeout: setTimer, clearTimeout: clearTimer,
     setImmediate, clearImmediate: (id: any) => immediates.delete(id),
     require(name: string) {
       if (name === 'node:perf_hooks') return { performance: { now: () => now } };
@@ -143,7 +153,7 @@ function harness(overrides: { enabled?: boolean; platform?: string; electron?: s
   });
   vm.runInNewContext(compiled, { exports: module.exports, Buffer, ArrayBuffer,
     process: { platform: overrides.platform ?? 'win32', arch: 'x64', pid: 1234, versions: { electron: overrides.electron ?? '44.0.0' } },
-    Date: class extends Date { static now() { return now; } }, setTimeout: setTimer, clearTimeout: (id: any) => timers.delete(id),
+    Date: class extends Date { static now() { return now; } }, setTimeout: setTimer, clearTimeout: clearTimer,
     require(name: string) {
       if (name === 'electron') return { sharedTexture };
       if (name === 'node:child_process') return { spawn };
@@ -170,7 +180,7 @@ function harness(overrides: { enabled?: boolean; platform?: string; electron?: s
   const start = (requestId = 'request_01', requested: protocol.NativeScreenOptions = {
     ...options, ...(overrides.storage === 'cpu' ? { colorSpace: 'bt709-limited' as const } : {}),
   }) => { choose(); return controller.start(target as any, requestId, requested); };
-  return { controller, config, target, start, choose, children, imports, transfers, sent, duplicates, childHandles, bridgeLoads, cpuReads, timers, advance, immediates, allImmediates, runImmediate,
+  return { controller, config, target, start, choose, children, imports, transfers, sent, duplicates, childHandles, bridgeLoads, cpuReads, timers, timerAllocations, advance, immediates, allImmediates, runImmediate,
     failImport() { importError = true; }, failSend(sync = false) { sendError = true; sendThrows = sync; },
     failDuplicate() { duplicateError = true; }, failHandleClose() { closeError = true; },
     failOpen() { openError = true; },
@@ -1129,6 +1139,73 @@ test('stalled transfer, encoder-held reference or missing refresh retires withou
     if (h.imports.length) { h.transfers[0].resolve(); await flush(); h.imports[0].config.allReferencesReleased(); }
     h.children[0].close(); assert.equal(h.timers.size, 0);
   }
+});
+
+for (const storage of ['gpu', 'cpu'] as const) {
+  test(`${storage} frames reuse one unrefed health timer and expire five seconds after the last frame`, async () => {
+    const h = harness(storage === 'cpu' ? { pixelFormat: 'nv12', storage } : {});
+    const pending = h.start(); h.children[0].emitMessage(storage === 'cpu' ? cpuReady : ready); await pending;
+    const health = [...h.timers.keys()][0];
+    const allocatedBeforeFrames = h.timerAllocations.length;
+    assert.equal(health.milliseconds, 5000); assert.equal(health.unrefs, 1);
+    const frameCount = 12;
+    for (let serial = 1; serial <= frameCount; serial++) {
+      h.advance(8);
+      h.children[0].emitMessage(storage === 'cpu' ? cpuFrame(serial) : frame(serial));
+      if (storage === 'cpu') {
+        const sent = h.sent.filter(value => value.channel === 'cove:native-screen:cpu-frame').at(-1);
+        assert.equal(h.controller.acknowledgeCpuFrame(h.target as any, sent.data), true);
+      } else {
+        h.transfers.at(-1).resolve(); await flush(); h.imports.at(-1).config.allReferencesReleased();
+      }
+      assert.equal(h.timers.size, 1); assert.equal([...h.timers.keys()][0], health);
+    }
+    assert.equal(health.refreshes, frameCount); assert.equal(health.unrefs, 1);
+    // Only the existing per-frame transfer/reference or CPU ACK timers allocate.
+    // The previous health implementation would allocate another frameCount timers.
+    assert.equal(h.timerAllocations.length - allocatedBeforeFrames, frameCount * (storage === 'gpu' ? 2 : 1));
+    h.advance(4999); assert.equal(h.controller.snapshot().activeSessions, 1);
+    h.advance(1); assert.equal(h.controller.snapshot().activeSessions, 0);
+    assert.equal(h.controller.snapshot().failureCode, 'capture_stalled');
+    h.children[0].close(); assert.equal(h.timers.size, 0);
+  });
+}
+
+test('stopped health timers and late callbacks cannot revive or retire a replacement session', async () => {
+  const h = harness(); const one = h.start(); h.children[0].emitMessage(ready); await one;
+  const health = [...h.timers.keys()][0];
+  h.children[0].emitMessage(frame());
+  const stopped = h.controller.stop(h.target as any, 'request_01'); h.children[0].close(); await stopped;
+  assert.equal(health.cancelled, true); assert.equal(h.timers.size, 0);
+  const two = h.start('request_02'); h.children[1].emitMessage(ready); await two;
+  const replacementHealth = [...h.timers.keys()][0];
+  assert.notEqual(replacementHealth, health);
+  const allocated = h.timerAllocations.length, refreshes = health.refreshes;
+  h.children[0].emitMessage(frame(2, 1)); health.callback();
+  h.transfers[0].resolve(); await flush(); h.imports[0].config.allReferencesReleased();
+  assert.equal(h.controller.snapshot().activeSessions, 1); assert.equal(h.controller.snapshot().disabled, false);
+  assert.equal(h.timerAllocations.length, allocated); assert.equal(health.refreshes, refreshes);
+  assert.equal(h.timers.size, 1); assert.equal([...h.timers.keys()][0], replacementHealth);
+  h.controller.reset(); h.children[1].close(); assert.equal(h.timers.size, 0);
+});
+
+test('concurrent sessions refresh independent health deadlines', async () => {
+  const h = harness(); const one = h.start(); h.children[0].emitMessage(ready); await one;
+  const firstHealth = [...h.timers.keys()][0];
+  const two = h.start('request_02'); h.children[1].emitMessage(ready); await two;
+  const secondHealth = [...h.timers.keys()].find(value => value !== firstHealth);
+  assert.ok(secondHealth);
+  h.advance(3000); h.children[0].emitMessage(frame());
+  h.transfers[0].resolve(); await flush(); h.imports[0].config.allReferencesReleased();
+  assert.equal(firstHealth.refreshes, 1); assert.equal(secondHealth.refreshes, 0);
+  h.advance(1999); assert.equal(h.controller.snapshot().activeSessions, 2);
+  h.advance(1); assert.equal(h.controller.snapshot().activeSessions, 1);
+  assert.equal(h.sent.filter(value => value.channel.endsWith(':ended')).at(-1).data.requestId, 'request_02');
+  assert.equal(h.timers.has(firstHealth), true); assert.equal(h.timers.has(secondHealth), false);
+  h.children[1].close(); h.advance(2999); assert.equal(h.controller.snapshot().activeSessions, 1);
+  h.advance(1); assert.equal(h.controller.snapshot().activeSessions, 0);
+  assert.equal(h.sent.filter(value => value.channel.endsWith(':ended')).at(-1).data.requestId, 'request_01');
+  h.children[0].close(); assert.equal(h.timers.size, 0);
 });
 
 test('renderer/receiver fault disables native retries while ordinary stop permits a fresh native session', async () => {
