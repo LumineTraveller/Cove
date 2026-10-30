@@ -5,7 +5,7 @@
 #define NOMINMAX
 #define _WIN32_WINNT 0x0A00
 #ifndef COVE_NATIVE_CAPTURE_NONBLOCKING_ACQUIRE
-#define COVE_NATIVE_CAPTURE_NONBLOCKING_ACQUIRE 0
+#define COVE_NATIVE_CAPTURE_NONBLOCKING_ACQUIRE 1
 #endif
 #if COVE_NATIVE_CAPTURE_NONBLOCKING_ACQUIRE != 0 && COVE_NATIVE_CAPTURE_NONBLOCKING_ACQUIRE != 1
 #error COVE_NATIVE_CAPTURE_NONBLOCKING_ACQUIRE_must_be_0_or_1
@@ -101,6 +101,10 @@ static uint64_t decimal(const std::string& text, uint64_t maximum, const char* c
 }
 enum class CompletionMode { Query, Fence };
 static const char* completionName(CompletionMode mode) { return mode == CompletionMode::Fence ? "fence" : "query"; }
+enum class CompletionPolicy { Auto, Query, Fence };
+static const char* completionPolicyName(CompletionPolicy policy) {
+  return policy == CompletionPolicy::Auto ? "auto" : policy == CompletionPolicy::Fence ? "fence" : "query";
+}
 enum class Nv12ColorSpace { Bt601Limited, Bt709Limited };
 static const char* nv12ColorSpaceName(Nv12ColorSpace colorSpace) {
   return colorSpace == Nv12ColorSpace::Bt601Limited ? "bt601-limited" : "bt709-limited";
@@ -108,7 +112,7 @@ static const char* nv12ColorSpaceName(Nv12ColorSpace colorSpace) {
 struct Options {
   DWORD owner = 0; UINT maxWidth = 0, maxHeight = 0, fps = 0;
   bool nv12 = false, cpu = false;
-  CompletionMode completion = CompletionMode::Query;
+  CompletionPolicy completion = CompletionPolicy::Auto;
   Nv12ColorSpace colorSpace = Nv12ColorSpace::Bt709Limited;
 };
 static Options options(int argc, char** argv) {
@@ -133,7 +137,7 @@ static Options options(int argc, char** argv) {
     } else if (name == "--completion") {
       bit = 64; const std::string value(argv[i + 1]);
       require(value == "query" || value == "fence", "invalid_arguments");
-      result.completion = value == "fence" ? CompletionMode::Fence : CompletionMode::Query;
+      result.completion = value == "fence" ? CompletionPolicy::Fence : CompletionPolicy::Query;
     } else if (name == "--color-space") {
       bit = 128; const std::string value(argv[i + 1]);
       require(value == "bt601-limited" || value == "bt709-limited", "invalid_arguments");
@@ -412,22 +416,25 @@ public:
     DuplicateOutput, ReadyOutput, PhaseCount };
 private:
   const Clock& clock_;
-  CompletionMode selectedCompletion_;
+  CompletionPolicy requestedCompletion_;
+  CompletionMode selectedCompletion_ = CompletionMode::Query;
+  bool completionSelected_ = false;
   bool enabled_ = false, reported_ = false;
   Phase phase_ = Setup;
   uint64_t begin_ = 0, previous_ = 0;
   std::array<uint64_t, PhaseCount> stages_{};
 public:
-  StartupTiming(const Clock& clock, bool enabled, CompletionMode completion)
-      : clock_(clock), selectedCompletion_(completion), enabled_(enabled) {
+  StartupTiming(const Clock& clock, bool enabled, CompletionPolicy completion)
+      : clock_(clock), requestedCompletion_(completion), enabled_(enabled) {
     if (enabled_) begin_ = previous_ = clock_.us();
   }
+  void selectCompletion(CompletionMode mode) { selectedCompletion_ = mode; completionSelected_ = true; }
   void next(Phase phase) {
     if (!enabled_) return;
     const auto now = clock_.us();
     stages_[phase_] += now - previous_; previous_ = now; phase_ = phase;
   }
-  void report(bool complete) {
+  void report(bool complete, std::ostream& destination = std::cerr) {
     if (!enabled_ || reported_) return;
     reported_ = true;
     const auto now = clock_.us();
@@ -437,15 +444,17 @@ public:
     static_assert(sizeof(names) / sizeof(names[0]) == PhaseCount, "startup phase names");
     std::ostringstream out;
     out << "COVE_NATIVE_CAPTURE_STARTUP {\"schemaVersion\":1,\"complete\":" << (complete ? "true" : "false")
-      << ",\"selectedCompletion\":\"" << completionName(selectedCompletion_) << '"'
-      << ",\"selectedAcquireMode\":\"" << selectedAcquireMode() << '"'
+      << ",\"requestedCompletion\":\"" << completionPolicyName(requestedCompletion_) << '"'
+      << ",\"selectedCompletion\":";
+    if (completionSelected_) out << '"' << completionName(selectedCompletion_) << '"'; else out << "null";
+    out << ",\"selectedAcquireMode\":\"" << selectedAcquireMode() << '"'
       << ",\"phase\":\"" << names[phase_] << "\",\"elapsedUs\":" << now - begin_ << ",\"stages\":{";
     for (size_t i = 0; i < stages_.size(); ++i) {
       if (i) out << ',';
       out << '\"' << names[i] << "Us\":" << stages_[i];
     }
     out << "}}\n";
-    std::cerr << out.str();
+    destination << out.str();
   }
   ~StartupTiming() {
     // On initialization failure the current phase also includes stack cleanup.
@@ -1015,6 +1024,28 @@ static bool waitForFence(uint64_t target, Pump&& pump, Probe&& probe, Arm&& arm,
     wait(std::min<uint64_t>(1000, deadline - current));
   }
 }
+// Auto is construction-only. A failed optional fence setup has already unwound
+// its temporary resources before a healthy device may select the query barrier.
+// Explicit experiments and every completion-time failure remain fail-closed.
+template<class ConstructFence, class CheckHealthy, class ConstructQuery>
+static CompletionMode selectCompletion(CompletionPolicy policy, ConstructFence&& constructFence,
+    CheckHealthy&& checkHealthy, ConstructQuery&& constructQuery) {
+  require(policy == CompletionPolicy::Auto || policy == CompletionPolicy::Query || policy == CompletionPolicy::Fence,
+    "invalid_completion_policy");
+  if (policy == CompletionPolicy::Query) { constructQuery(); return CompletionMode::Query; }
+  try {
+    constructFence();
+    return CompletionMode::Fence;
+  } catch (const Failure& error) {
+    const bool optionalConstructionFailure = std::strcmp(error.what(), "completion_fence_unsupported") == 0 ||
+      std::strcmp(error.what(), "completion_fence_failed") == 0 ||
+      std::strcmp(error.what(), "completion_event_failed") == 0;
+    if (policy != CompletionPolicy::Auto || !optionalConstructionFailure) throw;
+    checkHealthy();
+    constructQuery();
+    return CompletionMode::Query;
+  }
+}
 class GpuCompletion {
   ID3D11Device* device_;
   ID3D11DeviceContext* context_;
@@ -1031,23 +1062,31 @@ class GpuCompletion {
     check(result, code);
   }
 public:
-  GpuCompletion(ID3D11Device* device, ID3D11DeviceContext* context, CompletionMode mode)
-      : device_(device), context_(context), mode_(mode) {
-    if (mode_ == CompletionMode::Query) {
-      const D3D11_QUERY_DESC query{D3D11_QUERY_EVENT, 0};
-      check(device->CreateQuery(&query, query_.GetAddressOf()), "completion_query_failed");
-      return;
-    }
-    // An explicit experiment must fail visibly on unsupported interfaces or
-    // creation failure; it must never silently run the query baseline instead.
-    ComPtr<ID3D11Device5> device5;
-    check(device->QueryInterface(IID_PPV_ARGS(device5.GetAddressOf())), "completion_fence_unsupported");
-    check(context->QueryInterface(IID_PPV_ARGS(context4_.GetAddressOf())), "completion_fence_unsupported");
-    checked(device5->CreateFence(0, D3D11_FENCE_FLAG_NONE, IID_PPV_ARGS(fence_.GetAddressOf())),
-      "completion_fence_failed");
-    event_.value = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    require(event_.value != nullptr, "completion_event_failed");
+  GpuCompletion(ID3D11Device* device, ID3D11DeviceContext* context, CompletionPolicy policy)
+      : device_(device), context_(context), mode_(CompletionMode::Query) {
+    mode_ = selectCompletion(policy,
+      [&] {
+        // Keep every optional resource local until the entire fence setup has
+        // succeeded. There are no submitted reads, exported frames or waits.
+        ComPtr<ID3D11Device5> device5;
+        ComPtr<ID3D11DeviceContext4> context4;
+        ComPtr<ID3D11Fence> fence;
+        check(device->QueryInterface(IID_PPV_ARGS(device5.GetAddressOf())), "completion_fence_unsupported");
+        check(context->QueryInterface(IID_PPV_ARGS(context4.GetAddressOf())), "completion_fence_unsupported");
+        checked(device5->CreateFence(0, D3D11_FENCE_FLAG_NONE, IID_PPV_ARGS(fence.GetAddressOf())),
+          "completion_fence_failed");
+        Handle event(CreateEventW(nullptr, FALSE, FALSE, nullptr));
+        require(event.value != nullptr, "completion_event_failed");
+        context4_ = std::move(context4); fence_ = std::move(fence);
+        event_.value = event.value; event.value = nullptr;
+      },
+      [&] { check(device_->GetDeviceRemovedReason(), "gpu_device_lost"); },
+      [&] {
+        const D3D11_QUERY_DESC query{D3D11_QUERY_EVENT, 0};
+        check(device_->CreateQuery(&query, query_.GetAddressOf()), "completion_query_failed");
+      });
   }
+  CompletionMode mode() const { return mode_; }
   bool complete(HANDLE owner, Timer& timer, Input& input, std::array<Slot, 3>& slots,
       const Clock& clock, CaptureTiming& timing) {
     const uint64_t begin = clock.us();
@@ -1200,7 +1239,7 @@ static void capture(const Options& option) {
   require(SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) ||
     AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(), DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2),
     "dpi_context_unavailable");
-  Clock clock; CaptureTiming timing; timing.selectedCompletion = option.completion;
+  Clock clock; CaptureTiming timing;
   StartupTiming startup(clock, timing.enabled, option.completion);
   Timer timer; Input input(clock, timing);
   startup.next(StartupTiming::SourceLookup);
@@ -1221,6 +1260,7 @@ static void capture(const Options& option) {
   for (auto& slot : slots) createSlot(device.Get(), slot, size, option.nv12, option.cpu);
   startup.next(StartupTiming::Query);
   GpuCompletion completion(device.Get(), context.Get(), option.completion);
+  timing.selectedCompletion = completion.mode(); startup.selectCompletion(completion.mode());
   startup.next(StartupTiming::ValidateOutput);
   validateOutput(output);
   startup.next(StartupTiming::DuplicateOutput);
@@ -1501,7 +1541,7 @@ static void selfTest() {
     "--max-height", "1080", "--fps", "120"};
   const auto bgraOptions = parseTestOptions(bgraArguments);
   expect(!bgraOptions.nv12 && !bgraOptions.cpu && bgraOptions.maxWidth == 1920 && bgraOptions.maxHeight == 1080 &&
-    bgraOptions.fps == 120 && bgraOptions.completion == CompletionMode::Query);
+    bgraOptions.fps == 120 && bgraOptions.completion == CompletionPolicy::Auto);
   auto nv12Arguments = bgraArguments; nv12Arguments.insert(nv12Arguments.end(), {"--pixel-format", "nv12"});
   expect(parseTestOptions(nv12Arguments).nv12 && !parseTestOptions(nv12Arguments).cpu);
   auto cpuArguments = nv12Arguments; cpuArguments.insert(cpuArguments.end(), {"--frame-storage", "cpu"});
@@ -1509,10 +1549,11 @@ static void selfTest() {
   auto cpuReordered = bgraArguments; cpuReordered.insert(cpuReordered.end(), {"--frame-storage", "cpu", "--pixel-format", "nv12"});
   expect(parseTestOptions(cpuReordered).cpu);
   for (const auto& arguments : {bgraArguments, nv12Arguments, cpuArguments}) {
+    expect(parseTestOptions(arguments).completion == CompletionPolicy::Auto);
     for (const auto* mode : {"query", "fence"}) {
       auto explicitMode = arguments; explicitMode.insert(explicitMode.end(), {"--completion", mode});
       const auto parsed = parseTestOptions(explicitMode);
-      expect(std::string(completionName(parsed.completion)) == mode &&
+      expect(std::string(completionPolicyName(parsed.completion)) == mode &&
         parsed.cpu == (arguments.size() == cpuArguments.size()) && parsed.fps == 120);
     }
   }
@@ -1534,7 +1575,7 @@ static void selfTest() {
     if (arguments == cpuArguments) {
       expect(parseTestOptions(explicit601).colorSpace == Nv12ColorSpace::Bt601Limited);
       explicit601.insert(explicit601.end(), {"--completion", "fence"});
-      expect(parseTestOptions(explicit601).completion == CompletionMode::Fence);
+      expect(parseTestOptions(explicit601).completion == CompletionPolicy::Fence);
     } else { rejects([&] { parseTestOptions(explicit601); }); ++checks; }
   }
   auto reordered601 = bgraArguments;
@@ -1557,6 +1598,102 @@ static void selfTest() {
     try { action(); } catch (const Failure& error) { expect(std::string(error.what()) == code); return; }
     throw Failure("self_test_expected_rejection");
   };
+  struct TestCompletionConstruction {
+    unsigned fenceCalls = 0, healthyCalls = 0, queryCalls = 0, live = 0, cleaned = 0;
+    unsigned failStep = 0;
+    bool unhealthy = false, queryFailure = false, unrelatedException = false;
+    const char* fatalFenceCode = nullptr;
+    struct Resource {
+      TestCompletionConstruction& owner;
+      explicit Resource(TestCompletionConstruction& value) : owner(value) { ++owner.live; }
+      ~Resource() { --owner.live; ++owner.cleaned; }
+    };
+    CompletionMode run(CompletionPolicy policy) {
+      return selectCompletion(policy,
+        [&] {
+          ++fenceCalls;
+          if (fatalFenceCode) throw Failure(fatalFenceCode);
+          if (unrelatedException) throw std::runtime_error("self_test_constructor_exception");
+          if (failStep == 1) throw Failure("completion_fence_unsupported");
+          Resource device5(*this);
+          if (failStep == 2) throw Failure("completion_fence_unsupported");
+          Resource context4(*this);
+          if (failStep == 3) throw Failure("completion_fence_failed");
+          Resource fence(*this);
+          if (failStep == 4) throw Failure("completion_event_failed");
+          Resource event(*this);
+        },
+        [&] {
+          require(live == 0 && cleaned == failStep - 1 && !queryCalls,
+            "self_test_fence_resources_not_unwound");
+          ++healthyCalls;
+          require(!unhealthy, "gpu_device_lost");
+        },
+        [&] {
+          require(live == 0 && (policy == CompletionPolicy::Query || healthyCalls == 1),
+            "self_test_query_before_healthy_cleanup");
+          ++queryCalls;
+          require(!queryFailure, "completion_query_failed");
+        });
+    }
+  };
+  TestCompletionConstruction autoFence;
+  expect(autoFence.run(CompletionPolicy::Auto) == CompletionMode::Fence && autoFence.fenceCalls == 1 &&
+    autoFence.healthyCalls == 0 && autoFence.queryCalls == 0 && autoFence.live == 0);
+  TestCompletionConstruction explicitQuery; explicitQuery.failStep = 1;
+  expect(explicitQuery.run(CompletionPolicy::Query) == CompletionMode::Query && explicitQuery.fenceCalls == 0 &&
+    explicitQuery.healthyCalls == 0 && explicitQuery.queryCalls == 1);
+  TestCompletionConstruction explicitFence;
+  expect(explicitFence.run(CompletionPolicy::Fence) == CompletionMode::Fence && explicitFence.fenceCalls == 1 &&
+    explicitFence.healthyCalls == 0 && explicitFence.queryCalls == 0);
+  for (unsigned step = 1; step <= 4; ++step) {
+    TestCompletionConstruction fallback; fallback.failStep = step;
+    expect(fallback.run(CompletionPolicy::Auto) == CompletionMode::Query && fallback.fenceCalls == 1 &&
+      fallback.healthyCalls == 1 && fallback.queryCalls == 1 && fallback.live == 0 && fallback.cleaned == step - 1);
+    TestCompletionConstruction explicitFailure; explicitFailure.failStep = step;
+    expectFailure([&] { explicitFailure.run(CompletionPolicy::Fence); },
+      step <= 2 ? "completion_fence_unsupported" : step == 3 ? "completion_fence_failed" : "completion_event_failed");
+    expect(explicitFailure.fenceCalls == 1 && explicitFailure.healthyCalls == 0 && explicitFailure.queryCalls == 0 &&
+      explicitFailure.live == 0 && explicitFailure.cleaned == step - 1);
+    TestCompletionConstruction lostDevice; lostDevice.failStep = step; lostDevice.unhealthy = true;
+    expectFailure([&] { lostDevice.run(CompletionPolicy::Auto); }, "gpu_device_lost");
+    expect(lostDevice.live == 0 && lostDevice.healthyCalls == 1 && lostDevice.queryCalls == 0);
+  }
+  TestCompletionConstruction failedFallbackQuery; failedFallbackQuery.failStep = 4; failedFallbackQuery.queryFailure = true;
+  expectFailure([&] { failedFallbackQuery.run(CompletionPolicy::Auto); }, "completion_query_failed");
+  expect(failedFallbackQuery.live == 0 && failedFallbackQuery.cleaned == 3 &&
+    failedFallbackQuery.healthyCalls == 1 && failedFallbackQuery.queryCalls == 1 && failedFallbackQuery.fenceCalls == 1);
+  TestCompletionConstruction failedExplicitQuery; failedExplicitQuery.queryFailure = true;
+  expectFailure([&] { failedExplicitQuery.run(CompletionPolicy::Query); }, "completion_query_failed");
+  expect(failedExplicitQuery.fenceCalls == 0 && failedExplicitQuery.healthyCalls == 0 && failedExplicitQuery.queryCalls == 1);
+  for (const char* code : {"gpu_device_lost", "completion_fence_signal_failed", "completion_fence_event_failed",
+      "gpu_completion_timeout", "unexpected_constructor_failure"}) {
+    TestCompletionConstruction fatal; fatal.fatalFenceCode = code;
+    expectFailure([&] { fatal.run(CompletionPolicy::Auto); }, code);
+    expect(fatal.fenceCalls == 1 && fatal.healthyCalls == 0 && fatal.queryCalls == 0);
+  }
+  TestCompletionConstruction exception; exception.unrelatedException = true;
+  bool preservedException = false;
+  try { exception.run(CompletionPolicy::Auto); }
+  catch (const std::runtime_error&) { preservedException = true; }
+  expect(preservedException && exception.fenceCalls == 1 && exception.healthyCalls == 0 && exception.queryCalls == 0);
+  TestCompletionConstruction invalidPolicy;
+  expectFailure([&] { invalidPolicy.run(static_cast<CompletionPolicy>(99)); }, "invalid_completion_policy");
+  expect(invalidPolicy.fenceCalls == 0 && invalidPolicy.healthyCalls == 0 && invalidPolicy.queryCalls == 0);
+  Clock startupTestClock;
+  StartupTiming unselectedStartup(startupTestClock, true, CompletionPolicy::Auto);
+  std::ostringstream unselectedStartupJson; unselectedStartup.report(false, unselectedStartupJson);
+  expect(unselectedStartupJson.str().find("\"requestedCompletion\":\"auto\",\"selectedCompletion\":null") != std::string::npos);
+  for (const auto mode : {CompletionMode::Query, CompletionMode::Fence}) {
+    StartupTiming selectedStartup(startupTestClock, true, CompletionPolicy::Auto);
+    selectedStartup.selectCompletion(mode);
+    std::ostringstream selectedStartupJson; selectedStartup.report(true, selectedStartupJson);
+    expect(selectedStartupJson.str().find(std::string("\"selectedCompletion\":\"") + completionName(mode) + '"') != std::string::npos);
+    CaptureTiming selectedTiming; selectedTiming.enabled = true; selectedTiming.start(0, 8333);
+    selectedTiming.selectedCompletion = mode;
+    std::ostringstream selectedTimingJson; expect(selectedTiming.report(1, true, selectedTimingJson));
+    expect(selectedTimingJson.str().find(std::string("\"selectedCompletion\":\"") + completionName(mode) + '"') != std::string::npos);
+  }
   struct TestFenceWait {
     uint64_t completed = 0, time = 0, armAdvance = 0, largestWait = 0;
     unsigned pumps = 0, probes = 0, arms = 0, waits = 0, completeAfterWait = 0, stopAtPump = 0;

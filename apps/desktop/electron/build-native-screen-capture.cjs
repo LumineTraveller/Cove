@@ -60,7 +60,7 @@ if (selfTest) {
   const check = spawnSync(output, ['--self-test'], { stdio: 'inherit', windowsHide: true });
   if (check.error || check.status !== 0) throw new Error('Native screen capture self-test failed');
 }
-console.log(JSON.stringify({ output, selectedAcquireMode: acquireMode || 'timeout',
+console.log(JSON.stringify({ output, selectedAcquireMode: acquireMode || 'poll', defaultCompletionPolicy: 'auto',
   helperSourceSha256: crypto.createHash('sha256').update(
     fs.readFileSync(path.join(__dirname, 'native-screen-capture-helper.cpp'))).digest('hex'),
   bytes: fs.statSync(output).size,
