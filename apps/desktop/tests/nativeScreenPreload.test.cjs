@@ -176,6 +176,17 @@ test('CPU timing excludes invalid metadata and counts the handler for invalid by
   ]);
 });
 
+test('GPU snapshot preference requires exact opt-in and the qualified native bridge', () => {
+  const flag = '--cove-native-frame-sink=gpu-snapshot';
+  assert.equal(bridge(true, { argv: [flag] }).api.preferredFrameSink, 'gpu-snapshot');
+  for (const [enabled, options] of [[true, {}], [false, { argv: [flag] }],
+    [true, { argv: [flag + '-extra'] }],
+    [true, { argv: [flag], versions: { electron: '43.0.0' } }],
+    [true, { argv: [flag], platform: 'linux' }],
+    [true, { argv: [flag], sharedTexture: false }]])
+    assert.equal(bridge(enabled, options).api.preferredFrameSink, undefined);
+});
+
 test('CPU timing records attempted stages when construction, listener or close throws and preserves stop/ACK order', async () => {
   for (const failure of ['construct', 'listener', 'close', 'listener-and-close']) {
     let now = 0, closes = 0;

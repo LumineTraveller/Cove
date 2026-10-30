@@ -201,6 +201,7 @@ contextBridge.exposeInMainWorld('coveNativeScreen', {
   // are required. This grants no additional IPC, source or renderer authority.
   preferredFrameSink: nativeEnabled && process.versions?.electron === '44.0.0'
     ? process.argv.includes('--cove-native-frame-sink=worker') ? 'worker'
+      : process.argv.includes('--cove-native-frame-sink=gpu-snapshot') ? 'gpu-snapshot'
       : process.argv.includes('--cove-native-frame-sink=canvas') ? 'canvas' : undefined
     : undefined,
   getCpuFrameTiming: getNativeCpuFrameTiming,

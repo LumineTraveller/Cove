@@ -7,11 +7,13 @@ import { nativeScreenFailureReason, type NativeScreenFailureReason } from '../..
 import { createNativeFrameWriteQueue } from './nativeFrameWriteQueue';
 import { createNativeCanvasFrameSink, getNativeCanvasFrameFailureCode, type NativeCanvasFrameSinkSnapshot } from './nativeCanvasFrameSink';
 import { createNativeWorkerFrameSink, type NativeWorkerFrameSinkSnapshot } from './nativeWorkerFrameSink';
+import { createNativeGpuSnapshotFrameSink, getNativeGpuSnapshotFrameFailureCode,
+  type NativeGpuSnapshotFrameSinkSnapshot } from './nativeGpuSnapshotFrameSink';
 import { createFrameIntervalWindow, type FrameStabilitySnapshot } from '../diagnostics/frameIntervals';
 
 export interface NativeScreenBridge {
   readonly supported: boolean;
-  readonly preferredFrameSink?: 'canvas' | 'worker';
+  readonly preferredFrameSink?: 'canvas' | 'worker' | 'gpu-snapshot';
   start(requestId: string, options: NativeScreenOptions): Promise<NativeScreenStartResult>;
   stop(requestId: string, fault?: 'renderer_failed' | 'receiver_failed'): Promise<boolean>;
   onFrame(requestId: string, callback: (frame: VideoFrame, metadata: NativeScreenFrame) => Promise<void>): () => void;
@@ -34,7 +36,7 @@ export interface NativeScreenCaptureOptions extends NativeScreenOptions {
 
 export interface NativeScreenCaptureDiagnostics {
   backend: 'native-gpu';
-  frameSink: 'generator' | 'canvas' | 'worker';
+  frameSink: 'generator' | 'canvas' | 'worker' | 'gpu-snapshot';
   pixelFormat: 'bgra' | 'nv12';
   frameStorage: 'gpu' | 'cpu';
   framesReceived: number;
@@ -52,11 +54,13 @@ export interface NativeScreenCaptureDiagnostics {
   /** On-demand aggregate observation; never populated by per-frame allocation. */
   canvas?: NativeCanvasFrameSinkSnapshot;
   worker?: NativeWorkerFrameSinkSnapshot;
+  gpuSnapshot?: NativeGpuSnapshotFrameSinkSnapshot;
 }
 
 const captureDiagnostics = new WeakMap<MediaStreamTrack, NativeScreenCaptureDiagnostics>();
 const canvasDiagnostics = new WeakMap<MediaStreamTrack, () => NativeCanvasFrameSinkSnapshot>();
 const workerDiagnostics = new WeakMap<MediaStreamTrack, () => NativeWorkerFrameSinkSnapshot>();
+const gpuSnapshotDiagnostics = new WeakMap<MediaStreamTrack, () => NativeGpuSnapshotFrameSinkSnapshot>();
 
 type NativeFrameIntervalWindow = ReturnType<typeof createFrameIntervalWindow>;
 interface NativeFrameStabilitySource {
@@ -94,7 +98,9 @@ export function getNativeScreenCaptureDiagnostics(track: MediaStreamTrack): Nati
   if (!diagnostics) return null;
   const canvas = canvasDiagnostics.get(track)?.();
   const worker = workerDiagnostics.get(track)?.();
-  return { ...diagnostics, ...(canvas ? { canvas } : {}), ...(worker ? { worker } : {}) };
+  const gpuSnapshot = gpuSnapshotDiagnostics.get(track)?.();
+  return { ...diagnostics, ...(canvas ? { canvas } : {}), ...(worker ? { worker } : {}),
+    ...(gpuSnapshot ? { gpuSnapshot } : {}) };
 }
 
 export type NativeScreenCaptureAttemptPhase =
@@ -120,6 +126,7 @@ export interface NativeScreenCaptureAttempt {
   stopReason: NativeScreenCaptureStopReason | null;
   /** Failure-only, fixed aggregate metadata; never a frame, timestamp or identifier. */
   canvasFailure?: Readonly<{ code: ReturnType<typeof getNativeCanvasFrameFailureCode>; snapshot: NativeCanvasFrameSinkSnapshot | null }>;
+  gpuSnapshotFailure?: Readonly<{ code: ReturnType<typeof getNativeGpuSnapshotFrameFailureCode>; snapshot: NativeGpuSnapshotFrameSinkSnapshot | null }>;
 }
 type CaptureAttemptState = Omit<NativeScreenCaptureAttempt, 'elapsedMs'> & { startedAt: number };
 let lastCaptureAttempt: CaptureAttemptState | undefined;
@@ -220,6 +227,7 @@ export async function tryNativeScreenCapture(
   let lastWriteCompletedAt: number | undefined;
   let canvasSink: ReturnType<typeof createNativeCanvasFrameSink> | undefined;
   let workerSink: ReturnType<typeof createNativeWorkerFrameSink> | undefined;
+  let gpuSnapshotSink: ReturnType<typeof createNativeGpuSnapshotFrameSink> | undefined;
   let workerReady = false;
   let startIssued = false;
   let lastSerial = 0;
@@ -266,6 +274,7 @@ export async function tryNativeScreenCapture(
     writeQueue.stop();
     canvasSink?.stop();
     workerSink?.stop();
+    gpuSnapshotSink?.stop();
     if (deadline !== undefined) clearTimeout(deadline);
     if (settingsPoll !== undefined) clearTimeout(settingsPoll);
     settingsPoll = undefined;
@@ -415,6 +424,12 @@ export async function tryNativeScreenCapture(
         await canvasSink.submit(frame, metadata.timestamp);
         return;
       }
+      if (gpuSnapshotSink) {
+        // The source listener settles at the actual bitmap snapshot, while
+        // Electron allReferencesReleased still governs native slot reuse.
+        await gpuSnapshotSink.submit(frame, metadata.timestamp);
+        return;
+      }
       if (workerSink) {
         // The ACK releases this callback only. Imported texture credit still
         // waits for preload's permit and Electron allReferencesReleased.
@@ -537,6 +552,35 @@ export async function tryNativeScreenCapture(
           diagnostics.frameSink = 'canvas';
           canvasDiagnostics.set(track, canvasSink.snapshot);
           if (stopped) canvasSink.stop();
+        } catch {
+          stop(false, 'setup_error');
+        }
+      }
+      // This is a separate opt-in experiment. It adds no Canvas track, CPU
+      // readback, consumer, or native credit; unsupported setup preserves stock.
+      if (bridge.preferredFrameSink === 'gpu-snapshot' && options.colorSpace === 'bt709-limited' &&
+          result.storage === undefined && (result.pixelFormat ?? 'bgra') === 'bgra') {
+        try {
+          gpuSnapshotSink = createNativeGpuSnapshotFrameSink({
+            width: result.width, height: result.height, fps: options.fps, writer: { write: writeFrame },
+            onWritten(writeMs, queueAgeMs) {
+              if (stopped) return;
+              if (!current()) { stop(false, currentStopReason); return; }
+              if (track.readyState !== 'live') { stop(true, 'native_ended'); return; }
+              onWritten(writeMs, queueAgeMs);
+              if (!ready) checkFirstFrameSettings();
+            },
+            onDropped,
+            onFailure(error) {
+              const code = getNativeGpuSnapshotFrameFailureCode(error);
+              attempt.gpuSnapshotFailure = Object.freeze({ code, snapshot: gpuSnapshotSink?.snapshot() ?? null });
+              console.warn('[native-screen] gpu_snapshot_frame_error', code);
+              stop(true, 'frame_error');
+            },
+          });
+          diagnostics.frameSink = 'gpu-snapshot';
+          gpuSnapshotDiagnostics.set(track, gpuSnapshotSink.snapshot);
+          if (stopped) gpuSnapshotSink.stop();
         } catch {
           stop(false, 'setup_error');
         }

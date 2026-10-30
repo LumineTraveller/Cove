@@ -90,9 +90,11 @@ const isNativeCaptureLabBuild = buildFlavor === 'native-capture-lab';
 const nativeCaptureEnabled = process.platform === 'win32' && process.arch === 'x64' &&
   process.env.COVE_DISABLE_NATIVE_GPU_CAPTURE !== '1' &&
   (isNativeCaptureLabBuild || process.env.COVE_NATIVE_GPU_CAPTURE === '1');
-const nativeWorkerWriterEnabled = nativeCaptureEnabled && process.versions.electron === '44.0.0' &&
-  process.env.COVE_NATIVE_FRAME_SINK === 'worker' && process.env.COVE_NATIVE_GPU_CAPTURE_CPU_FRAMES !== '1' &&
-  process.env.COVE_NATIVE_GPU_CAPTURE_PIXEL_FORMAT !== 'nv12';
+const nativeFrameSinkPreference = process.env.COVE_NATIVE_FRAME_SINK;
+const nativeExperimentalFrameSink = nativeCaptureEnabled && process.versions.electron === '44.0.0' &&
+  (nativeFrameSinkPreference === 'worker' || nativeFrameSinkPreference === 'gpu-snapshot') &&
+  process.env.COVE_NATIVE_GPU_CAPTURE_CPU_FRAMES !== '1' && process.env.COVE_NATIVE_GPU_CAPTURE_PIXEL_FORMAT !== 'nv12'
+    ? nativeFrameSinkPreference : undefined;
 const isAnnotationFixBuild = buildFlavor === 'annotation-fix';
 const isMediaFixBuild = buildFlavor === 'media-fix';
 const isNetworkLabBuild = buildFlavor === 'network-lab' || isAnnotationFixBuild || isMediaFixBuild || isNativeCaptureLabBuild;
@@ -113,13 +115,15 @@ let integrityController: ReturnType<typeof createInstallationIntegrityController
 let mainWindow: BrowserWindow | null = null;
 const nativeTimingEnabled = nativeCaptureEnabled && process.env.COVE_NATIVE_GPU_CAPTURE_TIMING === '1';
 let nativeTimingLogger: ReturnType<typeof createNativeScreenTimingLogger> | undefined;
+const nativeCompletionPreference = process.env.COVE_NATIVE_GPU_CAPTURE_COMPLETION;
 const nativeScreenCapture = new NativeScreenCaptureController({
   enabled: nativeCaptureEnabled,
   timing: nativeTimingEnabled,
   onHelperTiming: nativeTimingEnabled ? (sample, captureNumber) => nativeTimingLogger?.helper(sample, captureNumber) : undefined,
   pixelFormat: process.env.COVE_NATIVE_GPU_CAPTURE_PIXEL_FORMAT === 'nv12' ? 'nv12' : 'bgra',
   storage: process.env.COVE_NATIVE_GPU_CAPTURE_CPU_FRAMES === '1' ? 'cpu' : 'gpu',
-  completion: process.env.COVE_NATIVE_GPU_CAPTURE_COMPLETION === 'fence' ? 'fence' : undefined,
+  completion: nativeCompletionPreference === 'query' || nativeCompletionPreference === 'fence'
+    ? nativeCompletionPreference : undefined,
   helperPath: app.isPackaged ? path.join(process.resourcesPath, 'native-screen-capture-helper.exe') :
     path.join(__dirname, '../build/native-screen-capture-helper.exe'),
 });
@@ -200,7 +204,7 @@ function createWindow() {
       contextIsolation: true,
       preload: path.join(__dirname, "preload.js"),
       additionalArguments: nativeCaptureEnabled ? ['--cove-native-gpu-capture=1',
-        ...(nativeWorkerWriterEnabled ? ['--cove-native-frame-sink=worker'] : [])] : [],
+        ...(nativeExperimentalFrameSink ? ['--cove-native-frame-sink=' + nativeExperimentalFrameSink] : [])] : [],
     },
   });
   mainWindow = win;

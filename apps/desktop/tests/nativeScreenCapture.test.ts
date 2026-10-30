@@ -81,6 +81,117 @@ test('unavailable experimental Canvas setup preserves published stock without fa
   assert.equal(getLastNativeScreenCaptureAttempt()?.stopReason, 'setup_error');
 });
 
+test('GPU snapshot preference preserves the generator for unqualified color contracts', async context => {
+  for (const colorSpace of [undefined, 'bt601-limited'] as const) {
+    await context.test(String(colorSpace), async child => {
+      const f = fixture(child);
+      Object.assign(f.bridge, { preferredFrameSink: 'gpu-snapshot' });
+      f.options.colorSpace = colorSpace;
+      replaceGlobal(child, 'OffscreenCanvas', undefined);
+      const { candidate, firstFrame } = await f.ready();
+      const diagnostics = getNativeScreenCaptureDiagnostics(candidate.stream.getVideoTracks()[0]);
+      assert.equal(diagnostics?.frameSink, 'generator');
+      assert.equal(diagnostics?.gpuSnapshot, undefined);
+      assert.deepEqual(f.writes, [firstFrame]);
+      candidate.stop();
+      assert.equal(f.stock.stops, 0);
+    });
+  }
+});
+
+test('GPU snapshot preference does not change CPU NV12 storage, color or writer ownership', async context => {
+  const f = fixture(context);
+  Object.assign(f.bridge, { preferredFrameSink: 'gpu-snapshot' });
+  f.options.colorSpace = 'bt709-limited';
+  replaceGlobal(context, 'OffscreenCanvas', undefined);
+  f.setResult({ ok: true, sessionId: 'session-1', width: 1920, height: 1080,
+    pixelFormat: 'nv12', storage: 'cpu' });
+  const pending = tryNativeScreenCapture(f.stream, f.options); await f.flush();
+  const input = Object.assign(new FakeFrame(), { format: 'NV12', colorSpace: {
+    primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', fullRange: false,
+  } });
+  await f.frame({ pixelFormat: 'nv12', storage: 'cpu' }, input);
+  const candidate = await pending; assert.ok(candidate);
+  const diagnostics = getNativeScreenCaptureDiagnostics(candidate.stream.getVideoTracks()[0]);
+  assert.equal(diagnostics?.frameSink, 'generator');
+  assert.equal(diagnostics?.frameStorage, 'cpu');
+  assert.equal(diagnostics?.gpuSnapshot, undefined);
+  assert.deepEqual(f.writes, [input]); assert.equal(input.closes, 1);
+  candidate.stop(); await f.flush();
+  assert.equal(f.stock.stops, 0); assert.deepEqual(f.stopFaults, [undefined]);
+});
+
+test('unavailable GPU snapshot platform retires startup without faulting published stock', async context => {
+  for (const mode of ['offscreen-missing', 'frame-constructor-missing', 'context-unavailable', 'attributes-mismatch'] as const) {
+    await context.test(mode, async child => {
+      child.mock.timers.enable({ apis: ['setTimeout'] });
+      const f = gpuSnapshotFixture(child, mode);
+      const pending = tryNativeScreenCapture(f.stream, f.options); await f.flush();
+      assert.equal(await pending, null);
+      assert.equal(f.stock.stops, 0); assert.equal(f.stock.readyState, 'live');
+      assert.equal(f.writes.length, 0); assert.equal(f.native[0].stops, 1);
+      assert.deepEqual(f.stopFaults, [undefined]); assert.deepEqual(f.stopArgumentCounts, [1]);
+      assert.ok(f.events.includes('unsubscribe-frame')); assert.ok(f.events.includes('unsubscribe-ended'));
+      assert.equal(f.aborts, 1); assert.equal(f.releases, 1);
+      assert.equal(getLastNativeScreenCaptureAttempt()?.stopReason, 'setup_error');
+      for (const canvas of f.canvases) assert.equal(canvas.width + canvas.height, 0);
+      child.mock.timers.tick(3_000); await f.flush();
+      assert.equal(f.stopRequests.length, 1, 'the retired startup deadline cannot issue another stop');
+      assert.equal(f.outputs.length, 0);
+    });
+  }
+});
+
+test('GPU snapshot callback releases the source while readiness and written counters await the real write', async context => {
+  const f = gpuSnapshotFixture(context);
+  const writing = deferred<void>(); f.setWrite(() => writing.promise);
+  const pending = tryNativeScreenCapture(f.stream, f.options);
+  let ready = false; void pending.then(() => { ready = true; });
+  await f.flush();
+  const input = f.source(); await f.frame({}, input);
+  assert.equal(input.closes, 1, 'the native callback settles at draw/snapshot, before writer settlement');
+  assert.equal(f.draws.length, 1); assert.equal(f.draws[0], input);
+  assert.equal(f.outputs.length, 1); assert.notEqual(f.outputs[0], input);
+  assert.equal(f.outputs[0].timestamp, input.timestamp);
+  assert.deepEqual(f.writes, f.outputs); assert.equal(f.outputs[0].closes, 0);
+  const track = f.native[0] as unknown as MediaStreamTrack;
+  const before = getNativeScreenCaptureDiagnostics(track)!;
+  assert.equal(before.frameSink, 'gpu-snapshot'); assert.equal(before.framesReceived, 1);
+  assert.equal(before.framesWritten, 0); assert.equal(before.gpuSnapshot?.snapshots, 1);
+  assert.equal(before.gpuSnapshot?.writesCompleted, 0); assert.equal(ready, false);
+  writing.resolve(); await f.flush();
+  const candidate = await pending; assert.ok(candidate);
+  const after = getNativeScreenCaptureDiagnostics(track)!;
+  assert.equal(after.framesWritten, 1); assert.equal(after.gpuSnapshot?.writesCompleted, 1);
+  assert.equal(f.outputs[0].closes, 1); assert.equal(f.native[0].contentHint, 'motion');
+  candidate.commit(); candidate.stop(); await f.flush();
+  assert.equal(f.stock.stops, 0); assert.deepEqual(f.stopFaults, [undefined]);
+});
+
+test('GPU snapshot cancellation retires pending source and late writes cannot ready or promote the old attempt', async context => {
+  const f = gpuSnapshotFixture(context);
+  const writing = deferred<void>(); f.setWrite(() => writing.promise);
+  const pending = tryNativeScreenCapture(f.stream, f.options); await f.flush();
+  const first = f.source(); await f.frame({}, first);
+  const second = f.source(2_000);
+  const secondReceived = f.frame({ serial: 2, timestamp: 2_000, slot: 1 }, second);
+  await f.flush(); assert.equal(second.closes, 0);
+  f.controller.abort(); await secondReceived;
+  assert.equal(await pending, null); assert.equal(second.closes, 1); assert.equal(first.closes, 1);
+  assert.equal(f.outputs[0].closes, 0, 'stop does not fabricate write completion');
+  assert.equal(f.draws.length, 1); assert.equal(f.native[0].stops, 1);
+  assert.equal(getLastNativeScreenCaptureAttempt()?.stopReason, 'abort');
+  writing.resolve(); await f.flush();
+  const diagnostics = getNativeScreenCaptureDiagnostics(f.native[0] as unknown as MediaStreamTrack)!;
+  assert.equal(f.outputs[0].closes, 1); assert.equal(f.draws.length, 1); assert.equal(f.writes.length, 1);
+  assert.equal(diagnostics.framesWritten, 0); assert.equal(diagnostics.gpuSnapshot?.writesCompleted, 0);
+  assert.equal(diagnostics.gpuSnapshot?.pendingInputs, 0); assert.equal(diagnostics.gpuSnapshot?.stopped, true);
+  const late = await f.frame({ serial: 3, timestamp: 3_000 }, f.source(3_000), true);
+  assert.equal(late.closes, 1); assert.equal(f.outputs.length, 1);
+  assert.equal(f.stock.stops, 0); assert.deepEqual(f.stopFaults, [undefined]);
+  assert.equal(f.stopRequests.length, 1);
+});
+
 function fixture(context: TestContext) {
   const controller = new AbortController();
   const stock = new FakeTrack();
@@ -181,6 +292,45 @@ function fixture(context: TestContext) {
     setPopulateSettings(value: boolean) { populateSettings = value; },
     ended(late = false) { (late ? lastEnded : activeEnded)?.('device-lost'); },
   };
+}
+
+function gpuSnapshotFixture(context: TestContext,
+  setup?: 'offscreen-missing' | 'frame-constructor-missing' | 'context-unavailable' | 'attributes-mismatch') {
+  const f = fixture(context);
+  const draws: FakeFrame[] = [];
+  const outputs: FakeFrame[] = [];
+  const canvases: FakeOffscreenCanvas[] = [];
+  class FakeOffscreenCanvas {
+    constructor(public width: number, public height: number) { canvases.push(this); }
+    getContext(kind: string, attributes: unknown) {
+      assert.equal(kind, '2d');
+      assert.deepEqual(attributes, { alpha: false, willReadFrequently: false, colorSpace: 'srgb' });
+      if (setup === 'context-unavailable') return null;
+      return {
+        getContextAttributes: () => ({ alpha: setup === 'attributes-mismatch', willReadFrequently: false, colorSpace: 'srgb' }),
+        drawImage(input: FakeFrame, x: number, y: number, width: number, height: number) {
+          assert.deepEqual([x, y, width, height], [0, 0, 1920, 1080]); draws.push(input);
+        },
+      };
+    }
+  }
+  class FakeSnapshot extends FakeFrame {
+    format = 'BGRA';
+    codedWidth: number;
+    codedHeight: number;
+    constructor(canvas: FakeOffscreenCanvas, init: { timestamp: number }) {
+      super(); assert.ok(canvas instanceof FakeOffscreenCanvas);
+      this.codedWidth = this.displayWidth = canvas.width;
+      this.codedHeight = this.displayHeight = canvas.height;
+      this.timestamp = init.timestamp; outputs.push(this);
+    }
+  }
+  replaceGlobal(context, 'OffscreenCanvas', setup === 'offscreen-missing' ? undefined : FakeOffscreenCanvas);
+  replaceGlobal(context, 'VideoFrame', setup === 'frame-constructor-missing' ? undefined : FakeSnapshot);
+  Object.assign(f.bridge, { preferredFrameSink: 'gpu-snapshot' }); f.options.colorSpace = 'bt709-limited';
+  return Object.assign(f, { draws, outputs, canvases,
+    source(timestamp = 1_000) { return Object.assign(new FakeFrame(), { timestamp, format: 'BGRA', codedWidth: 1920, codedHeight: 1080 }); },
+  });
 }
 
 function workerFixture(context: TestContext) {
