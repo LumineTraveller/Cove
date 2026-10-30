@@ -1,7 +1,7 @@
-import { useRef } from 'react';
-import { View, StyleSheet, type GestureResponderEvent } from 'react-native';
+import { View, StyleSheet } from 'react-native';
 import { type CoveColors } from '../../settings/theme';
 import { useThemedStyles } from '../../settings/ThemeProvider';
+import { useVolumeSliderGesture } from './useVolumeSliderGesture';
 interface InlineVolumeSliderProps {
   value: number;
   label: string;
@@ -13,24 +13,13 @@ export function InlineVolumeSlider({
   onChange,
 }: InlineVolumeSliderProps) {
   const styles = useThemedStyles(createStyles);
-  const trackWidth = useRef(1);
+  const gesture = useVolumeSliderGesture(onChange);
   const normalized = Math.max(0, Math.min(1, value));
   const percentage = Math.round(normalized * 100);
-  // locationX must stay relative to the track. Keep rail/fill/thumb out of the
-  // hit target so a drag that starts on the thumb cannot jump coordinate frames
-  // and make the value flicker back and forth.
-  const updateFromTouch = (event: GestureResponderEvent) => {
-    onChange(
-      Math.max(
-        0,
-        Math.min(1, event.nativeEvent.locationX / trackWidth.current),
-      ),
-    );
-  };
-
   return (
     <View
       style={styles.volumeSlider}
+      {...gesture}
       accessible
       accessibilityRole="adjustable"
       accessibilityLabel={label}
@@ -46,20 +35,16 @@ export function InlineVolumeSlider({
       ]}
       onAccessibilityAction={event =>
         onChange(
-          normalized +
-            (event.nativeEvent.actionName === 'increment' ? 0.05 : -0.05),
+          Math.max(
+            0,
+            Math.min(
+              1,
+              normalized +
+                (event.nativeEvent.actionName === 'increment' ? 0.05 : -0.05),
+            ),
+          ),
         )
       }
-      onLayout={event => {
-        trackWidth.current = Math.max(1, event.nativeEvent.layout.width);
-      }}
-      onStartShouldSetResponder={() => true}
-      onStartShouldSetResponderCapture={() => true}
-      onMoveShouldSetResponder={() => true}
-      onMoveShouldSetResponderCapture={() => true}
-      onResponderGrant={updateFromTouch}
-      onResponderMove={updateFromTouch}
-      onResponderTerminationRequest={() => false}
     >
       <View pointerEvents="none" style={styles.volumeSliderRail} />
       <View
@@ -75,7 +60,7 @@ export function InlineVolumeSlider({
 }
 const createStyles = (colors: CoveColors) =>
   StyleSheet.create({
-    volumeSlider: { flex: 1, height: 44, justifyContent: 'center' },
+    volumeSlider: { flex: 1, height: 48, justifyContent: 'center' },
     volumeSliderRail: {
       position: 'absolute',
       right: 0,

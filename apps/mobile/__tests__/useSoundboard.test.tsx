@@ -5,10 +5,12 @@ import {serverFetch} from '../src/features/connection/serverSecurity';
 import {useSoundboard, type SoundboardController, type SoundboardOptions} from '../src/features/soundpacks/useSoundboard';
 import {groupsStorageKey, favoritesStorageKey} from '../src/features/soundpacks/soundpackGroups';
 import {cancelOperations} from '../src/features/soundpacks/soundpackFiles';
+import {preparedSoundpacks} from '../src/features/soundpacks/preparedSoundpacks';
 import type {Soundpack} from '../src/types';
 
 jest.mock('../src/features/connection/serverSecurity', () => ({...jest.requireActual('../src/features/connection/serverSecurity'), serverFetch: jest.fn()}));
 jest.mock('../src/features/soundpacks/soundpackFiles', () => ({cancelOperations: jest.fn(async () => undefined)}));
+jest.mock('../src/features/soundpacks/preparedSoundpacks', () => ({preparedSoundpacks: {configure: jest.fn(), clear: jest.fn(), prepare: jest.fn(async () => false)}}));
 const sound = (id: string, canDelete = true, roomId = 'fixture-room'): Soundpack & {roomId: string} => ({id, roomId, name: id, filename: `${id}.normalized.mp3`, originalFilename: `${id}.wav`, uploader: 'Synthetic', sortOrder: 0, createdAt: 0, canDelete});
 const deferred = <T,>() => {let resolve!: (value: T) => void; const promise = new Promise<T>(yes => {resolve = yes;}); return {promise, resolve};};
 const response = (list: Soundpack[], roomId = 'fixture-room') => ({ok: true, json: async () => ({roomId, soundpacks: list})});
@@ -40,6 +42,34 @@ describe('soundboard existing wire protocol and lifecycle', () => {
     await act(async () => board.triggerSound(board.packs[0])); expect(emit).not.toHaveBeenCalled();
     await act(async () => {await board.renameSound('a', '中文新名称');}); expect(emit).toHaveBeenCalledWith('soundpack:rename', {roomId: 'fixture-room', soundId: 'a', name: '中文新名称'}, expect.any(Function));
     expect(board.packs[0].name).toBe('中文新名称');
+  });
+  test('prepares a bounded set only after joining voice and revokes the old credential session', async () => {
+    (serverFetch as jest.Mock).mockResolvedValue(response(Array.from({length: 12}, (_, index) => sound(`s${index}`))));
+    await mount();
+    expect(preparedSoundpacks!.prepare).not.toHaveBeenCalled();
+    await rerender({inVoice: true});
+    const oldSession = board.playbackSession;
+    expect(preparedSoundpacks!.configure).toHaveBeenCalledWith(oldSession);
+    expect(preparedSoundpacks!.prepare).toHaveBeenCalledTimes(6);
+    expect(preparedSoundpacks!.prepare).toHaveBeenCalledWith(oldSession, expect.objectContaining({roomId: 'fixture-room', soundId: 's0', version: 's0.normalized.mp3', headers: expect.objectContaining({'x-cove-account-token': 'synthetic-account-token'})}));
+    await event('soundpack:play', {soundId: 's0'});
+    expect(board.playback?.soundId).toBe('s0');
+    const stalePlay = events.get('soundpack:play')!;
+    await rerender({accountToken: 'renewed-token'});
+    expect(board.playback).toBeNull();
+    await act(async () => stalePlay({roomId: 'fixture-room', soundId: 's0'}));
+    expect(board.playback).toBeNull();
+    expect(board.playbackSession).not.toBe(oldSession);
+    expect(preparedSoundpacks!.clear).toHaveBeenCalledWith(oldSession);
+    const last = (preparedSoundpacks!.prepare as jest.Mock).mock.calls.at(-1)!;
+    expect(last[0]).toBe(board.playbackSession);
+    expect(last[1].headers['x-cove-account-token']).toBe('renewed-token');
+    const nextSession = board.playbackSession;
+    await rerender({inVoice: false});
+    expect(preparedSoundpacks!.clear).toHaveBeenCalledWith(nextSession);
+    const calls = (preparedSoundpacks!.prepare as jest.Mock).mock.calls.length;
+    await act(async () => board.warmSound(board.packs[0]));
+    expect(preparedSoundpacks!.prepare).toHaveBeenCalledTimes(calls);
   });
   test('restored local groups reconcile deleted/new sounds and preserve empty groups', async () => {
     (AsyncStorage.getItem as jest.Mock).mockImplementation(async key => String(key).includes('groups') ? JSON.stringify({version: 1, groups: [{id: 'one', soundIds: ['gone', 'a']}, {id: 'two', soundIds: ['b']}, {id: 'empty', soundIds: []}]}) : null);

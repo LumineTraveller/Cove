@@ -18,7 +18,9 @@ import {
   ConnectionState,
 } from './mobileMediaSupport';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { createRecoveryDiagnostics, request, screenAudioMatchesPublication, screenPublicationMetadata, type TransportIceRecovery } from '@cove/client-core';
+import { createRecoveryDiagnostics,
+  screenAudioMatchesPublication, screenPublicationMetadata, type TransportIceRecovery,
+} from '@cove/client-core';
 
 import type { Socket } from 'socket.io-client';
 import { Device } from 'mediasoup-client';
@@ -27,7 +29,6 @@ import { MediaStream } from 'react-native-webrtc';
 import type { VoiceMember } from '../../types';
 
 import { DisconnectGrace } from '../connection/disconnectGrace';
-import { useMobileScreenShare } from './screen/useMobileScreenShare';
 import {
   DEFAULT_NOISE_MODE,
   getNoiseStatus,
@@ -126,15 +127,12 @@ export function useMobileMedia(
   const pendingScreenAudioByPeer = useRef(new Map<string, string>());
   const watchingScreenPeerRef = useRef<string | null>(null);
   const screenReceiveVolumeRef = useRef(1);
-  const screenShare = useMobileScreenShare(socket, deviceRef, inVoiceRef, iceRecovery);
-  const stopScreenShare = screenShare.stopScreenShare;
   const { storeAvailableScreen, removeAvailableScreen, clearAvailableScreens } =
     useAvailableScreens({
       setAvailableScreens,
       availableScreensRef,
     });
   const { teardown } = useVoiceTeardown({
-    stopScreenShare,
     mediaGeneration,
     transportGeneration,
     joiningRef,
@@ -538,55 +536,8 @@ export function useMobileMedia(
     socket.emit('voice:mute-state', { roomId, muted: selfMutedRef.current });
   }, [roomId, socket]);
 
-  const collectScreenStats = screenShare.collectScreenStats;
-  const collectScreenEncodingDiagnostics =
-    screenShare.collectScreenEncodingDiagnostics;
-  const isSharingScreen = screenShare.sharingScreen;
-  const collectDiagnostics = useCallback(async () => {
-    const getStats = async (transport: Transport | null) => {
-      try {
-        return (await transport?.getStats()) ?? new Map();
-      } catch {
-        return new Map();
-      }
-    };
-    const [send, receive, screenSend, server] = await Promise.all([
-      getStats(sendTransport.current),
-      getStats(recvTransport.current),
-      collectScreenStats().catch(() => new Map()),
-      socket.connected
-        ? request(
-            socket,
-            'ms:media-diagnostics',
-            {},
-            { timeoutMs: 4000 },
-          ).catch(() => ({ unavailable: true }))
-        : Promise.resolve({ unavailable: true }),
-    ]);
-    return {
-      stage: {
-        inVoice,
-        watching: isWatchingScreen,
-        sharing: isSharingScreen,
-      },
-      stats: { send, receive, screenSend },
-      screenEncoder: collectScreenEncodingDiagnostics(),
-      recovery: recoveryDiagnostics.current.snapshot(),
-      server,
-    };
-  }, [
-    inVoice,
-    isWatchingScreen,
-    isSharingScreen,
-    collectScreenStats,
-    collectScreenEncodingDiagnostics,
-    socket,
-  ]);
-
   return {
-    collectDiagnostics,
     screenWatchingBusy,
-    ...screenShare,
     inVoice,
     joining,
     isMuted,

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Modal,
   ScrollView,
@@ -9,7 +9,6 @@ import {
   TextInput,
   TouchableOpacity,
   View,
-  type GestureResponderEvent,
 } from 'react-native';
 import {
   Check,
@@ -25,6 +24,7 @@ import {
 } from 'lucide-react-native';
 import { type CoveColors } from '../../settings/theme';
 import { useCoveTheme, useThemedStyles } from '../../settings/ThemeProvider';
+import { useVolumeSliderGesture } from '../../media/components/useVolumeSliderGesture';
 import { Avatar } from './Avatar';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -59,20 +59,12 @@ export function UserProfileModal({
   const styles = useThemedStyles(createStyles);
   const [draft, setDraft] = useState(remark);
   const [remarkFocused, setRemarkFocused] = useState(false);
-  const volumeTrackWidth = useRef(1);
+  const volumeGesture = useVolumeSliderGesture(
+    value => onVolumeChange?.(value),
+    2,
+  );
 
   useEffect(() => setDraft(remark), [remark, userId, visible]);
-
-  // locationX is only stable when the track itself is the hit target; the fill
-  // and thumb must not receive touches or the value jumps while dragging.
-  const updateVolumeFromTouch = (event: GestureResponderEvent) => {
-    if (!onVolumeChange) return;
-    const next = Math.max(
-      0,
-      Math.min(2, (event.nativeEvent.locationX / volumeTrackWidth.current) * 2),
-    );
-    onVolumeChange(next);
-  };
 
   const stepVolume = (delta: number) => {
     if (!onVolumeChange) return;
@@ -205,19 +197,7 @@ export function UserProfileModal({
                           )
                         }
                         accessibilityLabel={`${displayName}的音量，当前${volumePercent}%`}
-                        onLayout={event => {
-                          volumeTrackWidth.current = Math.max(
-                            1,
-                            event.nativeEvent.layout.width,
-                          );
-                        }}
-                        onStartShouldSetResponder={() => true}
-                        onStartShouldSetResponderCapture={() => true}
-                        onMoveShouldSetResponder={() => true}
-                        onMoveShouldSetResponderCapture={() => true}
-                        onResponderGrant={updateVolumeFromTouch}
-                        onResponderMove={updateVolumeFromTouch}
-                        onResponderTerminationRequest={() => false}
+                        {...volumeGesture}
                       >
                         <View pointerEvents="none" style={styles.volumeRail} />
                         <View
@@ -418,7 +398,7 @@ const createStyles = (colors: CoveColors) =>
     },
     volumeTrack: {
       flex: 1,
-      height: 44,
+      height: 48,
       justifyContent: 'center',
       overflow: 'visible',
     },

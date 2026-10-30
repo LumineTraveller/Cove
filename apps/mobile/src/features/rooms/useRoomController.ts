@@ -11,7 +11,6 @@ import {
 
 import type { Room, RoomMember, RoomState, SessionConfig } from '../../types';
 import { useMobileMedia } from '../media/useMobileMedia';
-import { useScreenSharingPreferences } from '../media/screen/useScreenSharingPreferences';
 
 export interface MobileRoomProps {
   socket: Socket;
@@ -46,13 +45,6 @@ export function useRoomController({
   const joinGeneration = useRef(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [audioSettingsOpen, setAudioSettingsOpen] = useState(false);
-  const [screenShareSettingsOpen, setScreenShareSettingsOpen] = useState(false);
-  const {
-    includeScreenAudio,
-    setIncludeScreenAudio,
-    screenCaptureScale,
-    setScreenCaptureScale,
-  } = useScreenSharingPreferences();
   const [settingsLimit, setSettingsLimit] = useState(
     room.maxMembers ? String(room.maxMembers) : '',
   );
@@ -300,16 +292,10 @@ export function useRoomController({
     joinRoom,
     sharerName,
     setFullscreen,
-    setScreenShareSettingsOpen,
     toggleScreenVolumeMute,
     setScreenVolume,
     profileRemarks,
     setViewingProfile,
-    screenShareSettingsOpen,
-    includeScreenAudio,
-    setIncludeScreenAudio,
-    screenCaptureScale,
-    setScreenCaptureScale,
     audioSettingsOpen,
     audioSettingsBusy,
     fullscreen,

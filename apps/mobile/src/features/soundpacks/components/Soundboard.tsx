@@ -78,7 +78,7 @@ export function Soundboard({controller: board, profileRemarks, showHeading = tru
         const sound = packsById.get(id);
         return sound ? <TouchableOpacity key={id} style={[styles.quickSound, playDisabled && styles.disabled]}
           accessibilityRole="button" accessibilityLabel={`播放收藏：${sound.name}`} disabled={playDisabled}
-          onPress={() => {board.triggerSound(sound);}}><Star size={14} color={colors.blue} fill={colors.blue}/>
+          onPressIn={() => board.warmSound?.(sound)} onPress={() => {board.triggerSound(sound);}}><Star size={14} color={colors.blue} fill={colors.blue}/>
           <Text style={styles.quickName} numberOfLines={2}>{sound.name}</Text></TouchableOpacity> : null;
       })}</View></View>}
     {board.loading ? <View style={styles.empty}><ActivityIndicator color={colors.blue}/><Text style={styles.hint}>正在加载语音包</Text></View>
@@ -96,7 +96,7 @@ export function Soundboard({controller: board, profileRemarks, showHeading = tru
           return <View key={sound.id} style={[styles.tile, playing && styles.tilePlaying]}><View style={styles.tileRow}>
             <TouchableOpacity style={[styles.tileMain, playDisabled && styles.disabled]} accessibilityRole="button"
               accessibilityLabel={`播放语音包：${sound.name}`} accessibilityState={{disabled: playDisabled}} disabled={playDisabled}
-              onPress={() => {board.triggerSound(sound);}}><View style={[styles.playIcon, playing && styles.playIconActive]}>
+              onPressIn={() => board.warmSound?.(sound)} onPress={() => {board.triggerSound(sound);}}><View style={[styles.playIcon, playing && styles.playIconActive]}>
               <Play size={15} color={playing ? colors.onPrimary : colors.textMuted}/></View><View style={styles.copy}>
               <Text style={styles.soundName} numberOfLines={2}>{sound.name}</Text><Text style={styles.uploader} numberOfLines={1}>
                 {getProfileDisplayName(sound.uploader, sound.uploaderUserId, profileRemarks)}</Text></View></TouchableOpacity>

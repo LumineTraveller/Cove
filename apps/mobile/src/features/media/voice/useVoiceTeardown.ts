@@ -20,7 +20,6 @@ import {
 } from '../mobileMediaSupport';
 
 export interface UseVoiceTeardownDependencies {
-  readonly stopScreenShare: () => void;
   readonly mediaGeneration: import('react').RefObject<number>;
   readonly transportGeneration: import('react').RefObject<number>;
   readonly joiningRef: import('react').RefObject<boolean>;
@@ -94,7 +93,6 @@ export interface UseVoiceTeardownDependencies {
 
 export function useVoiceTeardown(deps: UseVoiceTeardownDependencies) {
   const {
-    stopScreenShare,
     mediaGeneration,
     transportGeneration,
     joiningRef,
@@ -132,11 +130,11 @@ export function useVoiceTeardown(deps: UseVoiceTeardownDependencies) {
   } = deps;
 
   const teardown = useCallback(
-    (notifyServer: boolean, options: { preserveAvailableScreens?: boolean } = {}) => {
+    (notifyServer: boolean, options: { preserveAvailableScreens?: boolean } = {},
+    ) => {
       iceRecovery.current?.cancelAll();
       recoveryDiagnostics?.current.cancelActive();
       transportGeneration.current += 1;
-      stopScreenShare();
       mediaGeneration.current += 1;
       cancelPendingWatch();
       joiningRef.current = false;
@@ -185,7 +183,6 @@ export function useVoiceTeardown(deps: UseVoiceTeardownDependencies) {
       CoveNative?.stopVoiceService();
     },
     [
-      stopScreenShare,
       mediaGeneration,
       transportGeneration,
       joiningRef,

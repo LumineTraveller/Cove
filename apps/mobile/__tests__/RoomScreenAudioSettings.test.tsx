@@ -1,19 +1,15 @@
 import TestRenderer, { act } from 'react-test-renderer';
 import {
   Modal,
-  StyleSheet,
-  Switch,
-  Text,
-  TouchableOpacity,
-} from 'react-native';
+  StyleSheet, Text,
+  TouchableOpacity } from 'react-native';
 import type { Socket } from 'socket.io-client';
 import { RoomScreen } from '../src/features/rooms/screens/RoomScreen';
 import { useMobileMedia } from '../src/features/media/useMobileMedia';
 import type { Room, SessionConfig } from '../src/types';
-let mockAnnotations: any;
 let mockRemote: any;
-jest.mock('../src/features/media/annotation/useScreenAnnotations', () => ({
-  useScreenAnnotations: () => mockAnnotations,
+jest.mock('../src/features/remote-control/useRemoteControlPolicy', () => ({
+  useRemoteControlPolicy: () => true,
 }));
 jest.mock('../src/features/remote-control/useMobileRemoteControl', () => ({
   useMobileRemoteControl: () => mockRemote,
@@ -81,33 +77,6 @@ describe('room audio settings', () => {
   // Cold React Native/icon initialization can exceed 5s on a Windows CI host.
   // Only fixture setup gets extra time; all behavior assertions keep 5s.
   beforeEach(async () => {
-    mockAnnotations = {
-      ready: true,
-      localActive: false,
-      canDraw: false,
-      remoteControlAllowed: true,
-      state: { enabled: true, strokes: [], requests: [] },
-      optimisticStrokes: [],
-      laserPoints: {},
-      pendingAction: null,
-      error: null,
-      isRequestPending: false,
-      annotationsAllowed: true,
-      start: jest.fn(async () => {
-        mockAnnotations.localActive = true;
-        mockAnnotations.canDraw = true;
-      }),
-      exit: jest.fn(() => {
-        mockAnnotations.localActive = false;
-        mockAnnotations.canDraw = false;
-      }),
-      sendStroke: jest.fn((_tool, _color, _width, _points, id) => id),
-      sendLaser: jest.fn(),
-      finishStroke: jest.fn(),
-      clear: jest.fn(),
-      setAnnotationsAllowed: jest.fn(),
-      respond: jest.fn(),
-    };
     mockRemote = {
       session: null,
       pending: null,
@@ -380,91 +349,19 @@ describe('room audio settings', () => {
     expect(media.joinVoice).toHaveBeenCalledTimes(1);
   });
 
-  test('screen sharing keeps optional audio and honestly describes the fixed native capture rate', async () => {
-    const card = renderer.root.findByProps({ testID: 'own-screen-sharing' });
-    expect(StyleSheet.flatten(card.props.style).position).toBeUndefined();
-    expect(StyleSheet.flatten(card.props.style).flexDirection).toBe('row');
-    await act(async () => button('打开屏幕共享设置').props.onPress());
-    const content = JSON.stringify(renderer.toJSON());
-    expect(content).toContain('同时共享音频');
-    expect(content).toContain('画面采集比例');
-    expect(content).not.toContain('720p');
-    expect(content).not.toContain('1080p');
-    expect(content).toContain('30 FPS');
-    expect(content).toContain('观看帧率由共享源与设备决定');
-    expect(content).not.toContain('120 FPS');
-    expect(
-      renderer.root.findAllByProps({ accessibilityRole: 'radio' }),
-    ).not.toContainEqual(
-      expect.objectContaining({
-        props: expect.objectContaining({
-          accessibilityLabel: expect.stringContaining('FPS'),
-        }),
-      }),
+  test('mobile removes sharing, annotation and media status entries', () => {
+    const labels = renderer.root
+      .findAllByType(TouchableOpacity)
+      .map(node => node.props.accessibilityLabel ?? '');
+    expect(labels.some(label => /批注|共享设置|媒体状态/.test(label))).toBe(
+      false,
     );
-    await act(async () => button('开始共享手机屏幕').props.onPress());
-    expect(media.startScreenShare).toHaveBeenCalledWith(false, 1);
     expect(
-      renderer.root.findAllByType(Modal).some(node => node.props.visible),
-    ).toBe(false);
-    media.sharingScreen = true;
-    media.sharingScreenAudio = true;
-    media.screenViewerCount = 2;
-    await rerender();
-    await act(async () => button('停止共享我的屏幕').props.onPress());
-    expect(media.stopScreenShare).toHaveBeenCalledTimes(1);
-    expect(media.leaveVoice).not.toHaveBeenCalled();
-    expect(
-      renderer.root
-        .findByProps({ testID: 'voice-controls' })
-        .findAllByType(TouchableOpacity),
-    ).toHaveLength(2);
+      renderer.root.findAllByProps({ testID: 'own-screen-sharing' }),
+    ).toHaveLength(0);
+    expect(media.startScreenShare).not.toHaveBeenCalled();
   });
-
-  test('capture ratio selection is independent of audio and is passed to the next sharing start', async () => {
-    await act(async () => button('打开屏幕共享设置').props.onPress());
-    expect(
-      button('画面采集比例：原始 (100%)').props.accessibilityState.checked,
-    ).toBe(true);
-    await act(async () => button('画面采集比例：75%').props.onPress());
-    expect(button('画面采集比例：75%').props.accessibilityState.checked).toBe(
-      true,
-    );
-    const audio = () =>
-      renderer.root
-        .findAllByType(Switch)
-        .find(node => node.props.accessibilityLabel === '同时共享音频')!;
-    expect(audio().props.value).toBe(false);
-    await act(async () => audio().props.onValueChange(true));
-    expect(button('画面采集比例：75%').props.accessibilityState.checked).toBe(
-      true,
-    );
-    await act(async () => button('开始共享手机屏幕').props.onPress());
-    expect(media.startScreenShare).toHaveBeenCalledWith(true, 0.75);
-  });
-
-  test.each(['screenSharingBusy', 'sharingScreen'])(
-    '%s disables capture and audio choices while preserving close',
-    async state => {
-      await act(async () => button('打开屏幕共享设置').props.onPress());
-      media[state] = true;
-      await rerender();
-      for (const label of ['原始 (100%)', '75%', '50%']) {
-        const option = button(`画面采集比例：${label}`);
-        expect(option.props.disabled).toBe(true);
-        expect(option.props.accessibilityState.disabled).toBe(true);
-      }
-      expect(
-        renderer.root
-          .findAllByType(Switch)
-          .find(node => node.props.accessibilityLabel === '同时共享音频')!.props
-          .disabled,
-      ).toBe(true);
-      expect(button('关闭屏幕共享设置').props.disabled).not.toBe(true);
-    },
-  );
-
-  test('starting annotation during a remote session paints locally instead of sending remote input', async () => {
+  async function watch() {
     media.remoteScreen = {
       socketId: 'desktop',
       consumerId: 'video',
@@ -474,81 +371,81 @@ describe('room audio settings', () => {
       { socketId: 'desktop', videoProducerId: 'producer' },
     ];
     media.watchingScreenPeerId = 'desktop';
+    media.screenReceiveVolume = 0.6;
+    media.setScreenReceiveVolume = jest.fn();
+    await rerender();
+  }
+  test('receiving screen volume remains available outside voice and in audio settings', async () => {
+    media.inVoice = false;
+    await watch();
+    const slider = renderer.root.findByProps({
+      accessibilityLabel: '共享屏幕音量',
+    });
+    expect(slider.props.accessibilityValue.now).toBe(60);
+    await act(async () => button('将共享屏幕静音').props.onPress());
+    expect(media.setScreenReceiveVolume).toHaveBeenCalledWith(0);
+    await openAudio();
+    expect(
+      audioModal().findAllByProps({ accessibilityLabel: '共享屏幕音量' })
+        .length,
+    ).toBeGreaterThan(0);
+  });
+  test('fullscreen gives video the full stage and opens volume only on demand', async () => {
+    await watch();
+    await act(async () => button('全屏观看共享').props.onPress());
+    const modal = audioModal();
+    expect(modal.props.statusBarTranslucent).toBe(true);
+    expect(modal.props.navigationBarTranslucent).toBe(true);
+    expect(
+      modal.findAllByProps({ accessibilityLabel: '共享屏幕音量' }),
+    ).toHaveLength(0);
+    expect(
+      modal.findAllByProps({ accessibilityLabel: '申请远控' }),
+    ).toHaveLength(0);
+    await act(async () => button('全屏共享音量').props.onPress());
+    expect(
+      modal.findByProps({ accessibilityLabel: '共享屏幕音量' }).props
+        .accessibilityValue.now,
+    ).toBe(60);
+    await act(async () => button('全屏共享音量').props.onPress());
+    expect(
+      modal.findAllByProps({ accessibilityLabel: '共享屏幕音量' }),
+    ).toHaveLength(0);
+  });
+  test('toolbar text has an explicit centered line box and never wraps as separate flex rows', () => {
+    const toolbar = renderer.root
+        .findByProps({ testID: 'room-toolbar' });
+    for (const node of toolbar.findAllByType(TouchableOpacity))
+      expect(StyleSheet.flatten(node.props.style).flexWrap).toBe('nowrap');
+    for (const node of toolbar.findAllByType(Text))
+      expect(StyleSheet.flatten(node.props.style)).toEqual(
+      expect.objectContaining({
+          includeFontPadding: false,
+          textAlignVertical: 'center',
+          lineHeight: 18,
+        }),
+      );
+  });
+  test('remote pointer input is preserved without a mobile drawing mode', async () => {
+    await watch();
     mockRemote.session = {
       sessionId: 'remote-session',
       role: 'controller',
       sharerSocketId: 'desktop',
     };
     await rerender();
-    const surface = () =>
-      renderer.root.findAllByType('ZoomableScreenVideo' as any)[0];
+    const surface = renderer.root.findAllByType('ZoomableScreenVideo' as any)[0];
     await act(async () => {
-      surface().props.interaction.onStart({ x: 0.5, y: 0.5 });
-      surface().props.interaction.onMove({ x: 0.6, y: 0.6 });
+      surface.props.interaction.onStart({ x: 0.5, y: 0.5 });
+      surface.props.interaction.onMove({ x: 0.6, y: 0.6 });
+      surface.props.interaction.onEnd();
     });
     expect(mockRemote.button).toHaveBeenCalledWith('left', true, {
       x: 0.5,
       y: 0.5,
     });
+    expect(mockRemote.button).toHaveBeenCalledWith('left', false, { x: 0.6, y: 0.6 });
     expect(mockRemote.pointer).toHaveBeenCalledTimes(1);
-    await act(async () => {
-      button('批注').props.onPress();
-    });
-    await rerender();
-    expect(mockRemote.setInputEnabled).toHaveBeenLastCalledWith(false);
-    expect(button('键盘输入').props.disabled).toBe(true);
-    expect(
-      renderer.root.findAllByProps({ testID: 'screen-interaction-mode' })[0]
-        .props.children,
-    ).toContain('批注模式');
-    const remoteButtons = mockRemote.button.mock.calls.length;
-    await act(async () => {
-      surface().props.interaction.onStart({ x: 0.2, y: 0.2 });
-      surface().props.interaction.onMove({ x: 0.3, y: 0.3 });
-    });
-    expect(mockAnnotations.sendStroke).toHaveBeenCalledTimes(2);
-    expect(mockRemote.button).toHaveBeenCalledTimes(remoteButtons);
-    expect(mockRemote.pointer).toHaveBeenCalledTimes(1);
-    await act(async () => {
-      button('结束批注').props.onPress();
-    });
-    await rerender();
-    expect(mockRemote.setInputEnabled).toHaveBeenLastCalledWith(true);
-    await act(async () => {
-      surface().props.interaction.onStart({ x: 0.4, y: 0.4 });
-    });
-    expect(mockRemote.button).toHaveBeenLastCalledWith('left', true, {
-      x: 0.4,
-      y: 0.4,
-    });
-  });
-
-  test('sharing authorization can be canceled without locking other call controls', async () => {
-    await act(async () => button('打开屏幕共享设置').props.onPress());
-    media.screenSharingBusy = true;
-    await rerender();
-    expect(button('开始共享手机屏幕').props.disabled).toBe(true);
-    await act(async () => button('关闭屏幕共享设置').props.onPress());
-    expect(media.stopScreenShare).toHaveBeenCalledTimes(1);
-    expect(media.leaveVoice).not.toHaveBeenCalled();
-  });
-
-  test('sharing options can be viewed before joining while capture remains disabled', async () => {
-    media.inVoice = false;
-    await rerender();
-    expect(button('打开屏幕共享设置').props.disabled).not.toBe(true);
-    await act(async () => button('打开屏幕共享设置').props.onPress());
-    expect(button('开始共享手机屏幕').props.disabled).toBe(true);
-    expect(
-      renderer.root
-        .findAllByType(Text)
-        .some(node => node.props.children === '加入语音后才能开始共享屏幕。'),
-    ).toBe(true);
-    expect(media.startScreenShare).not.toHaveBeenCalled();
-    await act(async () => button('关闭屏幕共享设置').props.onPress());
-    expect(
-      renderer.root.findAllByType(Modal).some(node => node.props.visible),
-    ).toBe(false);
   });
 
   test('room settings preserve existing payloads, prevent double saves, and can close while pending', async () => {
@@ -597,4 +494,4 @@ describe('room audio settings', () => {
       renderer.root.findAllByType(Modal).some(node => node.props.visible),
     ).toBe(false);
   });
-});
+  });

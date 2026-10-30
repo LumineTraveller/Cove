@@ -1,4 +1,4 @@
-import {useCallback, useEffect, useRef, useState} from 'react';
+import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {request} from '@cove/client-core';
 import type {Socket} from 'socket.io-client';
@@ -6,9 +6,11 @@ import type {Soundpack} from '../../types';
 import {serverFetch} from '../connection/serverSecurity';
 import {soundpackFileSource, soundpackRequestInit, type SoundpackFileVariant} from './soundpackAccess';
 import {cancelOperations} from './soundpackFiles';
+import {preparedSoundpacks} from './preparedSoundpacks';
 import {addGroup, applySoundpackOrder, canAddGroup, favoritesStorageKey, flattenGroups, groupsStorageKey, initialGroups, moveSound, orderedGroups, readGroups, reconcileGroups, swapGroups, type SoundpackGroup} from './soundpackGroups';
 
 const VOLUME_KEY = 'cove:soundpack-volume';
+let playbackSessions = 0;
 // Preserve write order even when the previous screen is still finishing a save.
 const writes = new Map<string, Promise<unknown>>();
 function store(key: string, value: string) {
@@ -19,12 +21,20 @@ function store(key: string, value: string) {
 }
 const message = (cause: unknown, fallback: string) => cause instanceof Error ? cause.message : fallback;
 export interface SoundboardOptions {socket: Socket; roomId: string; serverURL: string; accountId: string; accountToken: string; ready: boolean; inVoice: boolean; outputDeviceId?: string;}
-export interface SoundpackPlayback {key: number; soundId: string; uri: string; headers: Record<string, string>;}
+export interface SoundpackPlayback {key: number; soundId: string; uri: string; headers: Record<string, string>;
+  version?: string;
+  requestedAt?: number;
+}
 
 export function useSoundboard({socket, roomId, serverURL, accountId, accountToken, ready, inVoice, outputDeviceId = 'out-speaker'}: SoundboardOptions) {
   const groupKey = groupsStorageKey(serverURL, accountId, roomId);
   const favoriteKey = favoritesStorageKey(serverURL, accountId, roomId);
   const scope = groupKey;
+  const playbackContext = useMemo(
+    () => ({scope, accountToken, session: String(++playbackSessions)}),
+    [scope, accountToken],
+  );
+  const playbackSession = playbackContext.session;
   const access = {serverURL, roomId, accountToken};
   const [packs, setPacks] = useState<Soundpack[]>([]);
   const [groups, setGroups] = useState<SoundpackGroup[]>(initialGroups);
@@ -149,7 +159,7 @@ export function useSoundboard({socket, roomId, serverURL, accountId, accountToke
       try {
         const response = await serverFetch(serverURL, `/api/soundpacks?roomId=${encodeURIComponent(roomId)}`, soundpackRequestInit({serverURL, accountToken, roomId}, {signal: abort.signal}));
         if (!response.ok) throw new Error(`语音包加载失败（HTTP ${response.status}）`);
-        const payload = await response.json() as {roomId?: unknown; soundpacks?: unknown};
+        const payload = (await response.json()) as {roomId?: unknown; soundpacks?: unknown};
         if (!payload || payload.roomId !== roomId || !Array.isArray(payload.soundpacks) || payload.soundpacks.some(value => !value || value.roomId !== roomId || typeof value.id !== 'string'))
           throw new Error('服务器未返回当前房间的隔离语音包列表，请更新服务器后重试。');
         const list = payload.soundpacks as Soundpack[];
@@ -173,7 +183,57 @@ export function useSoundboard({socket, roomId, serverURL, accountId, accountToke
     const nextFavorites = favoritesRef.current.filter(id => packs.some(pack => pack.id === id));
     if (nextFavorites.length !== favoritesRef.current.length) saveFavorites(nextFavorites);
   }, [packs, listReady, preferencesReady, saveGroups, saveFavorites, scope]);
-  useEffect(() => { if (!inVoice || !ready) setPlayback(null); }, [inVoice, ready, scope]);
+  useEffect(() => { if (!inVoice || !ready) setPlayback(null); }, [inVoice, ready, scope, accountToken]);
+  useEffect(() => {
+    setPlayback(null);
+    playbackScope.current = null;
+  }, [playbackSession]);
+  useEffect(() => {
+    if (!ready || !inVoice || !listReady || listScope.current !== scope) return;
+    preparedSoundpacks?.configure(playbackSession);
+    return () => preparedSoundpacks?.clear(playbackSession);
+  }, [ready, inVoice, listReady, scope, playbackSession]);
+  const warmSound = useCallback(
+    (sound: Soundpack) => {
+      if (
+        !readyRef.current || !voiceRef.current ||
+        listScope.current !== scope ||
+        !packsRef.current.some(pack => pack.id === sound.id)
+      )
+        return;
+      try {
+        const source = soundpackFileSource(
+          {serverURL, roomId, accountToken},
+          sound.id,
+          'playback',
+        );
+        void preparedSoundpacks
+          ?.prepare(playbackSession, {
+            ...source,
+            serverURL,
+            roomId,
+            soundId: sound.id,
+            version: sound.filename,
+          })
+          .catch(() => undefined);
+      } catch {
+        /* Normal playback still reports invalid sources. */
+      }
+    },
+    [serverURL, roomId, accountToken, scope, playbackSession],
+  );
+  useEffect(() => {
+    if (!ready || !inVoice || !listReady || listScope.current !== scope) return;
+    const prioritized = [
+      ...favorites
+        .map(id => packs.find(pack => pack.id === id))
+        .filter((pack): pack is Soundpack => Boolean(pack)),
+      ...packs,
+    ];
+    [...new Map(prioritized.map(pack => [pack.id, pack])).values()]
+      .slice(0, 6)
+      .forEach(warmSound);
+  }, [packs, favorites, ready, inVoice, listReady, scope, warmSound]);
   useEffect(() => {
     if (ready) return;
     operation.current += 1;
@@ -183,7 +243,8 @@ export function useSoundboard({socket, roomId, serverURL, accountId, accountToke
     setBusy(null);
   }, [ready]);
   useEffect(() => {
-    const belongs = (payload: unknown): boolean => mounted.current && scopeRef.current === scope &&
+    let active = true;
+    const belongs = (payload: unknown): boolean => active && mounted.current && scopeRef.current === scope &&
       !!payload && typeof payload === 'object' && (payload as {roomId?: unknown}).roomId === roomId;
     const onAdded = (sound: Soundpack) => {
       if (!belongs(sound)) return;
@@ -192,20 +253,23 @@ export function useSoundboard({socket, roomId, serverURL, accountId, accountToke
     };
     const onDeleted = (payload: {roomId?: string; soundId: string}) => {
       if (!belongs(payload)) return;
-      const {soundId} = payload;
+      const { soundId } = payload;
       revision.current += 1;
       updatePacks(current => current.filter(item => item.id !== soundId));
-      setPlayback(current => current?.soundId === soundId ? null : current);
+      setPlayback(current => (current?.soundId === soundId ? null : current));
     };
     const onRenamed = (payload: {roomId?: string; soundId: string; name: string}) => {
       if (!belongs(payload)) return;
       const {soundId, name} = payload;
       revision.current += 1;
-      updatePacks(current => current.map(item => item.id === soundId ? {...item, name} : item));
+      updatePacks(current =>
+        current.map(item => (item.id === soundId ? {...item, name} : item)),
+      );
     };
     const onNormalized = (payload: {roomId?: string; soundId: string; filename: string; originalFilename?: string}) => {
       if (!belongs(payload)) return;
       const {soundId, filename, originalFilename} = payload;
+      setPlayback(current => (current?.soundId === soundId ? null : current));
       revision.current += 1;
       updatePacks(current => current.map(item => item.id === soundId ? {...item, filename, ...(originalFilename ? {originalFilename} : {})} : item));
     };
@@ -219,12 +283,20 @@ export function useSoundboard({socket, roomId, serverURL, accountId, accountToke
     };
     const onPlay = (payload: {roomId?: string; soundId: string; filename?: string}) => {
       if (!belongs(payload) || listScope.current !== scope) return;
-      const {soundId} = payload;
+      const { soundId } = payload;
       if (!readyRef.current || !voiceRef.current) return;
       try {
+        const sound = packsRef.current.find(pack => pack.id === soundId);
+        if (!sound) return;
         const source = soundpackFileSource({serverURL, accountToken, roomId}, soundId, 'playback');
-        playbackScope.current = scope;
-        setPlayback({key: ++playSequence.current, soundId, ...source});
+        playbackScope.current = playbackSession;
+        setPlayback({
+          key: ++playSequence.current,
+          soundId,
+          version: payload.filename ?? sound.filename,
+          requestedAt: Date.now(),
+          ...source,
+        });
       } catch { setNotice('语音包播放请求无效，请重新加载当前房间。'); }
     };
     socket.on('soundpack:added', onAdded);
@@ -234,6 +306,7 @@ export function useSoundboard({socket, roomId, serverURL, accountId, accountToke
     socket.on('soundpack:reordered', onReordered);
     socket.on('soundpack:play', onPlay);
     return () => {
+      active = false;
       socket.off('soundpack:added', onAdded);
       socket.off('soundpack:deleted', onDeleted);
       socket.off('soundpack:renamed', onRenamed);
@@ -241,7 +314,7 @@ export function useSoundboard({socket, roomId, serverURL, accountId, accountToke
       socket.off('soundpack:reordered', onReordered);
       socket.off('soundpack:play', onPlay);
     };
-  }, [socket, serverURL, accountToken, saveGroups, updatePacks, scope, roomId]);
+  }, [socket, serverURL, accountToken, saveGroups, updatePacks, scope, roomId, playbackSession]);
 
   const ack = useCallback(async (event: string, payload: object) => {
     const result = await request<{ok: boolean; name?: string}>(socket, event, payload, {
@@ -256,6 +329,7 @@ export function useSoundboard({socket, roomId, serverURL, accountId, accountToke
     const token = ++playRequestToken.current;
     const activeScope = scope;
     setNotice(null);
+    warmSound(sound);
     try { await ack('soundpack:play', {soundId: sound.id, roomId}); }
     catch (cause) { if (mounted.current && scopeRef.current === activeScope && playRequestToken.current === token) setNotice(message(cause, '播放失败')); }
     finally { if (scopeRef.current === activeScope && playRequestToken.current === token) playPending.current = false; }
@@ -287,7 +361,11 @@ export function useSoundboard({socket, roomId, serverURL, accountId, accountToke
       setNotice(message(cause, '调整顺序失败'));
     } finally { if (active()) {busyRef.current = null; setBusy(null);} }
   };
-  const manageSound = async (kind: 'rename' | 'delete', soundId: string, name?: string) => {
+  const manageSound = async (
+    kind: 'rename' | 'delete',
+    soundId: string,
+    name?: string,
+  ) => {
     const sound = packsRef.current.find(pack => pack.id === soundId);
     if (scopeRef.current !== scope || !readyRef.current || busyRef.current || !sound?.canDelete || (kind === 'rename' && !name?.trim())) return false;
     const activeScope = scope;
@@ -301,10 +379,10 @@ export function useSoundboard({socket, roomId, serverURL, accountId, accountToke
       if (!active()) return false;
       revision.current += 1;
       updatePacks(current => kind === 'delete' ? current.filter(pack => pack.id !== soundId) : current.map(pack => pack.id === soundId ? {...pack, name: result.name ?? name!.trim().slice(0, 64)} : pack));
-      if (kind === 'delete') setPlayback(current => current?.soundId === soundId ? null : current);
+      if (kind === 'delete')
+        setPlayback(current => (current?.soundId === soundId ? null : current));
       return true;
-    } catch (cause) { if (active()) setNotice(message(cause, '语音包操作失败')); return false; }
-    finally { if (active()) {busyRef.current = null; setBusy(null);} }
+    } catch (cause) { if (active()) setNotice(message(cause, '语音包操作失败')); return false; } finally { if (active()) {busyRef.current = null; setBusy(null);} }
   };
   const updateVolume = (value: number) => {
     volumeRevision.current += 1;
@@ -332,19 +410,39 @@ export function useSoundboard({socket, roomId, serverURL, accountId, accountToke
   };
   return {packs: listScope.current === scope ? packs : [],
     groups: preferenceScope.current === scope ? groups : initialGroups(),
-    favorites: preferenceScope.current === scope ? favorites : [], volume,
-    playback: playbackScope.current === scope && ready && inVoice ? playback : null,
-    loading, loadError, notice, busy,
+    favorites: preferenceScope.current === scope ? favorites : [],
+    volume,
+    playback: playbackScope.current === playbackSession && ready && inVoice ? playback : null,
+    loading,
+    loadError,
+    notice,
+    busy,
     canManage: ready && listReady && preferencesReady && !busy && preferenceScope.current === scope && listScope.current === scope,
-    ready: resourceReady, inVoice, canAddGroup: canAddGroup(groups), serverURL, roomId, socket, scope, outputDeviceId,
-    requestInit, fileSource, reload: () => setRetry(value => value + 1), setNotice, triggerSound, updateVolume, toggleFavorite, addSoundpackGroup,
+    ready: resourceReady,
+    inVoice,
+    canAddGroup: canAddGroup(groups),
+    serverURL,
+    roomId,
+    socket,
+    scope,
+    outputDeviceId,
+    playbackSession,
+    warmSound,
+    requestInit,
+    fileSource,
+    reload: () => setRetry(value => value + 1),
+    setNotice,
+    triggerSound,
+    updateVolume,
+    toggleFavorite,
+    addSoundpackGroup,
     moveSound: (id: string, groupId: string, index: number) => commitGroups(moveSound(groupsRef.current, id, groupId, index)),
     swapGroups: (sourceId: string, targetId: string) => commitGroups(swapGroups(groupsRef.current, sourceId, targetId)),
     renameSound: (id: string, name: string) => manageSound('rename', id, name),
     deleteSound: (id: string) => manageSound('delete', id),
     playbackEnded: (key: number, failed = false) => {
       if (playbackRef.current?.key !== key) return;
-      setPlayback(current => current?.key === key ? null : current);
+      setPlayback(current => (current?.key === key ? null : current));
       if (failed) setNotice('播放失败，请检查语音包文件和服务器连接');
     },
   };

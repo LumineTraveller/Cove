@@ -1,4 +1,3 @@
-
 import TestRenderer, { act } from 'react-test-renderer';
 import { useMobileMedia } from '../src/features/media/useMobileMedia';
 
@@ -109,27 +108,10 @@ beforeEach(async () => {
 });
 afterEach(async () => { await act(async () => renderer.unmount()); jest.restoreAllMocks(); jest.useRealTimers(); });
 
-test('manual leave closes legacy recovery diagnostics before a later join', async () => {
-  jest.useFakeTimers();
-  await act(async () => media.joinVoice());
-  const changed = mockTransport.on.mock.calls.find(([event]) => event === 'connectionstatechange')![1];
-  await act(async () => changed('failed'));
-  await act(async () => { socket.connected = false; handlers.get('disconnect')!('transport close'); });
-  const before = (await media.collectDiagnostics()).recovery!.events;
-  const pending = before.filter(event => event.stage === 'begin');
-  expect(pending.length).toBeGreaterThanOrEqual(2);
-  await act(async () => media.leaveVoice());
-  const ended = (await media.collectDiagnostics()).recovery!.events;
-  for (const event of pending) expect(ended).toContainEqual(expect.objectContaining({
-    recoveryId: event.recoveryId, channel: event.channel, stage: 'cancelled', reason: 'OWNER_TEARDOWN',
-  }));
-  await act(async () => { socket.connected = true; socket.recovered = true; handlers.get('connect')!(); });
-  await act(async () => media.joinVoice());
-  const nextChanged = mockTransport.on.mock.calls.filter(([event]) => event === 'connectionstatechange').at(-1)![1];
-  await act(async () => nextChanged('failed'));
-  const later = (await media.collectDiagnostics()).recovery!.events;
-  expect(later.at(-1)!.recoveryId).not.toBe(pending.find(event => event.channel === 'send')?.recoveryId);
-  expect(later.filter(event => event.stage === 'connected' && pending.some(old => old.recoveryId === event.recoveryId))).toEqual([]);
+test('mobile exposes receiving controls without screen publishing or media diagnostics', () => {
+  expect(media).not.toHaveProperty('startScreenShare');
+  expect(media).not.toHaveProperty('collectDiagnostics');
+  expect(media.setScreenReceiveVolume).toEqual(expect.any(Function));
 });
 
 test('does not receive application audio before joining voice', async () => {
@@ -425,7 +407,6 @@ test('unmounting while native routing is pending releases its audio session and 
   expect(socket.emit).not.toHaveBeenCalledWith('voice:join', 'room');
 });
 
-
 test.each(['join', 'watch'] as const)('fresh reconnect can immediately %s without reusing a cancelled capability request', async action => {
   let oldAck!: (response: unknown) => void;
   const emit = socket.emit.getMockImplementation();
@@ -493,7 +474,7 @@ test('switches noise mode while in voice via replaceTrack', async () => {
   await act(async () => media.joinVoice());
   await act(async () => { await media.selectNoiseMode('rnnoise'); });
   expect(media.noiseMode).toBe('rnnoise');
-  const producer = (await (mockTransport.produce as jest.Mock).mock.results[0].value);
+  const producer = await (mockTransport.produce as jest.Mock).mock.results[0].value;
   expect(producer.replaceTrack).toHaveBeenCalledWith({ track: mockStreams[1].getAudioTracks()[0] });
   expect(mockStreams[0].release).toHaveBeenCalledWith(true);
   expect(mockStreams[1].release).not.toHaveBeenCalled();
@@ -599,7 +580,6 @@ test('repeated noise changes and leaving/rejoining do not create duplicate sende
   expect(media.noiseMode).toBe('rnnoise');
   expect(media.inVoice).toBe(true);
 });
-
 
 test('lists audio devices and switches output/input', async () => {
   await act(async () => { await media.refreshAudioDevices(); });
@@ -766,12 +746,18 @@ function configureIceRecovery(supported = true) {
     else emit(event, payload, reply);
   });
   const change = async (side: 'send' | 'receive', state: string) => {
-    const transport = side === 'send' ? (mockNextTransports?.send ?? mockTransport) : (mockNextTransports?.receive ?? mockReceiveTransport);
+    const transport =
+      side === 'send'
+        ? mockNextTransports?.send ?? mockTransport
+        : mockNextTransports?.receive ?? mockReceiveTransport;
     const changed = transport.on.mock.calls.find(([event]) => event === 'connectionstatechange')![1];
     await act(async () => { transport.connectionState = state; changed(state); });
   };
   const recovered = (side: 'send' | 'receive') => {
-    const transport = side === 'send' ? (mockNextTransports?.send ?? mockTransport) : (mockNextTransports?.receive ?? mockReceiveTransport);
+    const transport =
+      side === 'send'
+        ? mockNextTransports?.send ?? mockTransport
+        : mockNextTransports?.receive ?? mockReceiveTransport;
     transport.restartIce.mockImplementation(async () => {
       transport.connectionState = 'connected';
       transport.on.mock.calls.find(([event]) => event === 'connectionstatechange')![1]('connected');

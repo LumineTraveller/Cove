@@ -1,4 +1,3 @@
-
 import TestRenderer, { act } from 'react-test-renderer';
 import { View } from 'react-native';
 
@@ -85,5 +84,54 @@ test('profile volume track keeps children out of the hit target and maps touch o
   // Clamped to the 200% ceiling instead of overshooting.
   expect(changes.at(-1)).toBe(2);
 
+  await act(async () => renderer.unmount());
+});
+
+test('a drag keeps its original screen coordinate frame outside the row and across renders', async () => {
+  const changes: number[] = [];
+  const render = (value: number) => (
+    <InlineVolumeSlider
+      value={value}
+      label="共享音量"
+      onChange={next => changes.push(next)}
+    />
+  );
+  let renderer!: TestRenderer.ReactTestRenderer;
+  await act(async () => {
+    renderer = TestRenderer.create(render(0.5));
+  });
+  const track = () => findTrack(renderer);
+  await act(async () =>
+    track().props.onLayout({
+      nativeEvent: { layout: { width: 200, height: 48 } },
+    }),
+  );
+  expect(track().props.hitSlop).toEqual(
+    expect.objectContaining({ top: 16, bottom: 16 }),
+  );
+  expect(track().props.onResponderTerminationRequest()).toBe(false);
+  await act(async () =>
+    expect(track().props.onResponderGrant({
+      nativeEvent: { pageX: 250, locationX: 100, locationY: 20 },
+    })).toBe(true),
+  );
+  await act(async () => renderer.update(render(0.5)));
+  // Native locationX may change target after leaving the row; pageX remains stable.
+  await act(async () =>
+    track().props.onResponderMove({
+      nativeEvent: { pageX: 310, locationX: 4, locationY: -80 },
+    }),
+  );
+  await act(async () =>
+    track().props.onResponderMove({
+      nativeEvent: { pageX: 120, locationX: 4, locationY: 140 },
+    }),
+  );
+  await act(async () =>
+    track().props.onResponderMove({
+      nativeEvent: { pageX: 400, locationX: 4, locationY: -140 },
+    }),
+  );
+  expect(changes).toEqual([0.5, 0.8, 0, 1]);
   await act(async () => renderer.unmount());
 });

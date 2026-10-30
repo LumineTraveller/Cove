@@ -8,8 +8,11 @@ const server = 'https://grant.example.test/cove';
 const email = 'alice@example.test';
 const records = new Map<string, string>();
 const key = (s = server, e = email) => JSON.stringify([s, e]);
-const receipt = () => ({ accessToken: 'synthetic-server-grant', verifiedAt: Date.now(),
-  lastObservedAt: Date.now(), expiresAt: Date.now() + SERVER_ACCESS_MAX_AGE });
+const receipt = () => {
+  const now = Date.now();
+  return { accessToken: 'synthetic-server-grant', verifiedAt: now,
+    lastObservedAt: now, expiresAt: now + SERVER_ACCESS_MAX_AGE };
+};
 beforeEach(async () => {
   jest.restoreAllMocks();
   Object.defineProperty(Platform, 'OS', { configurable: true, value: 'android' });
