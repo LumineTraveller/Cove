@@ -20,6 +20,14 @@
 
 helper 使用固定容量记录、每秒输出；main 合并五秒内所有报告的八个最慢示例，避免只保留最后一秒。重复/迟到报告不回放，换捕获清空示例。沿用 16KiB 行限制与 main 最多十分钟/120条输出的观察预算；到限只停止观察。诊断关闭时不新增逐帧时钟读数。
 
+tail 的可选 `slotCreditWaitUs` 记录相邻真实交付间已经结算的槽位等待累计差值。期限内等到槽位时，`noSlot` 可以为零；不能据此把该间隔归因于 GPU。旧 helper 缺少该字段时保持未知，不补零。阶段时间可以重叠，不相加为独占耗时。
+
+## 逐帧分配与释放许可
+
+同一 session 的健康检查使用 Node `Timeout.refresh()` 续期，保持最后一帧后五秒的截止语义；退出仍清除并置空定时器。每个纹理的传输、引用和超时保护独立保留。
+
+preload 在 listener 前注册释放许可。许可与写入并行；listener 完成时许可已到达，就直接进入原有释放屏障，不再构造一个已完成的 Promise 或额外等待一个微任务。若许可未到达，才构造等待 Promise。1500ms 超时仍从接收时开始，包含 listener 尚未完成的情况；不因许可先到就提前清除。真正槽位归还仍由 main 的完整 credit 条件与 Electron `allReferencesReleased` 决定。
+
 ## 不可改变的安全约束
 
 - GPU query/fence 完成后才允许交付；不提前释放 shared texture credit。
