@@ -7,6 +7,7 @@ import { nativeScreenFailureReason, type NativeScreenFailureReason } from '../..
 import { createNativeFrameWriteQueue } from './nativeFrameWriteQueue';
 import { createNativeCanvasFrameSink, getNativeCanvasFrameFailureCode, type NativeCanvasFrameSinkSnapshot } from './nativeCanvasFrameSink';
 import { createNativeWorkerFrameSink, type NativeWorkerFrameSinkSnapshot } from './nativeWorkerFrameSink';
+import { createFrameIntervalWindow, type FrameStabilitySnapshot } from '../diagnostics/frameIntervals';
 
 export interface NativeScreenBridge {
   readonly supported: boolean;
@@ -56,6 +57,36 @@ export interface NativeScreenCaptureDiagnostics {
 const captureDiagnostics = new WeakMap<MediaStreamTrack, NativeScreenCaptureDiagnostics>();
 const canvasDiagnostics = new WeakMap<MediaStreamTrack, () => NativeCanvasFrameSinkSnapshot>();
 const workerDiagnostics = new WeakMap<MediaStreamTrack, () => NativeWorkerFrameSinkSnapshot>();
+
+type NativeFrameIntervalWindow = ReturnType<typeof createFrameIntervalWindow>;
+interface NativeFrameStabilitySource {
+  active: boolean;
+  observers: Set<NativeFrameIntervalWindow>;
+}
+const frameStabilitySources = new WeakMap<MediaStreamTrack, NativeFrameStabilitySource>();
+
+/** Observe validated helper delivery timestamps, not DXGI acquisition or encode timing.
+ * No history is collected until a caller subscribes; each caller owns its window.
+ */
+export function observeNativeFrameStability(track: MediaStreamTrack): {
+  snapshot(nowMs?: number): FrameStabilitySnapshot;
+  dispose(): void;
+} | null {
+  const source = frameStabilitySources.get(track);
+  if (!source?.active || track.readyState !== 'live') return null;
+  const intervalWindow = createFrameIntervalWindow();
+  source.observers.add(intervalWindow);
+  let active = true;
+  return {
+    snapshot: (nowMs = performance.now()) => intervalWindow.snapshot(nowMs),
+    dispose() {
+      if (!active) return;
+      active = false;
+      source.observers.delete(intervalWindow);
+      intervalWindow.reset();
+    },
+  };
+}
 
 /** Aggregate metadata only. A caller cannot mutate the live counters. */
 export function getNativeScreenCaptureDiagnostics(track: MediaStreamTrack): NativeScreenCaptureDiagnostics | null {
@@ -179,6 +210,8 @@ export async function tryNativeScreenCapture(
     totalWriteIdleMs: 0, maxWriteIdleMs: 0, writesOverFramePeriod: 0,
   };
   captureDiagnostics.set(track, diagnostics);
+  const frameStabilitySource: NativeFrameStabilitySource = { active: true, observers: new Set() };
+  frameStabilitySources.set(track, frameStabilitySource);
   const requestId = `native_${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}_${Math.random().toString(36).slice(2)}`}`;
   let session: Extract<NativeScreenStartResult, { ok: true }> | undefined;
   let stopped = false;
@@ -225,6 +258,10 @@ export async function tryNativeScreenCapture(
   function stop(unexpected = false, reason: NativeScreenCaptureStopReason = 'normal_stop') {
     if (stopped) return;
     stopped = true;
+    frameStabilitySource.active = false;
+    for (const observer of frameStabilitySource.observers) observer.reset();
+    frameStabilitySource.observers.clear();
+    if (frameStabilitySources.get(track) === frameStabilitySource) frameStabilitySources.delete(track);
     finishAttempt(reason);
     writeQueue.stop();
     canvasSink?.stop();
@@ -365,6 +402,11 @@ export async function tryNativeScreenCapture(
       }
       lastSerial = metadata.serial;
       lastTimestamp = metadata.timestamp;
+      if (frameStabilitySource.observers.size > 0) {
+        const observedAt = performance.now();
+        for (const observer of frameStabilitySource.observers)
+          observer.observe(metadata.timestamp / 1_000, observedAt);
+      }
       diagnostics.framesReceived++;
       if (metadata.refresh) diagnostics.refreshFrames++;
       if (canvasSink) {

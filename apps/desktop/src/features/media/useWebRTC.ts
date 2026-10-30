@@ -481,6 +481,9 @@ export function useWebRTC(socket: Socket, roomId: string) {
     },
   });
   const { toggleStats, exportMediaDiagnostics } = useMediaDiagnostics({
+    get statsEnabled() {
+      return statsEnabled;
+    },
     get statsCollecting() {
       return statsCollecting;
     },

@@ -97,11 +97,12 @@ export function ShareViewV2({
           {remote ? (
             <RemoteScreenVideo
               stream={remote.stream}
+              diagnosticsEnabled={rtc.statsEnabled}
               controlling={remoteControl.state === 'active' && !annotations.localActive && !floating}
               onInput={onInput}
             />
           ) : local ? (
-            <LocalScreenVideo stream={rtc.localScreen!} />
+            <LocalScreenVideo stream={rtc.localScreen!} diagnosticsEnabled={rtc.statsEnabled} />
           ) : (
             <div className="video-placeholder">
               <MonitorPlay size={42} />

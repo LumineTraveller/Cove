@@ -2,6 +2,7 @@ import { request } from '@cove/client-core';
 import { types as MsTypes } from 'mediasoup-client';
 import { Socket } from 'socket.io-client';
 import type { ScreenFps } from './screen/screenCapture';
+import type { FrameStabilitySnapshot } from './diagnostics/frameIntervals';
 
 export type Transport = MsTypes.Transport;
 
@@ -23,6 +24,8 @@ export interface MediaStats {
   sendFps: number | null;
   receiveFps: number | null;
   decodeFps: number | null;
+  nativeDeliveryStability: FrameStabilitySnapshot | null;
+  presentationStability: FrameStabilitySnapshot | null;
   loss: number | null;
   remoteLoss: number | null;
   bitrate: number | null;
@@ -66,6 +69,8 @@ export const EMPTY_STATS: MediaStats = {
   sendFps: null,
   receiveFps: null,
   decodeFps: null,
+  nativeDeliveryStability: null,
+  presentationStability: null,
   loss: null,
   remoteLoss: null,
   bitrate: null,

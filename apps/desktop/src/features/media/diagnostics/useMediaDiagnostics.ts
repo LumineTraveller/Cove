@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { Socket } from 'socket.io-client';
 import { MEDIA_TIMING_DEFINITIONS, rtcSecondsToMilliseconds } from '@cove/client-core';
 
@@ -16,7 +16,9 @@ import {
   videoCounterSample,
 } from './mediaDiagnostics';
 import { SCREEN_MAX_BITRATE_BPS, type ScreenEncodingPlan } from '../screen/screenCapture';
-import { getNativeScreenCaptureDiagnostics, getLastNativeScreenCaptureAttempt } from '../screen/nativeScreenCapture';
+import { getNativeScreenCaptureDiagnostics, getLastNativeScreenCaptureAttempt, observeNativeFrameStability } from '../screen/nativeScreenCapture';
+import { readFramePresentation } from './framePresentation';
+import { FRAME_STABILITY_DEFINITION } from './frameStabilityView';
 
 import {
   Transport,
@@ -34,6 +36,7 @@ export interface useMediaDiagnosticsDependencies {
   readonly screenProducer: import('react').MutableRefObject<Producer | null>;
   readonly watchingScreenPeerRef: import('react').MutableRefObject<string | null>;
   readonly statsEnabledRef: import('react').MutableRefObject<boolean>;
+  readonly statsEnabled: boolean;
   readonly videoCounterPrev: import('react').MutableRefObject<RtcVideoCounterSample | null>;
   readonly receiveLossPrev: import('react').MutableRefObject<{
     lost: number;
@@ -78,6 +81,23 @@ export interface useMediaDiagnosticsDependencies {
 }
 
 export function useMediaDiagnostics(deps: useMediaDiagnosticsDependencies) {
+  const nativeObservation = useRef<{
+    track: MediaStreamTrack;
+    observer: NonNullable<ReturnType<typeof observeNativeFrameStability>>;
+  } | null>(null);
+  const nativeTrack = deps.screenProducer.current?.track ?? null;
+  useEffect(() => {
+    if (!deps.statsEnabled || !nativeTrack) return;
+    const observer = observeNativeFrameStability(nativeTrack);
+    if (!observer) return;
+    const owned = { track: nativeTrack, observer };
+    nativeObservation.current = owned;
+    return () => {
+      observer.dispose();
+      if (nativeObservation.current === owned) nativeObservation.current = null;
+    };
+  }, [deps.statsEnabled, nativeTrack]);
+
   // 分阶段媒体统计：采集 → 编码 → RTP 发送 → SFU → RTP 接收 → 解码。
   // 每个速率都由同一个 RTP 对象的累计计数器求差，避免切换共享或统计对象时出现假低值/假峰值。
   const collectStats = useCallback(async () => {
@@ -307,6 +327,20 @@ export function useMediaDiagnostics(deps: useMediaDiagnosticsDependencies) {
       }
 
       const trackSettings = diagnosticTrackSettings(videoTrack?.getSettings());
+      // Frame intervals belong to the actual selected track, not just its peer.
+      // A replacement from the same peer must not inherit a predecessor's data.
+      const currentTrack = sendingScreen
+        ? deps.screenProducer.current?.track
+        : Array.from(deps.consumers.current.values()).find(
+            entry => entry.kind === 'video' && entry.socketId === watchedPeerId,
+          )?.consumer.track;
+      if (videoTrack && videoTrack === currentTrack && videoTrack.readyState === 'live') {
+        const native = nativeObservation.current;
+        next.nativeDeliveryStability = native?.track === videoTrack
+          ? native.observer.snapshot()
+          : null;
+        next.presentationStability = readFramePresentation(videoTrack);
+      }
       const diagnosticEntry = {
         timestamp: new Date().toISOString(),
         stats: next,
@@ -357,6 +391,7 @@ export function useMediaDiagnostics(deps: useMediaDiagnosticsDependencies) {
     const payload = {
       exportedAt: new Date().toISOString(),
       metricDefinitions: MEDIA_TIMING_DEFINITIONS,
+      frameStabilityDefinition: FRAME_STABILITY_DEFINITION,
       recovery: deps.recoveryDiagnostics?.current.snapshot(),
       platform: 'desktop',
       screen: {
