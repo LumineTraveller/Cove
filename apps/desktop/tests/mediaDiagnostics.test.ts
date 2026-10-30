@@ -1,5 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createElement, useState } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { useMediaDiagnostics, type useMediaDiagnosticsDependencies } from '../src/features/media/diagnostics/useMediaDiagnostics';
+import { bindFramePresentation, readFramePresentation } from '../src/features/media/diagnostics/framePresentation';
+import { EMPTY_STATS, type MediaStats } from '../src/features/media/desktopMediaSupport';
+import { createScreenEncodingPlan } from '../src/features/media/screen/screenCapture';
 import {
   diagnosticTrackSettings,
   diagnosticSenderParameters,
@@ -109,4 +115,132 @@ test('raw diagnostic counters retain queue windows while excluding identifiers a
   assert.equal(JSON.stringify(result).includes('private'), false);
   assert.equal(JSON.stringify(result).includes('secret'), false);
   assert.equal(diagnosticVideoCounters().rtp.framesEncoded, null);
+});
+
+type DiagnosticsApi = ReturnType<typeof useMediaDiagnostics>;
+
+// React's server renderer supports render-phase updates, so useRef/useCallback
+// retain their real React identity across these CPU-only dependency replacements.
+function renderDiagnostics(
+  dependencies: useMediaDiagnosticsDependencies[],
+  onRender?: (api: DiagnosticsApi, render: number) => void,
+) {
+  const renders: DiagnosticsApi[] = [];
+  function Probe() {
+    const [render, setRender] = useState(0);
+    const api = useMediaDiagnostics(dependencies[render]);
+    renders.push(api);
+    onRender?.(api, render);
+    if (render + 1 < dependencies.length) setRender(render + 1);
+    return null;
+  }
+  renderToStaticMarkup(createElement(Probe));
+  return renders;
+}
+
+function diagnosticCollectorFixture() {
+  const track = Object.assign(new EventTarget(), {
+    readyState: 'live', contentHint: 'detail',
+    getSettings: () => ({ width: 1920, height: 1080, frameRate: 120 }),
+  }) as unknown as MediaStreamTrack;
+  const report = new Map([['outbound', {
+    id: 'outbound', type: 'outbound-rtp', kind: 'video', timestamp: 1_000,
+    framesEncoded: 120, framesSent: 120, bytesSent: 1_000,
+  }]]) as unknown as RTCStatsReport;
+  const producer = { id: 'producer-1', track, getStats: async () => report };
+  const history: useMediaDiagnosticsDependencies['diagnosticHistory'] = { current: [] };
+  const updates: MediaStats[] = [];
+  let holdServerSample = false;
+  let finishServerSample = () => {};
+  let notifyServerSample!: () => void;
+  const serverSampleStarted = new Promise<void>(resolve => { notifyServerSample = resolve; });
+  const deps = {
+    statsCollecting: { current: false }, statsEnabled: true, statsEnabledRef: { current: true },
+    screenProducer: { current: producer }, watchingScreenPeerRef: { current: null },
+    videoCounterPrev: { current: null }, receiveLossPrev: { current: null }, remoteLossPrev: { current: null },
+    sendTransport: { current: null }, recvTransport: { current: null }, consumers: { current: new Map() },
+    diagnosticHistory: history, setStats: (stats: MediaStats) => updates.push(stats),
+    socket: {
+      id: 'socket-1', timeout() { return this; },
+      emit(_event: string, _payload: unknown, callback: (error: Error | null, value: unknown) => void) {
+        finishServerSample = () => callback(null, null);
+        notifyServerSample();
+        if (!holdServerSample) finishServerSample();
+      },
+    },
+    screenEncodingPlan: null,
+  } as unknown as useMediaDiagnosticsDependencies;
+  return {
+    deps, producer, track, history, updates, serverSampleStarted,
+    holdServerSample: () => { holdServerSample = true; },
+    finishServerSample: () => finishServerSample(),
+  };
+}
+
+test('the retained collector reads replacement render getters for each history entry', async () => {
+  const f = diagnosticCollectorFixture();
+  const plan = createScreenEncodingPlan({ preset: '1080p', maxFps: 120, activity: 'motion' });
+  const initial = { ...f.deps, get screenEncodingPlan() { return null; } };
+  const latest = { ...f.deps, get screenEncodingPlan() { return plan; } };
+  const [first, second] = renderDiagnostics([initial, latest]);
+  assert.equal(first.collectStats, second.collectStats, 'render updates keep the timer callback stable');
+  await first.collectStats();
+  assert.equal(f.history.current.length, 1);
+  assert.equal(f.history.current[0].encodingPlan, plan);
+  assert.equal(f.history.current[0].trackSettings?.frameRate, 120);
+  assert.equal(f.deps.statsCollecting.current, false);
+});
+
+test('a collection already awaiting RTC stats reads the current render context at completion', async () => {
+  const f = diagnosticCollectorFixture();
+  const plan = createScreenEncodingPlan({ preset: '720p', maxFps: 60, activity: 'active' });
+  const latest = { ...f.deps, get screenEncodingPlan() { return plan; } };
+  let collection: Promise<void> | undefined;
+  renderDiagnostics([f.deps, latest], (api, render) => {
+    if (render === 0) collection = api.collectStats();
+  });
+  await collection;
+  assert.equal(f.history.current.length, 1);
+  assert.equal(f.history.current[0].encodingPlan, plan);
+  assert.equal(f.deps.statsCollecting.current, false);
+});
+
+test('pending collections still discard disabled and replaced sessions and release their lock', async () => {
+  for (const change of ['disabled', 'session-replaced'] as const) {
+    const f = diagnosticCollectorFixture();
+    f.holdServerSample();
+    const [api] = renderDiagnostics([f.deps]);
+    const collection = api.collectStats();
+    await f.serverSampleStarted;
+    if (change === 'disabled') f.deps.statsEnabledRef.current = false;
+    else f.producer.id = 'producer-2';
+    f.finishServerSample();
+    await collection;
+    assert.equal(f.history.current.length, 0, change);
+    assert.equal(f.updates.at(-1), EMPTY_STATS, change);
+    assert.equal(f.deps.statsCollecting.current, false, change);
+  }
+});
+
+test('a same-producer track replacement does not attach the retired presentation observation', async context => {
+  const f = diagnosticCollectorFixture();
+  const stream = Object.assign(new EventTarget(), { getVideoTracks: () => [f.track] });
+  const video = Object.assign(new EventTarget(), {
+    ownerDocument: Object.assign(new EventTarget(), { hidden: false }),
+    srcObject: stream, paused: false, ended: false,
+    requestVideoFrameCallback: () => 1, cancelVideoFrameCallback: () => {},
+  });
+  context.after(bindFramePresentation(video as unknown as HTMLVideoElement, stream as unknown as MediaStream));
+  assert.ok(readFramePresentation(f.track), 'the old track has an actual presentation observation');
+  f.holdServerSample();
+  const [api] = renderDiagnostics([f.deps]);
+  const collection = api.collectStats();
+  await f.serverSampleStarted;
+  f.producer.track = Object.assign(new EventTarget(), { readyState: 'live' }) as unknown as MediaStreamTrack;
+  f.finishServerSample();
+  await collection;
+  assert.equal(f.history.current.length, 1);
+  assert.equal(f.history.current[0].stats.presentationStability, null);
+  assert.equal(f.history.current[0].stats.nativeDeliveryStability, null);
+  assert.equal(f.deps.statsCollecting.current, false);
 });
