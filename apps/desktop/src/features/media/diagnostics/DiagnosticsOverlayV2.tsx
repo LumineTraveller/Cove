@@ -19,6 +19,22 @@ export function DiagnosticsOverlayV2({
   const sending = rtc.stats.role === 'sender' ||
     (rtc.stats.role === 'idle' && Boolean(rtc.localScreen));
   const lowSample = sending ? rtc.stats.nativeDeliveryStability : rtc.stats.presentationStability;
+  const lowRows = <>
+    <div>
+      <span title={`${sending ? '原生采集交付节奏，不等于纯采集或发送帧率。' : '当前视频提交到合成器的节奏，不等于物理屏幕扫描输出。'}${frameStabilityDetail(lowSample)}`}>
+        {sending ? '原生交付 1% low' : '观看呈现 1% low'}
+      </span>
+      <b>{frameStabilityLabel(lowSample)}</b>
+    </div>
+    {!compact && sending && (
+      <div>
+        <span title={`本地预览提交到合成器的节奏，不等于远端观看体验。${frameStabilityDetail(rtc.stats.presentationStability)}`}>
+          预览呈现 1% low
+        </span>
+        <b>{frameStabilityLabel(rtc.stats.presentationStability)}</b>
+      </div>
+    )}
+  </>;
   return (
     <div className={`debug-overlay diagnostics-v2 ${compact ? 'compact' : ''}`}>
       <header>
@@ -31,21 +47,8 @@ export function DiagnosticsOverlayV2({
         >
           <SquaresFour size={14} />
         </button>
+        <button className="icon-btn" onClick={rtc.exportMediaDiagnostics} aria-label="导出媒体诊断" title="导出媒体诊断">导出</button>
       </header>
-      <div>
-        <span title={`${sending ? '原生helper交付节奏，不等于纯采集或发送帧率。' : '当前视频提交到合成器的节奏，不等于物理屏幕扫描输出。'}${frameStabilityDetail(lowSample)}`}>
-          {sending ? '原生交付 1% low' : '观看呈现 1% low'}
-        </span>
-        <b>{frameStabilityLabel(lowSample)}</b>
-      </div>
-      {!compact && sending && (
-        <div>
-          <span title={`本地预览提交到合成器的节奏，不等于远端观看体验。${frameStabilityDetail(rtc.stats.presentationStability)}`}>
-            预览呈现 1% low
-          </span>
-          <b>{frameStabilityLabel(rtc.stats.presentationStability)}</b>
-        </div>
-      )}
       {compact ? (
         <>
           <div>
@@ -56,6 +59,7 @@ export function DiagnosticsOverlayV2({
             <span>分辨率</span>
             <b>{resolution}</b>
           </div>
+          {lowRows}
           <div>
             <span>码率</span>
             <b>{rtc.stats.bitrate != null ? `${rtc.stats.bitrate} kbps` : '—'}</b>
@@ -92,6 +96,7 @@ export function DiagnosticsOverlayV2({
                 : '—'}
             </b>
           </div>
+          {lowRows}
           <div>
             <span>编码器</span>
             <b>{rtc.stats.codec ?? '—'}</b>
