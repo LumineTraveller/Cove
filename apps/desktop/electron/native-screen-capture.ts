@@ -7,6 +7,7 @@ import { createNativeCpuFrameDelivery, type NativeCpuFrameDelivery, type NativeC
 import { createNativeCpuBufferPipeline, type NativeCpuBufferPipeline, type NativeCpuOwnership,
   type NativeCpuPipelineCounters } from './native-screen-cpu-buffer-pipeline';
 import { createNativeScreenHelperTimingCollector, type NativeScreenHelperTiming } from './native-screen-capture-timing';
+import { acquireNativeScreenRendererActivity } from './native-screen-renderer-activity';
 import {
   NATIVE_SCREEN_POOL_SIZE, NATIVE_SCREEN_START_TIMEOUT_MS, NATIVE_SCREEN_STOP_TIMEOUT_MS,
   validNativeScreenOptions, validNativeScreenRequestId,
@@ -84,6 +85,7 @@ interface Session {
   stopPromise: Promise<void>;
   resolveStop: () => void;
   detach: () => void;
+  releaseRendererActivity?: () => void;
 }
 
 function integer(value: unknown, low: number, high: number): value is number {
@@ -113,7 +115,7 @@ export class NativeScreenCaptureController {
   private readonly cpuOwnershipCounters: NativeCpuPipelineCounters = { sourceCopied: 0, sourceDiscarded: 0,
     sourceReleased: 0, mainSent: 0, finalAck: 0, pendingSuperseded: 0, pendingExpired: 0 };
 
-  constructor(private readonly config: { enabled: boolean; helperPath: string; handles?: NativeScreenHandleBridge; timing?: boolean; onHelperTiming?: (sample: Readonly<NativeScreenHelperTiming>, captureNumber: number) => void; pixelFormat?: 'bgra' | 'nv12'; storage?: 'gpu' | 'cpu'; completion?: 'query' | 'fence'; cpuDeliveryScheduling?: NativeCpuDeliveryScheduling; cpuOwnership?: NativeCpuOwnership }) {
+  constructor(private readonly config: { enabled: boolean; helperPath: string; handles?: NativeScreenHandleBridge; timing?: boolean; onHelperTiming?: (sample: Readonly<NativeScreenHelperTiming>, captureNumber: number) => void; pixelFormat?: 'bgra' | 'nv12'; storage?: 'gpu' | 'cpu'; completion?: 'query' | 'fence'; cpuDeliveryScheduling?: NativeCpuDeliveryScheduling; cpuOwnership?: NativeCpuOwnership; keepRendererActive?: boolean }) {
     this.handles = config.handles;
   }
 
@@ -229,6 +231,10 @@ export class NativeScreenCaptureController {
       child.off('error', failed).off('close', closed);
       target.off('destroyed', destroy).off('render-process-gone', destroy).off('did-start-navigation', navigation);
     };
+    // Explicit experiment only. Acquire after validation/spawn and teardown
+    // listeners, so startup failure and every normal retirement release it.
+    if (this.config.keepRendererActive === true)
+      session.releaseRendererActivity = acquireNativeScreenRendererActivity(target);
     session.startTimer = setTimeout(() => this.retire(session, 'start_timeout', true), NATIVE_SCREEN_START_TIMEOUT_MS);
     session.startTimer.unref();
     try { session.childHandles = this.handles.openChild(child.pid!); }
@@ -276,6 +282,8 @@ export class NativeScreenCaptureController {
       } catch { /* Diagnostics cannot change capture or cleanup behavior. */ }
     }
     return { sessions: sessions.length, activeSessions: active.length, helperCpuSeconds,
+      keepRendererActive: this.config.keepRendererActive === true,
+      rendererActivityLeases: sessions.filter(value => value.releaseRendererActivity !== undefined).length,
       cpuDeliveryScheduling: cpuOwnership === 'copy-complete' ? 'yield' : this.config.storage === 'cpu' ? this.config.cpuDeliveryScheduling ?? 'immediate' : 'immediate',
       cpuOwnership, ...this.cpuOwnershipCounters,
       activeNativeLeases: sessions.reduce((sum, value) => sum + (value.cpuPipeline?.snapshot().activeNativeLeases ?? value.cpuDelivery?.snapshot().inFlight ?? 0), 0),
@@ -582,6 +590,9 @@ export class NativeScreenCaptureController {
   private retire(session: Session, reason: FailureCode, failed: boolean): void {
     if (!session.active) return;
     session.active = false;
+    const releaseRendererActivity = session.releaseRendererActivity;
+    session.releaseRendererActivity = undefined;
+    releaseRendererActivity?.();
     session.cpuDelivery?.stop();
     session.cpuBuffers?.clear();
     session.cpuBuffers = undefined;

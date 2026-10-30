@@ -7,6 +7,7 @@ import path from 'node:path';
 import ts from 'typescript';
 import * as protocol from '../electron/native-screen-capture-protocol';
 import * as captureTiming from '../electron/native-screen-capture-timing';
+import * as rendererActivity from '../electron/native-screen-renderer-activity';
 import type * as cpuDelivery from '../electron/native-screen-cpu-delivery';
 import type * as cpuPipeline from '../electron/native-screen-cpu-buffer-pipeline';
 import type { NativeScreenCaptureController } from '../electron/native-screen-capture';
@@ -35,10 +36,11 @@ const helperTimingLine = () => Buffer.from('COVE_NATIVE_CAPTURE_TIMING ' + JSON.
 }) + '\n');
 const flush = async () => { for (let n = 0; n < 6; n++) await Promise.resolve(); };
 
-function harness(overrides: { enabled?: boolean; platform?: string; electron?: string; missingBridge?: boolean; timing?: boolean; onHelperTiming?: (sample: Readonly<captureTiming.NativeScreenHelperTiming>, captureNumber: number) => void; pixelFormat?: 'bgra' | 'nv12'; storage?: 'gpu' | 'cpu'; completion?: 'query' | 'fence'; cpuDeliveryScheduling?: cpuDelivery.NativeCpuDeliveryScheduling; cpuOwnership?: cpuPipeline.NativeCpuOwnership; supportsCpuFrames?: boolean; supportsCachedCpuFrames?: boolean; supportsCachedCpuFramesInto?: boolean; missingReadInto?: boolean } = {}) {
+function harness(overrides: { enabled?: boolean; platform?: string; electron?: string; missingBridge?: boolean; timing?: boolean; onHelperTiming?: (sample: Readonly<captureTiming.NativeScreenHelperTiming>, captureNumber: number) => void; pixelFormat?: 'bgra' | 'nv12'; storage?: 'gpu' | 'cpu'; completion?: 'query' | 'fence'; cpuDeliveryScheduling?: cpuDelivery.NativeCpuDeliveryScheduling; cpuOwnership?: cpuPipeline.NativeCpuOwnership; supportsCpuFrames?: boolean; supportsCachedCpuFrames?: boolean; supportsCachedCpuFramesInto?: boolean; missingReadInto?: boolean; keepRendererActive?: boolean } = {}) {
   let now = 100_000, uuid = 0, importError = false, sendError = false, sendThrows = false, sendFrameError = false;
   let duplicateError = false, closeError = false, openError = false;
   let cpuReadError = false;
+  let spawnError = false;
   const timers = new Map<any, { due: number; callback: () => void }>();
   const immediates = new Set<{ callback(): void }>();
   const allImmediates: { callback(): void }[] = [];
@@ -92,6 +94,7 @@ function harness(overrides: { enabled?: boolean; platform?: string; electron?: s
       sent.push({ channel, data, ...(binary ? { binary } : {}) });
     } } });
   const spawn = (file: string, args: string[], config: unknown) => {
+    if (spawnError) throw Error('spawn failed');
     const writes: string[] = [];
     const stdin = Object.assign(new EventEmitter(), { writableLength: 0, destroyed: false,
       write(line: string) { writes.push(line); return true; }, end(line: string) { writes.push(line); } });
@@ -154,12 +157,13 @@ function harness(overrides: { enabled?: boolean; platform?: string; electron?: s
       }
       if (name === './native-screen-capture-protocol') return protocol;
       if (name === './native-screen-capture-timing') return captureTiming;
+      if (name === './native-screen-renderer-activity') return rendererActivity;
       if (name === './native-screen-cpu-delivery') return cpuModule.exports;
       if (name === './native-screen-cpu-buffer-pipeline') return pipelineModule.exports;
       throw Error(`Unexpected import ${name}`);
     },
   });
-  const config = { enabled: overrides.enabled ?? true, helperPath: 'owned-helper.exe', timing: overrides.timing, onHelperTiming: overrides.onHelperTiming, pixelFormat: overrides.pixelFormat, storage: overrides.storage, completion: overrides.completion, cpuDeliveryScheduling: overrides.cpuDeliveryScheduling, cpuOwnership: overrides.cpuOwnership };
+  const config = { enabled: overrides.enabled ?? true, helperPath: 'owned-helper.exe', timing: overrides.timing, onHelperTiming: overrides.onHelperTiming, pixelFormat: overrides.pixelFormat, storage: overrides.storage, completion: overrides.completion, cpuDeliveryScheduling: overrides.cpuDeliveryScheduling, cpuOwnership: overrides.cpuOwnership, keepRendererActive: overrides.keepRendererActive };
   const controller = new module.exports.NativeScreenCaptureController(config);
   const choose = (patch: Partial<protocol.NativeScreenSourceSelection> = {}) => controller.noteStockSelection({ sourceId: 'screen:0:0',
     displayId: '123', primaryDisplayId: '123', displayCount: 1, sourceWidth: 2560, sourceHeight: 1440, selectedAt: now, ...patch });
@@ -170,9 +174,91 @@ function harness(overrides: { enabled?: boolean; platform?: string; electron?: s
     failImport() { importError = true; }, failSend(sync = false) { sendError = true; sendThrows = sync; },
     failDuplicate() { duplicateError = true; }, failHandleClose() { closeError = true; },
     failOpen() { openError = true; },
+    failSpawn() { spawnError = true; },
     failCpuRead() { cpuReadError = true; },
     failTargetSend() { sendFrameError = true; } };
 }
+
+function installRendererPolicy(h: ReturnType<typeof harness>, initial = true) {
+  let policy = initial, reads = 0;
+  const writes: boolean[] = [];
+  Object.assign(h.target, {
+    getBackgroundThrottling() { reads++; return policy; },
+    setBackgroundThrottling(value: boolean) { writes.push(value); policy = value; },
+  });
+  return { get policy() { return policy; }, get reads() { return reads; }, writes };
+}
+
+test('renderer activity experiment is default-disabled and never touches policy before a validated owned spawn', async () => {
+  const ordinary = harness(), policy = installRendererPolicy(ordinary);
+  const pending = ordinary.start(); ordinary.children[0].emitMessage(ready); assert.equal((await pending).ok, true);
+  assert.equal(ordinary.controller.snapshot().keepRendererActive, false);
+  assert.equal(ordinary.controller.snapshot().rendererActivityLeases, 0);
+  ordinary.controller.reset(); ordinary.children[0].close(); assert.equal(policy.reads, 0); assert.deepEqual(policy.writes, []);
+  for (const failure of ['disabled', 'ineligible', 'spawn']) {
+    const h = harness({ enabled: failure !== 'disabled', keepRendererActive: true }), observed = installRendererPolicy(h);
+    if (failure === 'spawn') h.failSpawn();
+    if (failure === 'ineligible') {
+      h.choose({ displayCount: 2 }); assert.equal((await h.controller.start(h.target as any, 'request_01', options)).ok, false);
+    } else assert.equal((await h.start()).ok, false);
+    assert.equal(observed.reads, 0); assert.deepEqual(observed.writes, []); assert.equal(h.controller.snapshot().rendererActivityLeases, 0);
+  }
+});
+
+test('renderer activity is restored once across owned startup failures and active retirement paths', async () => {
+  for (const failure of ['open', 'timeout', 'invalid-ready', 'helper-close', 'child-error', 'stdout-end', 'navigation', 'render-process-gone', 'reset', 'stop']) {
+    const h = harness({ keepRendererActive: true }), policy = installRendererPolicy(h);
+    if (failure === 'open') h.failOpen();
+    const pending = h.start();
+    if (failure === 'open') assert.equal((await pending).ok, false);
+    else if (failure === 'timeout') { h.advance(1500); assert.equal((await pending).ok, false); }
+    else if (failure === 'invalid-ready') { h.children[0].emitMessage({ ...ready, poolSize: 4 }); assert.equal((await pending).ok, false); }
+    else {
+      h.children[0].emitMessage(ready); assert.equal((await pending).ok, true);
+      assert.equal(policy.policy, false); assert.equal(h.controller.snapshot().rendererActivityLeases, 1);
+      if (failure === 'helper-close') h.children[0].close();
+      if (failure === 'child-error') h.children[0].emit('error', Error('owned child'));
+      if (failure === 'stdout-end') h.children[0].stdout.emit('end');
+      if (failure === 'navigation') h.target.emit('did-start-navigation', {}, 'about:blank', false, true);
+      if (failure === 'render-process-gone') h.target.emit('render-process-gone');
+      if (failure === 'reset') h.controller.reset();
+      if (failure === 'stop') void h.controller.stop(h.target as any, 'request_01');
+    }
+    assert.equal(policy.policy, true, failure); assert.deepEqual(policy.writes, [false, true], failure);
+    assert.equal(h.controller.snapshot().rendererActivityLeases, 0);
+    h.children[0].close(); h.controller.reset(); assert.deepEqual(policy.writes, [false, true], 'late cleanup '+failure);
+    assert.equal(h.timers.size, 0);
+  }
+});
+
+test('overlapping renderer activity sessions retain the first policy until the last active retirement', async () => {
+  const h = harness({ keepRendererActive: true }), policy = installRendererPolicy(h);
+  const one = h.start(); h.children[0].emitMessage(ready); await one;
+  const two = h.start('request_02'); h.children[1].emitMessage(ready); await two;
+  assert.equal(h.controller.snapshot().rendererActivityLeases, 2); assert.equal(policy.reads, 1); assert.deepEqual(policy.writes, [false]);
+  const stopping = h.controller.stop(h.target as any, 'request_01'); h.children[0].close(); await stopping;
+  assert.equal(policy.policy, false); assert.equal(h.controller.snapshot().rendererActivityLeases, 1);
+  h.children[0].close(); assert.deepEqual(policy.writes, [false]);
+  h.controller.reset(); assert.deepEqual(policy.writes, [false, true]); assert.equal(h.controller.snapshot().rendererActivityLeases, 0);
+  h.children[1].close(); assert.equal(h.timers.size, 0);
+});
+
+test('renderer activity policy failures and missing APIs never reject capture or fabricate texture credit', async () => {
+  for (const failure of ['missing', 'getter', 'setter', 'restore']) {
+    const h = harness({ keepRendererActive: true });
+    if (failure !== 'missing') Object.assign(h.target, {
+      getBackgroundThrottling() { if (failure === 'getter') throw Error('policy getter'); return true; },
+      setBackgroundThrottling(value: boolean) { if (failure === 'setter' || failure === 'restore' && value) throw Error('policy setter'); },
+    });
+    const pending = h.start(); h.children[0].emitMessage(ready); assert.equal((await pending).ok, true);
+    h.children[0].emitMessage(frame());
+    h.controller.reset(); h.children[0].close();
+    assert.equal(h.controller.snapshot().rendererActivityLeases, 0); assert.equal(h.controller.snapshot().disabled, false);
+    assert.equal(h.children[0].writes.some((line: string) => line.startsWith('released ')), false);
+    h.transfers[0].resolve(); await flush(); h.imports[0].config.allReferencesReleased();
+    assert.equal(h.timers.size, 0);
+  }
+});
 
 test('helper timing stays on the default drain path unless explicitly enabled', async () => {
   let samples = 0;
