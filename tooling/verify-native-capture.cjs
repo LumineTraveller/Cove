@@ -29,19 +29,50 @@ function options(args) {
   if (!Number.isInteger(seconds) || seconds < 1 || seconds > 20) throw Error('Invalid bounded duration');
   return { executable, seconds };
 }
-function patternHtml() {
+function extractOwnedPattern(input) {
   const ts = require('typescript');
-  const input = fs.readFileSync(path.join(root, 'apps/desktop/tests/ui/screen-performance.electron.cjs'), 'utf8');
   const ast = ts.createSourceFile('owned-source.cjs', input, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
   const found = [];
   function visit(node) {
-    if (ts.isVariableDeclaration(node) && node.name.getText(ast) === 'source' && node.initializer &&
-      ts.isNoSubstitutionTemplateLiteral(node.initializer)) found.push(node.initializer.text);
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === 'source' &&
+      node.initializer?.getText(ast).includes('window.sourceFrames=frames')) found.push(node.initializer);
     ts.forEachChild(node, visit);
   }
   visit(ast);
-  if (found.length !== 1 || !found[0].includes('window.sourceFrames=frames')) throw Error('Known owned source was not found uniquely');
-  return found[0];
+  if (ast.parseDiagnostics.length || found.length !== 1) throw Error('Known owned source was not found uniquely');
+  const source = found[0];
+  const identifier = (node, name) => ts.isIdentifier(node) && node.text === name;
+  if (!ts.isConditionalExpression(source) || !identifier(source.condition, 'generatedNv12Enabled') ||
+      !ts.isStringLiteral(source.whenTrue) || source.whenTrue.text !== '<!doctype html><script>window.sourceFrames=0</script>' ||
+      !ts.isTemplateExpression(source.whenFalse)) throw Error('Unexpected owned source structure');
+
+  // Render only the existing default canvas branch. Never evaluate expressions
+  // from the file: optional source-age/lifecycle hooks are off and the bit
+  // coordinates come from the same fixed central layout used by the fixture.
+  const bits = require('../apps/desktop/tests/ui/screen-performance-pattern-layouts.json')['central-v1']?.bits;
+  if (!bits || !Number.isFinite(bits.top) || !Number.isFinite(bits.height) || bits.top < 0 ||
+      bits.height <= 0 || bits.top + bits.height > 1 || bits.count !== 16) throw Error('Invalid owned central layout');
+  const template = source.whenFalse;
+  const spans = template.templateSpans;
+  const lifecycle = spans[1]?.expression;
+  const scaledBit = (node, name) => ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.AsteriskToken &&
+    ts.isPropertyAccessExpression(node.left) && identifier(node.left.expression, 'patternBits') && node.left.name.text === name &&
+    ts.isNumericLiteral(node.right) && node.right.text === '1080';
+  if (spans.length !== 5 || !identifier(spans[0].expression, 'sourceAgeSetup') ||
+      !ts.isConditionalExpression(lifecycle) || !identifier(lifecycle.condition, 'nativeLifecycleEnabled') ||
+      !ts.isStringLiteral(lifecycle.whenTrue) || lifecycle.whenTrue.text !== 'if(window.sourceFrozen===true){return;}' ||
+      !ts.isStringLiteral(lifecycle.whenFalse) || lifecycle.whenFalse.text !== '' ||
+      !identifier(spans[2].expression, 'sourceAgeDraw') ||
+      !scaledBit(spans[3].expression, 'top') || !scaledBit(spans[4].expression, 'height')) {
+    throw Error('Unexpected owned source interpolation');
+  }
+  const values = ['', '', '', String(bits.top * 1080), String(bits.height * 1080)];
+  const html = template.head.text + spans.map((span, index) => values[index] + span.literal.text).join('');
+  if (!html.includes('window.sourceFrames=frames') || !html.includes('bit<16')) throw Error('Invalid owned canvas source');
+  return html;
+}
+function patternHtml() {
+  return extractOwnedPattern(fs.readFileSync(path.join(root, 'apps/desktop/tests/ui/screen-performance.electron.cjs'), 'utf8'));
 }
 async function launch() {
   const config = options(process.argv.slice(2));
@@ -159,4 +190,4 @@ async function runElectron() {
 // Ordinary node imports remain side-effect free for contract checks.
 if (process.versions.electron || require.main === module)
   (process.versions.electron ? runElectron() : launch()).catch(error => { console.error(error); process.exitCode = 1; });
-module.exports = { options, patternHtml, inside, selectedModes };
+module.exports = { options, patternHtml, extractOwnedPattern, inside, selectedModes };
