@@ -1,5 +1,10 @@
 # Cove 三端模块化架构
 
+正式 Windows x64 安装包在 Electron 44.0.0 上默认启用已验收的
+[原生 GPU BGRA / Generator 后端](native-gpu-screen-capture.md)，保留 stock 先启动再升级与失败回退。
+`COVE_DISABLE_NATIVE_GPU_CAPTURE=1` 可禁用；开发和其他实验包仍沿用原 opt-in 门控。
+不启用额外实验、不改变无人观看暂停、编码或画质策略；正式用户目录及更新器保持原配置。
+
 ## 基线与范围
 
 重构基线是原目录的完整当前源码，包含尚未提交的修复，不只是 v1.5.4 标签。`refactor-baseline` 本地标签保存该基线；`baseline/relocation-map.json` 可追溯旧路径。原目录、线上服务器、账号数据库和发布记录均不修改。
@@ -92,3 +97,10 @@ $env:COVE_TEST_NODE = (Get-Command node).Source
 架构门禁核对 HTTP/Socket 入口清单、依赖边界、原生源码指纹、外部依赖锁定版本和更新清单兼容副本。`tooling/verify-original.cjs` 是本次交付用只读检查，不应作为永久 CI 门禁阻止用户继续开发原目录。
 
 `tooling/extract-*`、`reorganize`、`repair-*` 等是本次迁移记录，不是日常命令，其中部分不是幂等脚本，禁止在完成的目录上盲目重跑。
+
+
+## Audio meter UI and full-room throughput
+
+See [audio meter ownership and leaf subscriptions](audio-meter-ui.md) for the
+rendering/resource boundary, and [measured full-room qualification](../diagnostics/native-audio-ui-throughput-20261029.md)
+for active-audio comparisons, stage-specific FPS, resource cleanup and limits.

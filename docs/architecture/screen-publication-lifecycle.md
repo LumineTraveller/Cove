@@ -34,3 +34,36 @@ duplicate allocation before the fix. Additional tests cover pending AudioContext
 resume and invalidation by the video owner. Existing screen settings, selected
 cadence and PCM pipeline regression tests are retained. Actual Windows source
 pickers and native system-audio capture still require local device acceptance.
+
+## Ordered updates and capture candidates
+
+An update requests capture immediately while the caller still has transient
+user activation. Only its commit is queued, per publication session. At commit
+time it reads the currently owned stream instead of retaining the stream that
+was current before its picker finished. This prevents reversed picker/replace
+completion from leaking an intermediate stream or restoring stale settings.
+
+The session owns a set of acquired but uncommitted candidate streams. Stop,
+leave and producer closure release that set immediately; a later picker result
+checks its epoch and releases itself. A new publication has its own queue and
+does not wait behind an unresolved operation from the old session. A candidate
+is removed from the set when attached, before subsequent audio or parameter
+work can fail. Committed-track ended handling is installed before awaiting
+audio startup and also checks for a track that already ended.
+
+## Capture size and the encoder boundary
+
+Preset mode supplies only maximum width/height to the initial or replacement
+`getDisplayMedia` request. The whole source keeps its aspect ratio and smaller
+sources are not requested at an ideal/minimum larger size. Native-resolution
+mode preserves the FPS-only capture request. The existing RTP plan remains the
+output ceiling, so a platform ignoring capture-size constraints still uses the
+normal sender limits. No repeated post-start `applyConstraints` is introduced.
+
+This constraint optimization alone cannot move Windows desktop-duplication
+readback onto the GPU or change Chromium's capture scheduler. The opt-in
+[native GPU capture adapter](native-gpu-screen-capture.md) provides that separate
+backend after a stock publication succeeds. It reuses this session's ordered
+replacement queue and leaves the codec/SFU/audio contracts intact. The default
+release path remains stock. See [the measured capture architecture](../diagnostics/screen-capture-efficiency-20261028.md)
+for the original costs and the independent probe evidence.

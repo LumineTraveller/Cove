@@ -168,7 +168,7 @@ describe('room audio settings', () => {
       .findAllByType(TouchableOpacity)
       .find(node => node.props.accessibilityLabel === label)!;
   async function openAudio() {
-    await act(async () => button('音频设置').props.onPress());
+    await act(async () => button('采集设置').props.onPress());
   }
   async function rerender() {
     await act(async () =>
@@ -190,14 +190,14 @@ describe('room audio settings', () => {
     const topActions = renderer.root
       .findAllByType(TouchableOpacity)
       .filter(node =>
-        ['打开聊天', '打开语音包', '音频设置'].includes(
+        ['打开聊天', '打开语音包', '采集设置'].includes(
           node.props.accessibilityLabel,
         ),
       );
     expect(topActions.map(node => node.props.accessibilityLabel)).toEqual([
       '打开聊天',
       '打开语音包',
-      '音频设置',
+      '采集设置',
     ]);
     expect(
       renderer.root
@@ -210,7 +210,7 @@ describe('room audio settings', () => {
         .findByProps({ testID: 'room-toolbar' })
         .findAllByType(TouchableOpacity)
         .map(node => node.props.accessibilityLabel),
-    ).toEqual(['打开聊天', '打开语音包', '音频设置']);
+    ).toEqual(['打开聊天', '打开语音包', '采集设置']);
     const footer = renderer.root.findByProps({ testID: 'voice-controls' });
     expect(
       footer
@@ -253,7 +253,7 @@ describe('room audio settings', () => {
     ).toBe(true);
     expect(audioModal().props.visible).toBe(true);
     expect(media.leaveVoice).not.toHaveBeenCalled();
-    await act(async () => button('关闭音频设置').props.onPress());
+    await act(async () => button('关闭采集设置').props.onPress());
     expect(
       renderer.root.findAllByType(Modal).some(node => node.props.visible),
     ).toBe(false);
@@ -284,7 +284,7 @@ describe('room audio settings', () => {
     const topActions = renderer.root
       .findAllByType(TouchableOpacity)
       .filter(node =>
-        ['房间设置', '打开聊天', '打开语音包', '音频设置'].includes(
+        ['房间设置', '打开聊天', '打开语音包', '采集设置'].includes(
           node.props.accessibilityLabel,
         ),
       );
@@ -292,7 +292,7 @@ describe('room audio settings', () => {
       '房间设置',
       '打开聊天',
       '打开语音包',
-      '音频设置',
+      '采集设置',
     ]);
     expect(
       renderer.root
@@ -312,7 +312,7 @@ describe('room audio settings', () => {
       expect(button('系统降噪').props.disabled).toBe(true);
       expect(button('输出设备：蓝牙耳机').props.disabled).toBe(true);
       expect(button('输入设备：USB 麦克风').props.disabled).toBe(true);
-      expect(button('关闭音频设置').props.disabled).not.toBe(true);
+      expect(button('关闭采集设置').props.disabled).not.toBe(true);
     },
   );
 

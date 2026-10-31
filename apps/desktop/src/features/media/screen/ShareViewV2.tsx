@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useRef } from 'react';
 import { MonitorPlay, Cursor as MousePointer2, Radio, X } from '@phosphor-icons/react';
 import { useWebRTC } from '../useWebRTC';
 import { useScreenFullscreen } from './useScreenFullscreen';
@@ -59,8 +59,7 @@ export function ShareViewV2({
     sessionId: remoteSessionId, self: false, active: Boolean(remote) });
   const annotations = remote ? viewerAnnotations : ownAnnotations;
   const overlayError = useSharerAnnotationOverlay(ownAnnotations, rtc.localScreen, rtc.localScreenProducerId);
-  const [muted, setMuted] = useState(false);
-  const lastVolume = useRef(100);
+  const lastVolume = useRef({ self: 100, remote: 100 });
   const {
     screenContainerRef,
     screenMaximized,
@@ -74,20 +73,18 @@ export function ShareViewV2({
     if (screenMaximized) toggleFullscreen();
     onEnd();
   };
-  const currentVolume = (local ? rtc.screenShareVolume : rtc.screenReceiveVolume) * 100;
+  const volumeTarget = displayedSelf ? 'self' : 'remote';
+  const currentVolume = (displayedSelf ? rtc.screenShareVolume : rtc.screenReceiveVolume) * 100;
   const setCurrentVolume = (value: number) => {
-    if (value > 0) setMuted(false);
-    if (local) rtc.setScreenShareVolume(value / 100);
+    if (value > 0) lastVolume.current[volumeTarget] = value;
+    if (displayedSelf) rtc.setScreenShareVolume(value / 100);
     else rtc.setScreenReceiveVolume(value / 100);
   };
   const toggleVolumeMute = () => {
-    if (muted || currentVolume === 0) {
-      setCurrentVolume(lastVolume.current || 100);
-      setMuted(false);
-    } else {
-      lastVolume.current = currentVolume;
+    if (currentVolume === 0) setCurrentVolume(lastVolume.current[volumeTarget] || 100);
+    else {
+      lastVolume.current[volumeTarget] = currentVolume;
       setCurrentVolume(0);
-      setMuted(true);
     }
   };
   return (
@@ -97,11 +94,12 @@ export function ShareViewV2({
           {remote ? (
             <RemoteScreenVideo
               stream={remote.stream}
+              diagnosticsEnabled={rtc.statsEnabled}
               controlling={remoteControl.state === 'active' && !annotations.localActive && !floating}
               onInput={onInput}
             />
           ) : local ? (
-            <LocalScreenVideo stream={rtc.localScreen!} />
+            <LocalScreenVideo stream={rtc.localScreen!} diagnosticsEnabled={rtc.statsEnabled} />
           ) : (
             <div className="video-placeholder">
               <MonitorPlay size={42} />
@@ -180,7 +178,7 @@ export function ShareViewV2({
         sharer={sharer}
         volume={currentVolume}
         onVolume={setCurrentVolume}
-        muted={muted}
+        muted={currentVolume === 0}
         onMute={toggleVolumeMute}
         onRemote={onRequestRemote}
         remoteState={remoteControl.state}
@@ -198,9 +196,7 @@ export function ShareViewV2({
             ? '请先停止远控或取消申请' : annotations.localActive ? '请先退出批注' :
               !pictureInPicture.supported ? '当前环境暂不支持置顶小窗' : undefined,
         } : undefined}
-        hasAudio={
-          local ? Boolean(rtc.localScreen?.getAudioTracks().length) : rtc.screenReceiveHasAudio
-        }
+        hasAudio={displayedSelf ? rtc.screenShareHasAudio : rtc.screenReceiveHasAudio}
       />
     </div>
   );

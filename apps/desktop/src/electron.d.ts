@@ -2,11 +2,17 @@ import type { RemoteControlActivation } from '../electron/remote-control-activat
 import type { ApplicationAudioSource } from './features/media/application-audio/applicationAudio';
 import type { RemoteControlInput } from './features/remote-control/remoteControl';
 import type { UpdateState } from './features/updates/update';
+import type { UpdateSettings, UpdateSettingsResult } from '../electron/update-settings-types';
 import type { AnnotationOverlayFrame } from '../electron/annotation-overlay-state';
 import type { AnnotationOverlayInput } from '../electron/annotation-overlay-input';
 import type { InstallationIntegrityApi } from '../electron/integrity-state';
+import type { NativeScreenBridge } from './features/media/screen/nativeScreenCapture';
 
 interface CoveUpdaterApi {
+  getSettings(): Promise<UpdateSettings>;
+  saveSettings(serverUrl: string): Promise<UpdateSettingsResult>;
+  checkGithub(): Promise<UpdateState>;
+  checkAutomatically(): Promise<UpdateState>;
   getState(): Promise<UpdateState>;
   checkNow(): Promise<UpdateState>;
   installNow(): Promise<boolean>;
@@ -71,6 +77,7 @@ interface CoveRemoteControlApi {
 
 declare global {
   interface Window {
+    coveNativeScreen?: NativeScreenBridge;
     coveServerAccess?: {
       get(server: string, email: string): Promise<{ available: boolean; ok: boolean; grant?: { accessToken: string; expiresAt: number } | null }>;
       set(server: string, email: string, grant: { accessToken: string; expiresAt: number }): Promise<{ available: boolean; ok: boolean }>;

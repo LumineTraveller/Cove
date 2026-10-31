@@ -33,7 +33,7 @@ test('actual main-window permission handlers allow fullscreen only for the Cove 
   const handlers = {};
   let window;
   const electron = {
-    app: { isPackaged: true, on() {}, commandLine: { appendSwitch() {} }, whenReady: () => ({ then() {} }) },
+    app: { isPackaged: true, on() {}, commandLine: { appendSwitch() {}, getSwitchValue() { return ''; } }, whenReady: () => ({ then() {} }) },
     BrowserWindow: class {
       constructor() { this.webContents = { on() {} }; window = this; }
       on() {}
@@ -49,11 +49,15 @@ test('actual main-window permission handlers allow fullscreen only for the Cove 
   };
   const source = fs.readFileSync(require.resolve('../dist-electron/main.js'), 'utf8');
   vm.runInNewContext(source + '\ncreateWindow();', {
-    exports: {}, __dirname, process: { platform: 'win32', env: {} },
+    exports: {}, __dirname, process: { platform: 'win32', arch: 'x64', resourcesPath: 'C:\\cove-test-resources',
+      env: {}, versions: { chrome: '152.0.0.0', electron: '44.0.0' } },
     require: id => {
       if (id === 'electron') return electron;
       if (id === 'path') return require('node:path');
       if (id === './server-certificate-policy') return { ServerCertificatePolicy };
+      if (id === './screen-capture-features') return require('../dist-electron/screen-capture-features.js');
+      if (id === './native-screen-capture-policy') return require('../dist-electron/native-screen-capture-policy.js');
+      if (id === './native-screen-capture') return { NativeScreenCaptureController: class {} };
       if (id === './application-audio') return { ApplicationAudioCaptureController: class {} };
       if (id === './remote-control') return { RemoteInputController: class { stop() {} setActive() { return true; } send() { return true; } } };
       if (id === './annotation-overlay') return { AnnotationOverlayController: class {} };

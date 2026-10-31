@@ -5,7 +5,7 @@ const test = require('node:test');
 const { configureAutoUpdater } = require('../dist-electron/updater-core.js');
 const { UPDATE_DOWNLOAD_BASE_URL } = require('../dist-electron/update-config.js');
 const { compareReleaseVersions, discoverUpdateSources } = require('../dist-electron/update-sources.js');
-const { formatTransferPercent, transferPercent, updateWaitWarning, updateStepIndex } = require('../dist-electron/update-state.js');
+const { formatTransferPercent, transferPercent, updateWaitWarning, updateStepIndex, updateDownloadNotice } = require('../dist-electron/update-state.js');
 
 const githubSource = {
   id: 'github', label: 'GitHub', version: '0.7.0',
@@ -51,10 +51,14 @@ test('compiled updater exposes only the in-app IPC bridge and no OS notification
 
 test('compiled Electron main keeps WGC capture without diagnostic file logging', () => {
   const main = fs.readFileSync(require.resolve('../dist-electron/main.js'), 'utf8');
-  const wgc = main.indexOf("appendSwitch('enable-features', 'AllowWgcScreenCapturer')");
+  const policy = require('../dist-electron/screen-capture-features.js').screenCaptureFeaturePolicy({ platform: 'win32', chromiumVersion: '152.0.0.0' });
+  assert.ok(policy.enabledFeatures.split(',').includes('AllowWgcScreenCapturer'), 'Windows capture policy must retain WGC');
+  const wgc = main.indexOf('screen_capture_features_1.screenCaptureFeaturePolicy');
   const ready = main.search(/\.whenReady\(\)\.then/);
-  assert.ok(wgc >= 0, 'WGC desktop capture feature is missing');
+  assert.ok(wgc >= 0, 'Windows capture feature policy is missing');
   assert.ok(ready > wgc, 'WGC feature must be applied before app.whenReady()');
+  const apply = main.indexOf("appendSwitch('enable-features', features.enabledFeatures)");
+  assert.ok(apply > wgc && apply < ready, 'Computed capture features must be applied before app.whenReady()');
   assert.doesNotMatch(main, /webrtc-max-cpu-consumption-percentage/);
   assert.doesNotMatch(main, /enable-logging|log-file|vmodule|chromium-screen-capture|media-diagnostics|cove:diagnostics:/);
   const preload = fs.readFileSync(require.resolve('../dist-electron/preload.js'), 'utf8');
@@ -91,6 +95,8 @@ class FakeUpdater extends EventEmitter {
   quitAndInstall(...args) {
     this.installCalls.push(args);
   }
+
+  setDownloadModeListener(listener) { this.downloadModeListener = listener; }
 }
 
 function createHarness(overrides = {}) {
@@ -193,8 +199,8 @@ test('development builds do not contact the update service', async () => {
   assert.equal(controller.installNow(), false);
 });
 
-test('packaged builds configure automatic checks and downloads', async () => {
-  const h = createHarness();
+test('configured packaged builds schedule automatic checks and downloads', async () => {
+  const h = createHarness({ downloadBaseUrl: cloudServerUrl });
   assert.equal(h.controller.enabled, true);
   assert.equal(h.updater.autoDownload, true);
   assert.equal(h.updater.autoInstallOnAppQuit, true);
@@ -225,7 +231,7 @@ test('startup and manual checks use the download configuration without a login s
   await new Promise(resolve => setImmediate(resolve));
   // Even stale callers cannot replace the update server with a chat address.
   await h.controller.checkNow('https://chat.example.test');
-  assert.deepEqual(received, [UPDATE_DOWNLOAD_BASE_URL, UPDATE_DOWNLOAD_BASE_URL]);
+  assert.deepEqual(received, [UPDATE_DOWNLOAD_BASE_URL]);
   assert.equal(h.controller.setServerUrl, undefined);
   h.controller.dispose();
 });
@@ -236,7 +242,7 @@ test('a custom download base is used by scheduled and manual checks', async () =
     downloadBaseUrl: 'https://download.example.test/cove',
     resolveSources: async serverUrl => {
       received.push(serverUrl);
-      return [cloudSource];
+      return serverUrl ? [cloudSource] : [githubSource];
     },
   });
   h.updater.checkForUpdates = async () => {
@@ -248,7 +254,7 @@ test('a custom download base is used by scheduled and manual checks', async () =
   h.repeating[0].callback();
   await new Promise(resolve => setImmediate(resolve));
   await h.controller.checkNow();
-  assert.deepEqual(received, Array(3).fill('https://download.example.test/cove'));
+  assert.deepEqual(received, Array(3).fill(['https://download.example.test/cove', '']).flat());
   h.controller.dispose();
 });
 
@@ -289,7 +295,7 @@ test('blank default download address never probes a server on startup or manual 
   h.once[0].callback();
   await new Promise(resolve => setImmediate(resolve));
   await h.controller.checkNow('https://chat.example.test');
-  assert.deepEqual(calls, [githubApi, githubApi]);
+  assert.deepEqual(calls, [githubApi]);
   assert.equal(h.controller.getState().source, 'github');
   h.controller.dispose();
 });
@@ -400,6 +406,8 @@ test('Electron adapter waits for legacy startup cleanup before any update check'
     'electron-updater': { autoUpdater: updater },
     fs: { appendFileSync() {} },
     './updater-core': { configureAutoUpdater },
+    './update-settings': { UpdateSettingsStore: class { load() { return { serverUrl: '', automaticEnabled: false }; } save() {} } },
+    './stable-nsis-updater': { StableNsisUpdater: function () { return updater; } },
     './gitee-installer-cache': { createGiteeInstallerCache: options => {
       assert.equal(options.installedVersion, '0.8.3');
       return { cleanupInstalledUpdate: () => cleanup };
@@ -408,6 +416,7 @@ test('Electron adapter waits for legacy startup cleanup before any update check'
   };
   vm.runInNewContext(fs.readFileSync(require.resolve('../dist-electron/updater.js'), 'utf8'), {
     exports, require: id => mocks[id] ?? require(id),
+    fetch: () => assert.fail('The Electron adapter fixture must never contact a network'),
     process: { platform: 'win32', env: { LOCALAPPDATA: 'C:\\test-local' } },
     console: { log() {}, warn() {}, error() {} },
   });
@@ -513,6 +522,28 @@ test('a differential download can fall back to a full transfer after 100%', () =
   assert.equal(h.controller.installNow(), false);
 });
 
+test('differential fallback resets transfer progress and keeps an explicit full-download reason after readiness', () => {
+  const h = createHarness();
+  h.updater.emit('update-available', { version: '2.1.2' });
+  h.updater.downloadModeListener({ downloadMode: 'differential', differentialOutcome: 'in-progress' });
+  h.updater.emit('download-progress', { percent: 100, transferred: 4, total: 4 });
+  h.updater.downloadModeListener({ downloadMode: 'full', differentialOutcome: 'fallback', fallbackCode: 'COVE_DIFFERENTIAL_CHECKSUM' });
+  assert.equal(h.controller.getState().status, 'available');
+  assert.equal(h.controller.getState().percent, 0);
+  assert.equal(h.controller.getState().transferred, undefined);
+  h.updater.emit('download-progress', { percent: 50, transferred: 6, total: 12 });
+  h.updater.emit('update-downloaded', { version: '2.1.2' });
+  const state = h.controller.getState();
+  assert.equal(state.status, 'downloaded');
+  assert.equal(state.downloadMode, 'full');
+  assert.equal(state.differentialOutcome, 'fallback');
+  assert.equal(state.fallbackCode, 'COVE_DIFFERENTIAL_CHECKSUM');
+  assert.match(updateDownloadNotice(state), /完整性校验未通过.*完整安装包/);
+  assert.doesNotMatch(updateDownloadNotice(state), /差分.*已完成/);
+  h.controller.dispose();
+  assert.equal(h.updater.downloadModeListener, null);
+});
+
 test('validation failure retains failed stage, transfer metrics and raw error', () => {
   const h = createHarness();
   h.updater.emit('update-available', { version: '0.8.1' });
@@ -527,6 +558,16 @@ test('validation failure retains failed stage, transfer metrics and raw error', 
   assert.equal(state.transferred, 1000);
   assert.equal(updateStepIndex(state), 3);
   assert.equal(h.controller.installNow(), false);
+});
+
+test('final errors keep diagnostic codes but redact signed URLs, local user paths and stacks in state and logs', () => {
+  const h = createHarness();
+  const error = Object.assign(new Error("Cannot download https://user:secret@example.test/a.exe?X-Amz-Signature=secret 'C:\\Users\\PrivateName\\cache.exe'\n hidden stack"), { code: 'ECONNRESET' });
+  h.updater.emit('error', error);
+  assert.equal(h.controller.getState().errorCode, 'ECONNRESET');
+  assert.doesNotMatch(h.controller.getState().errorDetail, /secret|PrivateName|Users|hidden stack|Signature/);
+  assert.doesNotMatch(JSON.stringify(h.logs), /secret|PrivateName|Users|hidden stack|Signature/);
+  h.controller.dispose();
 });
 
 test('installation exceptions and synchronous error events remain visible', () => {

@@ -40,7 +40,7 @@ function fixture(t) {
   return { root, cache, pending, version, fileName, contents, metadata, info, create, exists, markLegacyDownload, logs };
 }
 
-test('a legacy Gitee download is retained until the new version runs, then both installer copies are removed', async t => {
+test('a legacy Gitee download removes only pending files and preserves the installed differential baseline', async t => {
   const f = fixture(t);
   fs.writeFileSync(path.join(f.pending, 'unrelated.txt'), 'keep');
   fs.writeFileSync(path.join(f.root, 'manual-setup.exe'), 'keep');
@@ -50,9 +50,11 @@ test('a legacy Gitee download is retained until the new version runs, then both 
   await oldApp.cleanupInstalledUpdate();
   assert.equal(f.exists(`pending/${f.fileName}`), true, 'failed installation / old-version restart must preserve the file');
   await f.create().cleanupInstalledUpdate();
-  for (const file of [`pending/${f.fileName}`, 'installer.exe', 'current.blockmap', 'pending/current.blockmap', 'pending/update-info.json', 'pending/cove-gitee-cleanup.json']) {
+  for (const file of [`pending/${f.fileName}`, 'pending/current.blockmap', 'pending/update-info.json', 'pending/cove-gitee-cleanup.json']) {
     assert.equal(f.exists(file), false, file);
   }
+  assert.deepEqual(fs.readFileSync(path.join(f.cache, 'installer.exe')), f.contents);
+  assert.equal(fs.readFileSync(path.join(f.cache, 'current.blockmap'), 'utf8'), 'block map');
   assert.equal(f.exists('pending/unrelated.txt'), true);
   assert.equal(fs.existsSync(path.join(f.root, 'manual-setup.exe')), true);
   await f.create().cleanupInstalledUpdate(); // idempotent

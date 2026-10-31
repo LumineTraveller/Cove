@@ -57,8 +57,56 @@ jobs:
       - name: Test server
         run: npm test -w cove-server
 
+      - name: Prepare native capture build tools
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $nativeRoot = Join-Path $env:RUNNER_TEMP 'cove-native-capture'
+          $toolchain = Join-Path $nativeRoot 'toolchain'
+          $headers = Join-Path $nativeRoot 'headers'
+          New-Item -ItemType Directory -Force -Path $toolchain, $headers | Out-Null
+
+          # This is the same Strawberry Perl/GCC 13.2.0 UCRT r8 distribution
+          # used for native capture qualification; no machine-wide install.
+          # Checksums: https://github.com/StrawberryPerl/strawberryperl.com/blob/gh-pages/releases.json
+          $archive = Join-Path $nativeRoot 'strawberry-perl-5.42.0.1-64bit-portable.zip'
+          Invoke-WebRequest -Uri 'https://github.com/StrawberryPerl/Perl-Dist-Strawberry/releases/download/SP_54201_64bit/strawberry-perl-5.42.0.1-64bit-portable.zip' -OutFile $archive
+          if ((Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash -ne 'a1cde185656cf307b51670eed69f648b9eff15b5c518cb136e027c628e650b71') {
+            throw 'Pinned Strawberry Perl archive checksum mismatch'
+          }
+          $sevenZip = Join-Path $env:GITHUB_WORKSPACE 'node_modules/7zip-bin/win/x64/7za.exe'
+          & $sevenZip x -y "-o$toolchain" $archive | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Extracting pinned compiler failed' }
+          $compiler = Join-Path $toolchain 'c/bin/g++.exe'
+          if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) { throw 'Pinned compiler not found in archive' }
+          $compilerVersion = & $compiler --version | Select-Object -First 1
+          if ($LASTEXITCODE -ne 0 -or $compilerVersion -notmatch 'x86_64-ucrt-posix-seh.*r8.*13\.2\.0') {
+            throw "Unexpected native compiler: $compilerVersion"
+          }
+          Write-Output "Native compiler: $compilerVersion"
+
+          # The bridge uses N-API 8; pin the same headers used during qualification.
+          # Checksum: https://nodejs.org/en/blog/release/v24.11.1
+          $headerArchive = Join-Path $nativeRoot 'node-v24.11.1-headers.tar.gz'
+          Invoke-WebRequest -Uri 'https://nodejs.org/dist/v24.11.1/node-v24.11.1-headers.tar.gz' -OutFile $headerArchive
+          if ((Get-FileHash -Algorithm SHA256 -LiteralPath $headerArchive).Hash -ne '865b1da01e764066d207f5a14b41e2593e03fd43fcce60a5ac0a9a6d2822fedb') {
+            throw 'Pinned Node-API headers checksum mismatch'
+          }
+          & tar.exe -xzf $headerArchive -C $headers
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $headers 'node-v24.11.1/include/node/node_api.h') -PathType Leaf)) {
+            throw 'Extracting pinned Node-API headers failed'
+          }
+
       - name: Build Windows release
-        run: npm run build:electron -w cove-client -- --win --x64 --publish never --config.electronDist=node_modules/electron/dist
+        shell: pwsh
+        run: |
+          $nativeRoot = Join-Path $env:RUNNER_TEMP 'cove-native-capture'
+          $env:COVE_NATIVE_CAPTURE_CXX = Join-Path $nativeRoot 'toolchain/c/bin/g++.exe'
+          $env:COVE_NATIVE_CAPTURE_NODE_INCLUDE = Join-Path $nativeRoot 'headers/node-v24.11.1/include/node'
+          $env:PATH = "$(Split-Path -Parent $env:COVE_NATIVE_CAPTURE_CXX);$env:PATH"
+          # beforePack rebuilds both native resources and runs the CPU self-test.
+          npm run build:electron -w cove-client -- --win --x64 --publish never --config.electronDist=node_modules/electron/dist
+          if ($LASTEXITCODE -ne 0) { throw 'Building Windows client release failed' }
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 

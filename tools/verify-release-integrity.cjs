@@ -94,16 +94,19 @@ async function main() {
   const payloadRoot = path.dirname(path.join(extracted, ...executable[0].relative.split('/')));
   const embedded = path.join(payloadRoot, 'resources', 'cove-integrity.json');
   assert.deepEqual(fs.readFileSync(embedded), fs.readFileSync(manifestFile));
-  const descriptor = fs.openSync(path.join(payloadRoot, 'Cove.exe'), 'r');
-  const pe = Buffer.alloc(65536);
-  let headerBytes;
-  try { headerBytes = fs.readSync(descriptor, pe, 0, pe.length, 0); }
-  finally { fs.closeSync(descriptor); }
-  assert.equal(pe.toString('ascii', 0, 2), 'MZ');
-  const peOffset = pe.readUInt32LE(0x3c);
-  assert(peOffset + 6 <= headerBytes);
-  assert.equal(pe.readUInt32LE(peOffset), 0x00004550);
-  assert.equal(pe.readUInt16LE(peOffset + 4), 0x8664);
+  for (const relative of ['Cove.exe', 'resources/native-screen-capture-helper.exe', 'resources/native-screen-handles.node']) {
+    const descriptor = fs.openSync(path.join(payloadRoot, ...relative.split('/')), 'r');
+    const pe = Buffer.alloc(65536);
+    let headerBytes;
+    try { headerBytes = fs.readSync(descriptor, pe, 0, pe.length, 0); }
+    finally { fs.closeSync(descriptor); }
+    assert(headerBytes >= 64, `${relative}: truncated PE header`);
+    assert.equal(pe.toString('ascii', 0, 2), 'MZ', relative);
+    const peOffset = pe.readUInt32LE(0x3c);
+    assert(peOffset >= 64 && peOffset + 6 <= headerBytes, `${relative}: invalid PE offset`);
+    assert.equal(pe.readUInt32LE(peOffset), 0x00004550, relative);
+    assert.equal(pe.readUInt16LE(peOffset + 4), 0x8664, relative);
+  }
   const archive = path.join(payloadRoot, 'resources', 'app.asar');
   const packed = JSON.parse(asar.extractFile(archive, 'package.json'));
   assert.equal(packed.name, 'cove-client');
@@ -117,7 +120,8 @@ async function main() {
   const manifestBytes = fs.readFileSync(manifestFile);
   const manifest = JSON.parse(manifestBytes);
   for (const required of ['Cove.exe', 'resources/app.asar', 'resources/elevate.exe',
-    'resources/annotation-window-helper.exe', 'resources/remote-input-helper.exe', 'resources/application-audio-helper.exe']) {
+    'resources/annotation-window-helper.exe', 'resources/remote-input-helper.exe', 'resources/application-audio-helper.exe',
+    'resources/native-screen-capture-helper.exe', 'resources/native-screen-handles.node']) {
     assert(manifest.files.some(file => file.path === required), required);
   }
   const requests = [];

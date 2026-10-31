@@ -16,7 +16,7 @@ import {
   UserCircle,
   X,
 } from '@phosphor-icons/react';
-import { useWebRTC } from '../../media/useWebRTC';
+import type { useWebRTC } from '../../media/useWebRTC';
 import { AvatarCropDialog } from '../../profiles/components/AvatarCropDialog';
 import { UpdateCenter } from '../../updates/components/UpdateCenter';
 import { InstallationIntegrityPanel } from '../../integrity/components/InstallationIntegrityPanel';
@@ -70,7 +70,8 @@ export function GlobalSettingsV2({
   const [draftAudioInputId, setDraftAudioInputId] = useState(rtc.selectedAudioInputId);
   const [draftAudioOutputId, setDraftAudioOutputId] = useState(rtc.selectedAudioOutputId);
   const [audioActionBusy, setAudioActionBusy] = useState(false);
-  const serverDownloadUrl = getServerDownloadUrl(serverURL);
+  const [updateServerUrl, setUpdateServerUrl] = useState('');
+  const serverDownloadUrl = getServerDownloadUrl(updateServerUrl);
   const audioDeviceSelectionChanged =
     draftAudioInputId !== rtc.selectedAudioInputId ||
     draftAudioOutputId !== rtc.selectedAudioOutputId;
@@ -87,6 +88,14 @@ export function GlobalSettingsV2({
   useEffect(() => {
     if (page !== 'about') return;
     setAboutQuote((previous) => pickAboutQuote(previous));
+  }, [page]);
+
+  useEffect(() => {
+    let active = true;
+    void window.coveUpdater?.getSettings?.().then(settings => {
+      if (active) setUpdateServerUrl(settings.serverUrl);
+    }).catch(() => { if (active) setUpdateServerUrl(''); });
+    return () => { active = false; };
   }, [page]);
 
   useEffect(() => {
@@ -121,7 +130,7 @@ export function GlobalSettingsV2({
     }
   };
   const nav: [typeof page, React.ReactNode, string][] = [
-    ['audio', <Headphones size={19} />, '音频设备'],
+    ['audio', <Headphones size={19} />, '采集设置'],
     ['account', <UserCircle size={19} />, '账号与服务器'],
     ['update', <DownloadSimple size={19} />, '检查更新'],
     ['about', <Info size={19} />, '关于应用'],
@@ -274,6 +283,23 @@ export function GlobalSettingsV2({
                   : '未加入语音时，刷新会重新检测当前设备状态。'}
               </p>
               {rtc.audioDeviceError && <p className="field-error">{rtc.audioDeviceError}</p>}
+              <label className="settings-toggle-card">
+                <span>
+                  <b>兼容观看（VP8）</b>
+                  <small>
+                    {rtc.isSharing
+                      ? '停止当前共享后可更改编码模式；下次共享生效。'
+                      : '手机无法观看时可开启；下次共享使用 VP8，保留分辨率与帧率。'}
+                  </small>
+                </span>
+                <input
+                  type="checkbox"
+                  aria-label="兼容观看（VP8）"
+                  checked={rtc.screenCompatibilityMode}
+                  disabled={rtc.isSharing}
+                  onChange={(event) => rtc.setScreenCompatibilityMode(event.target.checked)}
+                />
+              </label>
             </div>
           )}
           {page === 'account' && (
@@ -369,7 +395,7 @@ export function GlobalSettingsV2({
                   >
                     GitHub
                   </a>
-                  {SERVER_DOWNLOAD_LINKS_ENABLED && (
+                  {SERVER_DOWNLOAD_LINKS_ENABLED && serverDownloadUrl && (
                     <a
                       href={serverDownloadUrl ?? '#'}
                       target="_blank"

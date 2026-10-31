@@ -1,13 +1,13 @@
 import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import {request} from '@cove/client-core';
+import {isCompleteSoundpackOrder, request} from '@cove/client-core';
 import type {Socket} from 'socket.io-client';
 import type {Soundpack} from '../../types';
 import {serverFetch} from '../connection/serverSecurity';
 import {soundpackFileSource, soundpackRequestInit, type SoundpackFileVariant} from './soundpackAccess';
 import {cancelOperations} from './soundpackFiles';
 import {preparedSoundpacks} from './preparedSoundpacks';
-import {addGroup, applySoundpackOrder, canAddGroup, favoritesStorageKey, flattenGroups, groupsStorageKey, initialGroups, moveSound, orderedGroups, readGroups, reconcileGroups, swapGroups, type SoundpackGroup} from './soundpackGroups';
+import {addGroup, applySoundpackOrder, canAddGroup, favoritesStorageKey, flattenGroups, groupsStorageKey, initialGroups, moveSound, readGroups, reconcileGroups, swapGroups, type SoundpackGroup} from './soundpackGroups';
 
 const VOLUME_KEY = 'cove:soundpack-volume';
 let playbackSessions = 0;
@@ -68,7 +68,6 @@ export function useSoundboard({socket, roomId, serverURL, accountId, accountToke
   const volumeRevision = useRef(0);
   const preferenceScope = useRef<string | null>(null);
   const listScope = useRef<string | null>(null);
-  const authoritativeOrder = useRef(0);
   scopeRef.current = scope;
   readyRef.current = ready;
   voiceRef.current = inVoice;
@@ -178,7 +177,7 @@ export function useSoundboard({socket, roomId, serverURL, accountId, accountToke
   }, [ready, roomId, serverURL, accountToken, socket, scope, retry, updatePacks]);
   useEffect(() => {
     if (!listReady || !preferencesReady || preferenceScope.current !== scope || listScope.current !== scope) return;
-    const next = orderedGroups(reconcileGroups(groupsRef.current, packs.map(pack => pack.id)), packs.map(pack => pack.id));
+    const next = reconcileGroups(groupsRef.current, packs.map(pack => pack.id));
     if (JSON.stringify(next) !== JSON.stringify(groupsRef.current)) saveGroups(next);
     const nextFavorites = favoritesRef.current.filter(id => packs.some(pack => pack.id === id));
     if (nextFavorites.length !== favoritesRef.current.length) saveFavorites(nextFavorites);
@@ -273,14 +272,6 @@ export function useSoundboard({socket, roomId, serverURL, accountId, accountToke
       revision.current += 1;
       updatePacks(current => current.map(item => item.id === soundId ? {...item, filename, ...(originalFilename ? {originalFilename} : {})} : item));
     };
-    const onReordered = (payload: {roomId?: string; orderedIds: string[]}) => {
-      if (!belongs(payload)) return;
-      const {orderedIds} = payload;
-      revision.current += 1;
-      authoritativeOrder.current += 1;
-      updatePacks(current => applySoundpackOrder(current, orderedIds));
-      if (preferenceScope.current === scope) saveGroups(orderedGroups(groupsRef.current, orderedIds));
-    };
     const onPlay = (payload: {roomId?: string; soundId: string; filename?: string}) => {
       if (!belongs(payload) || listScope.current !== scope) return;
       const { soundId } = payload;
@@ -303,7 +294,6 @@ export function useSoundboard({socket, roomId, serverURL, accountId, accountToke
     socket.on('soundpack:deleted', onDeleted);
     socket.on('soundpack:renamed', onRenamed);
     socket.on('soundpack:normalized', onNormalized);
-    socket.on('soundpack:reordered', onReordered);
     socket.on('soundpack:play', onPlay);
     return () => {
       active = false;
@@ -311,7 +301,6 @@ export function useSoundboard({socket, roomId, serverURL, accountId, accountToke
       socket.off('soundpack:deleted', onDeleted);
       socket.off('soundpack:renamed', onRenamed);
       socket.off('soundpack:normalized', onNormalized);
-      socket.off('soundpack:reordered', onReordered);
       socket.off('soundpack:play', onPlay);
     };
   }, [socket, serverURL, accountToken, saveGroups, updatePacks, scope, roomId, playbackSession]);
@@ -335,31 +324,9 @@ export function useSoundboard({socket, roomId, serverURL, accountId, accountToke
     finally { if (scopeRef.current === activeScope && playRequestToken.current === token) playPending.current = false; }
   };
   const commitGroups = async (nextGroups: SoundpackGroup[]) => {
-    if (!readyRef.current || !listReady || !preferencesReady || busyRef.current || preferenceScope.current !== scope || listScope.current !== scope) return;
-    const previous = packsRef.current;
-    const previousGroups = groupsRef.current;
-    const orderedIds = flattenGroups(nextGroups);
-    if (orderedIds.length !== previous.length || new Set(orderedIds).size !== previous.length || previous.some(pack => !orderedIds.includes(pack.id))) return;
+    if (!mounted.current || scopeRef.current !== scope || !readyRef.current || !listReady || !preferencesReady || busyRef.current || preferenceScope.current !== scope || listScope.current !== scope) return;
+    if (!isCompleteSoundpackOrder(flattenGroups(nextGroups), packsRef.current.map(pack => pack.id))) return;
     saveGroups(nextGroups);
-    if (orderedIds.every((id, index) => id === previous[index]?.id)) return;
-    const activeScope = scope;
-    const token = ++operation.current;
-    const startingOrder = authoritativeOrder.current;
-    const active = () => mounted.current && scopeRef.current === activeScope && operation.current === token;
-    busyRef.current = 'reorder';
-    setBusy('reorder');
-    setNotice(null);
-    revision.current += 1;
-    updatePacks(current => applySoundpackOrder(current, orderedIds));
-    try { await ack('soundpack:reorder', {roomId, orderedIds}); }
-    catch (cause) {
-      if (!active()) return;
-      revision.current += 1;
-      if (startingOrder === authoritativeOrder.current) updatePacks(current => applySoundpackOrder(current, previous.map(pack => pack.id)));
-      const restored = reconcileGroups(previousGroups, packsRef.current.map(pack => pack.id));
-      saveGroups(startingOrder === authoritativeOrder.current ? restored : orderedGroups(restored, packsRef.current.map(pack => pack.id)));
-      setNotice(message(cause, '调整顺序失败'));
-    } finally { if (active()) {busyRef.current = null; setBusy(null);} }
   };
   const manageSound = async (
     kind: 'rename' | 'delete',
@@ -408,7 +375,7 @@ export function useSoundboard({socket, roomId, serverURL, accountId, accountToke
     if (!resourceReady || scopeRef.current !== scope || !packsRef.current.some(pack => pack.id === soundId)) throw new Error('当前房间没有这个语音包。');
     return soundpackFileSource(access, soundId, variant);
   };
-  return {packs: listScope.current === scope ? packs : [],
+  return {packs: listScope.current === scope ? applySoundpackOrder(packs, preferenceScope.current === scope ? flattenGroups(groups) : []) : [],
     groups: preferenceScope.current === scope ? groups : initialGroups(),
     favorites: preferenceScope.current === scope ? favorites : [],
     volume,

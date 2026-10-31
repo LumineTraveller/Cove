@@ -9,6 +9,7 @@ const REQUIRED_FILES = [
   'Cove.exe', 'resources/app.asar',
   'resources/annotation-window-helper.exe', 'resources/remote-input-helper.exe',
   'resources/application-audio-helper.exe', 'resources/elevate.exe',
+  'resources/native-screen-capture-helper.exe', 'resources/native-screen-handles.node',
 ];
 // Review new Electron payload names here instead of accidentally publishing
 // arbitrary files from a reused output directory (including personal data).
@@ -90,13 +91,13 @@ function assertX64Executable(filePath) {
   try {
     const header = Buffer.alloc(64);
     if (fs.readSync(fd, header, 0, header.length, 0) !== header.length || header.toString('ascii', 0, 2) !== 'MZ') {
-      throw new Error('Cove.exe is not a Windows PE executable');
+      throw new Error(`${path.basename(filePath)} is not a Windows PE executable`);
     }
     const peOffset = header.readUInt32LE(0x3c);
     const pe = Buffer.alloc(6);
     if (peOffset < 64 || fs.readSync(fd, pe, 0, pe.length, peOffset) !== pe.length ||
         pe.readUInt32LE(0) !== 0x00004550 || pe.readUInt16LE(4) !== 0x8664) {
-      throw new Error('Installation integrity supports only the Windows x64 Cove.exe payload');
+      throw new Error(`Installation integrity supports only Windows x64 payloads: ${path.basename(filePath)}`);
     }
   } finally {
     fs.closeSync(fd);
@@ -186,6 +187,8 @@ async function generateInstallationIntegrity({ appOutDir, outputDir, version, pl
     if (!entries.some(entry => entry.relative === required)) throw new Error(`Missing required version payload: ${required}`);
   }
   assertX64Executable(path.join(root, 'Cove.exe'));
+  assertX64Executable(path.join(root, 'resources', 'native-screen-capture-helper.exe'));
+  assertX64Executable(path.join(root, 'resources', 'native-screen-handles.node'));
   const files = [];
   for (const entry of entries.sort((a, b) => a.relative < b.relative ? -1 : a.relative > b.relative ? 1 : 0)) {
     files.push({ path: entry.relative, ...await hashFile(entry.absolute, entry.stat) });

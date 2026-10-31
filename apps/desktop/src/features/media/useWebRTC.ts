@@ -1,6 +1,7 @@
 import { useVolumeControls } from './audio/useVolumeControls';
 import { useAudioDevices } from './audio/useAudioDevices';
 import { useAudioMeters } from './audio/useAudioMeters';
+import { createAudioMeterStore } from './audio/audioMeterLevels';
 import { useMediaDiagnostics } from './diagnostics/useMediaDiagnostics';
 import { type diagnosticVideoCounters } from './diagnostics/mediaDiagnostics';
 import { useMediaTransports } from './transport/useMediaTransports';
@@ -107,6 +108,8 @@ export function useWebRTC(socket: Socket, roomId: string) {
   const screenReceiveVolumeRef = useRef(screenReceiveVolume);
   // 观看中的屏幕共享是否附带音频：决定观看端是否显示共享音频音量条。
   const [screenReceiveHasAudio, setScreenReceiveHasAudio] = useState(false);
+  // 屏幕音频单独发布，不属于 localScreen 的视频流。
+  const [screenShareHasAudio, setScreenShareHasAudio] = useState(false);
   const [screenShareVolume, setScreenShareVolumeState] = useState(() =>
     loadNumber(SCREEN_SHARE_VOLUME_KEY, 1, 2),
   );
@@ -144,8 +147,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
   const [statsEnabled, setStatsEnabled] = useState(false);
   const [stats, setStats] = useState<MediaStats>(EMPTY_STATS);
   // 每个人说话音量 0~1（key = socketId）
-  const [speakingLevels, setSpeakingLevels] = useState<Record<string, number>>({});
-  const [sharedAudioLevels, setSharedAudioLevels] = useState<Record<string, number>>({});
+  const [audioMeters] = useState(createAudioMeterStore);
   // 本机针对每位远端成员的麦克风播放增益，1 = 100% 原始音量，2 = 200%。
   const [memberVolumes, setMemberVolumes] = useState<Record<string, number>>({});
 
@@ -476,14 +478,14 @@ export function useWebRTC(socket: Socket, roomId: string) {
     get volumeTimer() {
       return volumeTimer;
     },
-    get setSpeakingLevels() {
-      return setSpeakingLevels;
-    },
-    get setSharedAudioLevels() {
-      return setSharedAudioLevels;
+    get audioMeters() {
+      return audioMeters;
     },
   });
   const { toggleStats, exportMediaDiagnostics } = useMediaDiagnostics({
+    get statsEnabled() {
+      return statsEnabled;
+    },
     get statsCollecting() {
       return statsCollecting;
     },
@@ -559,7 +561,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
         voiceSessionActiveRef.current = false;
         playPresenceTone('leave');
       }
-      if (volumeTimer.current) clearInterval(volumeTimer.current);
+      stopMeters();
       clearAnalysers();
       if (statsTimer.current) clearInterval(statsTimer.current);
       if (screenAnalysisTimer.current) clearInterval(screenAnalysisTimer.current);
@@ -600,7 +602,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
       void window.coveApplicationAudio?.stop();
       void window.coveSystemAudio?.stop();
     },
-    [playPresenceTone],
+    [playPresenceTone, stopMeters],
   );
   const { setupDevice, consumeProducer } = useMediaTransports({
     get deviceRef() {
@@ -1212,6 +1214,9 @@ export function useWebRTC(socket: Socket, roomId: string) {
     get screenAudioProducer() {
       return screenAudioProducer;
     },
+    get setScreenShareHasAudio() {
+      return setScreenShareHasAudio;
+    },
     get applicationAudioProducer() {
       return applicationAudioProducer;
     },
@@ -1413,6 +1418,9 @@ export function useWebRTC(socket: Socket, roomId: string) {
     },
     get screenShareVolumeRef() {
       return screenShareVolumeRef;
+    },
+    get setScreenShareHasAudio() {
+      return setScreenShareHasAudio;
     },
     get sendTransport() {
       return sendTransport;
@@ -1618,6 +1626,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
     screenGameMode,
     screenNativeResolution,
     screenCompatibilityMode,
+    setScreenCompatibilityMode,
     isApplicationAudioSharing,
     applicationAudioLabel,
     applicationAudioShareVolume,
@@ -1649,14 +1658,20 @@ export function useWebRTC(socket: Socket, roomId: string) {
     statsEnabled,
     toggleStats,
     exportMediaDiagnostics,
-    speakingLevels, // socketId → 0~1，音量前的输入电平
-    sharedAudioLevels, // socketId → 0~1，同为音量前的输入电平；音量封顶由 UI 侧负责
+    audioMeters,
+    get speakingLevels() {
+      return audioMeters.getLevels('voice');
+    }, // socketId → 0~1，音量前的输入电平
+    get sharedAudioLevels() {
+      return audioMeters.getLevels('shared');
+    }, // socketId → 0~1，同为音量前的输入电平；音量封顶由 UI 侧负责
     memberVolumes,
     setMemberVolume,
     toggleMemberMute,
     screenReceiveVolume,
     screenReceiveHasAudio,
     setScreenReceiveVolume,
+    screenShareHasAudio,
     screenShareVolume,
     setScreenShareVolume,
     applicationAudioReceiveVolumes,

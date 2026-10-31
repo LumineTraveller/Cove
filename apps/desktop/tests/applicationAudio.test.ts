@@ -42,6 +42,21 @@ function audioHarness(t: TestContext) {
 
 const pcm = (seconds = 0.04) => new Uint8Array(Math.round(48_000 * seconds) * 4);
 
+test('shared PCM flows through the adjustable gain into the send track only', t => {
+  const h = audioHarness(t);
+  h.pipeline.pushPcm(pcm());
+  assert.equal(h.sources[0].connect.mock.calls[0].arguments[0], h.gains[1]);
+  assert.equal(h.gains[1].connect.mock.calls[0].arguments[0], h.pipeline.gain);
+  assert.equal(h.pipeline.gain.connect.mock.callCount(), 1, 'do not add a second playback route');
+  assert.equal(h.pipeline.gain.connect.mock.calls[0].arguments[0], h.pipeline.destination);
+  assert.equal(h.pipeline.track, h.track);
+  h.pipeline.setVolume(0);
+  assert.equal(h.pipeline.gain.gain.value, 0);
+  h.pipeline.setVolume(1.6);
+  assert.equal(h.pipeline.gain.gain.value, 1.6);
+  h.pipeline.close();
+});
+
 function workletHarness(t: TestContext, ready = true) {
   const h = audioHarness(t);
   const nodes: any[] = [];

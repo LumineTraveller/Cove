@@ -3,7 +3,13 @@ export type UpdateStatus =
   | 'disabled' | 'idle' | 'checking' | 'available' | 'downloading'
   | 'finalizing' | 'downloaded' | 'installing' | 'not-available' | 'error';
 
-export interface UpdateState {
+export interface UpdateDownloadMode {
+  downloadMode: 'differential' | 'full' | 'cached';
+  differentialOutcome?: 'in-progress' | 'completed' | 'fallback';
+  fallbackCode?: string;
+}
+
+export interface UpdateState extends Partial<UpdateDownloadMode> {
   status: UpdateStatus;
   version?: string;
   /** Transfer progress only, never overall installation progress. */
@@ -19,6 +25,25 @@ export interface UpdateState {
   failedStage?: UpdateStatus;
   errorDetail?: string;
   errorCode?: string;
+}
+
+export function updateDownloadNotice(state: UpdateState): string | null {
+  if (state.downloadMode === 'cached') return '使用已校验的完整安装包缓存。';
+  if (state.downloadMode === 'differential') return state.differentialOutcome === 'completed'
+    ? '差分重建及安装包完整性校验已完成。' : '正在校验旧版基线并尝试差分下载。';
+  if (state.downloadMode !== 'full') return null;
+  if (state.differentialOutcome !== 'fallback') return '正在下载完整安装包，完成后仍会校验完整性。';
+  const reason = state.fallbackCode === 'ENOENT' ? '旧版安装包基线缺失'
+    : state.fallbackCode === 'COVE_BASELINE_MISMATCH' ? '旧版安装包基线与已安装版本不符'
+    : state.fallbackCode === 'COVE_BASELINE_CHANGED' ? '旧版安装包基线在校验期间发生变化'
+    : state.fallbackCode === 'COVE_CACHE_UNSAFE' ? '更新缓存路径无法安全使用'
+    : state.fallbackCode?.startsWith('COVE_BASELINE') ? '无法确认旧版安装包的身份或完整性'
+    : state.fallbackCode?.startsWith('COVE_BLOCKMAP') ? '旧版分块信息无法验证'
+    : state.fallbackCode === 'COVE_DIFFERENTIAL_CHECKSUM' ? '差分重建的完整性校验未通过'
+    : state.fallbackCode === 'COVE_DIFFERENTIAL_RANGE' ? '下载源的分段响应不符合预期'
+    : state.fallbackCode === 'COVE_DIFFERENTIAL_NETWORK' ? '差分传输的网络连接中断'
+    : '差分下载未完成';
+  return `${reason}，已转为完整安装包下载；完整性校验仍会执行。`;
 }
 
 export const UPDATE_STEPS = [

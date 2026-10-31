@@ -121,19 +121,15 @@ test('an active share cannot pretend replaceTrack changed its codec mode', async
   assert.match(f.alerts[0], /停止/);
 });
 
-test('compatibility is opt-in before capture and read-only while an existing share is edited', () => {
+test('the share dialog leaves compatibility selection in capture settings', () => {
   const noop = () => {};
-  for (const editing of [false, true]) {
-    const markup = renderToStaticMarkup(createElement(ScreenShareSettingsV2, {
-      preset: '1080p', fps: 60, audio: false, gameMode: false, nativeResolution: false,
-      compatibilityMode: editing, editing,
-      onPreset: noop, onFps: noop, onAudio: noop, onGameMode: noop, onNativeResolution: noop,
-      onCompatibilityMode: noop, confirmLabel: '共享', onConfirm: noop, onCancel: noop,
-    }));
-    const input = markup.match(/<input[^>]*aria-label="兼容观看（VP8）"[^>]*>/)?.[0];
-    assert.ok(input);
-    assert.equal(input.includes('checked='), editing);
-    assert.equal(input.includes('disabled='), editing);
-    if (editing) assert.match(markup, /停止当前共享后可更改编码模式/);
-  }
+  const markup = renderToStaticMarkup(createElement(ScreenShareSettingsV2, {
+    preset: '1080p', fps: 60, audio: false, gameMode: false, nativeResolution: false,
+    onPreset: noop, onFps: noop, onAudio: noop, onGameMode: noop, onNativeResolution: noop,
+    confirmLabel: '共享', onConfirm: noop, onCancel: noop,
+  }));
+  assert.doesNotMatch(markup, /兼容观看|VP8/);
+  assert.match(markup, /分辨率/);
+  assert.match(markup, /帧率/);
+  assert.match(markup, /共享电脑音频/);
 });

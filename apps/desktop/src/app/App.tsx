@@ -77,6 +77,7 @@ import {
   type AppTheme,
 } from '../features/settings/theme';
 import { UpdateCenter } from '../features/updates/components/UpdateCenter';
+import { LoginUpdateSettings } from '../features/updates/components/LoginUpdateSettings';
 import {
   CLIENT_UPGRADE_EVENT,
   createClientVersionGate,
@@ -989,6 +990,7 @@ export default function App() {
   if (startupState === 'checking' || startupState === 'offline') {
     return <main className="auth-page">
       <WindowTitleBar />
+      <LoginUpdateSettings requiredUpgrade={activeUpgrade} onRetryVersion={retryVersionPolicy} />
       <UpdateCenter allowDetails={false} serverURL={updateServerURL} requiredUpgrade={activeUpgrade} onRetryVersion={retryVersionPolicy} />
       <div className="cove-connection-scrim"><div className="cove-connection-modal" role="status">
         {startupState === 'checking' ? <LoaderCircle size={24} className="animate-spin" /> : <WifiOff size={24} />}
@@ -1004,6 +1006,7 @@ export default function App() {
     return (
       <main className="auth-page">
         <WindowTitleBar showBrand={false} />
+        <LoginUpdateSettings requiredUpgrade={activeUpgrade} onRetryVersion={retryVersionPolicy} />
         <UpdateCenter allowDetails={false} serverURL={updateServerURL} requiredUpgrade={activeUpgrade} onRetryVersion={retryVersionPolicy} />
         <div className="auth-shell">
           <section className="auth-showcase" aria-label="Cove 产品介绍">

@@ -43,6 +43,8 @@ function fixture(t) {
     'resources/application-audio-helper.exe', 'resources/elevate.exe',
     'resources/app.asar.unpacked/node_modules/loopback-capture/build/Release/capture.node',
   ]) write(file);
+  write('resources/native-screen-capture-helper.exe', pe());
+  write('resources/native-screen-handles.node', pe());
   const options = { appOutDir: root, outputDir: output, version: '2.0.3', platform: 'win32', arch: 'x64' };
   return { root, output, write, options };
 }
@@ -60,6 +62,8 @@ test('inventories final Electron, app.asar, helpers and unpacked native packages
   assert.deepEqual(fs.readFileSync(result.assetPath), fs.readFileSync(result.embeddedPath));
   assert.ok(result.manifest.files.some(file => file.path.endsWith('capture.node')));
   assert.ok(result.manifest.files.some(file => file.path === 'resources/elevate.exe'));
+  assert.ok(result.manifest.files.some(file => file.path === 'resources/native-screen-capture-helper.exe'));
+  assert.ok(result.manifest.files.some(file => file.path === 'resources/native-screen-handles.node'));
   assert.deepEqual(result.manifest.files.map(file => file.path), result.manifest.files.map(file => file.path).sort());
   for (const file of result.manifest.files) {
     assert.deepEqual(Object.keys(file), ['path', 'size', 'sha256']);
@@ -78,7 +82,7 @@ test('never self-hashes or includes user data, voice packs, caches, uninstallers
     'Uninstall Cove.exe', 'Cove.lnk', 'accounts.json', 'settings.json', 'chat.db',
   ]) write(file, 'PRIVATE DO NOT HASH');
   const first = await generateInstallationIntegrity(options);
-  assert.equal(first.manifest.files.length, 14);
+  assert.equal(first.manifest.files.length, 16);
   assert.ok(first.manifest.files.every(file => file.path !== EMBEDDED_MANIFEST_PATH));
   const second = await generateInstallationIntegrity(options);
   assert.deepEqual(first.manifest, second.manifest);
@@ -114,6 +118,17 @@ test('refuses missing mandatory helpers instead of describing a partial release'
   fs.unlinkSync(path.join(root, 'resources', 'application-audio-helper.exe'));
   await assert.rejects(generateInstallationIntegrity(options), /Missing required version payload/);
 });
+
+for (const native of ['native-screen-capture-helper.exe', 'native-screen-handles.node']) {
+  test(`requires a Windows x64 ${native} in the packaged payload`, async t => {
+    const { root, write, options } = fixture(t);
+    const relative = `resources/${native}`;
+    fs.unlinkSync(path.join(root, 'resources', native));
+    await assert.rejects(generateInstallationIntegrity(options), /Missing required version payload/);
+    write(relative, pe(0xaa64));
+    await assert.rejects(generateInstallationIntegrity(options), /Windows x64/);
+  });
+}
 
 test('rejects traversal, alternate streams, ambiguous Windows names and unnormalized paths', () => {
   for (const value of ['', '..', '../Cove.exe', '/Cove.exe', 'a/../b', 'a\\b', 'C:/Cove.exe',

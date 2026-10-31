@@ -2902,8 +2902,7 @@ select:focus-visible {
      var(--ink)，深色墨色压在 42% 蓝上对比度不足 2:1。 */
   color: #fff;
 }
-.foreground-light .message-list time,
-.foreground-light .chat-panel header small {
+.foreground-light .message-list time {
   color: rgba(255, 255, 255, 0.58);
 }
 .foreground-light .chat-composer {
@@ -2953,10 +2952,6 @@ select:focus-visible {
 }
 .cove-shell .member-list-view {
   padding-top: 30px;
-}
-.cove-shell .chat-panel > header {
-  padding-top: 22px;
-  padding-bottom: 6px;
 }
 .app-mark-image {
   width: 46px;
@@ -3181,90 +3176,15 @@ body:has(.share-view.screen-maximized) .cove-window-titlebar {
   margin-left: auto;
   color: inherit;
 }
-.chat-panel > header {
-  position: relative;
-  min-height: 66px;
-  padding: 14px 16px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  border-bottom: 1px solid color-mix(in srgb, var(--room-fg) 12%, transparent);
-}
-.chat-header-actions {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-.chat-font-picker {
-  position: relative;
-  -webkit-app-region: no-drag;
-}
 .workspace-header button,
 .lobby-header button,
 .nav-brand button,
-.chat-header-actions,
-.chat-font-picker *,
-.chat-font-menu,
-.chat-font-menu *,
 .chat-edge-toggle-anchor {
   -webkit-app-region: no-drag;
 }
-.chat-header-actions-left {
-  margin-right: auto;
-}
-.chat-font-button {
-  width: 32px;
-  height: 32px;
-}
-.chat-font-button.active {
-  color: var(--blue);
-  background: #edf4ff;
-}
-.chat-font-menu {
-  position: absolute;
-  top: 100%;
-  left: 0;
-  right: auto;
-  z-index: 80;
-  width: 138px;
-  padding: 7px;
-  display: grid;
-  gap: 2px;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--room-bottom) 94%, white);
-  box-shadow: 0 14px 32px rgba(35, 52, 70, 0.16);
-}
-.chat-font-menu-title {
-  padding: 4px 8px 5px;
-  color: var(--muted);
-  font-size: 10px;
-}
-.chat-font-menu button {
-  min-height: 31px;
-  padding: 0 8px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  border-radius: 8px;
-  color: var(--room-fg);
-  font-size: 11px;
-  text-align: left;
-}
-.chat-font-menu button:hover,
-.chat-font-menu button.active {
-  background: color-mix(in srgb, var(--blue) 10%, transparent);
-  color: var(--blue);
-}
-.chat-font-menu button b {
-  color: inherit;
-  font-weight: 650;
-  line-height: 1;
-}
 .chat-copy-notice {
   position: absolute;
-  top: 73px;
+  top: 44px;
   right: 14px;
   z-index: 70;
   padding: 6px 9px;
@@ -3303,36 +3223,8 @@ body:has(.share-view.screen-maximized) .cove-window-titlebar {
   background: #edf4ff;
   box-shadow: 0 10px 24px rgba(53, 120, 229, 0.2);
 }
-.chat-panel > header h2 {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  margin: 3px 0 0;
-  font-size: 16px;
-}
-.chat-panel > header h2 i {
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  display: inline-grid;
-  place-items: center;
-  border-radius: 999px;
-  background: var(--blue);
-  color: #fff;
-  font-size: 9px;
-  font-style: normal;
-}
 .chat-panel .message-list {
   gap: 12px;
-}
-.chat-panel.chat-font-small {
-  --chat-message-font-size: 14px;
-}
-.chat-panel.chat-font-medium {
-  --chat-message-font-size: 16px;
-}
-.chat-panel.chat-font-large {
-  --chat-message-font-size: 18px;
 }
 .message-row {
   display: flex;
@@ -3657,7 +3549,7 @@ body .cove-window-controls button {
   padding: 8px 11px;
   border-radius: 6px 13px 13px 13px;
   background: rgba(255, 255, 255, 0.5);
-  font-size: var(--chat-message-font-size, 14px);
+  font-size: 14px;
   line-height: 1.5;
   text-align: left;
   overflow-wrap: anywhere;
@@ -3752,13 +3644,12 @@ body .cove-window-controls button {
   height: 20px;
   font-size: 10px;
 }
-/* 输入框预览的就是即将发出的消息，字号跟随「消息字号」设置（默认 medium=16px），
-   行高同步缩放；默认档算出来仍是原来的 24px，版面不变。 */
+/* Keep the composer and messages at the same standard reading size. */
 .chat-composer textarea {
   flex: 1;
   min-width: 0;
-  height: calc(var(--chat-message-font-size, 14px) * 1.5);
-  min-height: calc(var(--chat-message-font-size, 14px) * 1.5);
+  height: 21px;
+  min-height: 21px;
   max-height: 96px;
   padding: 0;
   resize: none;
@@ -3766,7 +3657,7 @@ body .cove-window-controls button {
   outline: 0;
   background: transparent;
   color: inherit;
-  font-size: var(--chat-message-font-size, 14px);
+  font-size: 14px;
   line-height: 1.5;
   align-self: center;
 }
@@ -6109,11 +6000,9 @@ body .cove-window-controls button {
   border-color: color-mix(in srgb, var(--room-fg) 28%, var(--line));
   background: color-mix(in srgb, var(--room-fg) 6%, transparent);
 }
-:root[data-theme="dark"] .chat-font-button.active,
 :root[data-theme="dark"] .chat-new-message-notice:hover {
   background: color-mix(in srgb, var(--blue) 22%, var(--surface));
 }
-:root[data-theme="dark"] .chat-font-menu,
 :root[data-theme="dark"] .chat-image-context-menu,
 :root[data-theme="dark"] .popover-card,
 :root[data-theme="dark"] .tool-menu {
@@ -7076,17 +6965,9 @@ body .cove-window-controls button {
   left: auto;
 }
 
-/* Chat header hierarchy: shared-screen chat starts directly with messages;
-   the normal chat keeps only the useful title and actions. */
-.chat-panel:not(.compact) > header {
-  min-height: 54px;
-  padding: 8px 16px;
-}
-.chat-panel:not(.compact) > header h2 {
-  margin-top: 0;
-}
-.chat-panel:not(.compact) .chat-copy-notice {
-  top: 60px;
+/* Keep normal chat messages below the transparent native window controls. */
+.chat-panel:not(.compact) {
+  padding-top: 38px;
 }
 .chat-panel.compact .chat-copy-notice {
   top: 14px;
@@ -7137,13 +7018,6 @@ body .cove-window-controls button {
   stroke: var(--line);
   stroke-width: 1;
   vector-effect: non-scaling-stroke;
-}
-
-.strip-chat-font-menu {
-  top: 100%;
-  left: 0;
-  right: auto;
-  bottom: auto;
 }
 
 /* Compact update status popover. It stays above the bottom-right control ball. */
@@ -7629,7 +7503,6 @@ body .cove-window-controls button {
   border-color: #6a5630;
   color: #efc878;
 }
-:root[data-theme="dark"] .chat-font-menu button.active,
 :root[data-theme="dark"] .message-copy-button:hover {
   background: #20395e;
   color: var(--blue);
@@ -8955,34 +8828,6 @@ html.theme-transitioning *::after {
   transform: scale(0.97);
 }
 
-/* The titlebar remains the drag surface.  Only the font picker is raised one
-   layer above it so the size buttons remain clickable at the top edge of the
-   chat panel.  A modal below will deliberately pull it back under its blur. */
-.chat-font-picker {
-  z-index: 3001;
-}
-.chat-font-menu {
-  z-index: 3002;
-}
-
-/* The transparent titlebar is above ordinary page content for dragging. When
-   a Cove foreground surface opens, the font control must join the background
-   snapshot so the scrim can blur it instead of leaving a crisp icon floating
-   above the dialog. The native window controls stay in their own 10000 layer. */
-body:has(
-  .modal-scrim,
-  .audio-popover-layer,
-  .audio-trim-layer,
-  .avatar-crop-scrim,
-  .image-lightbox,
-  .profile-modal-v2-scrim,
-  .user-profile-v2-scrim,
-  .cove-connection-scrim,
-  .cove-settings-scrim
-) .chat-font-picker {
-  z-index: 1;
-}
-
 /* Keep active non-screen controls legible on the dark control-ball surface;
    screen sharing intentionally keeps its existing yellow treatment. */
 :root[data-theme="dark"] .control-ball .ball-side button.enabled-blue,
@@ -9327,4 +9172,84 @@ html.viewport-resizing .cove-shell {
 html.viewport-resizing .cove-shell :is(.member-row, .control-ball, .share-status-bar) {
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
+}
+
+/* The login entry and Settings share one updater, including persisted sources. */
+.auth-update-trigger {
+  position: fixed;
+  right: 20px;
+  bottom: 18px;
+  z-index: 120;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 10px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  color: var(--ink);
+  background: var(--surface);
+  box-shadow: 0 4px 14px rgb(20 40 70 / 8%);
+  font-size: 13px;
+}
+.auth-update-trigger:hover { border-color: var(--blue); }
+.auth-update-trigger:focus-visible,
+.auth-update-dialog button:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 3px;
+}
+.auth-update-dialog {
+  width: min(680px, calc(100vw - 32px));
+  max-height: calc(100vh - 72px);
+  margin: auto;
+  padding: 0;
+  overflow: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: 20px;
+  color: var(--ink);
+  background: var(--surface);
+  box-shadow: 0 24px 80px rgb(0 0 0 / 22%);
+}
+.auth-update-dialog::backdrop { background: rgb(15 25 40 / 38%); }
+.auth-update-content { padding: 24px; }
+.auth-update-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+.auth-update-heading h2 { margin: 0 0 6px; font-size: 20px; }
+.auth-update-heading p { margin: 0; color: var(--muted); font-size: 13px; }
+.update-source-settings {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+}
+.update-source-settings form { display: grid; gap: 10px; }
+.update-source-settings .field { min-width: 0; margin: 0; }
+.update-source-settings .field input { width: 100%; min-width: 0; }
+.update-source-help { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.update-source-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.update-source-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  color: var(--ink);
+  background: var(--surface-strong);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.update-source-actions button:hover:not(:disabled) { border-color: var(--blue); }
+.update-source-actions button:disabled { opacity: 0.5; cursor: default; }
+.update-source-feedback { margin: 0; color: var(--green); font-size: 12px; }
+@media (max-width: 720px) {
+  .auth-page { padding-bottom: 72px; }
+  .auth-update-trigger { right: 12px; bottom: 12px; }
+  .auth-update-content { padding: 16px; }
 }

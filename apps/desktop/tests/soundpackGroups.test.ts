@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { reconcileSoundpackGroupOrder } from '../src/features/soundpacks/soundpackGroups';
 import { addSoundpackGroup, canAddSoundpackGroup, flattenSoundpackGroups, moveSoundpackToGroup, readSoundpackFavorites, readSoundpackGroups, reconcileSoundpackGroups, resolveSoundpackDrop, soundpackFavoritesStorageKey, soundpackGroupsStorageKey, soundpackPreferenceScope, swapSoundpackGroups, type SoundpackGroupGeometry } from '../src/features/soundpacks/soundpackGroups';
 
 const groups = [{ id: 'default', soundIds: ['a', 'b', 'c', 'd', 'e', 'f'] }, { id: 'second', soundIds: ['g'] }];
@@ -83,20 +82,18 @@ test('favorite values are validated, deduplicated and limited without changing t
 test('reconciliation adds new sounds to first group while retaining order and empty groups', () => {
   const previous = [{ id: 'default', soundIds: ['c', 'a'] }, { id: 'second', soundIds: ['b'] }, { id: 'empty', soundIds: [] }];
   const next = reconcileSoundpackGroups(previous, ['new', 'a', 'c']);
-  assert.deepEqual(next, [{ id: 'default', soundIds: ['new', 'c', 'a'] }, { id: 'second', soundIds: [] }, { id: 'empty', soundIds: [] }]);
+  assert.deepEqual(next, [{ id: 'default', soundIds: ['c', 'a', 'new'] }, { id: 'second', soundIds: [] }, { id: 'empty', soundIds: [] }]);
   assert.deepEqual(previous[0].soundIds, ['c', 'a']);
 });
 
-test('a pending room reorder merges the fresh snapshot rank while preserving local group membership', () => {
+test('old room snapshot order never replaces saved personal positions', () => {
   const previous = [{ id: 'default', soundIds: ['a', 'c', 'deleted'] },
     { id: 'second', soundIds: ['b', 'd'] }, { id: 'empty', soundIds: [] }];
-  assert.deepEqual(reconcileSoundpackGroupOrder(previous, ['d', 'c', 'new', 'b', 'a']), [
-    { id: 'default', soundIds: ['c', 'new', 'a'] },
-    { id: 'second', soundIds: ['d', 'b'] }, { id: 'empty', soundIds: [] },
+  assert.deepEqual(reconcileSoundpackGroups(previous, ['d', 'c', 'new', 'b', 'a']), [
+    { id: 'default', soundIds: ['a', 'c', 'new'] },
+    { id: 'second', soundIds: ['b', 'd'] }, { id: 'empty', soundIds: [] },
   ]);
-  assert.deepEqual(reconcileSoundpackGroupOrder([{ id: 'default', soundIds: ['a', 'b', 'c'] }], ['c', 'b', 'a']),
-    [{ id: 'default', soundIds: ['c', 'b', 'a'] }]);
-  assert.deepEqual(previous[0].soundIds, ['a', 'c', 'deleted'], 'merging a room snapshot does not mutate saved input');
+  assert.deepEqual(previous[0].soundIds, ['a', 'c', 'deleted']);
 });
 
 test('last sound can leave a group, retaining empty group and blocking all further additions', () => {

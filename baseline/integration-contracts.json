@@ -1322,6 +1322,27 @@
         "No additional Keystore, certificate, DNS, updater, manifest or capture implementation exception"
       ]
     },
+    "mobilePreparedSoundpackRelease": {
+      "baseCommit": "e31362ce07b316f15265daf6796730d947390b76",
+      "releaseCommit": "9cce11a0983c8ea62a62fef8d3ac5367e77483e9",
+      "publishedMainCommit": "5798e0ec0cc802c476505a32ff90c7795604b338",
+      "releaseVersion": "0.8.4",
+      "documentation": "docs/architecture/mobile-0.8.4-native-exception.md",
+      "hashFormat": "SHA-256 of UTF-8 source after CRLF-to-LF normalization; the original native relocation hash and earlier exception remain immutable",
+      "modifiedOriginal": [
+        {
+          "path": "apps/mobile/android/app/src/main/java/com/covemobile/CoveNativePackage.kt",
+          "originalSha256": "a6f9d5ce72d85d9a29634b8e374d29fac405fb8fab136d878c238f381a1476d8",
+          "baseSha256": "4cd639f4f599d5cf26b8a0c405b4401143d3ceab0a9aaadfa7725ae4248910ce",
+          "sha256": "bb42db264a136dc3e27e71ede40b75196f364010a3dbefd5eb2175cf45504e8f",
+          "reason": "Published mobile 0.8.4 removes the phone screen-sharing module registration and adds CoveSoundpackPlaybackModule for prepared playback; all other native module registrations retain their order"
+        }
+      ],
+      "boundaries": [
+        "Only this exact path and fixed transition from the previous integrated-candidate hash are accepted; no original native snapshot or historical exception is replaced",
+        "This records the already published 0.8.4 release and does not authorize another APK or feed update"
+      ]
+    },
     "presenceToneRelease": {
       "baseCommit": "805f4cfba3b7c52062959df9eee7c26a78c758ee",
       "releaseVersion": "0.8.3",
@@ -1341,6 +1362,39 @@
         "Only the single CoveNativeModule.kt path above may use this fixed replacement hash; all original native hashes and historical extension evidence remain unchanged",
         "The selected F-refined-01 PCM is doubled identically for desktop and mobile local presence cues; do not change system or call volume, audio focus, capture, DSP, DNS, certificate or updater behavior",
         "No Android manifest permission, application ID or signing identity change; current release metadata is 0.8.3 with versionCode 16"
+      ]
+    },
+    "mobileInAppUpdateCandidate": {
+      "baseCommit": "e31362ce07b316f15265daf6796730d947390b76",
+      "hashFormat": "SHA-256 of UTF-8 source after CRLF-to-LF normalization; all original native relocation hashes remain immutable",
+      "modifiedOriginal": [
+        {
+          "path": "apps/mobile/android/app/src/main/java/com/covemobile/MobileUpdateModule.kt",
+          "baseSha256": "3a52b330bfccca607b75d5b7e0eb618ab74eb697399697a49dd6b033972df18b",
+          "sha256": "564811cadda69f7ff3bfe22ccc752045538a88f07a11091c61c44cfc76f311b8",
+          "reason": "Complete the explicitly requested in-app update flow with request-scoped progress/cancellation, verified-cache ownership and an installation lease through the user-confirmed system installer handoff; retain strict installed identity/signature checks"
+        },
+        {
+          "path": "apps/mobile/android/app/src/test/java/com/covemobile/MobileUpdateNetworkTest.kt",
+          "baseSha256": "f4e2887fb375fade99062d38143edd1efeaf545166bd298c65851673b095cb2f",
+          "sha256": "76a31c3bde68fbffd9b426f019b31fbd9a202d87b9026e8cca18c3fe4eee3a13",
+          "reason": "Extend the existing native update network contract to require the compiled official HTTPS mirror and reject arbitrary chat-server download sources"
+        }
+      ],
+      "additionalModifiedSources": [
+        "apps/mobile/android/app/src/main/java/com/covemobile/MobileApkUpdater.kt",
+        "apps/mobile/android/app/src/main/res/xml/update_paths.xml",
+        "apps/mobile/android/app/src/test/java/com/covemobile/MobileApkUpdaterTest.kt"
+      ],
+      "newTests": [
+        "apps/mobile/android/app/src/test/java/com/covemobile/MobileApkTransportTest.kt"
+      ],
+      "boundaries": [
+        "Only these two paths from contracts.native may use the documented replacement hashes; original hashes and historical exception records remain unchanged",
+        "No capture, DSP, voice, Keystore, DNS, certificate trust, manifest permission, application ID, formal version, signing identity or published update-feed changes",
+        "Only verified APKs are exposed read-only by FileProvider; size/SHA-256/package/version/minSdk/current-signer checks remain mandatory and are repeated before requesting the system installer",
+        "Unknown-source permission remains a user-controlled Android setting; no silent install or automatic permission grant",
+        "Native JVM/API compilation and mocked JavaScript checks do not establish real-device PackageManager, FileProvider or OEM installation acceptance"
       ]
     }
   }

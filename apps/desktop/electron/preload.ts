@@ -1,8 +1,331 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, sharedTexture } from "electron";
+import type { NativeScreenFrame, NativeScreenOptions, NativeScreenStartResult } from './native-screen-capture-protocol';
 import type { UpdateState } from "./updater-core";
+import type { UpdateSettings, UpdateSettingsResult } from "./update-settings-types";
 import type { RemoteControlActivation } from "./remote-control-activation";
 import type { RemoteControlInput } from "./remote-control";
 import type { InstallationIntegrityState } from './integrity-state';
+
+// Keep this bridge in the sandboxed preload: it may require Electron builtins,
+// but cannot require an unbundled local runtime module. Handles never cross the
+// context bridge. Each imported texture has its own transfer/release barrier.
+const nativeFrameListeners = new Map<string, (frame: unknown, metadata: NativeScreenFrame) => Promise<void>>();
+const nativeEndListeners = new Map<string, (reason: string) => void>();
+const nativeReleasePermits = new Map<string, () => void>();
+const nativeEarlyPermits = new Set<string>();
+const nativeRequestId = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9_-]{8,80}$/.test(value);
+const nativeEnabled = process.platform === 'win32' && process.argv.includes('--cove-native-gpu-capture=1') &&
+  typeof sharedTexture?.setSharedTextureReceiver === 'function';
+const nativeEarlyImportRelease = nativeEnabled && process.versions?.electron === '44.0.0' &&
+  process.argv.includes('--cove-native-early-import-release=1');
+// Process-local receiver/import observations, not proof of released GPU resources.
+const nativeEarlyImportReleaseDiagnostics = nativeEarlyImportRelease
+  ? { imports: 0, released: 0, releasedBeforeListenerSettled: 0, releaseFailures: 0, openImports: 0,
+    permitTimeouts: 0, receiverFailures: 0, activeReceivers: 0 } : null;
+const incrementEarlyImportCounter = (value: number) => Math.min(Number.MAX_SAFE_INTEGER, value + 1);
+const getEarlyImportReleaseDiagnostics = () => nativeEarlyImportReleaseDiagnostics
+  ? Object.freeze({ ...nativeEarlyImportReleaseDiagnostics }) : null;
+type NativeCpuFrameTimingStage = 'construct' | 'listener' | 'close' | 'handler';
+type NativeCpuFrameTimingAggregate = { count: number; totalMs: number; maxMs: number; buckets: number[] };
+const nativeCpuFrameTimingAggregate = (): NativeCpuFrameTimingAggregate =>
+  ({ count: 0, totalMs: 0, maxMs: 0, buckets: [0, 0, 0, 0, 0, 0, 0] });
+// Opt-in, process-local aggregates only. No frame, request or session data is
+// retained, and the default path never reads the diagnostic clock.
+const nativeCpuFrameTiming: Record<NativeCpuFrameTimingStage, NativeCpuFrameTimingAggregate> | null =
+  nativeEnabled && process.argv.includes('--cove-native-cpu-frame-timing=1') ? {
+    construct: nativeCpuFrameTimingAggregate(), listener: nativeCpuFrameTimingAggregate(),
+    close: nativeCpuFrameTimingAggregate(), handler: nativeCpuFrameTimingAggregate(),
+  } : null;
+const nativeCpuFrameTimingNow = (): number | undefined => {
+  if (!nativeCpuFrameTiming) return undefined;
+  try {
+    const now = performance.now();
+    return Number.isFinite(now) ? now : undefined;
+  } catch { return undefined; }
+};
+const nativeCpuFrameTimingRecord = (stage: NativeCpuFrameTimingStage, startedAt: number | undefined) => {
+  if (!nativeCpuFrameTiming || startedAt === undefined) return;
+  // Diagnostics must never change receiver retirement, close or final ACK.
+  try {
+    const endedAt = nativeCpuFrameTimingNow();
+    if (endedAt === undefined || endedAt < startedAt) return;
+    const elapsed = endedAt - startedAt;
+    if (!Number.isFinite(elapsed)) return;
+    const aggregate = nativeCpuFrameTiming[stage];
+    const bucket = elapsed < 0.5 ? 0 : elapsed < 1 ? 1 : elapsed < 2 ? 2 : elapsed < 4 ? 3 :
+      elapsed < 8 ? 4 : elapsed < 16 ? 5 : 6;
+    aggregate.count++;
+    aggregate.totalMs += elapsed;
+    aggregate.maxMs = Math.max(aggregate.maxMs, elapsed);
+    aggregate.buckets[bucket]++;
+  } catch { /* Diagnostics cannot affect the CPU frame ownership barrier. */ }
+};
+const getNativeCpuFrameTiming = () => {
+  const timing = nativeCpuFrameTiming;
+  if (!timing) return null;
+  const clone = (stage: NativeCpuFrameTimingStage) => {
+    const aggregate = timing[stage];
+    return Object.freeze({ count: aggregate.count, totalMs: aggregate.totalMs, maxMs: aggregate.maxMs,
+      buckets: Object.freeze([...aggregate.buckets]) });
+  };
+  return Object.freeze({
+    // Each upper bound is exclusive; the last bucket contains 16 ms and above.
+    bucketUpperBoundsMs: Object.freeze([0.5, 1, 2, 4, 8, 16, null]),
+    stages: Object.freeze({ construct: clone('construct'), listener: clone('listener'), close: clone('close'), handler: clone('handler') }),
+  });
+};
+const nativePermitKey = (metadata: NativeScreenFrame) => `${metadata.sessionId}:${metadata.serial}`;
+// The intrinsic getter checks the ArrayBuffer internal slot across realms. A
+// byteLength property or Symbol.toStringTag on an arbitrary object is not enough.
+const nativeArrayBufferByteLength = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'byteLength')!.get!;
+type NativeCpuVideoFrame = { close(): void };
+type NativeCpuVideoFrameConstructor = new (data: ArrayBuffer, init: {
+  format: 'NV12'; codedWidth: number; codedHeight: number; displayWidth: number; displayHeight: number; timestamp: number;
+  layout: { offset: number; stride: number }[];
+  colorSpace: { primaries: 'bt709' | 'smpte170m'; transfer: 'bt709' | 'smpte170m'; matrix: 'bt709' | 'smpte170m'; fullRange: false };
+  transfer: ArrayBuffer[];
+}) => NativeCpuVideoFrame;
+const nativeFrameValid = (value: NativeScreenFrame): boolean => Boolean(value && nativeRequestId(value.requestId) &&
+  typeof value.sessionId === 'string' && /^[A-Za-z0-9-]{8,80}$/.test(value.sessionId) &&
+  Number.isSafeInteger(value.serial) && value.serial > 0 && Number.isInteger(value.slot) && value.slot >= 0 && value.slot < 3 &&
+  Number.isInteger(value.width) && value.width >= 2 && value.width <= 4096 &&
+  Number.isInteger(value.height) && value.height >= 2 && value.height <= 2560 &&
+  Number.isSafeInteger(value.timestamp) && value.timestamp >= 0 && typeof value.refresh === 'boolean' &&
+  (value.pixelFormat === undefined || value.pixelFormat === 'bgra' || value.pixelFormat === 'nv12') &&
+  (value.storage === undefined || value.storage === 'cpu') &&
+  (value.colorSpace === undefined || value.colorSpace === 'bt601-limited' || value.colorSpace === 'bt709-limited'));
+
+/** Electron 44 keeps getVideoFrame() references alive independently of release().
+ * Remove only the import's extra reference after the existing transfer permit;
+ * listener completion, frame close and main's allReferencesReleased stay owned
+ * by their existing paths. Keep this inline for the sandboxed preload.
+ */
+async function receiveEarlyImportRelease(imported: Electron.SharedTextureImported, metadata: NativeScreenFrame) {
+  const diagnostics = nativeEarlyImportReleaseDiagnostics!;
+  diagnostics.activeReceivers = incrementEarlyImportCounter(diagnostics.activeReceivers);
+  try {
+    diagnostics.imports = incrementEarlyImportCounter(diagnostics.imports);
+    diagnostics.openImports = incrementEarlyImportCounter(diagnostics.openImports);
+    let releaseAttempted = false, failed = false, listenerSettled = true;
+    const stopReceiver = () => {
+      if (failed) return;
+      failed = true;
+      diagnostics.receiverFailures = incrementEarlyImportCounter(diagnostics.receiverFailures);
+      if (!nativeRequestId(metadata?.requestId)) return;
+      try {
+        void ipcRenderer.invoke('cove:native-screen:stop', metadata.requestId, 'receiver_failed').catch(() => {});
+      } catch { /* A destroyed receiver cannot issue another cleanup request. */ }
+    };
+    const releaseImport = () => {
+      if (releaseAttempted) return;
+      releaseAttempted = true;
+      try {
+        imported.release();
+        diagnostics.released = incrementEarlyImportCounter(diagnostics.released);
+        if (!listenerSettled) diagnostics.releasedBeforeListenerSettled =
+          incrementEarlyImportCounter(diagnostics.releasedBeforeListenerSettled);
+        diagnostics.openImports--;
+      } catch {
+        diagnostics.releaseFailures = incrementEarlyImportCounter(diagnostics.releaseFailures);
+        console.warn('[native-screen] renderer_import_release_error', 'release_failed');
+        // A throw is not evidence that this reference was released. Never retry.
+        stopReceiver();
+      }
+    };
+    if (!nativeFrameValid(metadata) || metadata.storage !== undefined) { releaseImport(); return; }
+    const key = nativePermitKey(metadata);
+    let frame: ReturnType<typeof imported.getVideoFrame> | undefined;
+    let permitTimer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
+    let permitSettled = nativeEarlyPermits.delete(key);
+    let resolvePermit: (() => void) | undefined;
+    if (!permitSettled) {
+      const settlePermit = () => {
+        permitSettled = true;
+        resolvePermit?.();
+        // Timeout settles cleanup only; it does not authorize early handoff.
+        if (frame && !timedOut) releaseImport();
+      };
+      nativeReleasePermits.set(key, settlePermit);
+      permitTimer = setTimeout(() => {
+        // The original watchdog also bounds a listener after its permit arrives.
+        if (!timedOut) diagnostics.permitTimeouts = incrementEarlyImportCounter(diagnostics.permitTimeouts);
+        timedOut = true;
+        nativeReleasePermits.delete(key);
+        stopReceiver();
+        settlePermit();
+      }, 1500);
+    }
+    try {
+      const listener = nativeFrameListeners.get(metadata.requestId);
+      if (listener) {
+        frame = imported.getVideoFrame();
+        listenerSettled = false;
+        if (permitSettled) releaseImport();
+        try { await listener(frame, metadata); }
+        finally { listenerSettled = true; }
+      }
+    } catch (error) {
+      console.warn('[native-screen] renderer_frame_callback_error', error instanceof Error ? error.name : 'unknown');
+      stopReceiver();
+    } finally {
+      try { frame?.close(); }
+      catch { stopReceiver(); }
+      if (!permitSettled) await new Promise<void>(resolve => { resolvePermit = resolve; });
+      clearTimeout(permitTimer);
+      nativeReleasePermits.delete(key);
+      releaseImport();
+      if (timedOut) nativeEarlyPermits.delete(key);
+    }
+  } finally {
+    diagnostics.activeReceivers--;
+  }
+}
+
+if (nativeEnabled) {
+  ipcRenderer.on('cove:native-screen:release-permit', (_event, metadata: NativeScreenFrame) => {
+    if (!nativeFrameValid(metadata) || metadata.storage !== undefined) return;
+    const key = nativePermitKey(metadata);
+    const release = nativeReleasePermits.get(key);
+    if (release) { nativeReleasePermits.delete(key); release(); }
+    else if (nativeEarlyPermits.size < 6) nativeEarlyPermits.add(key);
+  });
+  ipcRenderer.on('cove:native-screen:ended', (_event, event: { requestId: string; reason: string }) => {
+    if (!event || !nativeRequestId(event.requestId) || typeof event.reason !== 'string') return;
+    nativeEndListeners.get(event.requestId)?.(event.reason);
+  });
+  ipcRenderer.on('cove:native-screen:cpu-frame', async (_event, metadata: NativeScreenFrame, data: ArrayBuffer) => {
+    if (!nativeFrameValid(metadata) || metadata.storage !== 'cpu' || metadata.pixelFormat !== 'nv12' ||
+        (metadata.colorSpace !== 'bt601-limited' && metadata.colorSpace !== 'bt709-limited') ||
+        metadata.width % 2 !== 0 || metadata.height % 2 !== 0) {
+      if (nativeRequestId(metadata?.requestId)) {
+        void ipcRenderer.invoke('cove:native-screen:stop', metadata.requestId, 'receiver_failed').catch(() => {});
+      }
+      return;
+    }
+    // Starts after metadata validation and ends after synchronous final ACK send.
+    const handlerStartedAt = nativeCpuFrameTimingNow();
+    let frame: NativeCpuVideoFrame | undefined;
+    let failed = false;
+    const stopReceiver = () => {
+      if (failed) return;
+      failed = true;
+      void ipcRenderer.invoke('cove:native-screen:stop', metadata.requestId, 'receiver_failed').catch(() => {});
+    };
+    try {
+      const expectedBytes = metadata.width * metadata.height * 3 / 2;
+      if (expectedBytes > 16 * 1024 * 1024 || nativeArrayBufferByteLength.call(data) !== expectedBytes) {
+        throw new TypeError('invalid_native_cpu_frame_bytes');
+      }
+      const listener = nativeFrameListeners.get(metadata.requestId);
+      if (listener) {
+        const CpuVideoFrame = (globalThis as { VideoFrame?: NativeCpuVideoFrameConstructor }).VideoFrame;
+        if (typeof CpuVideoFrame !== 'function') throw new TypeError('native_cpu_video_frame_unavailable');
+        const matrix = metadata.colorSpace === 'bt601-limited' ? 'smpte170m' : 'bt709';
+        const constructStartedAt = nativeCpuFrameTimingNow();
+        try {
+          frame = new CpuVideoFrame(data, {
+            format: 'NV12', codedWidth: metadata.width, codedHeight: metadata.height,
+            displayWidth: metadata.width, displayHeight: metadata.height, timestamp: metadata.timestamp,
+            layout: [{ offset: 0, stride: metadata.width }, { offset: metadata.width * metadata.height, stride: metadata.width }],
+            colorSpace: { primaries: matrix, transfer: matrix, matrix, fullRange: false },
+            // Implementations may consume the ArrayBuffer; correctness also holds
+            // when the constructor copies it and ignores this transfer hint.
+            transfer: [data],
+          });
+        } finally { nativeCpuFrameTimingRecord('construct', constructStartedAt); }
+        const listenerStartedAt = nativeCpuFrameTimingNow();
+        try { await listener(frame, metadata); }
+        finally { nativeCpuFrameTimingRecord('listener', listenerStartedAt); }
+      }
+    } catch (error) {
+      console.warn('[native-screen] renderer_cpu_frame_error', error instanceof Error ? error.name : 'unknown');
+      stopReceiver();
+    } finally {
+      const closeStartedAt = frame ? nativeCpuFrameTimingNow() : undefined;
+      try { frame?.close(); }
+      catch { stopReceiver(); }
+      finally { nativeCpuFrameTimingRecord('close', closeStartedAt); }
+      // Main owns the slot bytes independently. Only this CPU acknowledgment
+      // returns that credit; it never participates in GPU release permits.
+      try { ipcRenderer.send('cove:native-screen:cpu-frame-done', metadata); }
+      finally { nativeCpuFrameTimingRecord('handler', handlerStartedAt); }
+    }
+  });
+  sharedTexture.setSharedTextureReceiver(async ({ importedSharedTexture: imported }, metadata: NativeScreenFrame) => {
+    if (nativeEarlyImportRelease) return receiveEarlyImportRelease(imported, metadata);
+    let frame: ReturnType<typeof imported.getVideoFrame> | undefined;
+    // A malformed message is never sent by the main broker. Retire the import
+    // without issuing a slot credit rather than trusting unvalidated metadata.
+    if (!nativeFrameValid(metadata) || metadata.storage !== undefined) { imported.release(); return; }
+    const key = nativePermitKey(metadata);
+    let permitTimer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
+    let permitSettled = nativeEarlyPermits.delete(key);
+    let resolvePermit: (() => void) | undefined;
+    if (!permitSettled) {
+      const settlePermit = () => { permitSettled = true; resolvePermit?.(); };
+      nativeReleasePermits.set(key, settlePermit);
+      permitTimer = setTimeout(() => {
+        timedOut = true;
+        nativeReleasePermits.delete(key);
+        // No credit is fabricated on a timeout. Main retires this session.
+        void ipcRenderer.invoke('cove:native-screen:stop', metadata.requestId, 'receiver_failed').catch(() => {});
+        settlePermit();
+      }, 1500);
+    }
+    try {
+      const listener = nativeFrameListeners.get(metadata.requestId);
+      if (listener) {
+        frame = imported.getVideoFrame();
+        await listener(frame, metadata);
+      }
+    } catch (error) {
+      console.warn('[native-screen] renderer_frame_callback_error', error instanceof Error ? error.name : 'unknown');
+      void ipcRenderer.invoke('cove:native-screen:stop', metadata.requestId, 'receiver_failed').catch(() => {});
+    } finally {
+      frame?.close();
+      // Usually transfer has already settled while the listener was writing.
+      // Keep the same barrier without allocating/awaiting a resolved promise.
+      if (!permitSettled) await new Promise<void>(resolve => { resolvePermit = resolve; });
+      clearTimeout(permitTimer);
+      nativeReleasePermits.delete(key);
+      // sendSharedTexture owns another main-process reference until transfer
+      // completion. On timeout the entire session is retired, never reused.
+      imported.release();
+      if (timedOut) nativeEarlyPermits.delete(key);
+    }
+  });
+}
+contextBridge.exposeInMainWorld('coveNativeScreen', {
+  supported: nativeEnabled,
+  // Experimental handoff only; the qualified runtime and explicit launch flag
+  // are required. This grants no additional IPC, source or renderer authority.
+  preferredFrameSink: nativeEnabled && process.versions?.electron === '44.0.0'
+    ? process.argv.includes('--cove-native-frame-sink=worker') ? 'worker'
+      : process.argv.includes('--cove-native-frame-sink=gpu-snapshot') ? 'gpu-snapshot'
+      : process.argv.includes('--cove-native-frame-sink=canvas') ? 'canvas' : undefined
+    : undefined,
+  getCpuFrameTiming: getNativeCpuFrameTiming,
+  getEarlyImportReleaseDiagnostics,
+  start: (requestId: string, options: NativeScreenOptions): Promise<NativeScreenStartResult> =>
+    nativeEnabled && nativeRequestId(requestId)
+      ? ipcRenderer.invoke('cove:native-screen:start', requestId, options)
+      : Promise.resolve({ ok: false, reason: 'unavailable' }),
+  stop: (requestId: string, fault?: 'renderer_failed' | 'receiver_failed'): Promise<boolean> => nativeRequestId(requestId) &&
+    (fault === undefined || fault === 'renderer_failed' || fault === 'receiver_failed')
+    ? ipcRenderer.invoke('cove:native-screen:stop', requestId, fault) : Promise.resolve(false),
+  onFrame: (requestId: string, listener: (frame: unknown, metadata: NativeScreenFrame) => Promise<void>) => {
+    if (!nativeRequestId(requestId) || typeof listener !== 'function') return () => {};
+    nativeFrameListeners.set(requestId, listener);
+    return () => { if (nativeFrameListeners.get(requestId) === listener) nativeFrameListeners.delete(requestId); };
+  },
+  onEnded: (requestId: string, listener: (reason: string) => void) => {
+    if (!nativeRequestId(requestId) || typeof listener !== 'function') return () => {};
+    nativeEndListeners.set(requestId, listener);
+    return () => { if (nativeEndListeners.get(requestId) === listener) nativeEndListeners.delete(requestId); };
+  },
+});
 
 contextBridge.exposeInMainWorld('coveServerAccess', {
   get: (server: string, email: string) => ipcRenderer.invoke('cove:server-access:get', server, email),
@@ -37,6 +360,10 @@ contextBridge.exposeInMainWorld('coveAnnotationOverlay', {
 });
 
 contextBridge.exposeInMainWorld("coveUpdater", {
+  getSettings: (): Promise<UpdateSettings> => ipcRenderer.invoke("cove:update:get-settings"),
+  saveSettings: (serverUrl: string): Promise<UpdateSettingsResult> => ipcRenderer.invoke("cove:update:save-settings", serverUrl),
+  checkGithub: (): Promise<UpdateState> => ipcRenderer.invoke("cove:update:check-github"),
+  checkAutomatically: (): Promise<UpdateState> => ipcRenderer.invoke("cove:update:check-automatically"),
   getState: (): Promise<UpdateState> =>
     ipcRenderer.invoke("cove:update:get-state"),
   checkNow: (): Promise<UpdateState> =>

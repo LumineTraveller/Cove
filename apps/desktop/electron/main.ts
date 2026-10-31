@@ -11,9 +11,15 @@ import {
   ipcMain,
   shell,
   safeStorage,
+  screen,
 } from "electron";
 import path from "path";
 import { AccountPasswordStore } from './account-password-store';
+import { screenCaptureFeaturePolicy } from './screen-capture-features';
+import { nativeScreenCaptureEnabled } from './native-screen-capture-policy';
+import { NativeScreenCaptureController } from './native-screen-capture';
+import { nativeScreenStartDiagnostic } from './native-screen-capture-diagnostics';
+import { createNativeScreenTimingLogger } from './native-screen-capture-timing';
 import { registerAccountPasswordIpc } from './account-password-ipc';
 import { ServerAccessStore } from './server-access-store';
 import { registerServerAccessIpc } from './server-access-ipc';
@@ -50,12 +56,20 @@ for (const stream of [process.stdout, process.stderr]) {
   });
 }
 
-// Electron 29 / Chromium 122 在 Windows 上默认关闭 WGC 屏幕捕获，回退到
-// 较慢的 DXGI/GDI 抓屏路径。WGC 直接使用 Windows.Graphics.Capture 与
-// D3D11 图形链路；不受支持时 WebRTC 会安全回退到默认捕获器。
-// 该 Chromium Feature 必须在 app.whenReady() 之前启用。
+// Feature switches must precede app.whenReady(). Chromium 152 only selects WGC
+// for monitors on Windows 11 24H2+, irrespective of the older AllowWgc flag.
+// Its zero-copy conversion path also reduces copies on the DXGI fallback.
+// COVE_DISABLE_ZERO_COPY_DESKTOP_CAPTURE=1 restores Chromium's legacy path.
 if (process.platform === "win32") {
-  app.commandLine.appendSwitch('enable-features', 'AllowWgcScreenCapturer');
+  const features = screenCaptureFeaturePolicy({
+    platform: process.platform,
+    chromiumVersion: process.versions.chrome,
+    enabledFeatures: app.commandLine.getSwitchValue('enable-features'),
+    disabledFeatures: app.commandLine.getSwitchValue('disable-features'),
+    disableZeroCopy: process.env.COVE_DISABLE_ZERO_COPY_DESKTOP_CAPTURE === '1',
+  });
+  app.commandLine.appendSwitch('enable-features', features.enabledFeatures);
+  if (features.disabledFeatures) app.commandLine.appendSwitch('disable-features', features.disabledFeatures);
 }
 
 const isDev = !app.isPackaged;
@@ -73,11 +87,22 @@ function readPackagedBuildFlavor(): string | undefined {
   }
 }
 const buildFlavor = readPackagedBuildFlavor();
+const isNativeCaptureLabBuild = buildFlavor === 'native-capture-lab';
+const nativeCaptureEnabled = nativeScreenCaptureEnabled({
+  platform: process.platform, arch: process.arch, electronVersion: process.versions.electron,
+  isPackaged: app.isPackaged, buildFlavor,
+  optIn: process.env.COVE_NATIVE_GPU_CAPTURE, disable: process.env.COVE_DISABLE_NATIVE_GPU_CAPTURE,
+});
+const nativeFrameSinkPreference = process.env.COVE_NATIVE_FRAME_SINK;
+const nativeExperimentalFrameSink = nativeCaptureEnabled && process.versions.electron === '44.0.0' &&
+  (nativeFrameSinkPreference === 'worker' || nativeFrameSinkPreference === 'gpu-snapshot') &&
+  process.env.COVE_NATIVE_GPU_CAPTURE_CPU_FRAMES !== '1' && process.env.COVE_NATIVE_GPU_CAPTURE_PIXEL_FORMAT !== 'nv12'
+    ? nativeFrameSinkPreference : undefined;
 const isAnnotationFixBuild = buildFlavor === 'annotation-fix';
 const isMediaFixBuild = buildFlavor === 'media-fix';
-const isNetworkLabBuild = buildFlavor === 'network-lab' || isAnnotationFixBuild || isMediaFixBuild;
+const isNetworkLabBuild = buildFlavor === 'network-lab' || isAnnotationFixBuild || isMediaFixBuild || isNativeCaptureLabBuild;
 if (isNetworkLabBuild) {
-  const labUserDataPath = path.join(app.getPath("appData"), isMediaFixBuild ? 'Cove Media Fix' : isAnnotationFixBuild ? 'Cove Annotation Fix' : "Cove Network Lab");
+  const labUserDataPath = path.join(app.getPath("appData"), isNativeCaptureLabBuild ? 'Cove Native Capture Lab' : isMediaFixBuild ? 'Cove Media Fix' : isAnnotationFixBuild ? 'Cove Annotation Fix' : "Cove Network Lab");
   const labSessionDataPath = path.join(labUserDataPath, "session");
   mkdirSync(labSessionDataPath, { recursive: true });
   app.setPath("userData", labUserDataPath);
@@ -91,6 +116,27 @@ const devRendererURL = process.env.COVE_DEV_RENDERER_URL || 'http://127.0.0.1:55
 let updaterController: AutoUpdaterController | null = null;
 let integrityController: ReturnType<typeof createInstallationIntegrityController> | null = null;
 let mainWindow: BrowserWindow | null = null;
+const nativeTimingEnabled = nativeCaptureEnabled && process.env.COVE_NATIVE_GPU_CAPTURE_TIMING === '1';
+let nativeTimingLogger: ReturnType<typeof createNativeScreenTimingLogger> | undefined;
+const nativeCompletionPreference = process.env.COVE_NATIVE_GPU_CAPTURE_COMPLETION;
+const nativeScreenCapture = new NativeScreenCaptureController({
+  enabled: nativeCaptureEnabled,
+  timing: nativeTimingEnabled,
+  onHelperTiming: nativeTimingEnabled ? (sample, captureNumber) => nativeTimingLogger?.helper(sample, captureNumber) : undefined,
+  pixelFormat: process.env.COVE_NATIVE_GPU_CAPTURE_PIXEL_FORMAT === 'nv12' ? 'nv12' : 'bgra',
+  storage: process.env.COVE_NATIVE_GPU_CAPTURE_CPU_FRAMES === '1' ? 'cpu' : 'gpu',
+  completion: nativeCompletionPreference === 'query' || nativeCompletionPreference === 'fence'
+    ? nativeCompletionPreference : undefined,
+  helperPath: app.isPackaged ? path.join(process.resourcesPath, 'native-screen-capture-helper.exe') :
+    path.join(__dirname, '../build/native-screen-capture-helper.exe'),
+});
+if (nativeTimingEnabled) {
+  nativeTimingLogger = createNativeScreenTimingLogger({
+    snapshot: () => nativeScreenCapture.snapshot(),
+    log: value => console.info('[native-screen-timing]', JSON.stringify({ ...value as object, observedAtEpochMs: Date.now() })),
+  });
+  app.once('before-quit', () => nativeTimingLogger?.stop());
+}
 const annotationOverlay = new AnnotationOverlayController((token, reason) => {
   mainWindow?.webContents.send('cove:annotation-overlay:failure', { token, reason });
 }, (token, input) => {
@@ -160,17 +206,20 @@ function createWindow() {
       nodeIntegration: false,
       contextIsolation: true,
       preload: path.join(__dirname, "preload.js"),
+      additionalArguments: nativeCaptureEnabled ? ['--cove-native-gpu-capture=1',
+        ...(nativeExperimentalFrameSink ? ['--cove-native-frame-sink=' + nativeExperimentalFrameSink] : [])] : [],
     },
   });
   mainWindow = win;
   installNativeResizeState(win);
   win.on("closed", () => {
+    nativeScreenCapture.reset();
     annotationOverlay.setCaptureSource(null);
     if (mainWindow === win) mainWindow = null;
   });
-  win.webContents.on('render-process-gone', () => annotationOverlay.setCaptureSource(null));
+  win.webContents.on('render-process-gone', () => { nativeScreenCapture.reset(); annotationOverlay.setCaptureSource(null); });
   win.webContents.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => {
-    if (isMainFrame) annotationOverlay.setCaptureSource(null);
+    if (isMainFrame) { nativeScreenCapture.reset(); annotationOverlay.setCaptureSource(null); }
   });
   const notifyWindowState = () => {
     if (!win.isDestroyed()) win.webContents.send("cove:window-state", win.isMaximized());
@@ -289,6 +338,14 @@ function createWindow() {
         // process-loopback capture with Cove excluded when system audio is
         // requested, and the display stream itself remains video-only.
         annotationOverlay.setCaptureSource(source);
+        const primaryDisplay = screen.getPrimaryDisplay();
+        nativeScreenCapture.noteStockSelection({
+          sourceId: source.id, displayId: source.display_id,
+          primaryDisplayId: String(primaryDisplay.id), displayCount: screen.getAllDisplays().length,
+          sourceWidth: Math.round(primaryDisplay.size.width * primaryDisplay.scaleFactor),
+          sourceHeight: Math.round(primaryDisplay.size.height * primaryDisplay.scaleFactor),
+          selectedAt: Date.now(),
+        });
         callback({ video: source });
       })
       .catch((error) => {
@@ -301,6 +358,22 @@ function createWindow() {
 app.whenReady().then(() => {
   const integritySender = (event: Electron.IpcMainInvokeEvent) =>
     event.sender === mainWindow?.webContents && event.senderFrame === mainWindow?.webContents.mainFrame;
+  ipcMain.handle('cove:native-screen:start', async (event, requestId, options) => {
+    if (!integritySender(event)) return { ok: false, reason: 'untrusted_sender' };
+    nativeTimingLogger?.start();
+    const result = await nativeScreenCapture.start(event.sender, requestId, options);
+    try {
+      console.info('[native-screen-start]', JSON.stringify(nativeScreenStartDiagnostic(result, nativeScreenCapture.snapshot())));
+    } catch { /* Observability must never change capture or fallback behavior. */ }
+    return result;
+  });
+  ipcMain.handle('cove:native-screen:stop', (event, requestId, fault) => integritySender(event)
+    ? nativeScreenCapture.stop(event.sender, requestId, fault) : false);
+  ipcMain.on('cove:native-screen:cpu-frame-done', (event, metadata) => {
+    if (event.sender === mainWindow?.webContents && !event.sender.isDestroyed() &&
+        event.senderFrame === mainWindow?.webContents.mainFrame)
+      nativeScreenCapture.acknowledgeCpuFrame(event.sender, metadata);
+  });
   const unavailableIntegrityState: InstallationIntegrityState = {
     status: 'disabled', version: app.getVersion(), platform: process.platform, arch: process.arch,
     message: '安装完整性服务尚未就绪。',
@@ -491,6 +564,24 @@ app.whenReady().then(() => {
       return remoteInputController.send(sessionId, input as RemoteControlInput);
     },
   );
+  ipcMain.handle("cove:update:get-settings", (event, ...args: unknown[]) =>
+    integritySender(event) && !args.length
+      ? updaterController?.getSettings() ?? { serverUrl: '', automaticEnabled: false }
+      : { serverUrl: '', automaticEnabled: false });
+  ipcMain.handle("cove:update:save-settings", (event, ...args: unknown[]) => {
+    if (!integritySender(event) || args.length !== 1 || typeof args[0] !== 'string') {
+      return { ok: false, settings: { serverUrl: '', automaticEnabled: false }, error: '无效的更新设置请求。' };
+    }
+    return updaterController?.saveSettings(args[0]) ?? {
+      ok: false, settings: { serverUrl: '', automaticEnabled: false }, error: '更新服务尚未准备好。',
+    };
+  });
+  ipcMain.handle("cove:update:check-automatically", (event, ...args: unknown[]) =>
+    integritySender(event) && !args.length && !integrityController?.isBusy()
+      ? updaterController?.checkAutomatically() ?? unavailableUpdateState : unavailableUpdateState);
+  ipcMain.handle("cove:update:check-github", (event, ...args: unknown[]) =>
+    integritySender(event) && !args.length && !integrityController?.isBusy()
+      ? updaterController?.checkGithub() ?? unavailableUpdateState : unavailableUpdateState);
   ipcMain.handle(
     "cove:update:get-state",
     () => updaterController?.getState() ?? unavailableUpdateState,
@@ -642,6 +733,7 @@ app.whenReady().then(() => {
 });
 
 app.on("will-quit", () => {
+  nativeScreenCapture.reset();
   annotationOverlay.setCaptureSource(null);
   applicationAudioCapture.stop();
   screenAudioCapture.stop();

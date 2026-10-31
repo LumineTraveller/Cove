@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { Socket } from 'socket.io-client';
 import { MEDIA_TIMING_DEFINITIONS, rtcSecondsToMilliseconds } from '@cove/client-core';
 
@@ -16,6 +16,9 @@ import {
   videoCounterSample,
 } from './mediaDiagnostics';
 import { SCREEN_MAX_BITRATE_BPS, type ScreenEncodingPlan } from '../screen/screenCapture';
+import { getNativeScreenCaptureDiagnostics, getLastNativeScreenCaptureAttempt, observeNativeFrameStability } from '../screen/nativeScreenCapture';
+import { readFramePresentation } from './framePresentation';
+import { FRAME_STABILITY_DEFINITION } from './frameStabilityView';
 
 import {
   Transport,
@@ -33,6 +36,7 @@ export interface useMediaDiagnosticsDependencies {
   readonly screenProducer: import('react').MutableRefObject<Producer | null>;
   readonly watchingScreenPeerRef: import('react').MutableRefObject<string | null>;
   readonly statsEnabledRef: import('react').MutableRefObject<boolean>;
+  readonly statsEnabled: boolean;
   readonly videoCounterPrev: import('react').MutableRefObject<RtcVideoCounterSample | null>;
   readonly receiveLossPrev: import('react').MutableRefObject<{
     lost: number;
@@ -77,9 +81,30 @@ export interface useMediaDiagnosticsDependencies {
 }
 
 export function useMediaDiagnostics(deps: useMediaDiagnosticsDependencies) {
+  const latestDeps = useRef(deps);
+  latestDeps.current = deps;
+  const nativeObservation = useRef<{
+    track: MediaStreamTrack;
+    observer: NonNullable<ReturnType<typeof observeNativeFrameStability>>;
+  } | null>(null);
+  const nativeTrack = deps.screenProducer.current?.track ?? null;
+  useEffect(() => {
+    if (!deps.statsEnabled || !nativeTrack) return;
+    const observer = observeNativeFrameStability(nativeTrack);
+    if (!observer) return;
+    const owned = { track: nativeTrack, observer };
+    nativeObservation.current = owned;
+    return () => {
+      observer.dispose();
+      if (nativeObservation.current === owned) nativeObservation.current = null;
+    };
+  }, [deps.statsEnabled, nativeTrack]);
+
   // 分阶段媒体统计：采集 → 编码 → RTP 发送 → SFU → RTP 接收 → 解码。
   // 每个速率都由同一个 RTP 对象的累计计数器求差，避免切换共享或统计对象时出现假低值/假峰值。
   const collectStats = useCallback(async () => {
+    // The timer keeps this callback; render-state getters belong to the latest render.
+    const deps = latestDeps.current;
     if (deps.statsCollecting.current) return;
     deps.statsCollecting.current = true;
     const next: MediaStats = { ...EMPTY_STATS };
@@ -290,34 +315,51 @@ export function useMediaDiagnostics(deps: useMediaDiagnosticsDependencies) {
         next.serverScore = consumer?.stats[0]?.score ?? consumer?.score?.score ?? null;
       }
 
+      const currentDeps = latestDeps.current;
       const currentSessionKey = mediaDiagnosticSessionKey(
-        deps.screenProducer.current?.id ?? null,
-        deps.watchingScreenPeerRef.current,
+        currentDeps.screenProducer.current?.id ?? null,
+        currentDeps.watchingScreenPeerRef.current,
       );
       if (
         !shouldAcceptMediaDiagnosticSample(
-          deps.statsEnabledRef.current,
+          currentDeps.statsEnabledRef.current,
           capturedSessionKey,
           currentSessionKey,
         )
       ) {
-        deps.setStats(EMPTY_STATS);
+        currentDeps.setStats(EMPTY_STATS);
         return;
       }
 
       const trackSettings = diagnosticTrackSettings(videoTrack?.getSettings());
+      // Frame intervals belong to the actual selected track, not just its peer.
+      // A replacement from the same peer must not inherit a predecessor's data.
+      const currentTrack = sendingScreen
+        ? currentDeps.screenProducer.current?.track
+        : Array.from(currentDeps.consumers.current.values()).find(
+            entry => entry.kind === 'video' && entry.socketId === watchedPeerId,
+          )?.consumer.track;
+      if (videoTrack && videoTrack === currentTrack && videoTrack.readyState === 'live') {
+        const native = nativeObservation.current;
+        next.nativeDeliveryStability = native?.track === videoTrack
+          ? native.observer.snapshot()
+          : null;
+        next.presentationStability = readFramePresentation(videoTrack);
+      }
       const diagnosticEntry = {
         timestamp: new Date().toISOString(),
         stats: next,
         trackSettings,
+        captureProvider: videoTrack ? getNativeScreenCaptureDiagnostics(videoTrack) : null,
+        lastNativeAttempt: sendingScreen ? getLastNativeScreenCaptureAttempt() : null,
         rawVideoCounters: diagnosticVideoCounters(rtpStat, mediaSource),
-        encodingPlan: deps.screenEncodingPlan,
+        encodingPlan: currentDeps.screenEncodingPlan,
         contentHint: videoTrack?.contentHint ?? null,
       };
       // 仅在内存中保留最近 600 个样本，只有手动点击导出才保存文件。
-      deps.diagnosticHistory.current.push(diagnosticEntry);
-      if (deps.diagnosticHistory.current.length > 600) deps.diagnosticHistory.current.shift();
-      deps.setStats(next);
+      currentDeps.diagnosticHistory.current.push(diagnosticEntry);
+      if (currentDeps.diagnosticHistory.current.length > 600) currentDeps.diagnosticHistory.current.shift();
+      currentDeps.setStats(next);
     } catch (error) {
       console.warn('[media-diag] 采集客户端媒体统计失败', error);
     } finally {
@@ -354,6 +396,7 @@ export function useMediaDiagnostics(deps: useMediaDiagnosticsDependencies) {
     const payload = {
       exportedAt: new Date().toISOString(),
       metricDefinitions: MEDIA_TIMING_DEFINITIONS,
+      frameStabilityDefinition: FRAME_STABILITY_DEFINITION,
       recovery: deps.recoveryDiagnostics?.current.snapshot(),
       platform: 'desktop',
       screen: {
@@ -364,6 +407,8 @@ export function useMediaDiagnostics(deps: useMediaDiagnosticsDependencies) {
         configuredMaxBitrate: SCREEN_MAX_BITRATE_BPS,
         encodingPlan: deps.screenEncodingPlan,
         trackSettings: diagnosticTrackSettings(producer?.track?.getSettings()),
+        captureProvider: producer?.track ? getNativeScreenCaptureDiagnostics(producer.track) : null,
+        lastNativeAttempt: producer ? getLastNativeScreenCaptureAttempt() : null,
         senderParameters: diagnosticSenderParameters(producer?.rtpSender?.getParameters()),
       },
       samples: deps.diagnosticHistory.current,

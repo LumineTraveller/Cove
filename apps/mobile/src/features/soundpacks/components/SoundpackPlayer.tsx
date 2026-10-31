@@ -44,7 +44,7 @@ export function SoundpackAudioPlayer({controller, playerKey, source, onEnd, onEr
     } catch (cause) {
       if (activeKey.current !== currentKey) return;
       onError();
-      controller.setNotice(cause instanceof Error ? `语音包输出失败：${cause.message}` : '语音包输出失败，请在音频设置中重新选择设备。');
+      controller.setNotice(cause instanceof Error ? `语音包输出失败：${cause.message}` : '语音包输出失败，请在采集设置中重新选择设备。');
     }
   };
   return (

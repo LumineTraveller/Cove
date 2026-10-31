@@ -24,7 +24,7 @@ describe('soundboard existing wire protocol and lifecycle', () => {
   function Harness() {board = useSoundboard(options); return null;}
   const mount = async () => {await act(async () => {renderer = TestRenderer.create(<Harness/>);});};
   const rerender = async (next: Partial<SoundboardOptions>) => {options = {...options, ...next}; await act(async () => renderer.update(<Harness/>));};
-  const event = async (name: string, payload: unknown) => {await act(async () => events.get(name)!({roomId: options.roomId, ...(payload as object)}));};
+  const event = async (name: string, payload: unknown) => {await act(async () => events.get(name)?.({roomId: options.roomId, ...(payload as object)}));};
   beforeEach(() => {
     jest.clearAllMocks();
     events = new Map();
@@ -75,27 +75,89 @@ describe('soundboard existing wire protocol and lifecycle', () => {
     (AsyncStorage.getItem as jest.Mock).mockImplementation(async key => String(key).includes('groups') ? JSON.stringify({version: 1, groups: [{id: 'one', soundIds: ['gone', 'a']}, {id: 'two', soundIds: ['b']}, {id: 'empty', soundIds: []}]}) : null);
     await mount(); expect(board.groups).toEqual([{id: 'one', soundIds: ['a', 'c']}, {id: 'two', soundIds: ['b']}, {id: 'empty', soundIds: []}]);
   });
-  test('moving across groups submits complete order only once and commits local membership', async () => {
+  test('moving sounds and exchanging groups are immediate personal preferences with no reorder emission', async () => {
     await mount(); await act(async () => board.addSoundpackGroup());
-    const next = board.groups[1].id; let callback: (value: unknown) => void = () => undefined;
-    emit.mockImplementation((_name, _payload, cb) => {callback = cb;});
+    const next = board.groups[1].id;
     await act(async () => {board.moveSound('b', next, 0); board.moveSound('a', next, 0);});
-    expect(emit).toHaveBeenCalledTimes(1); expect(emit.mock.calls[0][1]).toEqual({roomId: 'fixture-room', orderedIds: ['a', 'c', 'b']});
-    await act(async () => callback({ok: true})); expect(board.groups[1].soundIds).toEqual(['b']); expect(board.busy).toBeNull();
+    expect(board.groups[1].soundIds).toEqual(['a', 'b']);
+    expect(board.packs.map(pack => pack.id)).toEqual(['c', 'a', 'b']);
+    await act(async () => board.swapGroups(board.groups[0].id, next));
+    expect(board.packs.map(pack => pack.id)).toEqual(['a', 'b', 'c']);
+    expect(emit).not.toHaveBeenCalled(); expect(board.busy).toBeNull();
   });
-  test('failed reorder retains concurrent addition and deletion while restoring the original order', async () => {
-    await mount(); let cb: (value: unknown) => void = () => undefined; emit.mockImplementation((_name, _payload, callback) => {cb = callback;});
-    await act(async () => {board.moveSound('a', board.groups[0].id, 2);});
+  test('a personally reordered sound retains prepared playback and server version handling', async () => {
+    await mount(); await rerender({inVoice: true});
+    await act(async () => board.moveSound('c', board.groups[0].id, 0));
+    expect(board.packs.map(pack => pack.id)).toEqual(['c', 'a', 'b']);
+    const session = board.playbackSession;
+    await act(async () => board.triggerSound(board.packs[0]));
+    expect(preparedSoundpacks!.prepare).toHaveBeenCalledWith(session, expect.objectContaining({soundId: 'c', version: 'c.normalized.mp3'}));
+    expect(emit).toHaveBeenCalledWith('soundpack:play', {soundId: 'c', roomId: options.roomId}, expect.any(Function));
+    expect(emit.mock.calls.every(([name]) => name !== 'soundpack:reorder')).toBe(true);
+    await event('soundpack:play', {soundId: 'c', filename: 'server-c.normalized.mp3'});
+    expect(board.playback).toMatchObject({soundId: 'c', version: 'server-c.normalized.mp3', requestedAt: expect.any(Number)});
+    await event('soundpack:normalized', {soundId: 'c', filename: 'new-c.normalized.mp3'});
+    expect(board.playback).toBeNull();
+    expect(board.packs[0].filename).toBe('new-c.normalized.mp3');
+  });
+  test('local reorder survives legacy shared reorder, addition and deletion broadcasts', async () => {
+    await mount();
+    await act(async () => board.moveSound('a', board.groups[0].id, 2));
+    await event('soundpack:reordered', {orderedIds: ['c', 'a', 'b']});
     await event('soundpack:added', sound('new')); await event('soundpack:deleted', {soundId: 'b'});
-    await act(async () => cb({ok: false, error: '合成顺序拒绝'}));
-    expect(board.packs.map(pack => pack.id)).toEqual(['a', 'c', 'new']); expect(board.groups[0].soundIds).toEqual(['a', 'c', 'new']);
-    expect(board.notice).toBe('合成顺序拒绝');
+    expect(board.groups[0].soundIds).toEqual(['c', 'a', 'new']);
+    expect(board.packs.map(pack => pack.id)).toEqual(['c', 'a', 'new']);
+    expect(emit).not.toHaveBeenCalled();
   });
-  test('a failed pending reorder cannot overwrite another client authoritative order', async () => {
-    await mount(); let cb: (value: unknown) => void = () => undefined; emit.mockImplementation((_name, _payload, callback) => {cb = callback;});
-    await act(async () => {board.moveSound('a', board.groups[0].id, 2);});
-    await event('soundpack:reordered', {orderedIds: ['b', 'a', 'c']}); await act(async () => cb({error: '拒绝', ok: false}));
-    expect(board.packs.map(pack => pack.id)).toEqual(['b', 'a', 'c']); expect(board.groups[0].soundIds).toEqual(['b', 'a', 'c']);
+  test('refreshing an old server snapshot retains the personal order and appends new content', async () => {
+    await mount(); await act(async () => board.moveSound('a', board.groups[0].id, 2));
+    (serverFetch as jest.Mock).mockResolvedValue(response([sound('new'), sound('a'), sound('c')]));
+    await act(async () => board.reload());
+    expect(board.groups[0].soundIds).toEqual(['c', 'a', 'new']);
+    expect(board.packs.map(pack => pack.id)).toEqual(['c', 'a', 'new']);
+    expect(emit).not.toHaveBeenCalled();
+  });
+  test('two simultaneous members customize independently while receiving the same content changes', async () => {
+    const secondEvents = new Map<string, (...args: any[]) => void>();
+    const secondEmit = jest.fn();
+    const secondOptions = {...options, accountId: 'bob', socket: {
+      ...options.socket, id: 'synthetic-bob', emit: secondEmit,
+      on: jest.fn((name, fn) => secondEvents.set(name, fn)),
+      off: jest.fn((name, fn) => {if (secondEvents.get(name) === fn) secondEvents.delete(name);}),
+    } as unknown as Socket};
+    let bob!: SoundboardController;
+    function Bob() {bob = useSoundboard(secondOptions); return null;}
+    await mount();
+    let bobRenderer!: TestRenderer.ReactTestRenderer;
+    await act(async () => {bobRenderer = TestRenderer.create(<Bob/>);});
+    try {
+      await act(async () => board.moveSound('a', board.groups[0].id, 2));
+      expect(bob.groups[0].soundIds).toEqual(['a', 'b', 'c']);
+      await act(async () => bob.moveSound('c', bob.groups[0].id, 0));
+      expect(board.groups[0].soundIds).toEqual(['b', 'c', 'a']);
+      expect(bob.groups[0].soundIds).toEqual(['c', 'a', 'b']);
+      await act(async () => {
+        for (const handlers of [events, secondEvents]) {
+          handlers.get('soundpack:reordered')?.({roomId: options.roomId, orderedIds: ['a', 'b', 'c']});
+          handlers.get('soundpack:added')!(sound('new'));
+          handlers.get('soundpack:deleted')!({roomId: options.roomId, soundId: 'b'});
+          handlers.get('soundpack:renamed')!({roomId: options.roomId, soundId: 'a', name: 'Shared name'});
+        }
+      });
+      expect(board.groups[0].soundIds).toEqual(['c', 'a', 'new']);
+      expect(bob.groups[0].soundIds).toEqual(['c', 'a', 'new']);
+      expect(board.packs.find(pack => pack.id === 'a')?.name).toBe('Shared name');
+      expect(bob.packs.find(pack => pack.id === 'a')?.name).toBe('Shared name');
+      expect(emit).not.toHaveBeenCalled(); expect(secondEmit).not.toHaveBeenCalled();
+    } finally {await act(async () => bobRenderer.unmount());}
+  });
+  test('lists beyond 500 sounds reorder locally and remain intact after server refresh', async () => {
+    const ids = Array.from({length: 751}, (_, index) => `sound-${index}`);
+    (serverFetch as jest.Mock).mockResolvedValue(response(ids.map(id => sound(id))));
+    await mount(); await act(async () => board.moveSound(ids[0], board.groups[0].id, ids.length - 1));
+    await act(async () => board.reload());
+    expect(board.groups[0].soundIds).toEqual([...ids.slice(1), ids[0]]);
+    expect(board.packs).toHaveLength(ids.length); expect(emit).not.toHaveBeenCalled();
   });
   test('rename and normalize broadcasts retain original audio and deleted playing sound stops', async () => {
     await mount(); await rerender({inVoice: true}); await event('soundpack:renamed', {soundId: 'a', name: '重命名'});
@@ -131,12 +193,20 @@ describe('soundboard existing wire protocol and lifecycle', () => {
     await mount(); await event('soundpack:added', sound('new')); await act(async () => pending.resolve(response([sound('a')])));
     expect(serverFetch).toHaveBeenCalledTimes(2); expect(board.packs.map(pack => pack.id)).toEqual(['new','a']);
   });
-  test('switching account ignores old reorder rollback and never overwrites new saved groups', async () => {
-    const bobGroups = {version: 1, groups: [{id: 'bob', soundIds: ['c','b','a']}]};
-    (AsyncStorage.getItem as jest.Mock).mockImplementation(async key => key === groupsStorageKey(options.serverURL, 'bob', options.roomId) ? JSON.stringify(bobGroups) : null);
-    await mount(); let cb: (value: unknown) => void = () => undefined; emit.mockImplementation((_name, _payload, callback) => {cb = callback;});
-    await act(async () => {board.moveSound('a', board.groups[0].id, 2);}); await rerender({accountId: 'bob'});
-    await act(async () => cb({ok: false, error: '旧账号拒绝'})); expect(board.groups).toEqual([{id: 'bob', soundIds: ['a','b','c']}]); expect(board.notice).toBeNull();
+  test('switching account retains each saved order and rejects departed callbacks and content events', async () => {
+    const values = new Map<string, string>([[groupsStorageKey(options.serverURL, 'bob', options.roomId), JSON.stringify({version: 1, groups: [{id: 'bob', soundIds: ['c','b','a']}]})]]);
+    (AsyncStorage.getItem as jest.Mock).mockImplementation(async key => values.get(key) ?? null);
+    (AsyncStorage.setItem as jest.Mock).mockImplementation(async (key, value) => {values.set(key, value);});
+    await mount(); await act(async () => board.moveSound('a', board.groups[0].id, 2));
+    const oldMove = board.moveSound;
+    const oldAdded = events.get('soundpack:added')!;
+    await rerender({accountId: 'bob'});
+    await act(async () => {oldMove('a', 'bob', 0); oldAdded(sound('late'));});
+    expect(board.groups).toEqual([{id: 'bob', soundIds: ['c','b','a']}]);
+    await rerender({accountId: 'alice'});
+    await act(async () => oldAdded(sound('late-again')));
+    expect(board.groups[0].soundIds).toEqual(['b','c','a']);
+    expect(emit).not.toHaveBeenCalled(); expect(board.notice).toBeNull();
   });
   test('permissions returned by server gate rename/delete and duplicate management requests', async () => {
     (serverFetch as jest.Mock).mockResolvedValue(response([sound('a', false), sound('b')])); await mount();
@@ -155,7 +225,7 @@ describe('soundboard existing wire protocol and lifecycle', () => {
     await mount(); await event('soundpack:reordered', {orderedIds: ['b','a','c']});
     expect(AsyncStorage.setItem).not.toHaveBeenCalled();
     await act(async () => saved.resolve(JSON.stringify({version: 1, groups: [{id: 'saved-one', soundIds: ['a','b']}, {id: 'saved-two', soundIds: ['c']}]})));
-    expect(board.groups).toEqual([{id: 'saved-one', soundIds: ['b','a']}, {id: 'saved-two', soundIds: ['c']}]);
+    expect(board.groups).toEqual([{id: 'saved-one', soundIds: ['a','b']}, {id: 'saved-two', soundIds: ['c']}]);
   });
   test('old play ACK after reconnect cannot release the new pending-play guard', async () => {
     await mount(); await rerender({inVoice: true}); const callbacks: ((value: unknown) => void)[] = [];
@@ -204,7 +274,7 @@ describe('soundboard existing wire protocol and lifecycle', () => {
         ['soundpack:added', {...sound('intruder'), roomId}], ['soundpack:deleted', {soundId: 'a', roomId}],
         ['soundpack:renamed', {soundId: 'a', name: 'foreign', roomId}], ['soundpack:normalized', {soundId: 'a', filename: 'foreign.mp3', roomId}],
         ['soundpack:reordered', {orderedIds: ['c', 'b', 'a'], roomId}], ['soundpack:play', {soundId: 'a', filename: 'foreign.mp3', roomId}],
-      ] as const) await act(async () => events.get(name)!(payload));
+      ] as const) await act(async () => events.get(name)?.(payload));
     }
     expect(JSON.stringify(board.packs)).toBe(before);
     expect(board.playback).toBeNull();

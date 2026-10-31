@@ -2,6 +2,7 @@ import { Radio, SquaresFour } from '@phosphor-icons/react';
 import { useWebRTC } from '../useWebRTC';
 import { isScreenEncodingWithinPlan, screenEncodingPlanLabel } from '../screen/screenCapture';
 import { diagnosticPacketLoss } from './mediaDiagnostics';
+import { frameStabilityDetail, frameStabilityLabel } from './frameStabilityView';
 
 export function DiagnosticsOverlayV2({
   rtc,
@@ -15,6 +16,25 @@ export function DiagnosticsOverlayV2({
   const resolution =
     rtc.stats.width && rtc.stats.height ? `${rtc.stats.width}×${rtc.stats.height}` : '—';
   const fps = rtc.localScreen ? rtc.stats.sendFps : rtc.stats.receiveFps;
+  const sending = rtc.stats.role === 'sender' ||
+    (rtc.stats.role === 'idle' && Boolean(rtc.localScreen));
+  const lowSample = sending ? rtc.stats.nativeDeliveryStability : rtc.stats.presentationStability;
+  const lowRows = <>
+    <div>
+      <span title={`${sending ? '原生采集交付节奏，不等于纯采集或发送帧率。' : '当前视频提交到合成器的节奏，不等于物理屏幕扫描输出。'}${frameStabilityDetail(lowSample)}`}>
+        {sending ? '原生交付 1% low' : '观看呈现 1% low'}
+      </span>
+      <b>{frameStabilityLabel(lowSample)}</b>
+    </div>
+    {!compact && sending && (
+      <div>
+        <span title={`本地预览提交到合成器的节奏，不等于远端观看体验。${frameStabilityDetail(rtc.stats.presentationStability)}`}>
+          预览呈现 1% low
+        </span>
+        <b>{frameStabilityLabel(rtc.stats.presentationStability)}</b>
+      </div>
+    )}
+  </>;
   return (
     <div className={`debug-overlay diagnostics-v2 ${compact ? 'compact' : ''}`}>
       <header>
@@ -27,6 +47,7 @@ export function DiagnosticsOverlayV2({
         >
           <SquaresFour size={14} />
         </button>
+        <button className="icon-btn" onClick={rtc.exportMediaDiagnostics} aria-label="导出媒体诊断" title="导出媒体诊断">导出</button>
       </header>
       {compact ? (
         <>
@@ -38,6 +59,7 @@ export function DiagnosticsOverlayV2({
             <span>分辨率</span>
             <b>{resolution}</b>
           </div>
+          {lowRows}
           <div>
             <span>码率</span>
             <b>{rtc.stats.bitrate != null ? `${rtc.stats.bitrate} kbps` : '—'}</b>
@@ -46,7 +68,13 @@ export function DiagnosticsOverlayV2({
       ) : (
         <>
           <div>
-            <span>帧率</span>
+            <span
+              title={rtc.localScreen
+                ? '报告为轨道 getSettings().frameRate；源为 WebRTC 送入编码器前的帧统计，不代表底层 DXGI 取帧速度。'
+                : '接收和解码分别表示对应阶段的视频帧率。'}
+            >
+              {rtc.localScreen ? '报告/源/编码/发送' : '接收/解码'}
+            </span>
             <b>
               {rtc.localScreen
                 ? `${rtc.stats.trackFps ?? '—'} / ${rtc.stats.captureFps ?? '—'} / ${
@@ -68,6 +96,7 @@ export function DiagnosticsOverlayV2({
                 : '—'}
             </b>
           </div>
+          {lowRows}
           <div>
             <span>编码器</span>
             <b>{rtc.stats.codec ?? '—'}</b>

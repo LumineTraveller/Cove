@@ -29,7 +29,7 @@ import { encodeAudioBufferSegment } from '../audioTrim';
 import { soundpackDownloadFileName } from '../soundpackDownload';
 import { readAccountSession } from '../../accounts/accountAuth';
 import { useSoundpackGroups } from '../useSoundpackGroups';
-import { reconcileSoundpackGroupOrder } from '../soundpackGroups';
+import { isCompleteSoundpackOrder } from '@cove/client-core';
 import { createSoundpackRoomLifetime, readSoundpackRoomList, soundpackRequestInit, soundpackRoomFilePath } from '../soundpackRoom';
 import { addSoundpackGroup, canAddSoundpackGroup, flattenSoundpackGroups, readSoundpackGroups, readSoundpackFavorites, reconcileSoundpackGroups, soundpackGroupsStorageKey, soundpackFavoritesStorageKey, type SoundpackGroup } from '../soundpackGroups';
 import { AudioTrimEditor } from './AudioTrimEditor';
@@ -99,17 +99,6 @@ function loadGroups(storageKey: string) {
 
 // Windows 保留名不能作为文件名，加前缀避开。
 
-function applySoundpackOrder(packs: Soundpack[], orderedIds: string[]) {
-  const byId = new Map(packs.map((pack) => [pack.id, pack]));
-  const ordered = orderedIds.flatMap((id) => {
-    const pack = byId.get(id);
-    if (!pack) return [];
-    byId.delete(id);
-    return [pack];
-  });
-  return [...ordered, ...byId.values()];
-}
-
 export function SoundPackPanel(props: Props) {
   const accountId = props.accountId ?? readAccountSession(props.serverURL)?.accountId ?? '';
   return <RoomSoundPackPanel key={JSON.stringify([props.serverURL, accountId, props.roomId, props.socket.id, Boolean(props.disabled)])} {...props} accountId={accountId} />;
@@ -154,7 +143,6 @@ function RoomSoundPackPanel({
   const [pendingRename, setPendingRename] = useState<Soundpack | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [renamingId, setRenamingId] = useState<string | null>(null);
-  const [reordering, setReordering] = useState(false);
   const [soundpackVolume, setSoundpackVolume] = useState(loadSoundpackVolume);
   const [favoriteIds, setFavoriteIds] = useState<string[]>(() => loadSoundpackFavorites(favoriteStorageKey));
   const [internalOpen, setInternalOpen] = useState(defaultOpen);
@@ -204,10 +192,8 @@ function RoomSoundPackPanel({
   const groupsRef = useRef(groups);
   groupsRef.current = groups;
   const listRevisionRef = useRef(0);
-  const pendingServerOrderRef = useRef(false);
   const groupScopeRef = useRef(groupStorageKey);
   groupScopeRef.current = groupStorageKey;
-  const reorderTokenRef = useRef(0);
   const mountedRef = useRef(true);
   useEffect(() => {
     if (!lifetimeRef.current.active()) lifetimeRef.current = createSoundpackRoomLifetime(roomId);
@@ -216,7 +202,6 @@ function RoomSoundPackPanel({
     return () => {
       mountedRef.current = false;
       lifetime.cancel();
-      reorderTokenRef.current += 1;
       playbackRequestRef.current += 1;
       playbackAbortRef.current?.abort();
       playbackAbortRef.current = null;
@@ -243,14 +228,13 @@ function RoomSoundPackPanel({
       { ...init, signal: init.signal ?? lifetimeRef.current.signal }));
   }, [serverURL, accountId]);
   const saveGroups = useCallback((next: SoundpackGroup[]) => {
+    if (!mountedRef.current || !lifetimeRef.current.active() || groupScopeRef.current !== groupStorageKey) return;
     groupsRef.current = next;
     setGroups(next);
     try { localStorage.setItem(groupStorageKey, JSON.stringify({ version: 1, groups: next })); }
     catch { setDownloadNotice('分组暂时无法保存，关闭后可能丢失。'); }
   }, [groupStorageKey]);
   useEffect(() => {
-    reorderTokenRef.current += 1;
-    setReordering(false);
     const stored = loadGroups(groupStorageKey);
     groupsRef.current = stored;
     setGroups(stored);
@@ -426,12 +410,8 @@ function RoomSoundPackPanel({
           if (!active || !lifetime.active()) return;
           const list = readSoundpackRoomList<Soundpack>(payload, roomId);
           if (!list) throw new Error('服务器尚未支持房间语音包，请升级服务器后重试。原有语音包保留为未分配。');
-          // A request started before an add/delete/reorder must not overwrite it.
+          // A request started before a content event must not overwrite it.
           if (revision !== listRevisionRef.current) { load(); return; }
-          if (pendingServerOrderRef.current) {
-            saveGroups(reconcileSoundpackGroupOrder(groupsRef.current, list.map(sound => sound.id)));
-            pendingServerOrderRef.current = false;
-          }
           // Mark protocol confirmation synchronously: an event arriving before
           // React replaces the old effect must still follow the accepted list.
           confirmedListScopeRef.current = groupStorageKey;
@@ -588,26 +568,17 @@ function RoomSoundPackPanel({
       );
       setPendingRename((current) => (current?.id === soundId ? { ...current, name } : current));
     };
-    const onReordered = ({ orderedIds, roomId: eventRoomId }: { orderedIds: string[]; roomId?: string; }) => {
-      if (!lifetime.accepts({ roomId: eventRoomId }) || roomDisabled) return;
-      if (!observeRoomEvent({ roomId: eventRoomId })) { pendingServerOrderRef.current = true; return; }
-      setPacks((previous) => applySoundpackOrder(previous, orderedIds));
-      const rank = new Map(orderedIds.map((id, index) => [id, index]));
-      saveGroups(groupsRef.current.map((group) => ({ ...group, soundIds: [...group.soundIds].sort((a, b) => (rank.get(a) ?? Infinity) - (rank.get(b) ?? Infinity)) })));
-    };
     socket.on('soundpack:added', onAdded);
     socket.on('soundpack:play', onPlay);
     socket.on('soundpack:normalized', onNormalized);
     socket.on('soundpack:deleted', onDeleted);
     socket.on('soundpack:renamed', onRenamed);
-    socket.on('soundpack:reordered', onReordered);
     return () => {
       socket.off('soundpack:added', onAdded);
       socket.off('soundpack:play', onPlay);
       socket.off('soundpack:normalized', onNormalized);
       socket.off('soundpack:deleted', onDeleted);
       socket.off('soundpack:renamed', onRenamed);
-      socket.off('soundpack:reordered', onReordered);
     };
   }, [socket, playSound, inVoice, saveGroups, roomDisabled, groupStorageKey]);
 
@@ -934,55 +905,17 @@ function RoomSoundPackPanel({
     }
   };
 
-  const commitGroups = useCallback(
-    (nextGroups: SoundpackGroup[]) => {
-      const operationScope = groupStorageKey;
-      const token = ++reorderTokenRef.current;
-      const active = () => mountedRef.current && groupScopeRef.current === operationScope && reorderTokenRef.current === token;
-      const orderedIds = flattenSoundpackGroups(nextGroups);
-      const previous = packsRef.current;
-      const previousGroups = groupsRef.current;
-      const byId = new Map(previous.map((pack) => [pack.id, pack]));
-      const next = orderedIds.flatMap((id) => {
-        const pack = byId.get(id);
-        return pack ? [pack] : [];
-      });
-      if (next.length !== previous.length) return;
-      saveGroups(nextGroups);
-      if (next.every((pack, index) => pack.id === previous[index]?.id)) return;
-      listRevisionRef.current += 1;
-      packsRef.current = next;
-      setPacks(next);
-      setReordering(true);
-      void new Promise<{ ok: boolean; error?: string; }>((resolve, reject) => {
-        socket
-          .timeout(5_000)
-          .emit(
-            'soundpack:reorder',
-            { roomId, orderedIds: next.map((pack) => pack.id) },
-            (error: Error | null, response: { ok: boolean; error?: string; }) =>
-              error ? reject(error) : resolve(response),
-          );
-      })
-        .then((result) => {
-          if (!result.ok) throw new Error(result.error ?? '调整顺序失败');
-        })
-        .catch((cause) => {
-          if (!active()) return;
-          // Retain concurrent additions/deletions while restoring the failed order.
-          setPacks((current) => applySoundpackOrder(current, previous.map((pack) => pack.id)));
-          saveGroups(reconcileSoundpackGroups(previousGroups, packsRef.current.map((pack) => pack.id)));
-          alert(cause instanceof Error ? cause.message : '调整顺序失败，请检查网络连接');
-        })
-        .finally(() => { if (active()) setReordering(false); });
-    },
-    [roomId, socket, saveGroups, groupStorageKey],
-  );
+  const commitGroups = useCallback((nextGroups: SoundpackGroup[]) => {
+    if (roomDisabled || !mountedRef.current || !lifetimeRef.current.active() ||
+        groupScopeRef.current !== groupStorageKey || confirmedListScopeRef.current !== groupStorageKey) return;
+    if (!isCompleteSoundpackOrder(flattenSoundpackGroups(nextGroups), packsRef.current.map(pack => pack.id))) return;
+    saveGroups(nextGroups);
+  }, [roomDisabled, groupStorageKey, saveGroups]);
 
   const sortable = useSoundpackGroups({
     groups,
     scopeKey: groupStorageKey,
-    disabled: disabled || reordering || !listReady || !open,
+    disabled: disabled || !listReady || !open,
     onCommit: commitGroups,
     scrollRef: soundpackScrollRef,
   });
@@ -990,12 +923,12 @@ function RoomSoundPackPanel({
     if (!open) sortable.cancel();
   }, [open, sortable.cancel]);
   const addGroup = () => {
-    if (disabled || reordering || !listReady) return;
+    if (disabled || !listReady) return;
     saveGroups(addSoundpackGroup(groupsRef.current, crypto.randomUUID()));
   };
   const addGroupButton = (
     <button type="button" className="soundpack-add-group" data-soundpack-add-group
-      onClick={addGroup} disabled={disabled || reordering || !listReady || !canAddSoundpackGroup(groups)}
+      onClick={addGroup} disabled={disabled || !listReady || !canAddSoundpackGroup(groups)}
       title={canAddSoundpackGroup(groups) ? '添加分组' : '先将语音包放入空组'}>
       <Plus size={14} />添加分组
     </button>
@@ -1534,7 +1467,7 @@ function RoomSoundPackPanel({
                   </h2>
                   <p className="text-sm text-white/40">
                     {inVoice
-                      ? '点击后只对语音中的成员同步播放，拖动方格调整顺序'
+                      ? '点击后只对语音中的成员同步播放，拖动调整本机个人顺序'
                       : '加入语音后才能同步播放；仍可上传和管理语音包'}
                   </p>
                 </div>

@@ -1,0 +1,10 @@
+'use strict';
+const path=require('node:path'),{pathToFileURL}=require('node:url');
+exports.source=({root,directory,entry,dependencies})=>`import {createServer} from ${JSON.stringify(entry)};
+import {createRequire} from 'node:module';
+const require=createRequire(import.meta.url);
+const {fullProductPlugin}=require(${JSON.stringify(path.join(__dirname,'vite-plugin.cjs'))});
+const server=await createServer({root:${JSON.stringify(path.join(root,'apps/desktop'))},configFile:${JSON.stringify(path.join(root,'apps/desktop/vite.config.ts'))},cacheDir:${JSON.stringify(path.join(directory,'vite-cache'))},plugins:[fullProductPlugin()],server:{host:'127.0.0.1',port:0,strictPort:true,hmr:false,watch:null,fs:{allow:${JSON.stringify([root,dependencies])}}}});
+await server.listen();process.send?.({type:'ready',url:'http://127.0.0.1:'+server.httpServer.address().port});
+process.on('message',async message=>{if(message?.type==='stop'){await server.close();process.disconnect?.();}});
+`;

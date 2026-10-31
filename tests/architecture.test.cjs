@@ -88,6 +88,60 @@ function presenceToneReleaseOverrides(evidence, originalHashes) {
   assert.equal(overrides.size,presenceToneReleaseAllowlist.size,'the single presence tone exception must be documented');
   return overrides;
 }
+const mobileUpdateCandidateAllowlist = new Map([
+  ['apps/mobile/android/app/src/main/java/com/covemobile/MobileUpdateModule.kt', {
+    baseSha256:'3a52b330bfccca607b75d5b7e0eb618ab74eb697399697a49dd6b033972df18b',
+    sha256:'564811cadda69f7ff3bfe22ccc752045538a88f07a11091c61c44cfc76f311b8',
+  }],
+  ['apps/mobile/android/app/src/test/java/com/covemobile/MobileUpdateNetworkTest.kt', {
+    baseSha256:'f4e2887fb375fade99062d38143edd1efeaf545166bd298c65851673b095cb2f',
+    sha256:'76a31c3bde68fbffd9b426f019b31fbd9a202d87b9026e8cca18c3fe4eee3a13',
+  }],
+]);
+function mobileUpdateCandidateOverrides(evidence, originalHashes) {
+  assert.equal(evidence?.baseCommit,'e31362ce07b316f15265daf6796730d947390b76');
+  assert.ok(Array.isArray(evidence.modifiedOriginal),'mobile updater exceptions must be an array');
+  const overrides=new Map();
+  for(const entry of evidence.modifiedOriginal){
+    const accepted=mobileUpdateCandidateAllowlist.get(entry.path);
+    assert.ok(accepted,'mobile updater exception is outside the reviewed allowlist: '+entry.path);
+    assert.ok(!overrides.has(entry.path),'duplicate mobile updater exception: '+entry.path);
+    assert.equal(originalHashes.get(entry.path),accepted.baseSha256,'original mobile updater baseline changed: '+entry.path);
+    for(const key of ['baseSha256','sha256'])assert.equal(entry[key],accepted[key],key+': '+entry.path);
+    assert.ok(typeof entry.reason==='string'&&entry.reason.trim(),'mobile updater exception requires a reviewable reason');
+    overrides.set(entry.path,entry.sha256);
+  }
+  assert.equal(overrides.size,mobileUpdateCandidateAllowlist.size,'both mobile updater exceptions must be documented');
+  return overrides;
+}
+const mobilePreparedSoundpackReleaseAllowlist = new Map([
+  ['apps/mobile/android/app/src/main/java/com/covemobile/CoveNativePackage.kt', {
+    originalSha256:'a6f9d5ce72d85d9a29634b8e374d29fac405fb8fab136d878c238f381a1476d8',
+    baseSha256:'4cd639f4f599d5cf26b8a0c405b4401143d3ceab0a9aaadfa7725ae4248910ce',
+    sha256:'bb42db264a136dc3e27e71ede40b75196f364010a3dbefd5eb2175cf45504e8f',
+  }],
+]);
+function mobilePreparedSoundpackReleaseOverrides(evidence, originalHashes, previousOverrides) {
+  assert.equal(evidence?.baseCommit,'e31362ce07b316f15265daf6796730d947390b76');
+  assert.equal(evidence.releaseCommit,'9cce11a0983c8ea62a62fef8d3ac5367e77483e9');
+  assert.equal(evidence.publishedMainCommit,'5798e0ec0cc802c476505a32ff90c7795604b338');
+  assert.equal(evidence.releaseVersion,'0.8.4');
+  assert.equal(evidence.documentation,'docs/architecture/mobile-0.8.4-native-exception.md');
+  assert.ok(Array.isArray(evidence.modifiedOriginal),'prepared soundpack exceptions must be an array');
+  const overrides=new Map();
+  for(const entry of evidence.modifiedOriginal){
+    const accepted=mobilePreparedSoundpackReleaseAllowlist.get(entry.path);
+    assert.ok(accepted,'prepared soundpack exception is outside the reviewed allowlist: '+entry.path);
+    assert.ok(!overrides.has(entry.path),'duplicate prepared soundpack exception: '+entry.path);
+    assert.equal(originalHashes.get(entry.path),accepted.originalSha256,'original prepared soundpack baseline changed: '+entry.path);
+    assert.equal(previousOverrides.get(entry.path),accepted.baseSha256,'previous reviewed hash changed: '+entry.path);
+    for(const key of ['originalSha256','baseSha256','sha256'])assert.equal(entry[key],accepted[key],key+': '+entry.path);
+    assert.ok(typeof entry.reason==='string'&&entry.reason.trim(),'prepared soundpack exception requires a reviewable reason');
+    overrides.set(entry.path,entry.sha256);
+  }
+  assert.equal(overrides.size,mobilePreparedSoundpackReleaseAllowlist.size,'the single prepared soundpack exception must be documented');
+  return overrides;
+}
 function files(dir){return fs.readdirSync(dir,{withFileTypes:true}).flatMap(entry=>entry.isDirectory()?files(path.join(dir,entry.name)):[path.join(dir,entry.name)]);}
 function inventory(text){
   const source=ts.createSourceFile('source.ts',text,ts.ScriptTarget.Latest,true);
@@ -206,10 +260,13 @@ test('accepted native capture, DSP and Android code survives relocation',()=>{
   const originalHashes = new Map(contracts.native.map(file=>[file.path,file.sha256]));
   assert.equal(originalHashes.size,contracts.native.length,'duplicate original native baseline entry');
   const evidence = contracts.nativeExtensionEvidence.screenEncoderRelease;
+  const integratedOverrides=integratedCandidateOverrides(contracts.nativeExtensionEvidence.integratedCandidates,originalHashes);
   const overrides = new Map([
-    ...integratedCandidateOverrides(contracts.nativeExtensionEvidence.integratedCandidates,originalHashes),
+    ...integratedOverrides,
     ...screenEncoderReleaseOverrides(evidence,originalHashes),
     ...presenceToneReleaseOverrides(contracts.nativeExtensionEvidence.presenceToneRelease,originalHashes),
+    ...mobileUpdateCandidateOverrides(contracts.nativeExtensionEvidence.mobileInAppUpdateCandidate,originalHashes),
+    ...mobilePreparedSoundpackReleaseOverrides(contracts.nativeExtensionEvidence.mobilePreparedSoundpackRelease,originalHashes,integratedOverrides),
   ]);
   for(const file of contracts.native){
     const buffer=fs.readFileSync(path.join(root,file.path));
@@ -249,20 +306,50 @@ test('presence tone exception rejects duplicates, other files and unreviewed has
   assert.throws(()=>presenceToneReleaseOverrides({...evidence,
     modifiedOriginal:[{...first,baseSha256:first.sha256}]},originalHashes),/baseSha256:/);
 });
+test('mobile updater exceptions preserve the original hashes and reject unreviewed paths',()=>{
+  const evidence=contracts.nativeExtensionEvidence.mobileInAppUpdateCandidate;
+  const originalHashes=new Map(contracts.native.map(file=>[file.path,file.sha256]));
+  const first=evidence.modifiedOriginal[0];
+  assert.throws(()=>mobileUpdateCandidateOverrides({...evidence,
+    modifiedOriginal:[first,first]},originalHashes),/duplicate mobile updater exception/);
+  assert.throws(()=>mobileUpdateCandidateOverrides({...evidence,
+    modifiedOriginal:[{...first,path:'apps/mobile/android/app/src/main/java/com/covemobile/CoveNativeModule.kt'}]},originalHashes),/outside the reviewed allowlist/);
+  assert.throws(()=>mobileUpdateCandidateOverrides({...evidence,
+    modifiedOriginal:[{...first,sha256:first.baseSha256},evidence.modifiedOriginal[1]]},originalHashes),/sha256:/);
+  assert.throws(()=>mobileUpdateCandidateOverrides({...evidence,
+    modifiedOriginal:[{...first,baseSha256:first.sha256},evidence.modifiedOriginal[1]]},originalHashes),/baseSha256:/);
+});
+test('published prepared soundpack exception preserves the reviewed hash chain',()=>{
+  const evidence=contracts.nativeExtensionEvidence.mobilePreparedSoundpackRelease;
+  const originalHashes=new Map(contracts.native.map(file=>[file.path,file.sha256]));
+  const previousOverrides=integratedCandidateOverrides(contracts.nativeExtensionEvidence.integratedCandidates,originalHashes);
+  const first=evidence.modifiedOriginal[0];
+  assert.throws(()=>mobilePreparedSoundpackReleaseOverrides({...evidence,
+    modifiedOriginal:[first,first]},originalHashes,previousOverrides),/duplicate prepared soundpack exception/);
+  assert.throws(()=>mobilePreparedSoundpackReleaseOverrides({...evidence,
+    modifiedOriginal:[{...first,path:'apps/mobile/android/app/src/main/java/com/covemobile/CoveNativeModule.kt'}]},originalHashes,previousOverrides),/outside the reviewed allowlist/);
+  for(const key of ['originalSha256','baseSha256','sha256'])
+    assert.throws(()=>mobilePreparedSoundpackReleaseOverrides({...evidence,
+      modifiedOriginal:[{...first,[key]:'0'.repeat(64)}]},originalHashes,previousOverrides),new RegExp(key+':'));
+  assert.throws(()=>mobilePreparedSoundpackReleaseOverrides({...evidence,releaseCommit:'0'.repeat(40)},originalHashes,previousOverrides));
+  assert.throws(()=>mobilePreparedSoundpackReleaseOverrides(evidence,originalHashes,new Map()),/previous reviewed hash changed/);
+});
 test('release identities match packages and both mobile feeds remain consistent',()=>{
-  for(const [key,file] of [['root','package.json'],['desktop','apps/desktop/package.json'],['server','apps/server/package.json'],['mobile','apps/mobile/package.json']])
-    assert.equal(require(path.join(root,file)).version,contracts.versions[key]);
+  const {COVE_RELEASE_VERSION,CLIENT_RELEASE_VERSIONS,compareSemanticVersions}=require('../packages/contracts/dist');
+  assert.equal(CLIENT_RELEASE_VERSIONS.desktop,COVE_RELEASE_VERSION);
+  for(const [file,version] of [['package.json',COVE_RELEASE_VERSION],['apps/desktop/package.json',CLIENT_RELEASE_VERSIONS.desktop],['apps/server/package.json',COVE_RELEASE_VERSION],['apps/mobile/package.json',CLIENT_RELEASE_VERSIONS.mobile]])
+    assert.equal(require(path.join(root,file)).version,version,file);
   assert.equal(read('mobile/update.json'),read('apps/mobile/update.json'));
   const feed=JSON.parse(read('mobile/update.json'));
   assert.equal(feed.schemaVersion,1);assert.equal(feed.platform,'android');
   assert.equal(feed.release.packageName,'com.cove.mobile');
-  const {compareSemanticVersions}=require('../packages/contracts/dist');
-  const precedence=compareSemanticVersions(feed.release.versionName,contracts.versions.mobile);
+  const precedence=compareSemanticVersions(feed.release.versionName,CLIENT_RELEASE_VERSIONS.mobile);
   assert.ok(precedence!==null&&precedence<=0,'feed must describe a built current or previously published APK');
-  assert.ok(Number.isSafeInteger(feed.release.versionCode)&&feed.release.versionCode<=Number(contracts.gradleCode.split(' ')[1]));
   const gradle=fs.readFileSync(path.join(root,'apps/mobile/android/app/build.gradle'),'utf8');
-  assert.equal(gradle.match(/versionName "[^"]+"/)?.[0],contracts.gradleVersion);
-  assert.equal(gradle.match(/versionCode \d+/)?.[0],contracts.gradleCode);
+  assert.equal(gradle.match(/versionName "([^"]+)"/)?.[1],CLIENT_RELEASE_VERSIONS.mobile);
+  const gradleCode=Number(gradle.match(/versionCode (\d+)/)?.[1]);
+  assert.equal(gradleCode,17);
+  assert.ok(Number.isSafeInteger(feed.release.versionCode)&&feed.release.versionCode>0&&feed.release.versionCode<=gradleCode);
 });
 test('third-party dependencies retain the accepted snapshot versions',()=>{
   const current=require('../package-lock.json');

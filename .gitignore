@@ -70,3 +70,6 @@ tests/local-media/**/*.results.json
 /server/
 /mobile/*
 !/mobile/update.json
+
+# Generated observer adapted from the existing UI fixture at test startup
+/tooling/full-product-ui-benchmark/observer.ts

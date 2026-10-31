@@ -184,10 +184,14 @@ export function useVolumeControls(deps: useVolumeControlsDependencies) {
   }, []);
 
   const setScreenShareVolume = useCallback((volume: number) => {
-    const normalized = Math.max(0, Math.min(2, volume));
+    const normalized = Number.isFinite(volume) ? Math.max(0, Math.min(2, volume)) : 1;
     deps.screenShareVolumeRef.current = normalized;
     deps.setScreenShareVolumeState(normalized);
-    localStorage.setItem(SCREEN_SHARE_VOLUME_KEY, String(normalized));
+    try {
+      localStorage.setItem(SCREEN_SHARE_VOLUME_KEY, String(normalized));
+    } catch {
+      /* 无法保存偏好也必须应用本次音量。 */
+    }
     deps.screenAudioPipeline.current?.setVolume(normalized);
   }, []);
 

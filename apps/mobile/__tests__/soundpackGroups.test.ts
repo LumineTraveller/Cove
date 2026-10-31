@@ -1,4 +1,4 @@
-import {addGroup, applySoundpackOrder, canAddGroup, flattenGroups, groupsStorageKey, moveSound, orderedGroups, readGroups, reconcileGroups, swapGroups} from '../src/features/soundpacks/soundpackGroups';
+import {addGroup, applySoundpackOrder, canAddGroup, flattenGroups, groupsStorageKey, moveSound, readGroups, reconcileGroups, swapGroups} from '../src/features/soundpacks/soundpackGroups';
 
 test('old or corrupt installations retain one server-ordered group', () => {
   expect(readGroups(null)).toEqual([{id: 'default', soundIds: []}]);
@@ -9,9 +9,9 @@ test('groups and sounds are deduplicated and malformed entries are rejected', ()
   expect(readGroups({version: 1, groups: [{id: 'a', soundIds: ['1', '1', 2]}, {id: 'a', soundIds: ['2']}, {id: 'b', soundIds: ['1', '2']}, null]}))
     .toEqual([{id: 'a', soundIds: ['1']}, {id: 'b', soundIds: ['2']}]);
 });
-test('deleted sounds vanish, new sounds go first and empty groups survive', () => {
+test('deleted sounds vanish, new sounds append and empty groups survive', () => {
   expect(reconcileGroups([{id: 'a', soundIds: ['gone', '1']}, {id: 'b', soundIds: []}], ['2', '1']))
-    .toEqual([{id: 'a', soundIds: ['2', '1']}, {id: 'b', soundIds: []}]);
+    .toEqual([{id: 'a', soundIds: ['1', '2']}, {id: 'b', soundIds: []}]);
 });
 test('adding is disabled until every group contains a sound', () => {
   const groups = [{id: 'a', soundIds: ['1']}];
@@ -26,10 +26,8 @@ test('touch equivalents move within and across groups and exchange dividers', ()
   expect(flattenGroups(swapGroups(groups, 'a', 'b'))).toEqual(['3', '1', '2']);
   expect(moveSound(groups, 'missing', 'a', 1)).toEqual(groups);
 });
-test('authoritative order preserves membership and leaves concurrent new sounds', () => {
+test('personal display order preserves membership and leaves concurrent new sounds', () => {
   expect(applySoundpackOrder([{id: '1'}, {id: 'new'}, {id: '2'}], ['2', '2', 'gone', '1'])).toEqual([{id: '2'}, {id: '1'}, {id: 'new'}]);
-  expect(orderedGroups([{id: 'a', soundIds: ['1', '2']}, {id: 'b', soundIds: ['3']}], ['3', '2', '1']))
-    .toEqual([{id: 'a', soundIds: ['2', '1']}, {id: 'b', soundIds: ['3']}]);
 });
 test('preferences isolate account, origin and server path while normalizing trailing slashes', () => {
   expect(groupsStorageKey('http://example.test/cove/', 'alice', 'room-a')).toBe(groupsStorageKey('http://example.test/cove', 'alice', 'room-a'));

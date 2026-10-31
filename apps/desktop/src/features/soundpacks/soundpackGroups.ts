@@ -1,4 +1,5 @@
 import { groupRowsIntoLines, type SortableRowGeometry } from '../sorting/sortableList';
+import { reconcilePersonalSoundpackGroups } from '@cove/client-core';
 
 export interface SoundpackGroup {
   id: string;
@@ -55,29 +56,9 @@ export function readSoundpackGroups(value: unknown): SoundpackGroup[] {
   return groups.length ? groups : [{ id: DEFAULT_SOUNDPACK_GROUP_ID, soundIds: [] }];
 }
 
-/** Deleted sounds are removed; empty groups survive. New sounds join the first group. */
+/** Snapshots change membership; existing personal positions and empty groups survive. */
 export function reconcileSoundpackGroups(groups: readonly SoundpackGroup[], availableIds: readonly string[]): SoundpackGroup[] {
-  const available = new Set(availableIds);
-  const assigned = new Set<string>();
-  const next = (groups.length ? groups : [{ id: DEFAULT_SOUNDPACK_GROUP_ID, soundIds: [] }]).map((group) => ({
-    id: group.id,
-    soundIds: group.soundIds.filter((id) => {
-      if (!available.has(id) || assigned.has(id)) return false;
-      assigned.add(id);
-      return true;
-    }),
-  }));
-  next[0].soundIds = [...availableIds.filter((id) => !assigned.has(id)), ...next[0].soundIds];
-  return next;
-}
-
-/** A room reorder changes positions within each local group, never group membership. */
-export function reconcileSoundpackGroupOrder(groups: readonly SoundpackGroup[], orderedIds: readonly string[]): SoundpackGroup[] {
-  const rank = new Map(orderedIds.map((id, index) => [id, index]));
-  return reconcileSoundpackGroups(groups, orderedIds).map(group => ({
-    ...group,
-    soundIds: [...group.soundIds].sort((a, b) => (rank.get(a) ?? Infinity) - (rank.get(b) ?? Infinity)),
-  }));
+  return reconcilePersonalSoundpackGroups(groups, availableIds);
 }
 
 export const flattenSoundpackGroups = (groups: readonly SoundpackGroup[]) => groups.flatMap((group) => group.soundIds);

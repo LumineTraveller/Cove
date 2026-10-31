@@ -4,11 +4,13 @@ Cove 是面向朋友和小群体的自托管语音、聊天与屏幕共享应用
 
 | 应用 | 当前源码版本 | 平台 |
 | --- | --- | --- |
-| 桌面客户端 | **2.1.1** | Windows |
-| 桌面服务端 | **2.1.1** | Windows 托盘；服务端也可独立运行在 Linux |
+| 桌面客户端 | **2.1.2** | Windows |
+| 桌面服务端 | **2.1.2** | Windows 托盘；服务端也可独立运行在 Linux |
 | 手机客户端 | **0.8.4** | Android |
 
 [下载与项目主页](https://cove.luxe) · [GitHub Releases](https://github.com/LumineTraveller/Cove/releases) · [本版说明](RELEASE_NOTES.md) · [历史更新](CHANGELOG.md)
+
+v2.1.2 合并了屏幕采集与帧稳定性诊断、共享方音量、个人语音包排序及更新来源设置，并修复首次共享启动时的生命周期竞态。手机保留已发布的 0.8.4。
 
 ## 开始使用
 
@@ -29,12 +31,22 @@ Cove 是面向朋友和小群体的自托管语音、聊天与屏幕共享应用
 | 屏幕共享 | 发起与观看，分辨率／帧率预设，全屏与置顶小窗 | 观看与全屏缩放，不发起共享或绘制批注 |
 | 共享音频 | 系统音频或单个应用音频，可独立调节共享声音 | 接收共享声音，可独立调节音量及静音 |
 | 远程控制 | 请求控制、授权、撤销与本地急停；Windows 可作为受控端 | 可请求控制支持远控的 Windows 共享端 |
-| 语音包 | 当前房间内上传、编辑、排序、收藏与同步播放 | 当前房间内管理与播放 |
-| 诊断与更新 | 媒体状态、手动导出诊断、更新中心 | 应用内更新检查 |
+| 语音包 | 当前房间内上传、编辑、个人排序、收藏与同步播放 | 当前房间内管理、个人排序与播放 |
+| 诊断与更新 | 媒体状态、手动导出诊断、更新中心 | 媒体状态、手动导出诊断、应用内检查与下载更新 |
 
 桌面端还支持共享画面批注、房间外观设置、个人备注、头像与明暗主题。远控和共享都需要相应权限；Windows 全局远控急停键为 `Ctrl+Alt+Shift+X`。
 
-语音包按房间隔离。升级保留已有记录和音频文件；历史上未归属房间的全局语音包不会被自动分配或广播到新房间。
+语音包内容按房间隔离，个人排序保存在当前设备，并按服务器、账号和房间分别保留；拖拽不会改变其他成员的顺序。首次使用沿用已有顺序，新增和删除内容继续同步。升级保留已有记录和音频文件；历史上未归属房间的全局语音包不会被自动分配或广播到新房间。
+
+桌面“设置 → 采集设置”集中输入输出设备和“兼容观看”开关。兼容模式在下一次开始共享时生效，共享进行中不能切换。手机对应栏目提供音频采集设置，不提供桌面编码兼容开关。
+
+桌面共享方和观看方在相同位置调节各自的共享音量；共享方调节实际发送的电脑音频，不影响麦克风音量。聊天消息和输入固定使用“小”字号，手机继续遵循系统文字缩放。
+
+### 屏幕采集与更新
+
+Windows x64 正式包在支持的运行环境中使用已验证的原生 GPU 采集路径，先启动标准采集，再安全替换已发布的轨道；原生路径不可用时保留标准采集。此版本没有更改编码、码率或画质策略，也不保证所有设备都能稳定达到所选帧率。统计中的 1% low 来自真实帧间隔；采样不足不会显示成已达标。
+
+登录页右下角 **“更新设置”** 与设置内的更新中心共用配置。更新服务器地址独立于登录地址，长期保存在本机；留空时不自动检查或下载，仍可手动使用 GitHub。填写并保存 HTTPS 根地址或路径前缀后，优先从其 `/releases/latest.json` 和版本目录更新，失败时再转 GitHub。差分下载会检查旧安装包、blockmap、Range 响应及重建后的完整性；条件不足时安全回退完整包。
 
 ### 连接与恢复
 
@@ -160,7 +172,7 @@ MEDIASOUP_IP=203.0.113.10 node apps/server/dist/index.js
 - 不从聊天地址推导自动更新地址，也不自动补填官方域名。官方域名为 `cove.luxe`。
 - 桌面手动“从服务器下载”使用当前选择的聊天服务器地址；自建服务器需另外提供对应的 `/downloads/` 和 `/releases/` 文件。
 
-Android 更新由应用检查清单，再交给浏览器／系统安装器完成下载和用户确认安装。覆盖升级需要兼容的签名身份及递增的 `versionCode`；更换签名的边界见 [Android 签名迁移说明](docs/architecture/mobile-signing-migration.md)。
+Android 更新在应用内检查和下载，显示进度并支持取消、重试及已验证包复用。应用核对大小、SHA-256、包名、版本和已安装签名身份，安装前再次验证，然后打开 Android 系统安装界面，由用户最终确认；不会自动开启未知来源安装权限或静默安装。覆盖升级需要兼容的签名身份及递增的 `versionCode`；更换签名的边界见 [Android 签名迁移说明](docs/architecture/mobile-signing-migration.md)。
 
 桌面客户端与桌面服务端使用 `vX.Y.Z` 标签，手机使用独立的 `mobile-vX.Y.Z` 标签。发布先校验最终安装包，再公开 GitHub Release、镜像同一产物，最后公布更新清单。Android 清单需同时维护 `apps/mobile/update.json` 与兼容副本 `mobile/update.json`。Gitee 只同步源码、清单及标签，不创建 Release 或上传附件。完整操作与完成条件见 [AGENTS.md](AGENTS.md)。
 
@@ -170,6 +182,10 @@ Android 更新由应用检查清单，再交给浏览器／系统安装器完成
 - [屏幕发布与换流生命周期](docs/architecture/screen-publication-lifecycle.md)
 - [桌面与手机编码兼容](docs/architecture/screen-codec-compatibility.md)
 - [语音包处理队列与资源限制](docs/architecture/soundpack-processing.md)
+- [个人语音包排序](docs/architecture/personal-soundpack-ordering.md)
+- [Android 应用内更新](docs/architecture/mobile-in-app-update.md)
+- [Windows 差分更新基线与回退](docs/desktop-differential-update-reliability.md)
+- [屏幕采集性能测量与回退](docs/diagnostics/screen-capture-performance-20261023.md)
 - [桌面置顶观看小窗](docs/architecture/floating-viewer.md)
 - [Windows 服务端运行时维护](docs/architecture/runtime-maintenance.md)
 - [Android 构建与发布](apps/mobile/README.md)

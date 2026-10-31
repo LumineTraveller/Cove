@@ -62,7 +62,7 @@ jobs:
           $steps = $jobs.jobs[0].steps
           foreach ($name in @('Verify tag matches client version', 'Install dependencies',
               'Verify architecture and development startup contracts', 'Test desktop client',
-              'Test release mirror asset selection without network access', 'Test server',
+              'Test release mirror asset selection without network access', 'Test server', 'Prepare native capture build tools',
               'Build Windows release', 'Prepare server Visual C++ runtime', 'Build Windows server release')) {
             $step = @($steps | Where-Object name -ceq $name)
             if ($step.Count -ne 1 -or $step[0].conclusion -ne 'success') { throw "Source gate did not pass: $name" }

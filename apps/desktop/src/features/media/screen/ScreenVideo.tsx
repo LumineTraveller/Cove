@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { MonitorPlay } from '@phosphor-icons/react';
 import { bindScreenVideo, type ScreenVideoStatus } from './screenVideoPlayback';
+import { bindFramePresentation } from '../diagnostics/framePresentation';
 import {
   normalizedVideoPoint,
   RemotePointerSender,
   type RemoteControlInput,
 } from '../../remote-control/remoteControl';
 
-function useScreenVideo(stream: MediaStream, remote: boolean) {
+function useScreenVideo(stream: MediaStream, remote: boolean, diagnosticsEnabled: boolean) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const retryRef = useRef<() => void>(() => undefined);
   const [presentation, setPresentation] = useState<{
@@ -28,6 +29,12 @@ function useScreenVideo(stream: MediaStream, remote: boolean) {
     };
   }, [stream, remote]);
 
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!diagnosticsEnabled || !video) return;
+    return bindFramePresentation(video, stream);
+  }, [stream, diagnosticsEnabled]);
+
   return {
     videoRef,
     ready: presentation?.stream === stream && presentation.status === 'ready',
@@ -46,8 +53,11 @@ function ScreenVideoLoading({ failed, onRetry }: { failed: boolean; onRetry: () 
   );
 }
 
-export function LocalScreenVideo({ stream }: { stream: MediaStream }) {
-  const { videoRef, ready, failed, retry } = useScreenVideo(stream, false);
+export function LocalScreenVideo({ stream, diagnosticsEnabled = false }: {
+  stream: MediaStream;
+  diagnosticsEnabled?: boolean;
+}) {
+  const { videoRef, ready, failed, retry } = useScreenVideo(stream, false, diagnosticsEnabled);
   return (
     <div className="screen-video-surface" aria-busy={!ready}>
       <video ref={videoRef} autoPlay muted playsInline />
@@ -60,12 +70,14 @@ export function RemoteScreenVideo({
   stream,
   controlling,
   onInput,
+  diagnosticsEnabled = false,
 }: {
   stream: MediaStream;
   controlling: boolean;
   onInput: (input: RemoteControlInput) => void;
+  diagnosticsEnabled?: boolean;
 }) {
-  const { videoRef, ready, failed, retry } = useScreenVideo(stream, true);
+  const { videoRef, ready, failed, retry } = useScreenVideo(stream, true, diagnosticsEnabled);
   const canControl = controlling && ready;
   const inputSender = useMemo(() => new RemotePointerSender(onInput), [onInput]);
   const surfaceRef = useRef<HTMLDivElement>(null);
