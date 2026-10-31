@@ -3,6 +3,7 @@ import test, { type TestContext } from 'node:test';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { useScreenAudio, type useScreenAudioDependencies } from '../src/features/media/screen/useScreenAudio';
+import { useVolumeControls, type useVolumeControlsDependencies } from '../src/features/media/audio/useVolumeControls';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -11,7 +12,7 @@ function deferred<T>() {
 }
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
-const producer = (id: string) => ({ id, closed: false, closes: 0, pause() {}, close() { this.closed = true; this.closes++; } });
+const producer = (id: string) => ({ id, closed: false, closes: 0, pauses: 0, pause() { this.pauses++; }, close() { this.closed = true; this.closes++; } });
 
 function fixture(t: TestContext) {
   let api!: ReturnType<typeof useScreenAudio>;
@@ -21,13 +22,14 @@ function fixture(t: TestContext) {
     Object.defineProperty(globalThis, name, { configurable: true, value });
     t.after(() => original ? Object.defineProperty(globalThis, name, original) : Reflect.deleteProperty(globalThis, name));
   };
-  const contexts: any[] = [], subscriptions: any[] = [], produced: any[] = [], events: any[] = [];
+  const contexts: any[] = [], subscriptions: any[] = [], produced: any[] = [], events: any[] = [], audioStatus: boolean[] = [];
   let bridgeStarts = 0, bridgeStops = 0, sequence = 0;
   let capture = async () => ({ ok: true, error: undefined as string | undefined });
   let publish = async (_: any) => producer(`audio-${++sequence}`);
   let suspend: (() => Promise<void>) | null = null;
   const ref = () => ({ current: null as any });
   const mediaGeneration = { current: 0 }, screenAudioProducer = ref(), screenAudioPipeline = ref(), screenAudioUnsubscribe = ref();
+  const screenShareVolumeRef = { current: 1 }, forceMutedRef = { current: false };
   const sendTransport = { current: { produce: async (options: any) => { produced.push(options); return publish(options); } } as any };
   replace('AudioContext', class {
     constructor() {
@@ -59,11 +61,13 @@ function fixture(t: TestContext) {
   const deps = {
     mediaGeneration, screenAudioProducer, screenAudioPipeline, screenAudioUnsubscribe, sendTransport,
     socket: { id: 'desktop', connected: true, emit: (...args: any[]) => events.push(args) },
-    screenShareVolumeRef: { current: 1 }, forceMutedRef: { current: false }, screenDemandActiveRef: { current: true },
+    screenShareVolumeRef, forceMutedRef, screenDemandActiveRef: { current: true },
+    setScreenShareHasAudio: (value: boolean) => audioStatus.push(value),
   } as unknown as useScreenAudioDependencies;
   function Probe() { api = useScreenAudio(deps); return null; }
   renderToStaticMarkup(createElement(Probe));
-  return { api, contexts, subscriptions, produced, events, mediaGeneration, sendTransport, screenAudioProducer, screenAudioPipeline,
+  return { api, contexts, subscriptions, produced, events, audioStatus, mediaGeneration, sendTransport, screenAudioProducer, screenAudioPipeline,
+    screenShareVolumeRef, forceMutedRef, replace,
     bridgeStarts: () => bridgeStarts, bridgeStops: () => bridgeStops,
     capture: (next: typeof capture) => { capture = next; }, publish: (next: typeof publish) => { publish = next; },
     suspend: (next: typeof suspend) => { suspend = next; } };
@@ -100,6 +104,7 @@ for (const ok of [true, false]) test(`old native start ${ok ? 'success' : 'failu
   assert.equal(f.screenAudioProducer.current, currentProducer);
   assert.equal(f.screenAudioPipeline.current, currentPipeline);
   assert.equal(currentProducer.closed, false);
+  assert.equal(f.audioStatus.at(-1), true, 'a stale start cannot hide the current producer');
   assert.equal(f.contexts[1].closes, 0);
   assert.equal(f.bridgeStops(), stops);
   assert.equal(f.contexts[0].closes, 1);
@@ -176,4 +181,63 @@ test('the owning video publication can invalidate native audio without reviving 
   assert.equal(f.produced.length, 0);
   assert.equal(f.contexts[0].closes, 1);
   assert.equal(f.screenAudioPipeline.current, null);
+});
+
+test('the share-volume control updates the outgoing pipeline, survives restart, and leaves muted producer ownership intact', async t => {
+  const f = fixture(t), pending = deferred<{ ok: boolean; error: undefined }>();
+  let stored = '', state = 1, storageUnavailable = false;
+  f.replace('localStorage', {
+    getItem: () => null,
+    setItem: (_key: string, value: string) => { if (storageUnavailable) throw new Error('storage unavailable'); stored = value; },
+  });
+  const microphone = { current: 0.45 }, receiver = { current: 0.8 };
+  let controls!: ReturnType<typeof useVolumeControls>;
+  function Controls() {
+    controls = useVolumeControls({
+      screenShareVolumeRef: f.screenShareVolumeRef,
+      setScreenShareVolumeState: (value: number) => { state = value; },
+      screenAudioPipeline: f.screenAudioPipeline,
+      microphoneVolumeRef: microphone,
+      screenReceiveVolumeRef: receiver,
+    } as unknown as useVolumeControlsDependencies);
+    return null;
+  }
+  renderToStaticMarkup(createElement(Controls));
+  f.forceMutedRef.current = true;
+  f.capture(() => pending.promise);
+  const start = f.api.startScreenAudio();
+  await settle();
+  controls.setScreenShareVolume(0.35);
+  assert.equal(f.screenAudioPipeline.current.gain.gain.value, 0.35, 'even a pending capture uses the new gain');
+  assert.notEqual(f.audioStatus.at(-1), true, 'do not expose an unpublished audio track');
+  pending.resolve({ ok: true, error: undefined });
+  await start;
+  const firstPipeline = f.screenAudioPipeline.current, firstProducer = f.screenAudioProducer.current;
+  assert.equal(f.produced[0].track, firstPipeline.track, 'the producer sends the gain pipeline destination');
+  assert.equal(firstProducer.pauses, 1, 'force mute continues to pause the producer');
+  assert.equal(f.audioStatus.at(-1), true, 'a paused producer still has an adjustable track');
+  controls.setScreenShareVolume(0);
+  assert.equal(firstPipeline.gain.gain.value, 0);
+  assert.equal(f.audioStatus.at(-1), true, 'zero gain does not hide the control');
+  storageUnavailable = true;
+  controls.setScreenShareVolume(1.6);
+  assert.equal(firstPipeline.gain.gain.value, 1.6, 'storage failure must not block live gain');
+  assert.equal(state, 1.6);
+  assert.equal(stored, '0');
+  assert.equal(microphone.current, 0.45);
+  assert.equal(receiver.current, 0.8);
+  assert.equal(f.bridgeStarts(), 1);
+  assert.equal(f.produced.length, 1);
+  f.api.closeScreenAudio();
+  assert.equal(f.audioStatus.at(-1), false);
+  assert.equal(firstProducer.closed, true);
+  assert.equal(f.contexts[0].closes, 1);
+  assert.equal(f.subscriptions[0].removals, 1);
+  f.capture(async () => ({ ok: true, error: undefined }));
+  await f.api.startScreenAudio();
+  assert.equal(f.audioStatus.at(-1), true);
+  assert.equal(f.screenAudioPipeline.current.gain.gain.value, 1.6);
+  assert.notEqual(f.screenAudioPipeline.current.track, firstPipeline.track);
+  assert.equal(f.bridgeStarts(), 2);
+  assert.equal(f.produced.length, 2);
 });

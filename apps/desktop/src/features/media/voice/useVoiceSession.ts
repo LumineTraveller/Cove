@@ -90,6 +90,7 @@ export interface useVoiceSessionDependencies {
   readonly playPresenceTone: (action: 'join' | 'leave') => void;
   readonly screenProducer: import('react').MutableRefObject<Producer | null>;
   readonly screenAudioProducer: import('react').MutableRefObject<Producer | null>;
+  readonly setScreenShareHasAudio: import('react').Dispatch<import('react').SetStateAction<boolean>>;
   readonly applicationAudioProducer: import('react').MutableRefObject<Producer | null>;
   readonly deviceRef: import('react').MutableRefObject<Device | null>;
   readonly screenAudioUnsubscribe: import('react').MutableRefObject<(() => void) | null>;
@@ -443,6 +444,7 @@ export function useVoiceSession(deps: useVoiceSessionDependencies) {
       deps.screenProducer.current = null;
       deps.screenAudioProducer.current?.close();
       deps.screenAudioProducer.current = null;
+      deps.setScreenShareHasAudio(false);
       deps.applicationAudioProducer.current?.close();
       deps.applicationAudioProducer.current = null;
       deps.sendTransport.current?.close();

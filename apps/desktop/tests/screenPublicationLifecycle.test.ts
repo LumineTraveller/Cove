@@ -43,6 +43,7 @@ function fixture(t: TestContext) {
   let sharing = false, captures = 0, sequence = 0;
   let capture = async () => stream();
   let startAudio = async (_isCurrent?: () => boolean) => {};
+  let closeAudio = () => {};
   let publish = async (options: any) => {
     const value = producer(`producer-${++sequence}`);
     value.track = options.track;
@@ -55,36 +56,62 @@ function fixture(t: TestContext) {
   replace('requestAnimationFrame', (callback: FrameRequestCallback) => { callback(0); return 0; });
   const ref = () => ({ current: null as any });
   const noop = () => {};
-  const mediaGeneration = { current: 0 }, screenProducer = ref(), localScreenRef = ref();
+  const mediaGeneration = { current: 0 }, screenProducer = ref(), screenAudioProducer = ref(), localScreenRef = ref();
   const sendTransport = { current: { produce: async (options: any) => { produced.push(options); return publish(options); } } as any };
-  const settings = { preset: '720p', fps: 30, gameMode: false, nativeResolution: false };
+  const settings = { preset: '720p', fps: 30, gameMode: false, nativeResolution: false, audio: false };
   const deps = {
     inVoice: true, get isSharing() { return sharing; }, mediaGeneration,
     screenPreset: '720p', fps: 30, screenGameMode: false, screenNativeResolution: false,
-    screenCompatibilityMode: false, shareAudio: false,
+    screenCompatibilityMode: false, get shareAudio() { return settings.audio; },
     setScreenPreset: (value: string) => { settings.preset = value; },
-    setFps: (value: number) => { settings.fps = value; }, setShareAudio: noop,
+    setFps: (value: number) => { settings.fps = value; }, setShareAudio: (value: boolean) => { settings.audio = value; },
     setScreenGameMode: (value: boolean) => { settings.gameMode = value; },
     setScreenNativeResolution: (value: boolean) => { settings.nativeResolution = value; }, setScreenCompatibilityMode: noop,
     setLocalScreen: noop, setScreenEncodingPlan: noop, setScreenViewerCount: noop, setScreenActivity: noop, setStats: noop,
     setIsSharing: (value: boolean) => { sharing = value; },
     localScreenRef, screenProducer, sendTransport, videoCounterPrev: ref(), remoteLossPrev: ref(),
-    screenAudioProducer: ref(), screenAudioUnsubscribe: ref(), screenAudioPipeline: ref(),
+    screenAudioProducer, screenAudioUnsubscribe: ref(), screenAudioPipeline: ref(),
     watchingScreenPeerRef: ref(), screenDemandActiveRef: { current: true }, screenActivityRef: { current: 'active' },
     socket: { id: 'desktop', connected: true, emit: (...args: any[]) => events.push(args) }, roomId: 'room',
     deviceRef: { current: { rtpCapabilities: { codecs: [] }, sendRtpCapabilities: { codecs: [] } } },
     armScreenRampGuard: noop, applyScreenActivity: noop, stopScreenAnalysis: noop, startScreenAnalysis: noop,
-    startScreenAudio: (isCurrent?: () => boolean) => startAudio(isCurrent), clearScreenRampGuard: noop, closeScreenAudio: noop,
+    startScreenAudio: (isCurrent?: () => boolean) => startAudio(isCurrent), clearScreenRampGuard: noop, closeScreenAudio: () => closeAudio(),
     clearAvailableScreens: noop, clearRemoteApplicationAudios: noop,
   } as unknown as useScreenPublishingDependencies;
   let api!: ReturnType<typeof useScreenPublishing>;
   function Probe() { api = useScreenPublishing(deps); return null; }
   renderToStaticMarkup(createElement(Probe));
-  return { api, alerts, events, produced, captureRequests, settings, mediaGeneration, screenProducer, localScreenRef, sendTransport,
+  return { api, alerts, events, produced, captureRequests, settings, mediaGeneration, screenProducer, screenAudioProducer, localScreenRef, sendTransport,
     captures: () => captures, sharing: () => sharing,
     capture: (next: typeof capture) => { capture = next; }, publish: (next: typeof publish) => { publish = next; },
-    startAudio: (next: typeof startAudio) => { startAudio = next; } };
+    startAudio: (next: typeof startAudio) => { startAudio = next; }, closeAudio: (next: typeof closeAudio) => { closeAudio = next; } };
 }
+
+test('changing screen source keeps audio ownership, while audio toggles and stop release the producer', async t => {
+  const f = fixture(t);
+  let starts = 0, closes = 0;
+  f.startAudio(async () => { starts++; f.screenAudioProducer.current = producer(`audio-${starts}`); });
+  f.closeAudio(() => { closes++; f.screenAudioProducer.current?.close(); f.screenAudioProducer.current = null; });
+  await f.api.startScreenShare('720p', 30, true);
+  const firstAudio = f.screenAudioProducer.current;
+  assert.ok(firstAudio);
+  assert.equal(f.settings.audio, true);
+  await f.api.updateScreenShare('1080p', 30, true);
+  assert.equal(f.screenAudioProducer.current, firstAudio, 'replacing video keeps the audio producer');
+  assert.equal(starts, 1);
+  assert.equal(closes, 0);
+  await f.api.updateScreenShare('1080p', 30, false);
+  assert.equal(firstAudio.closed, true);
+  assert.equal(f.screenAudioProducer.current, null);
+  assert.equal(f.settings.audio, false);
+  await f.api.updateScreenShare('1080p', 30, true);
+  assert.ok(f.screenAudioProducer.current);
+  assert.equal(starts, 2);
+  assert.equal(f.settings.audio, true);
+  f.api.stopScreenShare();
+  assert.equal(f.screenAudioProducer.current, null);
+  assert.equal(closes, 2);
+});
 
 test('leaving while the picker is pending releases only the late captured track without publishing', async t => {
   const f = fixture(t), pending = deferred<ReturnType<typeof stream>>(), late = stream();

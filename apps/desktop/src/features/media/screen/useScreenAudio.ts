@@ -19,6 +19,7 @@ export interface useScreenAudioDependencies {
   readonly screenAudioUnsubscribe: import('react').MutableRefObject<(() => void) | null>;
   readonly screenAudioPipeline: import('react').MutableRefObject<ApplicationAudioPipeline | null>;
   readonly screenShareVolumeRef: import('react').MutableRefObject<number>;
+  readonly setScreenShareHasAudio: import('react').Dispatch<import('react').SetStateAction<boolean>>;
   readonly sendTransport: import('react').MutableRefObject<Transport | null>;
   readonly forceMutedRef: import('react').MutableRefObject<boolean>;
   readonly screenDemandActiveRef: import('react').MutableRefObject<boolean>;
@@ -40,6 +41,7 @@ export function useScreenAudio(deps: useScreenAudioDependencies) {
     deps.screenAudioUnsubscribe.current = null;
     deps.screenAudioPipeline.current?.close();
     deps.screenAudioPipeline.current = null;
+    deps.setScreenShareHasAudio(false);
     void window.coveScreenAudio?.stop();
   }, [deps.socket]);
 
@@ -98,8 +100,12 @@ export function useScreenAudio(deps: useScreenAudioDependencies) {
         ensureCurrent();
         deps.screenAudioProducer.current = producer;
         if (deps.forceMutedRef.current || !deps.screenDemandActiveRef.current) producer.pause();
+        deps.setScreenShareHasAudio(true);
       } catch (error) {
-        if (deps.screenAudioProducer.current === producer) deps.screenAudioProducer.current = null;
+        if (producer && deps.screenAudioProducer.current === producer) {
+          deps.screenAudioProducer.current = null;
+          deps.setScreenShareHasAudio(false);
+        }
         if (producer && !producer.closed) {
           if (deps.socket.id === socketId && deps.socket.connected !== false)
             deps.socket.emit('ms:close-producer', { producerId: producer.id });
