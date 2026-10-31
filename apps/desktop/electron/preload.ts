@@ -15,6 +15,15 @@ const nativeEarlyPermits = new Set<string>();
 const nativeRequestId = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9_-]{8,80}$/.test(value);
 const nativeEnabled = process.platform === 'win32' && process.argv.includes('--cove-native-gpu-capture=1') &&
   typeof sharedTexture?.setSharedTextureReceiver === 'function';
+const nativeEarlyImportRelease = nativeEnabled && process.versions?.electron === '44.0.0' &&
+  process.argv.includes('--cove-native-early-import-release=1');
+// Process-local receiver/import observations, not proof of released GPU resources.
+const nativeEarlyImportReleaseDiagnostics = nativeEarlyImportRelease
+  ? { imports: 0, released: 0, releasedBeforeListenerSettled: 0, releaseFailures: 0, openImports: 0,
+    permitTimeouts: 0, receiverFailures: 0, activeReceivers: 0 } : null;
+const incrementEarlyImportCounter = (value: number) => Math.min(Number.MAX_SAFE_INTEGER, value + 1);
+const getEarlyImportReleaseDiagnostics = () => nativeEarlyImportReleaseDiagnostics
+  ? Object.freeze({ ...nativeEarlyImportReleaseDiagnostics }) : null;
 type NativeCpuFrameTimingStage = 'construct' | 'listener' | 'close' | 'handler';
 type NativeCpuFrameTimingAggregate = { count: number; totalMs: number; maxMs: number; buckets: number[] };
 const nativeCpuFrameTimingAggregate = (): NativeCpuFrameTimingAggregate =>
@@ -84,6 +93,93 @@ const nativeFrameValid = (value: NativeScreenFrame): boolean => Boolean(value &&
   (value.pixelFormat === undefined || value.pixelFormat === 'bgra' || value.pixelFormat === 'nv12') &&
   (value.storage === undefined || value.storage === 'cpu') &&
   (value.colorSpace === undefined || value.colorSpace === 'bt601-limited' || value.colorSpace === 'bt709-limited'));
+
+/** Electron 44 keeps getVideoFrame() references alive independently of release().
+ * Remove only the import's extra reference after the existing transfer permit;
+ * listener completion, frame close and main's allReferencesReleased stay owned
+ * by their existing paths. Keep this inline for the sandboxed preload.
+ */
+async function receiveEarlyImportRelease(imported: Electron.SharedTextureImported, metadata: NativeScreenFrame) {
+  const diagnostics = nativeEarlyImportReleaseDiagnostics!;
+  diagnostics.activeReceivers = incrementEarlyImportCounter(diagnostics.activeReceivers);
+  try {
+    diagnostics.imports = incrementEarlyImportCounter(diagnostics.imports);
+    diagnostics.openImports = incrementEarlyImportCounter(diagnostics.openImports);
+    let releaseAttempted = false, failed = false, listenerSettled = true;
+    const stopReceiver = () => {
+      if (failed) return;
+      failed = true;
+      diagnostics.receiverFailures = incrementEarlyImportCounter(diagnostics.receiverFailures);
+      if (!nativeRequestId(metadata?.requestId)) return;
+      try {
+        void ipcRenderer.invoke('cove:native-screen:stop', metadata.requestId, 'receiver_failed').catch(() => {});
+      } catch { /* A destroyed receiver cannot issue another cleanup request. */ }
+    };
+    const releaseImport = () => {
+      if (releaseAttempted) return;
+      releaseAttempted = true;
+      try {
+        imported.release();
+        diagnostics.released = incrementEarlyImportCounter(diagnostics.released);
+        if (!listenerSettled) diagnostics.releasedBeforeListenerSettled =
+          incrementEarlyImportCounter(diagnostics.releasedBeforeListenerSettled);
+        diagnostics.openImports--;
+      } catch {
+        diagnostics.releaseFailures = incrementEarlyImportCounter(diagnostics.releaseFailures);
+        console.warn('[native-screen] renderer_import_release_error', 'release_failed');
+        // A throw is not evidence that this reference was released. Never retry.
+        stopReceiver();
+      }
+    };
+    if (!nativeFrameValid(metadata) || metadata.storage !== undefined) { releaseImport(); return; }
+    const key = nativePermitKey(metadata);
+    let frame: ReturnType<typeof imported.getVideoFrame> | undefined;
+    let permitTimer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
+    let permitSettled = nativeEarlyPermits.delete(key);
+    let resolvePermit: (() => void) | undefined;
+    if (!permitSettled) {
+      const settlePermit = () => {
+        permitSettled = true;
+        resolvePermit?.();
+        // Timeout settles cleanup only; it does not authorize early handoff.
+        if (frame && !timedOut) releaseImport();
+      };
+      nativeReleasePermits.set(key, settlePermit);
+      permitTimer = setTimeout(() => {
+        // The original watchdog also bounds a listener after its permit arrives.
+        if (!timedOut) diagnostics.permitTimeouts = incrementEarlyImportCounter(diagnostics.permitTimeouts);
+        timedOut = true;
+        nativeReleasePermits.delete(key);
+        stopReceiver();
+        settlePermit();
+      }, 1500);
+    }
+    try {
+      const listener = nativeFrameListeners.get(metadata.requestId);
+      if (listener) {
+        frame = imported.getVideoFrame();
+        listenerSettled = false;
+        if (permitSettled) releaseImport();
+        try { await listener(frame, metadata); }
+        finally { listenerSettled = true; }
+      }
+    } catch (error) {
+      console.warn('[native-screen] renderer_frame_callback_error', error instanceof Error ? error.name : 'unknown');
+      stopReceiver();
+    } finally {
+      try { frame?.close(); }
+      catch { stopReceiver(); }
+      if (!permitSettled) await new Promise<void>(resolve => { resolvePermit = resolve; });
+      clearTimeout(permitTimer);
+      nativeReleasePermits.delete(key);
+      releaseImport();
+      if (timedOut) nativeEarlyPermits.delete(key);
+    }
+  } finally {
+    diagnostics.activeReceivers--;
+  }
+}
 
 if (nativeEnabled) {
   ipcRenderer.on('cove:native-screen:release-permit', (_event, metadata: NativeScreenFrame) => {
@@ -156,6 +252,7 @@ if (nativeEnabled) {
     }
   });
   sharedTexture.setSharedTextureReceiver(async ({ importedSharedTexture: imported }, metadata: NativeScreenFrame) => {
+    if (nativeEarlyImportRelease) return receiveEarlyImportRelease(imported, metadata);
     let frame: ReturnType<typeof imported.getVideoFrame> | undefined;
     // A malformed message is never sent by the main broker. Retire the import
     // without issuing a slot credit rather than trusting unvalidated metadata.
@@ -209,6 +306,7 @@ contextBridge.exposeInMainWorld('coveNativeScreen', {
       : process.argv.includes('--cove-native-frame-sink=canvas') ? 'canvas' : undefined
     : undefined,
   getCpuFrameTiming: getNativeCpuFrameTiming,
+  getEarlyImportReleaseDiagnostics,
   start: (requestId: string, options: NativeScreenOptions): Promise<NativeScreenStartResult> =>
     nativeEnabled && nativeRequestId(requestId)
       ? ipcRenderer.invoke('cove:native-screen:start', requestId, options)

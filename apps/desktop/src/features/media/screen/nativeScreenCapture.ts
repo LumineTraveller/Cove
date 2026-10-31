@@ -10,6 +10,7 @@ import { createNativeWorkerFrameSink, type NativeWorkerFrameSinkSnapshot } from 
 import { createNativeGpuSnapshotFrameSink, getNativeGpuSnapshotFrameFailureCode,
   type NativeGpuSnapshotFrameSinkSnapshot } from './nativeGpuSnapshotFrameSink';
 import { createFrameIntervalWindow, type FrameStabilitySnapshot } from '../diagnostics/frameIntervals';
+import { createNativeOpaqueFrameMetrics, writeOpaqueDesktopFrame, type NativeOpaqueFrameMetrics } from './nativeOpaqueFrameView';
 
 export interface NativeScreenBridge {
   readonly supported: boolean;
@@ -32,6 +33,8 @@ export interface NativeScreenCaptureOptions extends NativeScreenOptions {
   contentHint: string;
   isCurrent(): boolean;
   signal: AbortSignal;
+  /** Default-off, renderer-only full-desktop GPU experiment; never sent over IPC. */
+  opaqueDesktopView?: boolean;
 }
 
 export interface NativeScreenCaptureDiagnostics {
@@ -55,6 +58,7 @@ export interface NativeScreenCaptureDiagnostics {
   canvas?: NativeCanvasFrameSinkSnapshot;
   worker?: NativeWorkerFrameSinkSnapshot;
   gpuSnapshot?: NativeGpuSnapshotFrameSinkSnapshot;
+  opaqueView?: NativeOpaqueFrameMetrics;
 }
 
 const captureDiagnostics = new WeakMap<MediaStreamTrack, NativeScreenCaptureDiagnostics>();
@@ -100,7 +104,8 @@ export function getNativeScreenCaptureDiagnostics(track: MediaStreamTrack): Nati
   const worker = workerDiagnostics.get(track)?.();
   const gpuSnapshot = gpuSnapshotDiagnostics.get(track)?.();
   return { ...diagnostics, ...(canvas ? { canvas } : {}), ...(worker ? { worker } : {}),
-    ...(gpuSnapshot ? { gpuSnapshot } : {}) };
+    ...(gpuSnapshot ? { gpuSnapshot } : {}),
+    ...(diagnostics.opaqueView ? { opaqueView: { ...diagnostics.opaqueView } } : {}) };
 }
 
 export type NativeScreenCaptureAttemptPhase =
@@ -215,6 +220,7 @@ export async function tryNativeScreenCapture(
     framesDroppedWhileBusy: 0, totalWriteMs: 0, maxWriteMs: 0,
     framesDroppedExpired: 0, totalQueueAgeMs: 0, maxQueueAgeMs: 0,
     totalWriteIdleMs: 0, maxWriteIdleMs: 0, writesOverFramePeriod: 0,
+    ...(options.opaqueDesktopView === true ? { opaqueView: createNativeOpaqueFrameMetrics() } : {}),
   };
   captureDiagnostics.set(track, diagnostics);
   const frameStabilitySource: NativeFrameStabilitySource = { active: true, observers: new Set() };
@@ -327,7 +333,12 @@ export async function tryNativeScreenCapture(
       diagnostics.maxWriteIdleMs = Math.max(diagnostics.maxWriteIdleMs, idleMs);
     }
     if (!writer) return Promise.reject(new Error('Native Window writer unavailable'));
-    return writer.write(frame);
+    const ownedWriter = writer;
+    if (options.opaqueDesktopView === true && diagnostics.frameSink === 'generator' &&
+        session && session.storage !== 'cpu' && (session.pixelFormat ?? 'bgra') === 'bgra') {
+      return writeOpaqueDesktopFrame(frame, candidate => ownedWriter.write(candidate), diagnostics.opaqueView!);
+    }
+    return ownedWriter.write(frame);
   }
   const writeQueue = createNativeFrameWriteQueue<VideoFrame>({
     now: () => performance.now(),

@@ -357,6 +357,252 @@ test('missing transfer permit retires rather than manufacturing a slot credit', 
   assert.equal(t.state.released, 1); assert.equal(b.timers.size, 0);
 });
 
+const earlyImportReleaseFlag = '--cove-native-early-import-release=1';
+function earlyImportBridge(options = {}) {
+  return bridge(true, { ...options, argv: [earlyImportReleaseFlag, ...(options.argv ?? [])] });
+}
+function heldGpuListener(b) {
+  let finish, reject;
+  const promise = new Promise((resolve, no) => { finish = resolve; reject = no; });
+  const remove = b.api.onFrame(metadata.requestId, () => promise);
+  return { finish, reject, remove };
+}
+
+test('early import release requires the exact flag, native support and Electron 44', async context => {
+  for (const [name, enabled, options] of [
+    ['default', true, {}],
+    ['zero', true, { argv: ['--cove-native-early-import-release=0'] }],
+    ['suffix', true, { argv: [`${earlyImportReleaseFlag}-extra`] }],
+    ['runtime', true, { argv: [earlyImportReleaseFlag], versions: { electron: '43.0.0' } }],
+    ['missing-runtime', true, { argv: [earlyImportReleaseFlag], versions: {} }],
+    ['native-off', false, { argv: [earlyImportReleaseFlag] }],
+    ['platform', true, { argv: [earlyImportReleaseFlag], platform: 'linux' }],
+    ['shared-texture', true, { argv: [earlyImportReleaseFlag], sharedTexture: false }],
+  ]) await context.test(name, async () => {
+    const b = bridge(enabled, options), t = texture();
+    assert.equal(b.api.getEarlyImportReleaseDiagnostics(), null);
+    if (!b.hasReceiver()) { assert.equal(b.api.supported, false); return; }
+    const listener = heldGpuListener(b);
+    b.ipc.emit('cove:native-screen:release-permit', {}, metadata);
+    const completed = b.receive(t, metadata);
+    assert.equal(t.state.released, 0); assert.equal(t.state.closed, 0);
+    listener.finish(); await completed;
+    assert.equal(t.state.closed, 1); assert.equal(t.state.released, 1);
+  });
+});
+
+test('early import release removes only its reference while the original listener remains pending', async () => {
+  const promises = countedPermitPromises(), b = earlyImportBridge({ Promise: promises.constructor }), t = texture();
+  const listener = heldGpuListener(b);
+  b.ipc.emit('cove:native-screen:release-permit', {}, metadata);
+  let completed = false;
+  const receiving = b.receive(t, metadata).then(() => { completed = true; });
+  assert.equal(t.state.frames, 1); assert.equal(t.state.released, 1); assert.equal(t.state.closed, 0);
+  await flush(); assert.equal(completed, false);
+  assert.deepEqual(b.sent, []); assert.deepEqual(b.calls, []);
+  assert.equal(promises.count, 0); assert.equal(b.timers.size, 0);
+  const snapshot = b.api.getEarlyImportReleaseDiagnostics();
+  assert.deepEqual(plain(snapshot), { imports: 1, released: 1, releasedBeforeListenerSettled: 1, releaseFailures: 0, openImports: 0,
+    permitTimeouts: 0, receiverFailures: 0, activeReceivers: 1 });
+  assert.ok(Object.isFrozen(snapshot)); assert.notEqual(snapshot, b.api.getEarlyImportReleaseDiagnostics());
+  assert.equal(Reflect.set(snapshot, 'released', 99), false);
+  listener.finish(); await receiving;
+  assert.equal(t.state.closed, 1); assert.equal(t.state.released, 1); assert.equal(promises.count, 0);
+  assert.deepEqual(plain(b.api.getEarlyImportReleaseDiagnostics()), { ...plain(snapshot), activeReceivers: 0 });
+  assert.equal(snapshot.activeReceivers, 1, 'an earlier snapshot cannot change when the listener settles');
+});
+
+test('a late matching permit releases an import during its listener without changing the frame or timeout', async () => {
+  const promises = countedPermitPromises(), b = earlyImportBridge({ Promise: promises.constructor }), t = texture();
+  const listener = heldGpuListener(b), receiving = b.receive(t, metadata);
+  const timer = [...b.timers.entries()][0];
+  assert.equal(t.state.released, 0); assert.equal(t.state.closed, 0); assert.equal(promises.count, 0);
+  b.ipc.emit('cove:native-screen:release-permit', {}, { ...metadata, sessionId: 'session-other' });
+  b.ipc.emit('cove:native-screen:release-permit', {}, { ...metadata, serial: 2 });
+  assert.equal(t.state.released, 0);
+  assert.doesNotThrow(() => b.ipc.emit('cove:native-screen:release-permit', {}, metadata));
+  assert.equal(t.state.released, 1); assert.equal(t.state.closed, 0);
+  assert.equal(b.api.getEarlyImportReleaseDiagnostics().activeReceivers, 1, 'release does not settle its receiver');
+  assert.equal(b.timers.get(timer[0]), timer[1]); assert.equal(b.timerDelays.get(timer[0]), 1500);
+  assert.deepEqual(b.sent, []); assert.deepEqual(b.calls, []);
+  listener.finish(); await receiving;
+  b.ipc.emit('cove:native-screen:release-permit', {}, metadata);
+  assert.equal(t.state.released, 1); assert.equal(t.state.closed, 1); assert.equal(promises.count, 0);
+  assert.equal(b.timers.size, 0);
+});
+
+test('early import release preserves timeout retirement and never treats timeout as an early permit', async context => {
+  for (const permitArrives of [false, true]) await context.test(String(permitArrives), async () => {
+    const b = earlyImportBridge(), t = texture(), listener = heldGpuListener(b);
+    const receiving = b.receive(t, metadata), timer = [...b.timers.values()][0];
+    if (permitArrives) b.ipc.emit('cove:native-screen:release-permit', {}, metadata);
+    timer(); timer();
+    assert.deepEqual(b.calls, [['cove:native-screen:stop', metadata.requestId, 'receiver_failed']]);
+    assert.equal(t.state.closed, 0); assert.equal(t.state.released, permitArrives ? 1 : 0);
+    b.ipc.emit('cove:native-screen:release-permit', {}, metadata);
+    assert.equal(t.state.released, permitArrives ? 1 : 0, 'late permit must not revive a timed-out handoff');
+    listener.finish(); await receiving;
+    assert.equal(t.state.closed, 1); assert.equal(t.state.released, 1); assert.equal(b.timers.size, 0);
+    assert.deepEqual(b.sent, []);
+    assert.deepEqual(plain(b.api.getEarlyImportReleaseDiagnostics()),
+      { imports: 1, released: 1, releasedBeforeListenerSettled: permitArrives ? 1 : 0, releaseFailures: 0, openImports: 0,
+        permitTimeouts: 1, receiverFailures: 1, activeReceivers: 0 });
+  });
+});
+
+test('an early release failure retires once, never retries, and remains visible as an open import', async context => {
+  for (const permitArrivesEarly of [false, true]) await context.test(String(permitArrivesEarly), async () => {
+    const b = earlyImportBridge(), t = texture(), listener = heldGpuListener(b);
+    let attempts = 0;
+    t.importedSharedTexture.release = () => { attempts++; throw Error('release_failed'); };
+    if (permitArrivesEarly) b.ipc.emit('cove:native-screen:release-permit', {}, metadata);
+    const receiving = b.receive(t, metadata);
+    if (!permitArrivesEarly) assert.doesNotThrow(() => b.ipc.emit('cove:native-screen:release-permit', {}, metadata));
+    assert.equal(attempts, 1); assert.equal(t.state.closed, 0);
+    assert.deepEqual(b.calls, [['cove:native-screen:stop', metadata.requestId, 'receiver_failed']]);
+    for (const timer of b.timers.values()) timer();
+    listener.reject(Error('listener_failed')); await receiving;
+    assert.equal(attempts, 1); assert.equal(t.state.closed, 1); assert.equal(b.timers.size, 0);
+    assert.equal(b.calls.length, 1); assert.deepEqual(b.sent, []);
+    assert.deepEqual(plain(b.api.getEarlyImportReleaseDiagnostics()),
+      { imports: 1, released: 0, releasedBeforeListenerSettled: 0, releaseFailures: 1, openImports: 1,
+        permitTimeouts: permitArrivesEarly ? 0 : 1, receiverFailures: 1, activeReceivers: 0 });
+  });
+});
+
+test('early release does not hide synchronous or asynchronous listener failure', async context => {
+  for (const synchronous of [false, true]) await context.test(String(synchronous), async () => {
+    const b = earlyImportBridge(), t = texture();
+    b.api.onFrame(metadata.requestId, () => {
+      if (synchronous) throw Error('listener_failed');
+      return Promise.reject(Error('listener_failed'));
+    });
+    b.ipc.emit('cove:native-screen:release-permit', {}, metadata);
+    await b.receive(t, metadata);
+    assert.equal(t.state.released, 1); assert.equal(t.state.closed, 1);
+    assert.deepEqual(b.calls, [['cove:native-screen:stop', metadata.requestId, 'receiver_failed']]);
+    assert.deepEqual(b.sent, []); assert.equal(b.timers.size, 0);
+  });
+});
+
+test('early import cleanup waits for transfer when frame creation fails or no listener exists', async context => {
+  for (const createFails of [false, true]) await context.test(String(createFails), async () => {
+    const b = earlyImportBridge(), t = texture();
+    if (createFails) {
+      b.api.onFrame(metadata.requestId, async () => assert.fail('frame construction failed'));
+      t.importedSharedTexture.getVideoFrame = () => { throw Error('get_frame_failed'); };
+    }
+    const receiving = b.receive(t, metadata); await flush();
+    assert.equal(t.state.closed, 0); assert.equal(t.state.released, 0);
+    assert.equal(b.calls.length, createFails ? 1 : 0);
+    b.ipc.emit('cove:native-screen:release-permit', {}, metadata); await receiving;
+    assert.equal(t.state.released, 1); assert.equal(t.state.closed, 0); assert.equal(b.timers.size, 0);
+    assert.deepEqual(plain(b.api.getEarlyImportReleaseDiagnostics()),
+      { imports: 1, released: 1, releasedBeforeListenerSettled: 0, releaseFailures: 0, openImports: 0,
+        permitTimeouts: 0, receiverFailures: createFails ? 1 : 0, activeReceivers: 0 });
+  });
+});
+
+test('stopped listeners and old permits cannot release a different early import', async () => {
+  const b = earlyImportBridge(), old = texture(), current = texture(), listener = heldGpuListener(b);
+  const newer = { ...metadata, sessionId: 'session-newer' };
+  const receivingOld = b.receive(old, metadata);
+  listener.remove(); await b.api.stop(metadata.requestId);
+  const receivingCurrent = b.receive(current, newer); await flush();
+  b.ipc.emit('cove:native-screen:release-permit', {}, metadata);
+  assert.equal(old.state.released, 1); assert.equal(old.state.closed, 0); assert.equal(current.state.released, 0);
+  listener.finish(); await receivingOld;
+  b.ipc.emit('cove:native-screen:release-permit', {}, metadata);
+  assert.equal(current.state.released, 0);
+  b.ipc.emit('cove:native-screen:release-permit', {}, newer); await receivingCurrent;
+  assert.equal(old.state.closed, 1); assert.equal(old.state.released, 1); assert.equal(current.state.released, 1);
+  assert.deepEqual(b.calls, [['cove:native-screen:stop', metadata.requestId, undefined]]);
+  assert.deepEqual(b.sent, []); assert.equal(b.timers.size, 0);
+});
+
+test('early import cleanup continues after frame close or synchronous stop IPC failure', async context => {
+  for (const failure of ['close', 'stop-ipc']) await context.test(failure, async () => {
+    const b = earlyImportBridge(), t = texture(); let closeAttempts = 0;
+    b.api.onFrame(metadata.requestId, async () => { if (failure === 'stop-ipc') throw Error('listener_failed'); });
+    if (failure === 'close') t.importedSharedTexture.getVideoFrame = () => ({ close() { closeAttempts++; throw Error('close_failed'); } });
+    else b.ipc.invoke = () => { throw Error('renderer_gone'); };
+    b.ipc.emit('cove:native-screen:release-permit', {}, metadata);
+    await b.receive(t, metadata);
+    assert.equal(closeAttempts, failure === 'close' ? 1 : 0); assert.equal(t.state.released, 1);
+    assert.equal(b.timers.size, 0); assert.deepEqual(b.sent, []);
+    assert.equal(b.api.getEarlyImportReleaseDiagnostics().receiverFailures, 1);
+    assert.equal(b.api.getEarlyImportReleaseDiagnostics().activeReceivers, 0);
+  });
+});
+
+test('the early GPU import option does not change CPU frame close or ACK ownership', async () => {
+  const b = earlyImportBridge(), listener = heldGpuListener(b);
+  const receiving = b.receiveCpu(cpuMetadata, cpuBytes());
+  assert.equal(b.cpuFrames[0].closed, 0); assert.deepEqual(b.sent, []);
+  assert.deepEqual(plain(b.api.getEarlyImportReleaseDiagnostics()),
+    { imports: 0, released: 0, releasedBeforeListenerSettled: 0, releaseFailures: 0, openImports: 0,
+      permitTimeouts: 0, receiverFailures: 0, activeReceivers: 0 });
+  listener.finish(); await receiving;
+  assert.equal(b.cpuFrames[0].closed, 1);
+  assert.deepEqual(b.sent, [['cove:native-screen:cpu-frame-done', cpuMetadata]]);
+});
+
+test('a permit watchdog after normal stop remains a fault after all import references drain', async () => {
+  const b = earlyImportBridge(), t = texture(), listener = heldGpuListener(b);
+  const receiving = b.receive(t, metadata), timer = [...b.timers.entries()][0];
+  assert.equal(b.timerDelays.get(timer[0]), 1500);
+  listener.remove(); await b.api.stop(metadata.requestId);
+  listener.finish(); await flush();
+  assert.equal(t.state.closed, 1); assert.equal(t.state.released, 0);
+  assert.equal(b.api.getEarlyImportReleaseDiagnostics().activeReceivers, 1);
+  timer[1](); await receiving;
+  const diagnostics = b.api.getEarlyImportReleaseDiagnostics();
+  assert.deepEqual(plain(diagnostics), { imports: 1, released: 1, releasedBeforeListenerSettled: 0, releaseFailures: 0, openImports: 0,
+    permitTimeouts: 1, receiverFailures: 1, activeReceivers: 0 });
+  assert.deepEqual(b.calls, [['cove:native-screen:stop', metadata.requestId, undefined],
+    ['cove:native-screen:stop', metadata.requestId, 'receiver_failed']]);
+  assert.equal(t.state.closed, 1); assert.equal(t.state.released, 1); assert.equal(b.timers.size, 0);
+  assert.deepEqual(b.sent, []);
+  assert.equal(diagnostics.openImports === 0 && diagnostics.activeReceivers === 0 &&
+    diagnostics.permitTimeouts === 0 && diagnostics.receiverFailures === 0, false,
+  'resource drain must not hide a watchdog fault, even if main already stopped the session');
+  b.ipc.emit('cove:native-screen:release-permit', {}, metadata);
+  assert.deepEqual(plain(b.api.getEarlyImportReleaseDiagnostics()), plain(diagnostics));
+});
+
+test('active receivers include a waiting listener after its import has already released', async () => {
+  const b = earlyImportBridge(), t = texture(), listener = heldGpuListener(b);
+  const receiving = b.receive(t, metadata), timer = [...b.timers.entries()][0];
+  b.ipc.emit('cove:native-screen:release-permit', {}, metadata);
+  assert.equal(t.state.released, 1); assert.equal(t.state.closed, 0);
+  assert.deepEqual(plain(b.api.getEarlyImportReleaseDiagnostics()),
+    { imports: 1, released: 1, releasedBeforeListenerSettled: 1, releaseFailures: 0, openImports: 0,
+      permitTimeouts: 0, receiverFailures: 0, activeReceivers: 1 });
+  assert.equal(b.timers.get(timer[0]), timer[1], 'the original listener watchdog stays armed after permit arrival');
+  timer[1]();
+  assert.equal(b.api.getEarlyImportReleaseDiagnostics().permitTimeouts, 1);
+  assert.equal(b.api.getEarlyImportReleaseDiagnostics().receiverFailures, 1);
+  assert.equal(b.api.getEarlyImportReleaseDiagnostics().activeReceivers, 1);
+  assert.equal(t.state.closed, 0, 'observing a timeout cannot close the original listener frame');
+  listener.finish(); await receiving;
+  assert.equal(b.api.getEarlyImportReleaseDiagnostics().activeReceivers, 0);
+  assert.equal(t.state.released, 1); assert.equal(t.state.closed, 1);
+});
+
+test('invalid-metadata returns settle active receiver counts even when import release fails', async context => {
+  for (const releaseFails of [false, true]) await context.test(String(releaseFails), async () => {
+    const b = earlyImportBridge(), t = texture();
+    b.api.onFrame(metadata.requestId, async () => assert.fail('invalid metadata reached a listener'));
+    if (releaseFails) t.importedSharedTexture.release = () => { throw Error('release_failed'); };
+    await b.receive(t, cpuMetadata);
+    assert.deepEqual(plain(b.api.getEarlyImportReleaseDiagnostics()),
+      { imports: 1, released: releaseFails ? 0 : 1, releasedBeforeListenerSettled: 0,
+        releaseFailures: releaseFails ? 1 : 0, openImports: releaseFails ? 1 : 0,
+        permitTimeouts: 0, receiverFailures: releaseFails ? 1 : 0, activeReceivers: 0 });
+    assert.equal(t.state.frames, 0); assert.equal(t.state.closed, 0); assert.equal(b.timers.size, 0);
+  });
+});
+
 test('CPU NV12 uses exact bytes, tight planes and limited BT709, then closes before ACK', async () => {
   const b = bridge(), data = cpuBytes(); let finish, seen;
   b.api.onFrame(metadata.requestId, async (frame, value) => {

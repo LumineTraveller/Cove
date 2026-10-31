@@ -5,6 +5,8 @@ export interface FrameStabilitySnapshot {
   windowMs: number;
   /** Sum of retained actual frame intervals; a recovered long stall is not capped. */
   observedMs: number;
+  /** Largest retained actual interval; coverage may be incomplete and excludes an ongoing wait. */
+  maxFrameIntervalMs?: number | null;
   lastFrameAgeMs: number | null;
   missedFrames: number;
   status: 'sampling' | 'ready' | 'stalled' | 'incomplete';
@@ -108,10 +110,14 @@ export function createFrameIntervalWindow(
     }
     const capacityLimited = lastDiscardedEnd > cutoff;
     let observedMs = 0;
+    let maxFrameIntervalMs: number | null = null;
     let missedFrames = 0;
     for (let offset = 0; offset < count; offset++) {
       const index = (head + offset) % capacity;
-      observedMs += durations[index];
+      const duration = durations[index];
+      observedMs += duration;
+      if (maxFrameIntervalMs === null || duration > maxFrameIntervalMs)
+        maxFrameIntervalMs = duration;
       missedFrames += missed[index];
     }
     const lastFrameAgeMs = previousObservedAt === null ? null : nowMs - previousObservedAt;
@@ -132,7 +138,7 @@ export function createFrameIntervalWindow(
       lowFps = 1_000 / (slowTotalMs / slowFrameCount);
     }
     return {
-      lowFps, sampleCount: count, slowFrameCount, windowMs, observedMs,
+      lowFps, sampleCount: count, slowFrameCount, windowMs, observedMs, maxFrameIntervalMs,
       lastFrameAgeMs, missedFrames, status, capacityLimited,
     };
   }

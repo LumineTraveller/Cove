@@ -53,6 +53,64 @@ class FakeFrame {
 
 type FrameCallback = Parameters<NativeScreenBridge['onFrame']>[1];
 
+function opaqueFixture(context: TestContext) {
+  const f = fixture(context), outputs: FakeFrame[] = [];
+  f.options.opaqueDesktopView = true;
+  class OpaqueFrame extends FakeFrame {
+    format = 'BGRX'; codedWidth = 1920; codedHeight = 1080; duration = null;
+    visibleRect = { x: 0, y: 0, width: 1920, height: 1080 };
+    colorSpace = { primaries: 'bt709', transfer: 'bt709', matrix: 'rgb', fullRange: true };
+    constructor(input: VideoFrame, init: VideoFrameInit) {
+      super(); assert.equal(init.alpha, 'discard'); assert.equal(init.timestamp, input.timestamp);
+      this.timestamp = input.timestamp; outputs.push(this);
+    }
+  }
+  replaceGlobal(context, 'VideoFrame', OpaqueFrame);
+  const source = (timestamp = 1000) => Object.assign(new FakeFrame(), {
+    format: 'BGRA', codedWidth: 1920, codedHeight: 1080, duration: null, timestamp,
+    visibleRect: { x: 0, y: 0, width: 1920, height: 1080 },
+    colorSpace: { primaries: 'bt709', transfer: 'bt709', matrix: 'rgb', fullRange: true },
+  });
+  return { ...f, outputs, source };
+}
+
+test('opaque experiment recognizes default GPU protocol storage and keeps IPC options unchanged', async context => {
+  const f = opaqueFixture(context);
+  const pending = tryNativeScreenCapture(f.stream, f.options); await f.flush();
+  const input = f.source(); await f.frame({}, input);
+  const candidate = await pending; assert.ok(candidate);
+  const track = candidate.stream.getVideoTracks()[0];
+  const diagnostics = getNativeScreenCaptureDiagnostics(track)!;
+  assert.equal(diagnostics.frameSink, 'generator'); assert.equal(diagnostics.frameStorage, 'gpu');
+  assert.equal(f.outputs.length, 1); assert.deepEqual(f.writes, f.outputs);
+  assert.equal(input.closes, 1); assert.equal(f.outputs[0].closes, 1);
+  assert.equal(diagnostics.opaqueView?.admitted, 1); assert.equal(diagnostics.opaqueView?.written, 1);
+  assert.equal(diagnostics.opaqueView?.active, 0); assert.equal(diagnostics.opaqueView?.fallback, 0);
+  diagnostics.opaqueView!.admitted = 999;
+  assert.equal(getNativeScreenCaptureDiagnostics(track)?.opaqueView?.admitted, 1, 'readers cannot alter live counters');
+  candidate.stop(); await f.flush(); assert.equal(f.stock.stops, 0);
+});
+
+test('opaque view is dispatch-only and stop never closes an in-flight view before real writer completion', async context => {
+  const f = opaqueFixture(context), writing = deferred<void>(); f.setWrite(() => writing.promise);
+  const pending = tryNativeScreenCapture(f.stream, f.options); await f.flush();
+  const first = f.source(), second = f.source(2000), third = f.source(3000);
+  const firstReceived = f.frame({}, first);
+  const secondReceived = f.frame({ serial: 2, timestamp: 2000, slot: 1 }, second);
+  const thirdReceived = f.frame({ serial: 3, timestamp: 3000, slot: 2 }, third);
+  await secondReceived; assert.equal(second.closes, 1);
+  assert.equal(f.outputs.length, 1, 'superseded and pending frames construct no wrapper');
+  f.controller.abort(); await Promise.all([firstReceived, thirdReceived]);
+  assert.equal(await pending, null); assert.equal(f.outputs[0].closes, 0);
+  assert.equal(first.closes, 1); assert.equal(third.closes, 1);
+  const track = f.native[0] as unknown as MediaStreamTrack;
+  assert.equal(getNativeScreenCaptureDiagnostics(track)?.opaqueView?.active, 1);
+  writing.resolve(); await f.flush(); await f.flush();
+  assert.equal(f.outputs[0].closes, 1); assert.equal(f.outputs.length, 1);
+  assert.equal(getNativeScreenCaptureDiagnostics(track)?.opaqueView?.active, 0);
+  assert.equal(f.stock.stops, 0);
+});
+
 test('experimental Canvas preference does not replace an unqualified color contract', async context => {
   for (const colorSpace of [undefined, 'bt601-limited'] as const) {
     await context.test(String(colorSpace), async child => {
