@@ -235,13 +235,16 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
       const operation = ++publicationGeneration.current;
       const generation = deps.mediaGeneration.current;
       const socketId = deps.socket.id;
-      const isCurrent = () => operation === publicationGeneration.current &&
-        generation === deps.mediaGeneration.current && transport === deps.sendTransport.current &&
-        socketId === deps.socket.id;
-      const ensureCurrent = () => { if (!isCurrent()) throw new CancelledScreenPublication(); };
-      pendingStart.current = { operation, isCurrent };
       let acquiredStream: MediaStream | null = null;
       let acquiredProducer: Producer | null = null;
+      let videoCommitted = false;
+      const isCurrent = () => operation === publicationGeneration.current &&
+        generation === deps.mediaGeneration.current && transport === deps.sendTransport.current &&
+        (videoCommitted
+          ? acquiredProducer !== null && deps.screenProducer.current === acquiredProducer && !acquiredProducer.closed
+          : socketId === deps.socket.id);
+      const ensureCurrent = () => { if (!isCurrent()) throw new CancelledScreenPublication(); };
+      pendingStart.current = { operation, isCurrent };
       let startupStage = '申请屏幕采集';
       try {
         // rtpCapabilities is the receive-capabilities alias in mediasoup-client.
@@ -361,19 +364,33 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
         if (gameMode) deps.stopScreenAnalysis();
         else deps.startScreenAnalysis(stream, preset, currentFps, nativeResolution);
 
+        // The SFU video and local preview are already published. From here the
+        // voice recovery coordinator owns session validity; a transient signal
+        // disconnect must not undo healthy video while optional audio starts.
+        videoCommitted = true;
+
         // Electron's global `loopback` source captures Cove's own voice and
         // sound-pack playback as well as other desktop audio. The Windows client
         // therefore uses only the native process-loopback capture in exclude
         // mode (Cove's process tree is removed at the WASAPI level).
         if (audio) {
           startupStage = '启动共享系统音频';
+          let audioSignalChanged = false;
+          const audioPublicationCurrent = () => {
+            if (socketId !== deps.socket.id) audioSignalChanged = true;
+            return isCurrent();
+          };
           try {
-            await deps.startScreenAudio(isCurrent);
+            await deps.startScreenAudio(audioPublicationCurrent);
             ensureCurrent();
           } catch (e) {
             ensureCurrent();
-            console.warn('[screen share] 排除 Cove 后的系统音频发布失败:', e);
-            window.alert('屏幕画面已开始共享，但系统音频发布失败。请停止共享后重试。');
+            if (audioSignalChanged || socketId !== deps.socket.id) {
+              console.info('[screen share] signal interrupted audio startup; published video retained');
+            } else {
+              console.warn('[screen share] 排除 Cove 后的系统音频发布失败:', e);
+              window.alert('屏幕画面已开始共享，但系统音频发布失败。请停止共享后重试。');
+            }
           }
         }
 
@@ -391,8 +408,23 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
           }
         }
         acquiredStream?.getTracks().forEach((track) => { track.onended = null; track.stop(); });
-        if (!current || e instanceof CancelledScreenPublication) return;
-        console.error(`[screen share] ${startupStage}失败`, e);
+        const cancelled = !current || e instanceof CancelledScreenPublication;
+        if (cancelled) {
+          console.info('[screen share] startup cancelled', JSON.stringify({
+            stage: startupStage,
+            publicationChanged: operation !== publicationGeneration.current,
+            mediaChanged: generation !== deps.mediaGeneration.current,
+            transportChanged: transport !== deps.sendTransport.current,
+            signalChanged: socketId !== deps.socket.id,
+          }));
+          // The media session can expire after this attempt adopted a preview.
+          // Release that preview too, but never clear a successor's capture
+          // or producer during late cancellation cleanup.
+          if (!acquiredStream || deps.localScreenRef.current !== acquiredStream ||
+              deps.screenProducer.current) return;
+        } else {
+          console.error(`[screen share] ${startupStage}失败`, e);
+        }
         deps.stopScreenAnalysis();
         deps.clearScreenRampGuard();
         deps.closeScreenAudio();
@@ -400,7 +432,7 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
         deps.setLocalScreen(null);
         deps.setIsSharing(false);
         deps.setScreenEncodingPlan(null);
-        if (!(e instanceof DOMException && e.name === 'NotAllowedError'))
+        if (!cancelled && !(e instanceof DOMException && e.name === 'NotAllowedError'))
           window.alert(`无法开始屏幕共享：${e instanceof Error ? e.message : String(e)}`);
       } finally {
         if (pendingStart.current?.operation === operation) pendingStart.current = null;

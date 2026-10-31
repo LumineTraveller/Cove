@@ -41,6 +41,7 @@ function fixture(t: TestContext) {
   const alerts: string[] = [], events: any[] = [], produced: any[] = [];
   const captureRequests: DisplayMediaStreamOptions[] = [];
   let sharing = false, captures = 0, sequence = 0;
+  let localScreen: ReturnType<typeof stream> | null = null;
   let capture = async () => stream();
   let startAudio = async (_isCurrent?: () => boolean) => {};
   let closeAudio = () => {};
@@ -59,6 +60,7 @@ function fixture(t: TestContext) {
   const mediaGeneration = { current: 0 }, screenProducer = ref(), screenAudioProducer = ref(), localScreenRef = ref();
   const sendTransport = { current: { produce: async (options: any) => { produced.push(options); return publish(options); } } as any };
   const settings = { preset: '720p', fps: 30, gameMode: false, nativeResolution: false, audio: false };
+  const socket = { id: 'desktop' as string | undefined, connected: true, emit: (...args: any[]) => events.push(args) };
   const deps = {
     inVoice: true, get isSharing() { return sharing; }, mediaGeneration,
     screenPreset: '720p', fps: 30, screenGameMode: false, screenNativeResolution: false,
@@ -67,12 +69,13 @@ function fixture(t: TestContext) {
     setFps: (value: number) => { settings.fps = value; }, setShareAudio: (value: boolean) => { settings.audio = value; },
     setScreenGameMode: (value: boolean) => { settings.gameMode = value; },
     setScreenNativeResolution: (value: boolean) => { settings.nativeResolution = value; }, setScreenCompatibilityMode: noop,
-    setLocalScreen: noop, setScreenEncodingPlan: noop, setScreenViewerCount: noop, setScreenActivity: noop, setStats: noop,
+    setLocalScreen: (value: ReturnType<typeof stream> | null) => { localScreen = value; },
+    setScreenEncodingPlan: noop, setScreenViewerCount: noop, setScreenActivity: noop, setStats: noop,
     setIsSharing: (value: boolean) => { sharing = value; },
     localScreenRef, screenProducer, sendTransport, videoCounterPrev: ref(), remoteLossPrev: ref(),
     screenAudioProducer, screenAudioUnsubscribe: ref(), screenAudioPipeline: ref(),
     watchingScreenPeerRef: ref(), screenDemandActiveRef: { current: true }, screenActivityRef: { current: 'active' },
-    socket: { id: 'desktop', connected: true, emit: (...args: any[]) => events.push(args) }, roomId: 'room',
+    socket, roomId: 'room',
     deviceRef: { current: { rtpCapabilities: { codecs: [] }, sendRtpCapabilities: { codecs: [] } } },
     armScreenRampGuard: noop, applyScreenActivity: noop, stopScreenAnalysis: noop, startScreenAnalysis: noop,
     startScreenAudio: (isCurrent?: () => boolean) => startAudio(isCurrent), clearScreenRampGuard: noop, closeScreenAudio: () => closeAudio(),
@@ -81,8 +84,8 @@ function fixture(t: TestContext) {
   let api!: ReturnType<typeof useScreenPublishing>;
   function Probe() { api = useScreenPublishing(deps); return null; }
   renderToStaticMarkup(createElement(Probe));
-  return { api, alerts, events, produced, captureRequests, settings, mediaGeneration, screenProducer, screenAudioProducer, localScreenRef, sendTransport,
-    captures: () => captures, sharing: () => sharing,
+  return { api, alerts, events, produced, captureRequests, settings, mediaGeneration, screenProducer, screenAudioProducer, localScreenRef, sendTransport, socket,
+    captures: () => captures, sharing: () => sharing, localScreen: () => localScreen,
     capture: (next: typeof capture) => { capture = next; }, publish: (next: typeof publish) => { publish = next; },
     startAudio: (next: typeof startAudio) => { startAudio = next; }, closeAudio: (next: typeof closeAudio) => { closeAudio = next; } };
 }
@@ -476,6 +479,190 @@ test('initial capture ending during audio startup closes its publication before 
   assert.equal(f.localScreenRef.current, current);
   assert.equal(active.closed, false);
   assert.equal(current.track.stops, 0);
+  assert.equal(f.sharing(), true);
+  assert.deepEqual(f.alerts, []);
+});
+
+test('a transient socket loss during audio startup preserves the first committed video', async t => {
+  for (const outcome of ['resolve', 'reject'] as const) await t.test(outcome, async subtest => {
+    const f = fixture(subtest), first = stream(), pendingAudio = deferred<void>();
+    const audioGuard: { current?: () => boolean } = {};
+    f.capture(async () => first);
+    f.startAudio(isCurrent => { audioGuard.current = isCurrent; return pendingAudio.promise; });
+    const firstStart = f.api.startScreenShare('720p', 30, true);
+    await flush();
+    const active = f.screenProducer.current;
+    assert.ok(active);
+    assert.ok(audioGuard.current);
+    assert.equal(f.localScreenRef.current, first);
+    assert.equal(f.localScreen(), first);
+    assert.equal(f.sharing(), false, 'startup remains pending until audio settles');
+
+    f.socket.id = undefined;
+    assert.equal(audioGuard.current(), true, 'signal loss does not invalidate committed video');
+    if (outcome === 'reject') pendingAudio.reject(new Error('audio startup canceled by signal loss'));
+    else pendingAudio.resolve();
+    await firstStart;
+    assert.equal(f.screenProducer.current, active);
+    assert.equal(active.closed, false);
+    assert.equal(first.track.readyState, 'live');
+    assert.equal(first.track.stops, 0);
+    assert.equal(f.localScreenRef.current, first);
+    assert.equal(f.localScreen(), first);
+    assert.equal(f.sharing(), true);
+    assert.equal(f.captures(), 1);
+    assert.equal(f.produced.length, 1);
+    assert.deepEqual(f.alerts, []);
+  });
+});
+
+test('audio cancellation observed during signal loss remains silent after the same socket id returns', async t => {
+  const f = fixture(t), first = stream(), pendingAudio = deferred<void>();
+  const audioGuard: { current?: () => boolean } = {};
+  f.capture(async () => first);
+  f.startAudio(isCurrent => { audioGuard.current = isCurrent; return pendingAudio.promise; });
+  const start = f.api.startScreenShare('720p', 30, true);
+  await flush();
+  const active = f.screenProducer.current;
+  assert.ok(active);
+  assert.ok(audioGuard.current);
+  f.socket.id = undefined;
+  assert.equal(audioGuard.current(), true);
+  f.socket.id = 'desktop';
+  pendingAudio.reject(new Error('delayed audio cancellation'));
+  await start;
+  assert.equal(f.screenProducer.current, active);
+  assert.equal(active.closed, false);
+  assert.equal(first.track.readyState, 'live');
+  assert.equal(f.localScreen(), first);
+  assert.equal(f.sharing(), true);
+  assert.deepEqual(f.alerts, []);
+});
+
+test('a repeated start during transient signal loss cannot launch another capture', async t => {
+  const f = fixture(t), pendingAudio = deferred<void>();
+  f.startAudio(() => pendingAudio.promise);
+  const firstStart = f.api.startScreenShare('720p', 30, true);
+  await flush();
+  const active = f.screenProducer.current;
+  assert.ok(active);
+  f.socket.id = undefined;
+  await f.api.startScreenShare('1080p', 60, false);
+  assert.equal(f.captures(), 1);
+  assert.equal(f.produced.length, 1);
+  assert.equal(f.screenProducer.current, active);
+  pendingAudio.resolve();
+  await firstStart;
+  assert.equal(f.screenProducer.current, active);
+  assert.equal(f.sharing(), true);
+});
+
+test('a socket change before video publication cancels and releases the old attempt', async t => {
+  const f = fixture(t), first = stream(), pending = deferred<ReturnType<typeof producer>>();
+  const oldProducer = producer('pending-video');
+  f.capture(async () => first);
+  f.publish(() => pending.promise);
+  const start = f.api.startScreenShare('720p', 30, false);
+  await flush();
+  assert.equal(f.captures(), 1);
+  assert.equal(f.produced.length, 1);
+  assert.equal(f.localScreen(), null);
+  f.socket.id = undefined;
+  pending.resolve(oldProducer);
+  await start;
+  assert.equal(oldProducer.closed, true);
+  assert.equal(first.track.readyState, 'ended');
+  assert.equal(f.screenProducer.current, null);
+  assert.equal(f.localScreenRef.current, null);
+  assert.equal(f.localScreen(), null);
+  assert.equal(f.sharing(), false);
+  assert.deepEqual(f.alerts, []);
+});
+
+test('a media generation or transport change during audio startup cleans the old publication', async t => {
+  for (const change of ['media-generation', 'transport'] as const) await t.test(change, async subtest => {
+    const f = fixture(subtest), first = stream(), pendingAudio = deferred<void>();
+    f.capture(async () => first);
+    f.startAudio(() => pendingAudio.promise);
+    const start = f.api.startScreenShare('720p', 30, true);
+    await flush();
+    const oldProducer = f.screenProducer.current;
+    assert.ok(oldProducer);
+    assert.equal(f.localScreen(), first);
+    if (change === 'media-generation') f.mediaGeneration.current++;
+    else f.sendTransport.current = { produce: async () => producer('replacement-transport') };
+    pendingAudio.resolve();
+    await start;
+    assert.equal(oldProducer.closed, true);
+    assert.equal(first.track.readyState, 'ended');
+    assert.equal(f.screenProducer.current, null);
+    assert.equal(f.localScreenRef.current, null);
+    assert.equal(f.localScreen(), null);
+    assert.equal(f.sharing(), false);
+    assert.deepEqual(f.alerts, []);
+  });
+});
+
+test('ordinary audio startup failure still alerts while preserving the video', async t => {
+  const f = fixture(t), first = stream();
+  f.capture(async () => first);
+  f.startAudio(async () => { throw new Error('audio device failed'); });
+  await f.api.startScreenShare('720p', 30, true);
+  assert.equal(f.screenProducer.current.closed, false);
+  assert.equal(first.track.readyState, 'live');
+  assert.equal(f.localScreen(), first);
+  assert.equal(f.sharing(), true);
+  assert.equal(f.alerts.length, 1);
+});
+
+test('late initial audio after explicit stop cannot clear a newer video or audio publication', async t => {
+  const f = fixture(t), first = stream(), next = stream(), pendingAudio = deferred<void>();
+  const nextAudio = producer('new-audio');
+  let audioStarts = 0, audioCloses = 0;
+  f.startAudio(() => {
+    if (++audioStarts === 1) return pendingAudio.promise;
+    f.screenAudioProducer.current = nextAudio;
+    return Promise.resolve();
+  });
+  f.closeAudio(() => {
+    audioCloses++;
+    f.screenAudioProducer.current?.close();
+    f.screenAudioProducer.current = null;
+  });
+  f.capture(async () => first);
+  const firstStart = f.api.startScreenShare('720p', 30, true);
+  await flush();
+  const firstProducer = f.screenProducer.current;
+  assert.ok(firstProducer);
+  assert.equal(f.localScreen(), first);
+
+  f.api.stopScreenShare();
+  assert.equal(firstProducer.closed, true);
+  assert.equal(first.track.readyState, 'ended');
+  assert.equal(f.localScreen(), null);
+  assert.equal(audioCloses, 1);
+  f.capture(async () => next);
+  await f.api.startScreenShare('720p', 30, true);
+  const active = f.screenProducer.current;
+  assert.ok(active);
+  assert.notEqual(active, firstProducer);
+  assert.equal(f.localScreenRef.current, next);
+  assert.equal(f.localScreen(), next);
+  assert.equal(f.screenAudioProducer.current, nextAudio);
+  assert.equal(f.sharing(), true);
+
+  pendingAudio.reject(new Error('old audio canceled'));
+  await firstStart;
+  assert.equal(firstProducer.closed, true);
+  assert.equal(first.track.readyState, 'ended');
+  assert.equal(f.screenProducer.current, active);
+  assert.equal(active.closed, false);
+  assert.equal(f.localScreenRef.current, next);
+  assert.equal(f.localScreen(), next);
+  assert.equal(next.track.readyState, 'live');
+  assert.equal(f.screenAudioProducer.current, nextAudio);
+  assert.equal(nextAudio.closed, false);
+  assert.equal(audioCloses, 1, 'old cleanup must not close the current audio');
   assert.equal(f.sharing(), true);
   assert.deepEqual(f.alerts, []);
 });
