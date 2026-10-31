@@ -4,11 +4,11 @@ import {
   createScreenEncodingPlan,
   SCREEN_MAX_BITRATE_BPS,
   SCREEN_RAMP_GRACE_MS,
-  withScreenEncodingPlan,
   type ScreenActivity,
   type ScreenEncodingPlan,
   type ScreenPreset,
 } from './screenCapture';
+import { updateScreenEncodingParametersIfNeeded } from './screenEncodingParameterUpdate';
 
 import { Producer, Fps } from '../desktopMediaSupport';
 
@@ -72,18 +72,19 @@ export function useScreenAnalysis(deps: useScreenAnalysisDependencies) {
       deps.screenActivityRef.current = activity;
       deps.setScreenActivity(activity);
       deps.setScreenEncodingPlan(plan);
-      if (track) track.contentHint = plan.contentHint;
+      if (track && track.contentHint !== plan.contentHint) track.contentHint = plan.contentHint;
       // getDisplayMedia requests the selected maximum FPS up front. Activity
       // changes only need to alter sender encoding; applying constraints to a
       // live Windows desktop track can restart WGC/DXGI and leave black frames.
       if (!producer) return;
-      if (producer.track) producer.track.contentHint = plan.contentHint;
+      if (producer.track && producer.track.contentHint !== plan.contentHint)
+        producer.track.contentHint = plan.contentHint;
       try {
-        const currentParameters = producer.rtpSender?.getParameters();
-        if (!currentParameters) return;
-        const params = withScreenEncodingPlan(currentParameters, plan);
-        producer.rtpSender
-          ?.setParameters(params)
+        const sender = producer.rtpSender;
+        if (!sender) return;
+        const update = updateScreenEncodingParametersIfNeeded(sender, plan);
+        if (update.status !== 'submitted') return;
+        update.completion
           .then(() => {
             console.info('[media-diag] 已应用屏幕编码参数', {
               activity,

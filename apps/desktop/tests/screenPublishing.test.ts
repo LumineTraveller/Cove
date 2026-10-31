@@ -135,6 +135,119 @@ test('real publishing hooks carry selected 120 through normal/game start and sou
   assert.equal(senderParameters.transactionId, 'same-sender');
 });
 
+test('screen analysis skips matching updates while preserving desired state and track hints', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+  const info = context.mock.method(console, 'info', () => {});
+  let hint = '';
+  const hintWrites: string[] = [];
+  const track = {
+    get contentHint() { return hint; },
+    set contentHint(value: string) { hint = value; hintWrites.push(value); },
+    getSettings: () => ({ width: 1920, height: 1080 }),
+  };
+  let parameters: RTCRtpSendParameters = {
+    transactionId: 'screen-sender', codecs: [], headerExtensions: [], rtcp: {},
+    degradationPreference: 'maintain-resolution',
+    encodings: [{ rid: 'screen', active: true, maxBitrate: 200_000_000, maxFramerate: 120, scaleResolutionDownBy: 1 }],
+  };
+  let reads = 0;
+  const submissions: RTCRtpSendParameters[] = [];
+  const producer = { track, rtpSender: {
+    getParameters: () => { reads += 1; return parameters; },
+    setParameters: (next: RTCRtpSendParameters) => { submissions.push(next); parameters = next; return Promise.resolve(); },
+  } };
+  const activityRef = { current: 'motion' as ScreenActivity };
+  const activities: ScreenActivity[] = [];
+  const plans: ReturnType<typeof createScreenEncodingPlan>[] = [];
+  const analysis = renderHook(() => useScreenAnalysis({
+    screenProducer: { current: producer }, localScreenRef: { current: null },
+    screenRampGuardUntil: { current: 0 }, screenRampTimer: { current: null },
+    screenActivityRef: activityRef,
+    setScreenActivity: (activity: ScreenActivity) => { activities.push(activity); },
+    setScreenEncodingPlan: (plan: ReturnType<typeof createScreenEncodingPlan>) => { plans.push(plan); },
+    screenAnalysisTimer: { current: null }, screenAnalysisVideo: { current: null }, screenAnalysisCanvas: { current: null },
+    previousScreenSample: { current: null }, activityCandidate: { current: { value: 'active', count: 0 } },
+  } as unknown as useScreenAnalysisDependencies));
+
+  analysis.armScreenRampGuard('1080p', 120, true);
+  analysis.applyScreenActivity('1080p', 120, 'active', true);
+  context.mock.timers.tick(5_000);
+  analysis.applyScreenActivity('1080p', 120, 'motion', true);
+  assert.equal(reads, 3);
+  assert.equal(submissions.length, 0);
+  assert.deepEqual(hintWrites, ['detail', 'motion']);
+  assert.deepEqual(activities, ['active', 'active', 'motion']);
+  assert.equal(activityRef.current, 'motion');
+  assert.equal(plans.length, 3);
+  assert.ok(plans.every((plan) => plan.fps === 120 && plan.degradationPreference === 'maintain-resolution'));
+  assert.equal(info.mock.callCount(), 0, 'skipped updates must not log a successful submission');
+
+  parameters = { ...parameters, encodings: [{ ...parameters.encodings[0], maxFramerate: 60 }] };
+  analysis.applyScreenActivity('1080p', 120, 'motion', true);
+  await flushPublishing();
+  assert.equal(submissions.length, 1, 'a real sender change must still be submitted');
+  assert.equal(submissions[0].encodings[0].maxFramerate, 120);
+  assert.deepEqual(hintWrites, ['detail', 'motion']);
+  assert.deepEqual(activities, ['active', 'active', 'motion', 'motion']);
+  assert.equal(info.mock.callCount(), 1, 'only the submitted update logs success');
+});
+
+test('screen analysis preserves unavailable sender and error handling behavior', async (context) => {
+  const warnings: unknown[] = [];
+  const info = context.mock.method(console, 'info', () => {});
+  context.mock.method(console, 'warn', (_message, error) => { warnings.push(error); });
+  let hint = '';
+  const hintWrites: string[] = [];
+  const track = {
+    get contentHint() { return hint; },
+    set contentHint(value: string) { hint = value; hintWrites.push(value); },
+    getSettings: () => ({ width: 1920, height: 1080 }),
+  };
+  const producer = { track, rtpSender: undefined as unknown };
+  const screenProducer = { current: producer as typeof producer | null };
+  const activities: ScreenActivity[] = [];
+  const activityRef = { current: 'static' as ScreenActivity };
+  const analysis = renderHook(() => useScreenAnalysis({
+    screenProducer, localScreenRef: { current: { getVideoTracks: () => [track] } },
+    screenRampGuardUntil: { current: 0 }, screenRampTimer: { current: null },
+    screenActivityRef: activityRef, setScreenActivity: (activity: ScreenActivity) => { activities.push(activity); },
+    setScreenEncodingPlan: () => {}, screenAnalysisTimer: { current: null },
+    screenAnalysisVideo: { current: null }, screenAnalysisCanvas: { current: null },
+    previousScreenSample: { current: null }, activityCandidate: { current: { value: 'active', count: 0 } },
+  } as unknown as useScreenAnalysisDependencies));
+
+  analysis.applyScreenActivity('1080p', 120, 'active', true);
+  let emptySubmissions = 0;
+  producer.rtpSender = { getParameters: () => undefined, setParameters: () => { emptySubmissions += 1; } };
+  analysis.applyScreenActivity('1080p', 120, 'static', true);
+  assert.equal(emptySubmissions, 0);
+  assert.deepEqual(warnings, []);
+
+  const getFailure = new Error('getParameters failed');
+  producer.rtpSender = { getParameters: () => { throw getFailure; } };
+  analysis.applyScreenActivity('1080p', 120, 'motion', true);
+  const stale: RTCRtpSendParameters = {
+    transactionId: 'screen-sender', codecs: [], headerExtensions: [], rtcp: {},
+    degradationPreference: 'maintain-resolution',
+    encodings: [{ maxBitrate: 200_000_000, maxFramerate: 15, scaleResolutionDownBy: 1 }],
+  };
+  const syncFailure = new Error('setParameters threw');
+  producer.rtpSender = { getParameters: () => stale, setParameters: () => { throw syncFailure; } };
+  analysis.applyScreenActivity('1080p', 120, 'active', true);
+  const asyncFailure = new Error('setParameters rejected');
+  producer.rtpSender = { getParameters: () => stale, setParameters: () => Promise.reject(asyncFailure) };
+  analysis.applyScreenActivity('1080p', 120, 'motion', true);
+  await flushPublishing();
+
+  screenProducer.current = null;
+  analysis.applyScreenActivity('1080p', 120, 'active', true);
+  assert.deepEqual(warnings, [getFailure, syncFailure, asyncFailure]);
+  assert.equal(info.mock.callCount(), 0);
+  assert.deepEqual(activities, ['active', 'static', 'motion', 'active', 'motion', 'active']);
+  assert.equal(activityRef.current, 'active');
+  assert.deepEqual(hintWrites, ['detail', 'motion', 'detail', 'motion', 'detail']);
+});
+
 test('diagnostic export reports selected 120 in game mode and keeps actual track cadence distinct', async (context) => {
   let exported: Blob | undefined;
   context.mock.method(URL, 'createObjectURL', (blob: Blob) => { exported = blob; return 'blob:test'; });
