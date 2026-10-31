@@ -561,6 +561,24 @@ app.whenReady().then(() => {
       return remoteInputController.send(sessionId, input as RemoteControlInput);
     },
   );
+  ipcMain.handle("cove:update:get-settings", (event, ...args: unknown[]) =>
+    integritySender(event) && !args.length
+      ? updaterController?.getSettings() ?? { serverUrl: '', automaticEnabled: false }
+      : { serverUrl: '', automaticEnabled: false });
+  ipcMain.handle("cove:update:save-settings", (event, ...args: unknown[]) => {
+    if (!integritySender(event) || args.length !== 1 || typeof args[0] !== 'string') {
+      return { ok: false, settings: { serverUrl: '', automaticEnabled: false }, error: '无效的更新设置请求。' };
+    }
+    return updaterController?.saveSettings(args[0]) ?? {
+      ok: false, settings: { serverUrl: '', automaticEnabled: false }, error: '更新服务尚未准备好。',
+    };
+  });
+  ipcMain.handle("cove:update:check-automatically", (event, ...args: unknown[]) =>
+    integritySender(event) && !args.length && !integrityController?.isBusy()
+      ? updaterController?.checkAutomatically() ?? unavailableUpdateState : unavailableUpdateState);
+  ipcMain.handle("cove:update:check-github", (event, ...args: unknown[]) =>
+    integritySender(event) && !args.length && !integrityController?.isBusy()
+      ? updaterController?.checkGithub() ?? unavailableUpdateState : unavailableUpdateState);
   ipcMain.handle(
     "cove:update:get-state",
     () => updaterController?.getState() ?? unavailableUpdateState,

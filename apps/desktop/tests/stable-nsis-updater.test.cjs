@@ -112,7 +112,7 @@ async function fixture(t, behavior = 'correct') {
   const app = { version: '2.1.0', name: 'cove-test', isPackaged: true, appUpdateConfigPath: config,
     userDataPath: root, baseCachePath: root, whenReady: async () => {}, relaunch() {}, quit() { throw new Error('Tests must not quit an app'); },
     onQuit: handler => quitHandlers.push(handler) };
-  const updater = new StableNsisUpdater(null, app);
+  const updater = new StableNsisUpdater(null, app, { allowLoopbackHttp: true });
   updater.httpExecutor = new LoopbackElectronExecutor();
   const logs = [];
   updater.logger = { info: x => logs.push(x), warn: x => logs.push(x), error: x => logs.push(x) };
@@ -134,6 +134,7 @@ async function fixture(t, behavior = 'correct') {
 test('native 6.8.9 protected hooks reconstruct only the changed bytes and preserve the installed cache pair', async t => {
   assert.equal(require('electron-updater/package.json').version, '6.8.9', 'Review native hook contracts before changing this dependency');
   const f = await fixture(t);
+  assert.equal(f.updater.disableWebInstaller, true, 'Cove only publishes complete offline NSIS installers');
   const files = await f.updater.doDownloadUpdate(f.options);
   assert.deepEqual(fs.readFileSync(files[0]), f.newBytes);
   assert.deepEqual(f.requests.filter(r => r.range).map(r => r.range), ['bytes=4-7']);

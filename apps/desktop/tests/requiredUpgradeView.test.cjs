@@ -17,6 +17,14 @@ function createViewHarness() {
   const opened = [];
   const updater = {
     checks: 0, installs: 0, state: { status: 'idle' },
+    settings: { serverUrl: 'https://updates.test', automaticEnabled: true },
+    async getSettings() { return this.settings; },
+    async checkAutomatically() {
+      this.automaticChecks = (this.automaticChecks ?? 0) + 1;
+      if (this.settings.automaticEnabled) this.checks++;
+      return this.state;
+    },
+    async checkGithub() { this.githubChecks = (this.githubChecks ?? 0) + 1; return this.state; },
     async checkNow() { this.checks++; return this.state; },
     async getState() { return this.state; },
     onState(fn) { listeners.add(fn); return () => listeners.delete(fn); },
@@ -74,7 +82,7 @@ function createViewHarness() {
   }
   const { UpdateCenter } = load(path.resolve(__dirname, '../src/features/updates/components/UpdateCenter.tsx'));
   return {
-    updater, opened,
+    updater, opened, win,
     render(props) { cursor = 0; const tree = UpdateCenter(props); return { tree, html: tree ? renderToStaticMarkup(tree) : '' }; },
     async flush() { const pending = effects; effects = []; pending.forEach(fn => fn()); await new Promise(resolve => setImmediate(resolve)); },
     emit(state) { updater.state = state; for (const listener of listeners) listener(state); },
@@ -97,6 +105,7 @@ test('the real update view starts one check, cannot dismiss a gate, and retains 
   const h = createViewHarness();
   try {
     h.render({ requiredUpgrade: requirement }); await h.flush();
+    h.render({ requiredUpgrade: requirement }); await h.flush();
     assert.equal(h.updater.checks, 1);
     h.render({ requiredUpgrade: { ...requirement } }); await h.flush();
     assert.equal(h.updater.checks, 1, 'equivalent repeated requirements do not restart discovery');
@@ -106,6 +115,10 @@ test('the real update view starts one check, cannot dismiss a gate, and retains 
     assert.match(view.html, /下载失败/);
     assert.match(view.html, /登录记录已保留/);
     assert.doesNotMatch(view.html, /aria-label="关闭更新提示"/);
+    let settingsOpened = 0;
+    h.win.addEventListener('cove:update:settings', () => { settingsOpened++; });
+    findButton(view.tree, '更新设置').props.onClick();
+    assert.equal(settingsOpened, 1, 'the mandatory upgrade popover must keep settings reachable');
     findButton(view.tree, '检查更新').props.onClick(); await h.flush();
     assert.equal(h.updater.checks, 2);
     findButton(view.tree, '正式下载入口').props.onClick(); await h.flush();
@@ -135,16 +148,57 @@ test('the real view keeps transfer and finalization distinct and installs only a
   } finally { h.dispose(); }
 });
 
-test('a manual retry rechecks server policy; the first automatic download check is immediate', async () => {
+test('a manual retry rechecks server policy; automatic discovery first reads persisted configuration', async () => {
   const h = createViewHarness();
   let retries = 0;
   const props = { requiredUpgrade: requirement, onRetryVersion: async () => { retries++; } };
   try {
+    h.render(props); await h.flush();
+    assert.equal(h.updater.checks, 0, 'do not automatically check before reading the saved setting');
     h.render(props); await h.flush();
     assert.equal(retries, 0);
     const view = h.render(props);
     findButton(view.tree, '检查更新').props.onClick(); await h.flush();
     assert.equal(retries, 1);
     assert.equal(h.updater.checks, 2);
+  } finally { h.dispose(); }
+});
+
+test('an empty update address never automatically checks even when a server requires an upgrade', async () => {
+  const h = createViewHarness();
+  h.updater.settings = { serverUrl: '', automaticEnabled: false };
+  try {
+    h.render({ requiredUpgrade: requirement }); await h.flush();
+    const view = h.render({ requiredUpgrade: requirement }); await h.flush();
+    assert.equal(h.updater.checks, 0);
+    findButton(view.tree, '检查更新').props.onClick(); await h.flush();
+    assert.equal(h.updater.checks, 1, 'the explicit manual action remains available');
+  } finally { h.dispose(); }
+});
+
+test('the embedded update view exposes the saved update source and explicit GitHub download action', async () => {
+  const h = createViewHarness();
+  try {
+    h.render({ embedded: true }); await h.flush();
+    h.render({ embedded: true }); await h.flush();
+    const view = h.render({ embedded: true });
+    assert.match(view.html, /更新服务器地址/);
+    assert.match(view.html, /GitHub 检查并下载/);
+    assert.match(view.html, /留空时不自动检查或下载更新/);
+    assert.match(view.html, /https:\/\/updates\.test/);
+    assert.equal(h.updater.checks, 0, 'opening settings must not start an automatic check');
+  } finally { h.dispose(); }
+});
+
+test('an obsolete renderer settings snapshot still uses the guarded automatic IPC entry', async () => {
+  const h = createViewHarness();
+  try {
+    h.render({ requiredUpgrade: requirement }); await h.flush();
+    h.render({ requiredUpgrade: requirement }); await h.flush();
+    assert.equal(h.updater.checks, 1);
+    h.updater.settings = { serverUrl: '', automaticEnabled: false };
+    h.render({ requiredUpgrade: { ...requirement, minimumClientVersion: '3.1.0' } }); await h.flush();
+    assert.equal(h.updater.automaticChecks, 2);
+    assert.equal(h.updater.checks, 1, 'the main-process guard can reject an automatic check without invoking the manual entry');
   } finally { h.dispose(); }
 });

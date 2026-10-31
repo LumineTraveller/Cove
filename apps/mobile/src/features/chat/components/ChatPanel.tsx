@@ -780,7 +780,7 @@ export const createChatStyles = (colors: CoveColors) =>
       borderTopRightRadius: 6,
       backgroundColor: colors.ownMessage,
     },
-    messageText: { color: colors.text, fontSize: 16, lineHeight: 24 },
+    messageText: { color: colors.text, fontSize: 14, lineHeight: 21 },
     imageBubble: { padding: 4 },
     composerContainer: { padding: 13, backgroundColor: colors.navigation },
     composer: {
@@ -805,8 +805,8 @@ export const createChatStyles = (colors: CoveColors) =>
       paddingHorizontal: 10,
       paddingVertical: 11,
       color: colors.text,
-      fontSize: 15,
-      lineHeight: 22,
+      fontSize: 14,
+      lineHeight: 21,
     },
     sendButton: {
       width: 44,

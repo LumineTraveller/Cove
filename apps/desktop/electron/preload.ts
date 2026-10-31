@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, sharedTexture } from "electron";
 import type { NativeScreenFrame, NativeScreenOptions, NativeScreenStartResult } from './native-screen-capture-protocol';
 import type { UpdateState } from "./updater-core";
+import type { UpdateSettings, UpdateSettingsResult } from "./update-settings-types";
 import type { RemoteControlActivation } from "./remote-control-activation";
 import type { RemoteControlInput } from "./remote-control";
 import type { InstallationIntegrityState } from './integrity-state';
@@ -359,6 +360,10 @@ contextBridge.exposeInMainWorld('coveAnnotationOverlay', {
 });
 
 contextBridge.exposeInMainWorld("coveUpdater", {
+  getSettings: (): Promise<UpdateSettings> => ipcRenderer.invoke("cove:update:get-settings"),
+  saveSettings: (serverUrl: string): Promise<UpdateSettingsResult> => ipcRenderer.invoke("cove:update:save-settings", serverUrl),
+  checkGithub: (): Promise<UpdateState> => ipcRenderer.invoke("cove:update:check-github"),
+  checkAutomatically: (): Promise<UpdateState> => ipcRenderer.invoke("cove:update:check-automatically"),
   getState: (): Promise<UpdateState> =>
     ipcRenderer.invoke("cove:update:get-state"),
   checkNow: (): Promise<UpdateState> =>

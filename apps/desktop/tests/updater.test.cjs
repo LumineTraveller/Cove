@@ -199,8 +199,8 @@ test('development builds do not contact the update service', async () => {
   assert.equal(controller.installNow(), false);
 });
 
-test('packaged builds configure automatic checks and downloads', async () => {
-  const h = createHarness();
+test('configured packaged builds schedule automatic checks and downloads', async () => {
+  const h = createHarness({ downloadBaseUrl: cloudServerUrl });
   assert.equal(h.controller.enabled, true);
   assert.equal(h.updater.autoDownload, true);
   assert.equal(h.updater.autoInstallOnAppQuit, true);
@@ -231,7 +231,7 @@ test('startup and manual checks use the download configuration without a login s
   await new Promise(resolve => setImmediate(resolve));
   // Even stale callers cannot replace the update server with a chat address.
   await h.controller.checkNow('https://chat.example.test');
-  assert.deepEqual(received, [UPDATE_DOWNLOAD_BASE_URL, UPDATE_DOWNLOAD_BASE_URL]);
+  assert.deepEqual(received, [UPDATE_DOWNLOAD_BASE_URL]);
   assert.equal(h.controller.setServerUrl, undefined);
   h.controller.dispose();
 });
@@ -242,7 +242,7 @@ test('a custom download base is used by scheduled and manual checks', async () =
     downloadBaseUrl: 'https://download.example.test/cove',
     resolveSources: async serverUrl => {
       received.push(serverUrl);
-      return [cloudSource];
+      return serverUrl ? [cloudSource] : [githubSource];
     },
   });
   h.updater.checkForUpdates = async () => {
@@ -254,7 +254,7 @@ test('a custom download base is used by scheduled and manual checks', async () =
   h.repeating[0].callback();
   await new Promise(resolve => setImmediate(resolve));
   await h.controller.checkNow();
-  assert.deepEqual(received, Array(3).fill('https://download.example.test/cove'));
+  assert.deepEqual(received, Array(3).fill(['https://download.example.test/cove', '']).flat());
   h.controller.dispose();
 });
 
@@ -295,7 +295,7 @@ test('blank default download address never probes a server on startup or manual 
   h.once[0].callback();
   await new Promise(resolve => setImmediate(resolve));
   await h.controller.checkNow('https://chat.example.test');
-  assert.deepEqual(calls, [githubApi, githubApi]);
+  assert.deepEqual(calls, [githubApi]);
   assert.equal(h.controller.getState().source, 'github');
   h.controller.dispose();
 });
@@ -406,6 +406,7 @@ test('Electron adapter waits for legacy startup cleanup before any update check'
     'electron-updater': { autoUpdater: updater },
     fs: { appendFileSync() {} },
     './updater-core': { configureAutoUpdater },
+    './update-settings': { UpdateSettingsStore: class { load() { return { serverUrl: '', automaticEnabled: false }; } save() {} } },
     './stable-nsis-updater': { StableNsisUpdater: function () { return updater; } },
     './gitee-installer-cache': { createGiteeInstallerCache: options => {
       assert.equal(options.installedVersion, '0.8.3');
@@ -415,6 +416,7 @@ test('Electron adapter waits for legacy startup cleanup before any update check'
   };
   vm.runInNewContext(fs.readFileSync(require.resolve('../dist-electron/updater.js'), 'utf8'), {
     exports, require: id => mocks[id] ?? require(id),
+    fetch: () => assert.fail('The Electron adapter fixture must never contact a network'),
     process: { platform: 'win32', env: { LOCALAPPDATA: 'C:\\test-local' } },
     console: { log() {}, warn() {}, error() {} },
   });

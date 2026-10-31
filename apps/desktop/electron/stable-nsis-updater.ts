@@ -1,6 +1,6 @@
 import path from 'path';
 import { URL } from 'url';
-import { CancellationError, CancellationToken, type HttpExecutor } from 'builder-util-runtime';
+import { CancellationError, CancellationToken, type HttpExecutor, type AllPublishOptions, type PublishConfiguration, type GenericServerOptions, type UpdateInfo } from 'builder-util-runtime';
 import { NsisUpdater, type Logger, type ResolvedUpdateFileInfo, type UpdateDownloadedEvent } from 'electron-updater';
 import type { DownloadUpdateOptions } from 'electron-updater/out/AppUpdater';
 import type { InstallOptions } from 'electron-updater/out/BaseUpdater';
@@ -10,6 +10,9 @@ import fs from 'fs';
 import { acquireUpdateCacheLock, cacheError, hashStableFile, regularCacheFile, sameFile } from './update-cache-safety';
 import type { UpdateDownloadMode } from './update-state';
 import { safeDownloadDiagnostic } from './update-diagnostics';
+import { BoundedUpdateProvider } from './update-provider';
+import { guardUpdateDownloadTransport } from './update-download-transport';
+import type { AppAdapter } from 'electron-updater/out/AppAdapter';
 export { safeDownloadDiagnostic } from './update-diagnostics';
 
 const NATIVE_FALLBACK = 'Cannot download differentially, fallback to full download:';
@@ -31,6 +34,31 @@ interface NativeUpdaterRuntime {
 
 /** Small adaptations around the protected electron-updater 6.8.9 NSIS hooks. */
 export class StableNsisUpdater extends NsisUpdater {
+  constructor(options?: AllPublishOptions | null, app?: AppAdapter,
+    private readonly testPolicy?: { allowLoopbackHttp: true }) {
+    super(options, app);
+    // Cove publishes complete NSIS installers, never nsis-web packages.
+    this.disableWebInstaller = true;
+  }
+
+  private checkSignal: AbortSignal | null = null;
+
+  setCheckSignal(signal: AbortSignal | null): void { this.checkSignal = signal; }
+
+  override setFeedURL(options: PublishConfiguration | AllPublishOptions | string): void {
+    if (typeof options !== 'string' && options.provider === 'generic') {
+      const source = options as GenericServerOptions & { expectedVersion?: string };
+      super.setFeedURL({ provider: 'custom', updateProvider: BoundedUpdateProvider,
+        url: source.url, expectedVersion: source.expectedVersion, getCheckSignal: () => this.checkSignal,
+        allowLoopbackHttpForTests: this.testPolicy?.allowLoopbackHttp === true });
+    } else super.setFeedURL(options);
+  }
+
+  protected override onUpdateAvailable(info: UpdateInfo): void {
+    if (this.checkSignal?.aborted) throw new CancellationError();
+    super.onUpdateAvailable(info);
+  }
+
   private modeListener: ((mode: UpdateDownloadMode) => void) | null = null;
   private nativeFailure: string | undefined;
   private preparingDownload = false;
@@ -157,6 +185,7 @@ export class StableNsisUpdater extends NsisUpdater {
   }
 
   protected override async doDownloadUpdate(options: DownloadUpdateOptions): Promise<string[]> {
+    guardUpdateDownloadTransport(this.nativeRuntime.httpExecutor, this.testPolicy?.allowLoopbackHttp === true);
     const cacheName = (await this.nativeRuntime.configOnDisk.value).updaterCacheDirName;
     const cacheDir = path.join(this.app.baseCachePath, cacheName || this.app.name);
     const lockAbort = new AbortController();

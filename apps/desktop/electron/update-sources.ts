@@ -1,5 +1,6 @@
 import { compareSemanticVersions } from '@cove/contracts';
 import { UPDATE_DOWNLOAD_BASE_URL } from './update-config';
+import { normalizeUpdateServerUrl } from './update-settings';
 
 // Discover the configured HTTPS download server first and GitHub as fallback.
 export type UpdateSourceId = 'github' | 'cloud';
@@ -30,13 +31,8 @@ const GITHUB_SOURCE: SourceDefinition = {
 
 /** Automatic update metadata requires a valid HTTPS download-server URL. */
 export function getServerUpdateBaseUrl(serverUrl: string): string | null {
-  try {
-    const url = new URL(serverUrl.trim());
-    if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) return null;
-    return `${url.origin}${url.pathname.replace(/\/+$/, '')}`;
-  } catch {
-    return null;
-  }
+  const normalized = normalizeUpdateServerUrl(serverUrl);
+  return normalized || null;
 }
 
 function createServerSource(serverUrl: string): SourceDefinition | null {
@@ -59,18 +55,41 @@ async function discoverSource(
   fetchImpl: FetchLike,
   timeoutMs: number,
   now: () => number,
+  signal?: AbortSignal,
 ): Promise<UpdateSourceCandidate> {
   const startedAt = now();
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const cancel = () => controller.abort();
+  signal?.addEventListener('abort', cancel, { once: true });
+  if (signal?.aborted) cancel();
+  const timeout = setTimeout(cancel, timeoutMs);
   timeout.unref?.();
   try {
+    controller.signal.throwIfAborted();
     const response = await fetchImpl(source.apiUrl, {
       headers: { Accept: 'application/json', 'User-Agent': 'Cove-Updater' },
       signal: controller.signal,
+      redirect: 'error',
     });
-    if (!response.ok) throw new Error(`${source.label} Release API 返回 HTTP ${response.status}`);
-    const release = await response.json() as { tag_name?: unknown; prerelease?: unknown; draft?: unknown };
+    if (!response.ok) {
+      void response.body?.cancel().catch(() => undefined);
+      throw new Error(`${source.label} Release API 返回 HTTP ${response.status}`);
+    }
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error('Empty release metadata');
+    const chunks: Uint8Array[] = [];
+    let received = 0;
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        received += value.byteLength;
+        if (received > 64 * 1024) throw new Error('Release metadata is too large');
+        chunks.push(value);
+      }
+    } finally { await reader.cancel().catch(() => undefined); }
+    controller.signal.throwIfAborted();
+    const release = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { tag_name?: unknown; prerelease?: unknown; draft?: unknown };
     if (release.draft === true || release.prerelease === true || typeof release.tag_name !== 'string' ||
         !/^v?\d+\.\d+\.\d+(?:\+[0-9A-Za-z.-]+)?$/.test(release.tag_name) ||
         compareSemanticVersions(release.tag_name.replace(/^v/i, ''), release.tag_name.replace(/^v/i, '')) === null) {
@@ -86,6 +105,7 @@ async function discoverSource(
     };
   } finally {
     clearTimeout(timeout);
+    signal?.removeEventListener('abort', cancel);
   }
 }
 
@@ -101,15 +121,24 @@ export async function discoverUpdateSources(
   fetchImpl: FetchLike = fetch,
   timeoutMs = 6_000,
   now: () => number = Date.now,
+  options: { signal?: AbortSignal; currentVersion?: string } = {},
 ): Promise<UpdateSourceCandidate[]> {
   const sources = [createServerSource(serverUrl), GITHUB_SOURCE].filter(
     (source): source is SourceDefinition => source !== null,
   );
   const discovered: UpdateSourceCandidate[] = [];
   for (const source of sources) {
+    options.signal?.throwIfAborted();
     try {
-      discovered.push(await discoverSource(source, fetchImpl, timeoutMs, now));
+      const candidate = await discoverSource(source, fetchImpl, timeoutMs, now, options.signal);
+      if (source.id !== 'cloud' || options.currentVersion === undefined || compareReleaseVersions(candidate.version, options.currentVersion) > 0) discovered.push(candidate);
+      // In the application, a configured server with a newer release is used
+      // immediately. GitHub is discovered only if that server/check/download
+      // fails, or the server has no update for the installed version.
+      if (source.id === 'cloud' && options.currentVersion !== undefined &&
+          compareReleaseVersions(candidate.version, options.currentVersion) > 0) return [candidate];
     } catch {
+      options.signal?.throwIfAborted();
       // Keep probing the lower-priority mirror when the preferred source is
       // unavailable. The updater will report an error only if both fail.
     }

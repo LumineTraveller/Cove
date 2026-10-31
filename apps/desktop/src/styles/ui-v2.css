@@ -3549,7 +3549,7 @@ body .cove-window-controls button {
   padding: 8px 11px;
   border-radius: 6px 13px 13px 13px;
   background: rgba(255, 255, 255, 0.5);
-  font-size: 16px;
+  font-size: 14px;
   line-height: 1.5;
   text-align: left;
   overflow-wrap: anywhere;
@@ -3648,8 +3648,8 @@ body .cove-window-controls button {
 .chat-composer textarea {
   flex: 1;
   min-width: 0;
-  height: 24px;
-  min-height: 24px;
+  height: 21px;
+  min-height: 21px;
   max-height: 96px;
   padding: 0;
   resize: none;
@@ -3657,7 +3657,7 @@ body .cove-window-controls button {
   outline: 0;
   background: transparent;
   color: inherit;
-  font-size: 16px;
+  font-size: 14px;
   line-height: 1.5;
   align-self: center;
 }
@@ -9172,4 +9172,84 @@ html.viewport-resizing .cove-shell {
 html.viewport-resizing .cove-shell :is(.member-row, .control-ball, .share-status-bar) {
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
+}
+
+/* The login entry and Settings share one updater, including persisted sources. */
+.auth-update-trigger {
+  position: fixed;
+  right: 20px;
+  bottom: 18px;
+  z-index: 120;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 10px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  color: var(--ink);
+  background: var(--surface);
+  box-shadow: 0 4px 14px rgb(20 40 70 / 8%);
+  font-size: 13px;
+}
+.auth-update-trigger:hover { border-color: var(--blue); }
+.auth-update-trigger:focus-visible,
+.auth-update-dialog button:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 3px;
+}
+.auth-update-dialog {
+  width: min(680px, calc(100vw - 32px));
+  max-height: calc(100vh - 72px);
+  margin: auto;
+  padding: 0;
+  overflow: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: 20px;
+  color: var(--ink);
+  background: var(--surface);
+  box-shadow: 0 24px 80px rgb(0 0 0 / 22%);
+}
+.auth-update-dialog::backdrop { background: rgb(15 25 40 / 38%); }
+.auth-update-content { padding: 24px; }
+.auth-update-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+.auth-update-heading h2 { margin: 0 0 6px; font-size: 20px; }
+.auth-update-heading p { margin: 0; color: var(--muted); font-size: 13px; }
+.update-source-settings {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+}
+.update-source-settings form { display: grid; gap: 10px; }
+.update-source-settings .field { min-width: 0; margin: 0; }
+.update-source-settings .field input { width: 100%; min-width: 0; }
+.update-source-help { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.update-source-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.update-source-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  color: var(--ink);
+  background: var(--surface-strong);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.update-source-actions button:hover:not(:disabled) { border-color: var(--blue); }
+.update-source-actions button:disabled { opacity: 0.5; cursor: default; }
+.update-source-feedback { margin: 0; color: var(--green); font-size: 12px; }
+@media (max-width: 720px) {
+  .auth-page { padding-bottom: 72px; }
+  .auth-update-trigger { right: 12px; bottom: 12px; }
+  .auth-update-content { padding: 16px; }
 }

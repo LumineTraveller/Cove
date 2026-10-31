@@ -1,4 +1,4 @@
-/** 手动下载跟随当前输入的服务器；允许本地开发用的 HTTP 地址。 */
+/** Derive a manual installer link from the explicitly saved update base URL. */
 export const SERVER_DOWNLOAD_LINKS_ENABLED = true;
 
 export function getServerDownloadUrl(

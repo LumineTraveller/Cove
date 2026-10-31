@@ -14,7 +14,7 @@
     "test:application-audio-sources": "tsx --test tests/applicationAudioSources.test.ts && node tests/applicationAudioSources.native.cjs",
     "prepare:rnnoise-assets": "node tools/prepare-rnnoise-assets.cjs",
     "electron:compile": "npm run remote-input:build && npm run application-audio:build && node electron/build-annotation-window.cjs && tsc -p electron/tsconfig.json",
-    "test:updater": "npm run electron:compile && node --test tests/updater.test.cjs tests/gitee-installer-cache.test.cjs tests/differential-baseline.test.cjs tests/stable-nsis-updater.test.cjs tests/server-certificate-policy.test.cjs",
+    "test:updater": "npm run electron:compile && node --test tests/updater.test.cjs tests/update-settings.test.cjs tests/gitee-installer-cache.test.cjs tests/differential-baseline.test.cjs tests/stable-nsis-updater.test.cjs tests/server-certificate-policy.test.cjs",
     "test:installation-integrity-manifest": "node --test tests/installation-integrity-manifest.test.cjs",
     "test:installation-integrity": "npm run electron:compile && tsx --test tests/installationIntegrity.test.ts && node --test tests/integrityIpc.test.cjs tests/integrityHandoff.test.cjs tests/installationIntegrityView.test.cjs tests/installation-integrity-manifest.test.cjs",
     "test:connection": "tsx --test tests/connectionDeadline.test.ts tests/sessionRegistration.test.ts tests/voiceConnectionRecovery.test.ts",

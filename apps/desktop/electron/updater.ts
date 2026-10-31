@@ -12,6 +12,7 @@ import {
 import { discoverUpdateSources } from './update-sources';
 import { createGiteeInstallerCache } from './gitee-installer-cache';
 import { StableNsisUpdater } from './stable-nsis-updater';
+import { UpdateSettingsStore } from './update-settings';
 
 function createLogger(): LoggerLike {
   const logPath = path.join(app.getPath('userData'), 'updater.log');
@@ -49,6 +50,8 @@ function publishState(state: UpdateState): void {
 
 export function startAutoUpdater(isPackaged: boolean, isMaintenanceBusy: () => boolean = () => false): AutoUpdaterController {
   const logger = createLogger();
+  const settingsStore = new UpdateSettingsStore(app.getPath('userData'));
+  const settings = settingsStore.load();
   let installerCache: ReturnType<typeof createGiteeInstallerCache> | undefined;
   if (isPackaged && process.platform === 'win32') {
     try {
@@ -69,6 +72,12 @@ export function startAutoUpdater(isPackaged: boolean, isMaintenanceBusy: () => b
     isMaintenanceBusy,
     // Serialize startup cleanup with ALL checks (including a manual check) so a
     // cleanup cannot race this process's next download into the same directory.
-    resolveSources: async (serverUrl) => { await cleanup; return discoverUpdateSources(serverUrl); },
+    downloadBaseUrl: settings.serverUrl,
+    saveServerUrl: serverUrl => settingsStore.save(serverUrl),
+    resolveSources: async (serverUrl, signal) => {
+      await cleanup;
+      signal?.throwIfAborted();
+      return discoverUpdateSources(serverUrl, fetch, 6_000, Date.now, { signal, currentVersion: app.getVersion() });
+    },
   });
 }

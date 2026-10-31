@@ -24,6 +24,7 @@ import {
   formatTransferPercent,
   isUpdateBusy,
   openUpdateDetails,
+  openUpdateSettings,
   updateHasDetails,
   updateStepIndex,
   updateWaitWarning,
@@ -31,6 +32,8 @@ import {
   type UpdateState,
 } from '../update';
 import '../../../styles/ui-v2.css';
+import type { UpdateSettings } from '../../../../electron/update-settings-types';
+import { UpdateSourceSettings } from './UpdateSourceSettings';
 
 const initialState: UpdateState = { status: 'idle' };
 
@@ -287,7 +290,6 @@ function UpdateProgress({
 
 export function UpdateCenter({
   embedded = false,
-  serverURL = '',
   allowDetails = true,
   requiredUpgrade,
   onRetryVersion,
@@ -302,13 +304,15 @@ export function UpdateCenter({
   const [open, setOpen] = useState(false);
   const [clock, setClock] = useState(Date.now);
   const [actionError, setActionError] = useState('');
+  const [settings, setSettings] = useState<UpdateSettings | null>(null);
+  const [settingsError, setSettingsError] = useState('');
   const manualCheckRef = useRef(false);
   const dismissedRef = useRef(false);
   const popoverRef = useRef<HTMLElement | null>(null);
   const previousStatusRef = useRef(state.status);
   const requiredCheckRef = useRef('');
 
-  const checkNow = useCallback(async (recheckVersion = true) => {
+  const checkNow = useCallback(async (recheckVersion = true, source: 'preferred' | 'github' | 'automatic' = 'preferred') => {
     manualCheckRef.current = true;
     dismissedRef.current = false;
     setActionError('');
@@ -324,7 +328,8 @@ export function UpdateCenter({
       return;
     }
     try {
-      setState(await updater.checkNow());
+      setState(await (source === 'github' ? updater.checkGithub()
+        : source === 'automatic' ? updater.checkAutomatically() : updater.checkNow()));
     } catch (cause) {
       setState({
         status: 'error',
@@ -335,15 +340,27 @@ export function UpdateCenter({
   }, [embedded, onRetryVersion, requiredUpgrade]);
 
   useEffect(() => {
-    if (!requiredUpgrade) {
+    let active = true;
+    const updater = window.coveUpdater;
+    if (!updater?.getSettings) {
+      setSettingsError('请重启客户端后使用更新设置。');
+      return;
+    }
+    void updater.getSettings().then(value => { if (active) setSettings(value); })
+      .catch(() => { if (active) setSettingsError('读取更新设置失败，请关闭后重试。'); });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!requiredUpgrade || !settings?.automaticEnabled) {
       requiredCheckRef.current = '';
       return;
     }
     const key = `${requiredUpgrade.serverURL}|${requiredUpgrade.minimumClientVersion}`;
     if (requiredCheckRef.current === key) return;
     requiredCheckRef.current = key;
-    void checkNow(false);
-  }, [checkNow, requiredUpgrade]);
+    void checkNow(false, 'automatic');
+  }, [checkNow, requiredUpgrade, settings?.automaticEnabled]);
 
   useEffect(() => {
     const updater = window.coveUpdater;
@@ -449,7 +466,7 @@ export function UpdateCenter({
     const githubBase = 'https://github.com/LumineTraveller/Cove/releases';
     const url =
       source === 'cloud'
-        ? getServerDownloadUrl(serverURL)
+        ? getServerDownloadUrl(settings?.serverUrl ?? '')
         : state.version && /^\d+\.\d+\.\d+$/.test(state.version)
         ? `${githubBase}/tag/v${state.version}`
         : githubBase;
@@ -505,6 +522,8 @@ export function UpdateCenter({
   if (embedded) {
     return (
       <section className="update-center-details" aria-label="Cove 更新详情">
+        <UpdateSourceSettings settings={settings} busy={busy} loadError={settingsError} onSaved={setSettings}
+          onGithubCheck={() => { void checkNow(true, 'github'); }} />
         <div className="update-details-summary">
           <StatusIcon state={state} />
           <div className="update-details-summary-copy" aria-live="polite">
@@ -585,7 +604,7 @@ export function UpdateCenter({
               <ExternalLink size={14} />
               GitHub 发布页
             </button>
-            {SERVER_DOWNLOAD_LINKS_ENABLED && (
+            {SERVER_DOWNLOAD_LINKS_ENABLED && Boolean(settings?.serverUrl) && (
               <button
                 type="button"
                 onClick={() => {
@@ -670,6 +689,11 @@ export function UpdateCenter({
           <button type="button" className="update-details-action" onClick={showDetails}>
             <FileText size={15} />
             详细信息
+          </button>
+        )}
+        {!allowDetails && (
+          <button type="button" className="update-details-action" aria-haspopup="dialog" onClick={openUpdateSettings}>
+            <FileText size={15} />更新设置
           </button>
         )}
         {requiredUpgrade && (

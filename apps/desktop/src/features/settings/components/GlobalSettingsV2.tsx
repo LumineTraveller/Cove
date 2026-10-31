@@ -70,7 +70,8 @@ export function GlobalSettingsV2({
   const [draftAudioInputId, setDraftAudioInputId] = useState(rtc.selectedAudioInputId);
   const [draftAudioOutputId, setDraftAudioOutputId] = useState(rtc.selectedAudioOutputId);
   const [audioActionBusy, setAudioActionBusy] = useState(false);
-  const serverDownloadUrl = getServerDownloadUrl(serverURL);
+  const [updateServerUrl, setUpdateServerUrl] = useState('');
+  const serverDownloadUrl = getServerDownloadUrl(updateServerUrl);
   const audioDeviceSelectionChanged =
     draftAudioInputId !== rtc.selectedAudioInputId ||
     draftAudioOutputId !== rtc.selectedAudioOutputId;
@@ -87,6 +88,14 @@ export function GlobalSettingsV2({
   useEffect(() => {
     if (page !== 'about') return;
     setAboutQuote((previous) => pickAboutQuote(previous));
+  }, [page]);
+
+  useEffect(() => {
+    let active = true;
+    void window.coveUpdater?.getSettings?.().then(settings => {
+      if (active) setUpdateServerUrl(settings.serverUrl);
+    }).catch(() => { if (active) setUpdateServerUrl(''); });
+    return () => { active = false; };
   }, [page]);
 
   useEffect(() => {
@@ -386,7 +395,7 @@ export function GlobalSettingsV2({
                   >
                     GitHub
                   </a>
-                  {SERVER_DOWNLOAD_LINKS_ENABLED && (
+                  {SERVER_DOWNLOAD_LINKS_ENABLED && serverDownloadUrl && (
                     <a
                       href={serverDownloadUrl ?? '#'}
                       target="_blank"
