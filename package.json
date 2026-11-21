@@ -1,6 +1,6 @@
 {
   "name": "cove",
-  "version": "2.1.3",
+  "version": "2.1.4",
   "private": true,
   "workspaces": [
     "apps/server",

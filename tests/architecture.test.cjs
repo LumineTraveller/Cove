@@ -348,8 +348,10 @@ test('release identities match packages and both mobile feeds remain consistent'
   const gradle=fs.readFileSync(path.join(root,'apps/mobile/android/app/build.gradle'),'utf8');
   assert.equal(gradle.match(/versionName "([^"]+)"/)?.[1],CLIENT_RELEASE_VERSIONS.mobile);
   const gradleCode=Number(gradle.match(/versionCode (\d+)/)?.[1]);
-  assert.equal(gradleCode,17);
-  assert.ok(Number.isSafeInteger(feed.release.versionCode)&&feed.release.versionCode>0&&feed.release.versionCode<=gradleCode);
+  assert.ok(Number.isSafeInteger(gradleCode)&&gradleCode>0);
+  assert.ok(Number.isSafeInteger(feed.release.versionCode)&&feed.release.versionCode>0);
+  if(precedence===0) assert.equal(feed.release.versionCode,gradleCode);
+  else assert.ok(feed.release.versionCode<gradleCode,'a staged Android release must increment versionCode before publishing its feed');
 });
 test('third-party dependencies retain the accepted snapshot versions',()=>{
   const current=require('../package-lock.json');
