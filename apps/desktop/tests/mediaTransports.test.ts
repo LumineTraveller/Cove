@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import React from 'react';
+import { EventEmitter } from 'node:events';
 import { renderToString } from 'react-dom/server';
 import { useScreenViewing } from '../src/features/media/screen/useScreenViewing';
 import { useMediaTransports } from '../src/features/media/transport/useMediaTransports';
@@ -58,7 +59,14 @@ const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve();
 function installStream(t: any) {
   const previous = Object.getOwnPropertyDescriptor(globalThis, 'MediaStream');
   Object.defineProperty(globalThis, 'MediaStream', {
-    configurable: true, value: class { constructor(readonly tracks: any[]) {} },
+    configurable: true, value: class {
+      constructor(readonly tracks: any[] = []) {}
+      addTrack(track: any) { if (!this.tracks.includes(track)) this.tracks.push(track); }
+      removeTrack(track: any) { const index = this.tracks.indexOf(track); if (index >= 0) this.tracks.splice(index, 1); }
+      getTracks() { return [...this.tracks]; }
+      getVideoTracks() { return this.tracks.filter(track => track.kind === 'video'); }
+      getAudioTracks() { return this.tracks.filter(track => track.kind === 'audio'); }
+    },
   });
   t.after(() => {
     if (previous) Object.defineProperty(globalThis, 'MediaStream', previous);
@@ -79,6 +87,53 @@ test('desktop prepares screen before resume and still awaits the acknowledgement
   f.reply({});
   assert.equal(await pending, true);
 });
+
+for (const order of [['video', 'audio'], ['audio', 'video']]) {
+  test(`screen sound and picture retain one stream with ${order.join('-first-')} arrival`, async t => {
+    installStream(t);
+    const oldAudio = Object.getOwnPropertyDescriptor(globalThis, 'Audio');
+    Object.defineProperty(globalThis, 'Audio', { configurable: true, value: class {
+      muted = false; volume = 1; srcObject = null; play() { return Promise.resolve(); } pause() {}
+    } });
+    t.after(() => oldAudio ? Object.defineProperty(globalThis, 'Audio', oldAudio) : Reflect.deleteProperty(globalThis, 'Audio'));
+    const f = fixture();
+    const consumers: any[] = [], options: any[] = [];
+    f.deps.screenReceiveVolumeRef = ref(1);
+    f.deps.masterOutputGain = ref(null);
+    f.deps.socket.emit = (event: string, payload: any, ack: (value: any) => void) => {
+      if (event === 'ms:consume') ack({ id: payload.producerId });
+      else if (event === 'ms:resume-consumer') ack({});
+    };
+    f.deps.recvTransport.current.consume = async (value: any) => {
+      options.push(value);
+      const kind = value.id === 'video' ? 'video' : 'audio';
+      const observer = new EventEmitter();
+      const consumer = Object.assign(new EventEmitter(), { id: value.id, kind, closed: false,
+        observer, track: { kind, readyState: 'live' }, getStats: async () => new Map(),
+        close() { this.closed = true; observer.emit('close'); },
+      });
+      consumers.push(consumer); return consumer;
+    };
+    let sourceStream: any;
+    const gain = { gain: { value: 1 }, connect() {}, disconnect() {} };
+    f.deps.ensureAudioCtx = () => ({ destination: {}, resume: async () => {}, createGain: () => gain,
+      createMediaStreamSource: (stream: any) => { sourceStream = stream; return { connect: () => gain, disconnect() {} }; },
+    });
+    for (const kind of order)
+      assert.equal(await f.api.consumeProducer(kind, 'peer-1', kind, { type: kind === 'video' ? 'screen' : 'screen-audio' }), true);
+    const stream = f.deps.screen.stream;
+    assert.equal(sourceStream, stream);
+    assert.equal(stream.getVideoTracks().length, 1);
+    assert.equal(stream.getAudioTracks().length, 1);
+    assert.deepEqual(options.map(value => value.streamId), ['screen-peer-1', 'screen-peer-1']);
+    consumers.find(consumer => consumer.kind === 'audio').close();
+    assert.equal(stream.getAudioTracks().length, 0);
+    assert.equal(f.deps.screen.stream, stream);
+    consumers.find(consumer => consumer.kind === 'video').close();
+    assert.equal(f.deps.screen, null);
+    for (const output of f.deps.remoteAudioOutputs.current.values()) output.close();
+  });
+}
 
 test('resume rejection removes the early attached screen and permits retry', async t => {
   installStream(t);

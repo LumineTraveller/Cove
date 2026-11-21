@@ -6,6 +6,21 @@ import type { RemoteControlActivation } from "./remote-control-activation";
 import type { RemoteControlInput } from "./remote-control";
 import type { InstallationIntegrityState } from './integrity-state';
 
+let screenActivitySequence = 0;
+contextBridge.exposeInMainWorld('coveScreenShareActivity', {
+  acquire: () => {
+    if (screenActivitySequence >= Number.MAX_SAFE_INTEGER) throw new Error('Screen activity limit reached');
+    const id = ++screenActivitySequence;
+    ipcRenderer.send('cove:screen-share:activity', id, true);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      ipcRenderer.send('cove:screen-share:activity', id, false);
+    };
+  },
+});
+
 // Keep this bridge in the sandboxed preload: it may require Electron builtins,
 // but cannot require an unbundled local runtime module. Handles never cross the
 // context bridge. Each imported texture has its own transfer/release barrier.

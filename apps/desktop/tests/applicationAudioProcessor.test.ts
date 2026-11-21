@@ -5,14 +5,14 @@ import { runInNewContext } from 'node:vm';
 import { PcmChunkQueue } from '../electron/pcmChunkQueue';
 
 const source = readFileSync(new URL('../src/features/media/application-audio/applicationAudioProcessor.js', import.meta.url), 'utf8');
-function harness(rate = 48000) {
+function harness(rate = 48000, latencyProfile = 'application') {
   let Processor: any;
   const messages: any[] = [];
   runInNewContext(source, { sampleRate: rate, Float32Array, DataView,
     AudioWorkletProcessor: class { port = { onmessage: null, postMessage: (value: any) => messages.push(value) }; },
     registerProcessor: (_: string, value: any) => { Processor = value; },
   });
-  const processor = new Processor();
+  const processor = new Processor({ processorOptions: { latencyProfile } });
   const render = (frames = 128) => {
     const channels = [new Float32Array(frames), new Float32Array(frames)];
     const alive = processor.process([], [channels]);
@@ -40,6 +40,19 @@ test('ring starts with 30 ms of capture and emits stereo silence before priming'
   h.push(480, 960);
   assert.ok(h.render(256).left.some(v => v !== 0));
   assert.equal(h.processor.target, 1440);
+});
+
+test('screen sound survives 100ms PCM delivery bursts without changing independent audio latency', () => {
+  const h = harness(48000, 'screen');
+  h.push(5760);
+  for (let block = 0; block < 30; block++) {
+    for (let quantum = 0; quantum < 37; quantum++) h.render();
+    h.push(37 * 128, 5760 + block * 37 * 128);
+  }
+  assert.equal(h.processor.underflows, 0);
+  assert.equal(h.processor.droppedFrames, 0);
+  assert.equal(h.processor.target, 5760);
+  assert.equal(harness().processor.target, 1440);
 });
 
 test('48 kHz preserves PCM exactly after fade, across variable render quanta', () => {

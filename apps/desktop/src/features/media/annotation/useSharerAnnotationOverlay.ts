@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { useScreenAnnotations } from './useScreenAnnotations';
+import { composeAnnotationStrokes } from './annotationModel';
 
 /** Mirror the owner's session even while Cove displays somebody else's share. */
 export function useSharerAnnotationOverlay(
@@ -80,9 +81,9 @@ export function useSharerAnnotationOverlay(
     const bridge = window.coveAnnotationOverlay;
     if (!bridge || !token) return;
     const valid = annotations.ready && annotations.state?.enabled && annotations.state.sessionId === sessionId;
-    // Only server-authorized state and this hook's permitted optimistic tail.
+    // Keep local extensions at the confirmed stroke's original layer.
     void bridge.update(token, valid ? {
-      strokes: [...annotations.state!.strokes, ...annotations.optimisticStrokes],
+      strokes: composeAnnotationStrokes(annotations.state!.strokes, annotations.optimisticStrokes),
       lasers: Object.values(annotations.laserPoints),
     } : { strokes: [], lasers: [] }).then(ok => {
       if (!ok && tokenRef.current === token) setError('桌面批注会话已失效，请停止并重新共享。');

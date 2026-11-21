@@ -11,11 +11,43 @@ import {
   authorizedResourceURL,
   serverFetch,
   setServerAccessToken,
+  clearAllServerAccessTokens,
+  getServerAccessToken,
+  retainServerAccessForConnection,
 } from '../src/features/connection/serverSecurity';
 
 const response = (status: number, payload: unknown) => new Response(JSON.stringify(payload), {
   status,
   headers: { 'content-type': 'application/json' },
+});
+
+test('expiry preserves requests for a connected session, while a fresh login and disconnect remain strict', t => {
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  const server = 'https://active-session.test';
+  clearAllServerAccessTokens();
+  t.after(clearAllServerAccessTokens);
+  setServerAccessToken(server, { accessToken: 'admitted-fixture-token', expiresAt: now + 100 });
+  const release = retainServerAccessForConnection(server, getServerAccessToken(server));
+  now += 100;
+  assert.equal(getServerAccessToken(server), null);
+  assert.equal(serverSocketAuth(server).serverAccessToken, null);
+  assert.equal(new Headers(serverRequestInit(server).headers).get('authorization'), 'Bearer admitted-fixture-token');
+  assert.equal(new URL(authorizedResourceURL(server, '/avatars/fixture.png')).searchParams.get('access_token'), 'admitted-fixture-token');
+  assert.equal(new Headers(serverRequestInit('https://other-session.test').headers).get('authorization'), null);
+  release();
+  assert.equal(new Headers(serverRequestInit(server).headers).get('authorization'), null);
+});
+
+test('a stale connection cleanup cannot clear its successor, and explicit invalidation clears live access', () => {
+  const server = 'https://connection-cleanup.test';
+  const previous = retainServerAccessForConnection(server, 'previous-fixture');
+  const release = retainServerAccessForConnection(server, 'current-fixture');
+  previous();
+  assert.equal(new Headers(serverRequestInit(server).headers).get('authorization'), 'Bearer current-fixture');
+  clearAllServerAccessTokens();
+  assert.equal(new Headers(serverRequestInit(server).headers).get('authorization'), null);
+  release();
 });
 
 test('legacy server status 404 is treated as password-free mode', async () => {

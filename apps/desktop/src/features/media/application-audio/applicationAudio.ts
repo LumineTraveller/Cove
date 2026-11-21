@@ -45,7 +45,7 @@ export class ApplicationAudioPipeline {
     }
   >();
 
-  constructor(initialVolume: number) {
+  constructor(initialVolume: number, private readonly latencyProfile: 'application' | 'screen' = 'application') {
     let legacy = false;
     try {
       legacy = window.coveAudioLatencyProfile === 'legacy'
@@ -71,7 +71,7 @@ export class ApplicationAudioPipeline {
   }
 
   get diagnostics() {
-    return { mode: this.worklet ? 'worklet' : 'legacy', ...this.workletStats,
+    return { mode: this.worklet ? 'worklet' : 'legacy', latencyProfile: this.latencyProfile, ...this.workletStats,
       pendingMs: this.pendingPcm.byteLength / 192, ipcDroppedFrames: this.pendingPcm.droppedFrames };
   }
 
@@ -88,6 +88,7 @@ export class ApplicationAudioPipeline {
           if (this.closed || this.workletFailed) return;
           node = new AudioWorkletNode(this.context, 'cove-application-audio', {
             numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2],
+            ...(this.latencyProfile === 'screen' ? { processorOptions: { latencyProfile: 'screen' } } : {}),
           });
           const currentNode = node;
           this.initializingNode = currentNode;

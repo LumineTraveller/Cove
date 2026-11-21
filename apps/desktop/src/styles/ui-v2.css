@@ -1230,7 +1230,7 @@ select:focus-visible {
 }
 .debug-overlay {
   position: absolute;
-  z-index: 20;
+  z-index: 30;
   left: 14px;
   top: 14px;
   width: 190px;

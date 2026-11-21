@@ -460,6 +460,16 @@ export function createServerSecurityStore(
       );
     },
 
+    // Only for sessions admitted while their grant was valid. Natural expiry
+    // prevents the next login; password rotation/revocation still ends this one.
+    isAccessEpochCurrent(epoch: unknown): boolean {
+      if (!Number.isSafeInteger(epoch) || Number(epoch) < 1) return false;
+      return withSecurityClock(() => {
+        const record = getSecurity.get() as ServerSecurityRecord;
+        return !!record.passwordHash && !!record.passwordSalt && record.tokenEpoch === epoch;
+      }, () => false);
+    },
+
     revokeAll() {
       const explicitlyRevoked = withSecurityClock(
         (currentTime) => {

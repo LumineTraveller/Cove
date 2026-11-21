@@ -70,6 +70,19 @@ function enableRequestMode(s: ReturnType<typeof setup>) {
   assert.equal(ack.ok, true);
 }
 
+test('clearing rejects delayed chunks from the previous canvas and permits a fresh stroke', () => {
+  const s = setup();
+  enableRequestMode(s);
+  assert.equal(s.service.draw({ target: s.target, clearRevision: 0, stroke: stroke('old') }, OWNER).ack.ok, true);
+  const cleared = s.service.clear(s.target, OWNER).ack;
+  assert.equal(cleared.ok, true);
+  assert.equal(cleared.state!.clearRevision, cleared.state!.revision);
+  assert.equal(s.service.draw({ target: s.target, clearRevision: 0, stroke: stroke('old') }, OWNER).ack.ok, false);
+  assert.deepEqual(s.service.get(s.target, OWNER).state!.strokes, []);
+  assert.equal(s.service.draw({ target: s.target, clearRevision: cleared.state!.clearRevision, stroke: stroke('fresh') }, OWNER).ack.ok, true);
+  assert.deepEqual(s.service.get(s.target, OWNER).state!.strokes.map(item => item.id), ['fresh']);
+});
+
 test('permissions and author identity are enforced by the server', () => {
   const s = setup(['intruder-1']);
   assert.equal(s.service.get(s.getTarget, OWNER).state?.enabled, false);

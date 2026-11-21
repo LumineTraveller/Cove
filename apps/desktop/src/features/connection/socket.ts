@@ -1,5 +1,5 @@
 import { io } from 'socket.io-client';
-import { serverSocketAuth } from './serverSecurity';
+import { retainServerAccessForConnection, serverSocketAuth } from './serverSecurity';
 
 const CLIENT_ID_KEY = 'cove_client_id';
 
@@ -39,11 +39,23 @@ export function getServerURL(): string {
 }
 
 // socket 在模块加载时创建，login 后 reload 页面使新 URL 生效
-export const socket = io(getServerURL(), {
+const socketServerURL = getServerURL();
+export const socket = io(socketServerURL, {
   autoConnect: false,
-  auth: serverSocketAuth(getServerURL()),
+  auth: serverSocketAuth(socketServerURL),
 });
 
+let releaseServerAccess = () => {};
+socket.on('connect', () => {
+  releaseServerAccess();
+  const auth = socket.auth;
+  releaseServerAccess = retainServerAccessForConnection(
+    socketServerURL, typeof auth === 'object' ? auth.serverAccessToken : null,
+  );
+});
+socket.on('disconnect', () => releaseServerAccess());
+
 export function applyServerAccessToSocket(serverURL: string): void {
-  socket.auth = serverSocketAuth(serverURL);
+  // Registration retries must retain the grant admitted on this connection.
+  if (!socket.connected) socket.auth = serverSocketAuth(serverURL);
 }

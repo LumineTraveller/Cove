@@ -67,6 +67,7 @@ export function requiresServerAccessRecovery(code: unknown): boolean {
 // Durable grants are OS-encrypted through the main process, bound to an exact
 // URL and account. The session copy only bridges the post-login renderer reload.
 const accessTokens = new Map<string, ServerAccessGrant>();
+const connectionAccess = new Map<string, { token: string }>();
 const grantOwners = new Map<string, string>();
 const grantObservedAt = new Map<string, number>();
 const CLOCK_ROLLBACK_TOLERANCE = 5 * 60 * 1000;
@@ -154,6 +155,21 @@ export function getServerAccessToken(serverURL: string): string | null {
   return getServerAccessGrant(serverURL)?.accessToken ?? null;
 }
 
+/** Retain only while the server-admitted socket is connected. Never persisted. */
+export function retainServerAccessForConnection(serverURL: string, token: unknown): () => void {
+  const key = serverKey(serverURL);
+  if (!key || typeof token !== 'string' || !token) return () => {};
+  const connection = { token };
+  connectionAccess.set(key, connection);
+  return () => {
+    if (connectionAccess.get(key) === connection) connectionAccess.delete(key);
+  };
+}
+
+function requestAccessToken(serverURL: string): string | null {
+  return connectionAccess.get(serverKey(serverURL))?.token ?? getServerAccessToken(serverURL);
+}
+
 /** A restored grant may authorize only its exact server and account. */
 export function hasServerAccessForAccount(serverURL: string, email: string): boolean {
   const server = serverKey(serverURL), account = email.trim().toLowerCase();
@@ -174,6 +190,7 @@ export function clearServerAccessToken(serverURL: string): void {
   const key = serverKey(serverURL);
   if (key) {
     invalidateServerOperations(key);
+    connectionAccess.delete(key);
     accessTokens.delete(key);
     grantOwners.delete(key);
     grantObservedAt.delete(key);
@@ -183,6 +200,7 @@ export function clearServerAccessToken(serverURL: string): void {
 
 export function clearAllServerAccessTokens(): void {
   operationGeneration += 1;
+  connectionAccess.clear();
   accessTokens.clear();
   grantOwners.clear();
   grantObservedAt.clear();
@@ -318,7 +336,7 @@ export function serverRequestInit(serverURL: string, init: RequestInit = {}): Re
   headers.set('X-Cove-Client-Protocol', String(CLIENT_PROTOCOL_VERSION));
   headers.set('X-Cove-Client-Version', CLIENT_VERSION);
   headers.set('X-Cove-Client-Platform', CLIENT_PLATFORM);
-  const token = getServerAccessToken(serverURL);
+  const token = requestAccessToken(serverURL);
   if (token) headers.set('Authorization', `Bearer ${token}`);
   return { ...init, headers };
 }
@@ -349,7 +367,7 @@ export function serverSocketAuth(serverURL: string) {
 export function authorizedResourceURL(serverURL: string, target: string): string {
   if (/^(?:data|blob):/i.test(target)) return target;
   const url = requestURL(serverURL, target);
-  const token = getServerAccessToken(serverURL);
+  const token = requestAccessToken(serverURL);
   try {
     const parsed = new URL(url);
     if (parsed.origin !== new URL(serverURL).origin) return url;

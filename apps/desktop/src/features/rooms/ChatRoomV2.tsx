@@ -846,6 +846,7 @@ export default function ChatRoomV2({
           nativeResolution={pendingNativeResolution}
           onNativeResolution={setPendingNativeResolution}
           confirmLabel={editingScreen ? '更新共享' : '开始共享'}
+          busy={rtc.isStartingScreenShare}
           onPreset={setPendingPreset}
           onFps={setPendingFps}
           onAudio={() => setPendingAudio((value) => !value)}
@@ -853,8 +854,6 @@ export default function ChatRoomV2({
           onConfirm={() => {
             const shouldUpdate = editingScreen && rtc.isSharing;
             setRemoteNotice('');
-            setEditingScreen(false);
-            setShowScreenModal(false);
             const update = shouldUpdate ? rtc.updateScreenShare : rtc.startScreenShare;
             void update(
               pendingPreset,
@@ -863,9 +862,15 @@ export default function ChatRoomV2({
               pendingGameMode,
               pendingNativeResolution,
               rtc.screenCompatibilityMode,
-            );
+            ).then(started => {
+              if (shouldUpdate || started) {
+                setEditingScreen(false);
+                setShowScreenModal(false);
+              }
+            });
           }}
           onCancel={() => {
+            if (rtc.isStartingScreenShare) rtc.stopScreenShare();
             setEditingScreen(false);
             setShowScreenModal(false);
           }}

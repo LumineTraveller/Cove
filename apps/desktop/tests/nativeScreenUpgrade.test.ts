@@ -93,8 +93,68 @@ test('native acquisition leaves the published stock track and stock commit queue
   assert.deepEqual(f.replacements, [f.native.track]);
   assert.equal(f.current(), f.native.stream);
   assert.equal(f.commits(), 1);
-  assert.equal(f.stock.track.stops, 1);
+  assert.equal(f.stock.track.stops, 0, 'browser capture remains available for backend failure');
   assert.equal(f.native.track.stops, 0);
+  assert.equal(f.queue.candidates.has(f.stock.stream), true);
+});
+
+test('native backend failure restores the original browser source without closing the publication', async () => {
+  const f = fixture();
+  await f.run();
+  f.native.track.readyState = 'ended';
+  f.native.track.onended?.();
+  await f.queue.tail;
+  assert.equal(f.stopped(), 0);
+  assert.equal(f.current(), f.stock.stream);
+  assert.equal(f.stock.track.readyState, 'live');
+  assert.deepEqual(f.replacements, [f.native.track, f.stock.track]);
+  assert.equal(f.queue.candidates.size, 0);
+});
+
+test('standby capture stays owned until the native publication is explicitly stopped', async () => {
+  const f = fixture();
+  await f.run();
+  assert.equal(f.stock.track.readyState, 'live');
+  f.native.track.stop();
+  assert.equal(f.stock.track.readyState, 'ended');
+  assert.equal(f.native.track.readyState, 'ended');
+  assert.equal(f.queue.candidates.size, 0);
+});
+
+test('revoking the retained browser capture stops the native publication too', async () => {
+  const f = fixture();
+  await f.run();
+  f.stock.track.readyState = 'ended';
+  f.stock.track.onended?.();
+  assert.equal(f.stopped(), 1);
+});
+
+test('repeated native ended events serialize one fallback and explicit stop wins over a late replacement', async () => {
+  const f = fixture(), replacing = deferred<void>();
+  await f.run();
+  f.replace(() => replacing.promise);
+  f.native.track.readyState = 'ended';
+  f.native.track.onended?.(); f.native.track.onended?.();
+  await flush();
+  assert.deepEqual(f.replacements, [f.native.track, f.stock.track]);
+  f.setPublication(false);
+  f.native.track.stop();
+  replacing.resolve();
+  await f.queue.tail;
+  assert.equal(f.stock.track.readyState, 'ended');
+  assert.equal(f.current(), f.native.stream, 'late fallback cannot adopt a stopped publication');
+  assert.equal(f.queue.candidates.size, 0);
+});
+
+test('failed browser fallback stops only its own publication and releases standby', async () => {
+  const f = fixture();
+  await f.run();
+  f.replace(async () => { throw new Error('sender no longer accepts tracks'); });
+  f.native.track.readyState = 'ended';
+  f.native.track.onended?.();
+  await f.queue.tail;
+  assert.equal(f.stopped(), 1);
+  assert.equal(f.stock.track.readyState, 'ended');
   assert.equal(f.queue.candidates.size, 0);
 });
 
@@ -257,17 +317,18 @@ test('late native replace success cannot restore stock over a new publication', 
   assert.equal(f.stopped(), 0);
 });
 
-test('only the currently published native track ending can stop sharing', async () => {
+test('a stale native ended event cannot restore its standby over a newer source', async () => {
   const f = fixture();
   await f.run();
   const ended = f.native.track.onended!;
   const newest = capture();
   f.setCurrent(newest.stream);
   ended();
+  await f.queue.tail;
   assert.equal(f.stopped(), 0);
-  f.setCurrent(f.native.stream);
-  ended();
-  assert.equal(f.stopped(), 1);
+  assert.equal(f.current(), newest.stream);
+  assert.equal(newest.track.readyState, 'live');
+  assert.equal(f.stock.track.readyState, 'ended');
 });
 
 test('native admission preserves the sender resize contract before acquisition and queued commit', async () => {
@@ -332,7 +393,7 @@ test('native commit follows settled stock geometry instead of provisional startu
   assert.equal(f.current(), f.native.stream);
   assert.deepEqual(f.committedDimensions, [[864, 540]]);
   assert.equal(f.stockPlan.sourceWidth, 960, 'startup plan is not rewritten to manufacture eligibility');
-  assert.equal(f.stock.track.stops, 1);
+  assert.equal(f.stock.track.stops, 0);
   assert.equal(f.native.track.stops, 0);
 });
 
@@ -372,7 +433,7 @@ test('native geometry permits only two pixels of even-rounding difference within
     f.native.track.getSettings = () => ({ width, height: 540 });
     await f.run();
     assert.equal(f.commits(), width === 866 ? 1 : 0);
-    assert.equal(f.stock.track.stops, width === 866 ? 1 : 0);
+    assert.equal(f.stock.track.stops, 0);
     assert.equal(f.native.track.stops, width === 866 ? 0 : 1);
   }
 });

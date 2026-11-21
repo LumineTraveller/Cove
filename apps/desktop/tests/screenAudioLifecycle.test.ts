@@ -73,6 +73,13 @@ function fixture(t: TestContext) {
     suspend: (next: typeof suspend) => { suspend = next; } };
 }
 
+test('screen sound stays in the video RTP group with continuous stereo Opus', async t => {
+  const f = fixture(t);
+  await f.api.startScreenAudio();
+  assert.equal(f.produced[0].streamId, 'screen-desktop');
+  assert.deepEqual(f.produced[0].codecOptions, { opusStereo: true, opusDtx: false, opusFec: true });
+});
+
 test('closing while native start ACK is pending cannot publish or restore its pipeline', async t => {
   const f = fixture(t), pending = deferred<{ ok: boolean; error: undefined }>();
   f.capture(() => pending.promise);

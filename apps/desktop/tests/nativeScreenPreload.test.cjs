@@ -30,10 +30,18 @@ function bridge(enabled = true, options = {}) {
     clearTimeout: key => { timers.delete(key); timerDelays.delete(key); },
     console, Uint8Array, Buffer, VideoFrame, performance: options.performance,
     ...(options.Promise ? { Promise: options.Promise } : {}) });
-  return { api: api.coveNativeScreen, ipc, calls, sent, events, cpuFrames, timers, timerDelays, receive: (...args) => receiver(...args),
+  return { api: api.coveNativeScreen, activity: api.coveScreenShareActivity, ipc, calls, sent, events, cpuFrames, timers, timerDelays, receive: (...args) => receiver(...args),
     receiveCpu: (...args) => ipc.listeners('cove:native-screen:cpu-frame')[0]({}, ...args),
     hasReceiver: () => Boolean(receiver), hasCpuReceiver: () => ipc.listenerCount('cove:native-screen:cpu-frame') > 0 };
 }
+test('screen-share activity works without a native backend and releases only its own token once', () => {
+  const f = bridge(false), one = f.activity.acquire(), two = f.activity.acquire();
+  one(); one(); two();
+  assert.deepEqual(f.sent.map(args => Array.from(args)), [
+    ['cove:screen-share:activity', 1, true], ['cove:screen-share:activity', 2, true],
+    ['cove:screen-share:activity', 1, false], ['cove:screen-share:activity', 2, false],
+  ]);
+});
 const metadata = { requestId: 'native_request_1', sessionId: 'session-1234', slot: 0, serial: 1,
   width: 64, height: 64, timestamp: 1000, refresh: false };
 const cpuMetadata = { ...metadata, storage: 'cpu', pixelFormat: 'nv12', colorSpace: 'bt709-limited' };

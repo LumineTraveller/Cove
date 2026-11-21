@@ -9,6 +9,7 @@ import {
 
 export interface CreateHttpSecurityDependencies {
   readonly serverSecurityEnabled: boolean;
+  readonly hasActiveServerAccess: (token: unknown) => boolean;
   readonly serverSecurity: {
     status: () => import('./serverSecurity').ServerSecurityStatus;
     bootstrap(
@@ -89,6 +90,7 @@ export function createHttpSecurity(deps: CreateHttpSecurityDependencies) {
     res: express.Response,
     next: express.NextFunction,
     allowQueryToken = false,
+    allowActiveSession = false,
   ) => {
     if (!deps.serverSecurityEnabled) {
       next();
@@ -126,7 +128,8 @@ export function createHttpSecurity(deps: CreateHttpSecurityDependencies) {
       );
       return;
     }
-    if (!deps.serverSecurity.accessForToken(token)) {
+    if (!deps.serverSecurity.accessForToken(token) &&
+        !(allowActiveSession && deps.hasActiveServerAccess(token))) {
       securityDenied(
         res,
         new ServerSecurityError(

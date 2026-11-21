@@ -62,6 +62,7 @@ interface AnnotationScope {
 
 interface PendingStroke {
   id: string;
+  clearRevision: number;
   tool: AnnotationTool;
   color: string;
   width: number;
@@ -101,6 +102,7 @@ export function useScreenAnnotations({
   const readyRef = useRef(false);
   const localActiveRef = useRef(false);
   const pendingStrokesRef = useRef(new Map<string, PendingStroke>());
+  const clearingRef = useRef<object | null>(null);
   const rejectedStrokeIdsRef = useRef(new Set<string>());
   const laserTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const bufferedEventsRef = useRef<AnnotationStrokeEvent[]>([]);
@@ -140,26 +142,35 @@ export function useScreenAnnotations({
           pending.echoedPoints,
           Math.min(pending.points.length, accepted.points.length),
         );
-      const tail = pending.points.slice(pending.echoedPoints);
-      if (tail.length === 0) continue;
-      const continuation =
-        pending.echoedPoints > 0 ? pending.points[pending.echoedPoints - 1] : undefined;
+      if (pending.echoedPoints >= pending.points.length) continue;
       next.push({
         id: pending.id,
         authorSocketId: socketId,
         tool: pending.tool,
         color: pending.color,
         width: pending.width,
-        points: continuation ? [continuation, ...tail] : tail,
+        points: [...pending.points],
       });
     }
     setOptimisticStrokes(next);
+  }, []);
+
+  const discardPendingStrokes = useCallback(() => {
+    for (const stroke of pendingStrokesRef.current.values()) {
+      if (stroke.timer) clearTimeout(stroke.timer);
+      rejectedStrokeIdsRef.current.add(stroke.id);
+    }
+    while (rejectedStrokeIdsRef.current.size > MAX_STROKES_PER_SESSION)
+      rejectedStrokeIdsRef.current.delete(rejectedStrokeIdsRef.current.values().next().value!);
+    pendingStrokesRef.current.clear();
+    setOptimisticStrokes([]);
   }, []);
 
   useEffect(() => {
     const generation = ++generationRef.current;
     const valid = active && Boolean(roomId) && Boolean(sharerSocketId) && Boolean(sessionId);
     stateRef.current = null;
+    clearingRef.current = null;
     bufferedEventsRef.current = [];
     for (const stroke of pendingStrokesRef.current.values())
       if (stroke.timer) clearTimeout(stroke.timer);
@@ -309,6 +320,13 @@ export function useScreenAnnotations({
       const current = stateRef.current;
       if (current && current.revision > incoming.revision) return;
       const next = preferNewerAnnotationState(current, incoming);
+      const remainingIds = new Set(next.strokes.map(stroke => stroke.id));
+      const cleared = (next.clearRevision ?? 0) > (current?.clearRevision ?? 0) ||
+        (next.clearRevision === undefined && current?.strokes.some(stroke => !remainingIds.has(stroke.id)));
+      if (cleared) {
+        discardPendingStrokes();
+        inputLimitHitRef.current = false;
+      }
       stateRef.current = next;
       setState(next);
       updateReady(true);
@@ -390,6 +408,16 @@ export function useScreenAnnotations({
 
     const flushStroke = (stroke: PendingStroke) => {
       if (!isCurrent() || !pendingStrokesRef.current.has(stroke.id)) return;
+      // Pointer input can run before an overdue timer. Admit older strokes
+      // first so a newly selected eraser cannot become their lower layer.
+      for (const earlier of pendingStrokesRef.current.values()) {
+        if (earlier === stroke) break;
+        if (earlier.sentPoints === 0 && earlier.unsent.length > 0) {
+          flushStroke(earlier);
+          scheduleStroke(stroke, DRAW_INTERVAL_MS);
+          return;
+        }
+      }
       if (!canSubmitPending()) {
         cancelStrokeQueue();
         return;
@@ -408,6 +436,7 @@ export function useScreenAnnotations({
       lastDrawSentAt = Date.now();
       const payload = {
         target,
+        clearRevision: stroke.clearRevision,
         stroke: {
           id: stroke.id,
           tool: stroke.tool,
@@ -418,7 +447,8 @@ export function useScreenAnnotations({
       };
       const requestGeneration = scope.connectionGeneration;
       socket.emit('annotation:draw', payload, (ack?: AnnotationAck) => {
-        if (!isCurrent() || requestGeneration !== scope.connectionGeneration) return;
+        if (!isCurrent() || requestGeneration !== scope.connectionGeneration ||
+            pendingStrokesRef.current.get(stroke.id) !== stroke) return;
         if (ack?.state) applySnapshot(ack.state);
         if (!ack?.ok) {
           const message = ack?.error?.message ?? '批注笔画发送失败';
@@ -545,6 +575,7 @@ export function useScreenAnnotations({
     updateLocalActive,
     updateReady,
     refreshOptimisticStrokes,
+    discardPendingStrokes,
   ]);
 
   const performAction = useCallback(
@@ -723,9 +754,13 @@ export function useScreenAnnotations({
 
   const clear = useCallback(async () => {
     const scope = scopeRef.current;
-    if (!scope || !canDrawNow(scope, stateRef.current, localActiveRef.current)) return;
-    await performAction('annotation:clear', { target: scope.target }, 'clear');
-  }, [performAction]);
+    if (!scope || clearingRef.current || !canDrawNow(scope, stateRef.current, localActiveRef.current)) return;
+    const operation = {};
+    clearingRef.current = operation;
+    discardPendingStrokes();
+    try { await performAction('annotation:clear', { target: scope.target }, 'clear'); }
+    finally { if (clearingRef.current === operation) clearingRef.current = null; }
+  }, [performAction, discardPendingStrokes]);
 
   const sendStroke = useCallback(
     (
@@ -737,13 +772,14 @@ export function useScreenAnnotations({
       final = false,
     ): string | null => {
       const scope = scopeRef.current;
-      if (!scope || !canDrawNow(scope, stateRef.current, localActiveRef.current)) return null;
+      if (!scope || clearingRef.current || !canDrawNow(scope, stateRef.current, localActiveRef.current)) return null;
       const id = strokeId?.trim() || createStrokeId();
       if (rejectedStrokeIdsRef.current.has(id)) return null;
       let stroke = pendingStrokesRef.current.get(id);
       if (!stroke) {
         stroke = {
           id,
+          clearRevision: stateRef.current?.clearRevision ?? 0,
           tool,
           color: normalizeColor(color),
           width: normalizeWidth(width),
@@ -824,6 +860,7 @@ export function useScreenAnnotations({
       sessionId &&
       ready &&
       localActive &&
+      pendingAction !== 'clear' &&
       socket.connected &&
       currentState?.enabled &&
       (self || permission === 'everyone' || (permission === 'request' && granted)),

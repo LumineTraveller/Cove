@@ -3,6 +3,7 @@ import { MOBILE_RELEASE_VERSION } from './clientVersion';
 import {
   CLIENT_PROTOCOL_VERSION,
   getServerAccessToken,
+  retainServerAccessForConnection,
 } from './serverSecurity';
 
 export function serverSocketAuth(serverURL: string) {
@@ -15,7 +16,7 @@ export function serverSocketAuth(serverURL: string) {
 }
 
 export function createCoveSocket(serverURL: string) {
-  return io(serverURL, {
+  const socket = io(serverURL, {
     autoConnect: false,
     transports: ['websocket', 'polling'],
     reconnection: true,
@@ -24,4 +25,14 @@ export function createCoveSocket(serverURL: string) {
     timeout: 10_000,
     auth: serverSocketAuth(serverURL),
   });
+  let releaseServerAccess = () => {};
+  socket.on('connect', () => {
+    releaseServerAccess();
+    const auth = socket.auth;
+    releaseServerAccess = retainServerAccessForConnection(
+      serverURL, typeof auth === 'object' ? auth.serverAccessToken : null,
+    );
+  });
+  socket.on('disconnect', () => releaseServerAccess());
+  return socket;
 }

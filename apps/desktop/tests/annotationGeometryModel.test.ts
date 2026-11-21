@@ -11,6 +11,7 @@ import {
 } from '../src/features/media/annotation/annotationGeometry';
 import {
   mergeAnnotationStroke,
+  composeAnnotationStrokes,
   preferNewerAnnotationState,
   renderAnnotationStrokes,
   upsertAnnotationStroke,
@@ -43,16 +44,16 @@ test('floating controls are kept inside resized display bounds and placed around
   assert.ok(placement.rect.top + placement.rect.height <= bounds.top + bounds.height);
 });
 
-test('stroke chunks merge monotonically and duplicate/late acknowledgements do not duplicate points', () => {
+test('stroke chunks preserve repeated coordinates and reversals within the same stroke', () => {
   const p0 = { x: 0.1, y: 0.1 };
   const p1 = { x: 0.2, y: 0.2 };
   const p2 = { x: 0.3, y: 0.3 };
   const p3 = { x: 0.4, y: 0.4 };
   const base = stroke('stroke-1', [p0, p1]);
-  const extended = mergeAnnotationStroke(base, stroke('stroke-1', [p1, p2, p3]));
+  const extended = mergeAnnotationStroke(base, stroke('stroke-1', [p2, p3]));
   assert.deepEqual(extended.points, [p0, p1, p2, p3]);
-  assert.deepEqual(mergeAnnotationStroke(extended, stroke('stroke-1', [p0, p1])).points, [p0, p1, p2, p3]);
-  assert.deepEqual(mergeAnnotationStroke(extended, stroke('stroke-1', [p2, p3])).points, [p0, p1, p2, p3]);
+  assert.deepEqual(mergeAnnotationStroke(extended, stroke('stroke-1', [p0, p1])).points, [p0, p1, p2, p3, p0, p1]);
+  assert.deepEqual(mergeAnnotationStroke(extended, stroke('stroke-1', [p2, p3])).points, [p0, p1, p2, p3, p2, p3]);
   assert.equal(upsertAnnotationStroke([extended], stroke('stroke-1', [p1, p2, p3])).length, 1);
 
   const newest = { revision: 8, marker: 'new' };
@@ -90,6 +91,22 @@ test('eraser is replayed in server order with destination-out composition', () =
     { left: 0, top: 0, width: 100, height: 100 },
   );
   assert.deepEqual(operations, ['source-over', 'destination-out', 'source-over']);
+});
+
+test('pending pen and eraser extensions retain their original layer below newer strokes', () => {
+  const point = { x: 0.5, y: 0.5 };
+  const pen = stroke('pen', [point]);
+  const eraser = stroke('eraser', [point], 'eraser');
+  const later = stroke('later', [point]);
+  const extension = { ...eraser, points: [point, { x: 0.7, y: 0.5 }] };
+  const result = composeAnnotationStrokes([pen, eraser, later], [extension]);
+  assert.deepEqual(result.map(item => item.id), ['pen', 'eraser', 'later']);
+  assert.deepEqual(result[1].points, extension.points);
+  assert.equal(result[2], later);
+  const pendingPen = { ...pen, points: [point, { x: 0.6, y: 0.5 }] };
+  const erased = composeAnnotationStrokes([pen, eraser], [pendingPen]);
+  assert.deepEqual(erased.map(item => item.tool), ['pen', 'eraser']);
+  assert.deepEqual(erased[0].points, pendingPen.points);
 });
 
 function stroke(

@@ -5,9 +5,11 @@ import {useWebRTC} from '../../src/features/media/useWebRTC';
 import {CLIENT_PROTOCOL_VERSION, CLIENT_RELEASE_VERSIONS} from '@cove/contracts';
 import {Device, type types as MsTypes} from 'mediasoup-client';
 import {installScreenPerformanceFixture,screenPerformanceLocalPreviewEnabled,screenPerformanceVisiblePresentationEnabled} from './screen-performance-fixture';
-import {LocalScreenVideo} from '../../src/features/media/screen/ScreenVideo';
+import {LocalScreenVideo,RemoteScreenVideo} from '../../src/features/media/screen/ScreenVideo';
 import {DiagnosticsOverlayV2} from '../../src/features/media/diagnostics/DiagnosticsOverlayV2';
+import {ApplicationAudioPipeline} from '../../src/features/media/application-audio/applicationAudio';
 const params=new URLSearchParams(location.search);
+const screenSoundEnabled=params.get('screenSound')==='1';
 const floatingMode=params.get('floating')==='1';
 const performanceMode=params.get('performance')==='1';
 const localPreviewEnabled=screenPerformanceLocalPreviewEnabled(params);
@@ -35,6 +37,39 @@ class SilentAudioContext extends NativeAudioContext {
 window.AudioContext=SilentAudioContext;
 (window as any).webkitAudioContext=SilentAudioContext;
 const audioTaps: Array<{label:string;stream:MediaStream;context:AudioContext;analyser:AnalyserNode;source:MediaStreamAudioSourceNode}>=[];
+const screenPlaybackTaps: Array<{stream:MediaStream;analyser:AnalyserNode}>=[];
+let screenCapturePipeline:ApplicationAudioPipeline|null=null;
+if(screenSoundEnabled){
+  const pushPcm=ApplicationAudioPipeline.prototype.pushPcm;
+  ApplicationAudioPipeline.prototype.pushPcm=function(chunk:Uint8Array){screenCapturePipeline=this;return pushPcm.call(this,chunk);};
+  const createSource=SilentAudioContext.prototype.createMediaStreamSource;
+  SilentAudioContext.prototype.createMediaStreamSource=function(stream:MediaStream){
+    const source=createSource.call(this,stream),connect=source.connect.bind(source);
+    (source as any).connect=(destination:AudioNode)=>{
+      const result=connect(destination);
+      if(destination instanceof GainNode){const analyser=this.createAnalyser();analyser.fftSize=2048;
+        destination.connect(analyser);screenPlaybackTaps.push({stream,analyser});}
+      return result;
+    };
+    return source;
+  };
+  let listener:((chunk:Uint8Array)=>void)|null=null,timer:number|null=null,generated=0,started=0;
+  (window as any).coveScreenAudio={
+    onChunk(next:(chunk:Uint8Array)=>void){listener=next;return()=>{if(listener===next)listener=null;};},
+    async start(){
+      generated=0;started=performance.now();
+      timer=window.setInterval(()=>{
+        const due=Math.floor((performance.now()-started)*48),frames=due-generated;
+        if(frames<=0)return;const bytes=new Uint8Array(frames*4),view=new DataView(bytes.buffer);
+        for(let index=0;index<frames;index++){const value=Math.round(Math.sin((generated+index)*2*Math.PI*440/48000)*7000);
+          view.setInt16(index*4,value,true);view.setInt16(index*4+2,value,true);}
+        generated=due;listener?.(bytes);
+      },20);
+      return {ok:true};
+    },
+    async stop(){if(timer!==null)window.clearInterval(timer);timer=null;return true;},
+  };
+}
 function tapAudio(stream:MediaStream,label:string){
   stream.getTracks().forEach(track=>mediaTracks.add(track));
   if(!stream.getAudioTracks().length)return;
@@ -141,9 +176,26 @@ function Fixture(){
   // This is the actual product collector and panel, including its 1 Hz local
   // stats and isolated-SFU diagnostics requests. Do not substitute mock text.
   useEffect(()=>{if(visiblePresentationEnabled&&ready&&!rtc.statsEnabled)rtc.toggleStats();},[ready]);
-  useEffect(()=>{(window as any).coveMediaQA={rtc,socket,ready,error,ice:iceQA,control:control.current,resources:()=>({...iceQA.resources(),socketListeners:Object.values((socket as any)._callbacks??{}).reduce((n:number,list:any)=>n+list.length,0)})};});
+  useEffect(()=>{(window as any).coveMediaQA={rtc,socket,ready,error,ice:iceQA,control:control.current,
+    screenSound:async()=>{
+      const stream=rtc.remoteScreen?.stream,audio=stream?.getAudioTracks()[0];
+      const tap=screenPlaybackTaps.find(value=>value.stream===stream);
+      let rms=0;if(tap){const values=new Float32Array(tap.analyser.fftSize);tap.analyser.getFloatTimeDomainData(values);rms=Math.sqrt(values.reduce((sum,value)=>sum+value*value,0)/values.length);}
+      const raw=audioTaps.find(value=>value.stream.getAudioTracks()[0]===audio);
+      let rawRms=0;if(raw){const values=new Float32Array(raw.analyser.fftSize);raw.analyser.getFloatTimeDomainData(values);rawRms=Math.sqrt(values.reduce((sum,value)=>sum+value*value,0)/values.length);}
+      const consumer=mediaTransports.flatMap(value=>value.consumers).find(value=>!value.closed&&value.track===audio);
+      const stats=consumer?[...(await consumer.getStats()).values()].find(value=>value.type==='inbound-rtp'):null;
+      const producers=mediaTransports.flatMap(value=>value.producers).filter(value=>!value.closed&&['screen','screen-audio'].includes(String(value.appData.type)));
+      return {combined:stream?.getVideoTracks().length===1&&stream?.getAudioTracks().length===1,rms,rawRms,
+        capture:screenCapturePipeline?.diagnostics,
+        packets:stats?.packetsReceived??0,samples:stats?.totalSamplesReceived??0,concealed:stats?.concealedSamples??0,
+        senderCnameBound:producers.length===2&&producers[0].rtpParameters.rtcp?.cname===producers[1].rtpParameters.rtcp?.cname,
+        presentation:rtc.stats.presentationStability};
+    },resources:()=>({...iceQA.resources(),socketListeners:Object.values((socket as any)._callbacks??{}).reduce((n:number,list:any)=>n+list.length,0)})};});
   if(floatingFixture){const FloatingView=floatingFixture.FloatingView;return <><p>{ready?'Room ready':'Connecting'} {error}</p><FloatingView rtc={rtc} roomId={params.get('room')!}/></>;}
   return <><p hidden={visiblePresentationEnabled}>{ready?'Room ready':'Connecting'} {error}</p><video ref={video} autoPlay muted playsInline hidden={visiblePresentationEnabled}/><pre hidden={visiblePresentationEnabled}>{rtc.inVoice?'In voice':'Not in voice'}</pre>
+    {screenSoundEnabled&&rtc.remoteScreen&&<RemoteScreenVideo stream={rtc.remoteScreen.stream} controlling={false} onInput={()=>{}} diagnosticsEnabled={rtc.statsEnabled}/>}
+    {screenSoundEnabled&&rtc.remoteScreen&&<DiagnosticsOverlayV2 rtc={rtc} compact={true} onToggleCompact={()=>{}}/>}
     {visiblePresentationEnabled?<main className="cove-v2-page" data-cove-performance-presentation="1" style={{position:'fixed',inset:0}}>
       <div className="share-view"><div className="video-surface"><div className="video-content">
         {localPreviewEnabled&&rtc.localScreen&&<section data-cove-performance-local-preview="1" style={{width:'100%',height:'100%',minWidth:0,minHeight:0}}><LocalScreenVideo stream={rtc.localScreen}/></section>}

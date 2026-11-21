@@ -60,7 +60,10 @@ function fixture(t: TestContext) {
   const mediaGeneration = { current: 0 }, screenProducer = ref(), screenAudioProducer = ref(), localScreenRef = ref();
   const sendTransport = { current: { produce: async (options: any) => { produced.push(options); return publish(options); } } as any };
   const settings = { preset: '720p', fps: 30, gameMode: false, nativeResolution: false, audio: false };
-  const socket = { id: 'desktop' as string | undefined, connected: true, emit: (...args: any[]) => events.push(args) };
+  const signalEvents = new EventEmitter();
+  const socket = { id: 'desktop' as string | undefined, connected: true,
+    on: signalEvents.on.bind(signalEvents), off: signalEvents.off.bind(signalEvents),
+    emit: (...args: any[]) => events.push(args) };
   const deps = {
     inVoice: true, get isSharing() { return sharing; }, mediaGeneration,
     screenPreset: '720p', fps: 30, screenGameMode: false, screenNativeResolution: false,
@@ -86,9 +89,138 @@ function fixture(t: TestContext) {
   renderToStaticMarkup(createElement(Probe));
   return { api, alerts, events, produced, captureRequests, settings, mediaGeneration, screenProducer, screenAudioProducer, localScreenRef, sendTransport, socket,
     captures: () => captures, sharing: () => sharing, localScreen: () => localScreen,
-    capture: (next: typeof capture) => { capture = next; }, publish: (next: typeof publish) => { publish = next; },
+    signalEvents, capture: (next: typeof capture) => { capture = next; }, publish: (next: typeof publish) => { publish = next; },
     startAudio: (next: typeof startAudio) => { startAudio = next; }, closeAudio: (next: typeof closeAudio) => { closeAudio = next; } };
 }
+
+test('transient signal loss while the picker is pending waits for the same session and publishes once', async t => {
+  const f = fixture(t), pending = deferred<ReturnType<typeof stream>>(), captured = stream();
+  f.capture(() => pending.promise);
+  const start = f.api.startScreenShare();
+  f.socket.connected = false; f.socket.id = undefined;
+  pending.resolve(captured);
+  await flush();
+  assert.equal(captured.track.readyState, 'live');
+  assert.equal(f.produced.length, 0);
+  f.socket.id = 'desktop'; f.socket.connected = true; f.signalEvents.emit('connect');
+  await start;
+  assert.equal(f.produced.length, 1);
+  assert.equal(f.produced[0].streamId, 'screen-desktop');
+  assert.equal(f.sharing(), true);
+  assert.deepEqual(f.alerts, []);
+  assert.equal(f.signalEvents.listenerCount('connect'), 0);
+  f.api.stopScreenShare();
+});
+
+test('transient signal loss after the video produce ACK does not silently discard a healthy publication', async t => {
+  const f = fixture(t), pending = deferred<ReturnType<typeof producer>>();
+  f.publish(() => pending.promise);
+  const start = f.api.startScreenShare();
+  await flush();
+  const published = producer('ack-before-signal-loss');
+  f.socket.connected = false; f.socket.id = undefined;
+  pending.resolve(published);
+  await start;
+  assert.equal(f.sharing(), true);
+  assert.equal(f.screenProducer.current, published);
+  assert.equal(published.closed, false);
+  assert.deepEqual(f.alerts, []);
+  f.api.stopScreenShare();
+});
+
+test('stopping during signal recovery releases the pending capture and its connection listener', async t => {
+  const f = fixture(t), pending = deferred<ReturnType<typeof stream>>(), captured = stream();
+  f.capture(() => pending.promise);
+  const start = f.api.startScreenShare();
+  f.socket.connected = false; f.socket.id = undefined;
+  pending.resolve(captured);
+  await flush();
+  assert.equal(f.signalEvents.listenerCount('connect'), 1);
+  f.api.stopScreenShare();
+  await start;
+  assert.equal(captured.track.readyState, 'ended');
+  assert.equal(f.signalEvents.listenerCount('connect'), 0);
+  assert.equal(f.produced.length, 0);
+  assert.deepEqual(f.alerts, []);
+});
+
+test('signal recovery timeout reports a retryable startup failure and releases capture', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture(t), pending = deferred<ReturnType<typeof stream>>(), captured = stream();
+  f.capture(() => pending.promise);
+  const start = f.api.startScreenShare();
+  f.socket.connected = false; f.socket.id = undefined;
+  pending.resolve(captured);
+  await flush();
+  t.mock.timers.tick(5_000);
+  assert.equal(await start, false);
+  assert.equal(captured.track.readyState, 'ended');
+  assert.equal(f.sharing(), false);
+  assert.match(f.alerts[0], /连接恢复超时/);
+  assert.equal(f.signalEvents.listenerCount('connect'), 0);
+});
+
+test('automatic display capture denial is reported instead of silently returning to the room', async t => {
+  const f = fixture(t);
+  f.capture(async () => { throw new DOMException('屏幕采集权限不可用', 'NotAllowedError'); });
+  assert.equal(await f.api.startScreenShare(), false);
+  assert.match(f.alerts[0], /屏幕采集权限不可用/);
+  assert.equal(f.produced.length, 0);
+});
+
+test('canceling while the produce ACK is pending immediately releases the captured screen', async t => {
+  const f = fixture(t), captured = stream(), pending = deferred<ReturnType<typeof producer>>();
+  f.capture(async () => captured); f.publish(() => pending.promise);
+  const start = f.api.startScreenShare();
+  await flush();
+  f.api.stopScreenShare();
+  assert.equal(captured.track.readyState, 'ended', 'capture must stop before a late server ACK');
+  const late = producer('cancelled-start'); pending.resolve(late);
+  assert.equal(await start, false);
+  assert.equal(late.closed, true);
+  assert.equal(f.sharing(), false);
+});
+
+test('browser screen publication owns renderer activity through optional audio and releases it once', async t => {
+  const f = fixture(t), audio = deferred<void>();
+  let acquired = 0, released = 0;
+  window.coveScreenShareActivity = { acquire: () => { acquired++; return () => { released++; }; } };
+  f.startAudio(() => audio.promise);
+  const start = f.api.startScreenShare('720p', 30, true);
+  await flush();
+  assert.equal(acquired, 1); assert.equal(released, 0);
+  audio.resolve(); assert.equal(await start, true);
+  assert.equal(released, 0, 'startup completion does not release an ongoing publication');
+  f.api.stopScreenShare(); f.api.stopScreenShare();
+  assert.equal(released, 1);
+});
+
+test('late canceled startup cannot release a newer screen publication activity lease', async t => {
+  const f = fixture(t), pending = deferred<ReturnType<typeof producer>>(), active = new Set<number>();
+  let sequence = 0;
+  window.coveScreenShareActivity = { acquire: () => {
+    const id = ++sequence; active.add(id); return () => { active.delete(id); };
+  } };
+  f.publish(() => pending.promise);
+  const old = f.api.startScreenShare(); await flush();
+  f.api.stopScreenShare();
+  assert.deepEqual([...active], []);
+  f.publish(async options => { const p = producer('new'); p.track = options.track; return p; });
+  await f.api.startScreenShare();
+  pending.resolve(producer('old')); await old;
+  assert.deepEqual([...active], [2]);
+  assert.equal(f.sharing(), true);
+  f.api.stopScreenShare(); assert.deepEqual([...active], []);
+});
+
+test('scheduling policy failures cannot cancel a healthy browser screen publication', async t => {
+  const f = fixture(t);
+  window.coveScreenShareActivity = { acquire: () => { throw new Error('policy unavailable'); } };
+  assert.equal(await f.api.startScreenShare(), true);
+  assert.equal(f.sharing(), true);
+  assert.deepEqual(f.alerts, []);
+  f.api.stopScreenShare();
+});
 
 test('changing screen source keeps audio ownership, while audio toggles and stop release the producer', async t => {
   const f = fixture(t);

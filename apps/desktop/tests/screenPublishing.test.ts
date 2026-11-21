@@ -404,7 +404,7 @@ test('stock publication and audio complete before native preparation; native nev
   assert.equal(f.produced.length, 1);
   assert.deepEqual(f.replacements, [f.native[0]]);
   assert.equal(f.localScreenRef.current?.getVideoTracks()[0], f.native[0]);
-  assert.equal(stock.stops, 1);
+  assert.equal(stock.stops, 0, 'browser capture remains owned as the native standby');
   assert.equal(f.plan().fps, 15, 'upgrading dimensions retains the current static cadence');
   assert.deepEqual(f.parameters, senderBefore, 'upgrading capture does not mutate encoder policy');
   assert.equal(f.analyses.length, 2);
@@ -474,7 +474,7 @@ test('native startup failure preserves stock and a successful stock source updat
   await f.frame();
   assert.equal(f.produced.length, 1);
   assert.deepEqual(f.replacements, [updatedStock, f.native[1]]);
-  assert.equal(updatedStock.stops, 1);
+  assert.equal(updatedStock.stops, 0, 'updated browser capture remains available for native recovery');
   assert.deepEqual(f.alerts, []);
 });
 
@@ -540,9 +540,13 @@ test('canceling a new stock picker retains the committed native predecessor', as
   assert.equal(f.localScreenRef.current?.getVideoTracks()[0], native);
   assert.deepEqual(f.alerts, []);
   f.ended();
-  assert.equal(f.sharing(), false, 'native faults run the ordinary publication teardown');
-  assert.equal(f.screenProducer.current, null);
-  assert.equal(f.requests.length, 1, 'fault teardown never automatically reacquires capture');
+  await flushPublishing();
+  assert.equal(f.sharing(), true, 'native failure retains the existing publication');
+  assert.equal(f.screenProducer.current, f.producer);
+  assert.equal(f.localScreenRef.current, f.captures[0]);
+  assert.equal(f.requests.length, 1, 'recovery uses the authorized standby without acquiring a new source');
+  f.api.stopScreenShare();
+  assert.equal(f.captures[0].getVideoTracks()[0].readyState, 'ended');
 });
 
 test('unsupported native bridge and native-resolution sharing preserve the original stock path', async context => {

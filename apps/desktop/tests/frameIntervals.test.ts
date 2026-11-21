@@ -116,7 +116,7 @@ test('a gap longer than the window is not clipped or replaced with invented fram
   assert.equal(sample.maxFrameIntervalMs, 1000);
 });
 
-test('missed callbacks suppress the claim of complete 1% low until they expire', () => {
+test('missed callbacks retain a marked estimate instead of permanently hiding 1% low', () => {
   const window = createFrameIntervalWindow({ windowMs: 100, minSamples: 1 });
   window.observe(0, 0);
   window.observe(30, 30, 2);
@@ -124,7 +124,7 @@ test('missed callbacks suppress the claim of complete 1% low until they expire',
   assert.equal(incomplete.sampleCount, 1);
   assert.equal(incomplete.missedFrames, 2);
   assert.equal(incomplete.status, 'incomplete');
-  assert.equal(incomplete.lowFps, null);
+  assert.equal(incomplete.lowFps, 1000 / 30);
   assert.equal(incomplete.maxFrameIntervalMs, 30);
   window.observe(40, 130);
   const complete = window.snapshot(130);

@@ -78,6 +78,7 @@ interface CoveRemoteControlApi {
 declare global {
   interface Window {
     coveNativeScreen?: NativeScreenBridge;
+    coveScreenShareActivity?: { acquire(): () => void };
     coveServerAccess?: {
       get(server: string, email: string): Promise<{ available: boolean; ok: boolean; grant?: { accessToken: string; expiresAt: number } | null }>;
       set(server: string, email: string, grant: { accessToken: string; expiresAt: number }): Promise<{ available: boolean; ok: boolean }>;

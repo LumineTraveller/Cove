@@ -9,6 +9,7 @@ import {
   serverRequestInit,
   setServerAccessToken,
   unlockServer,
+  retainServerAccessForConnection,
 } from '../src/features/connection/serverSecurity';
 import { serverSocketAuth } from '../src/features/connection/socket';
 
@@ -22,6 +23,33 @@ const response = (payload: unknown, status = 200) =>
 beforeEach(() => {
   clearServerAccessToken(server);
   globalThis.fetch = jest.fn();
+});
+
+test('natural expiry keeps connected requests working but never authorizes another login', () => {
+  let now = Date.now();
+  const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+  const current = { accessToken: 'admitted-mobile-fixture', expiresAt: now + 100 };
+  setServerAccessToken(server, current);
+  const release = retainServerAccessForConnection(server, getServerAccessToken(server));
+  try {
+    now += 100;
+    expect(getServerAccessToken(server)).toBeNull();
+    expect(serverSocketAuth(server).serverAccessToken).toBeNull();
+    expect(new Headers(serverRequestInit(server).headers).get('Authorization')).toBe('Bearer admitted-mobile-fixture');
+    expect(new URL(authorizedResourceURL(server, '/avatars/fixture.png')).searchParams.get('access_token')).toBe(current.accessToken);
+    release();
+    expect(new Headers(serverRequestInit(server).headers).get('Authorization')).toBeNull();
+  } finally { release(); clock.mockRestore(); }
+});
+
+test('stale connection cleanup cannot clear a replacement and invalidation clears live access', () => {
+  const previous = retainServerAccessForConnection(server, 'previous-mobile-fixture');
+  const release = retainServerAccessForConnection(server, 'current-mobile-fixture');
+  previous();
+  expect(new Headers(serverRequestInit(server).headers).get('Authorization')).toBe('Bearer current-mobile-fixture');
+  clearServerAccessToken(server);
+  expect(new Headers(serverRequestInit(server).headers).get('Authorization')).toBeNull();
+  release();
 });
 
 test.each([200, 404])('late disabled status %s cannot clear a grant installed after the request began', async status => {

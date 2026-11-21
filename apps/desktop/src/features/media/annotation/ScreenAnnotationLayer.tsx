@@ -1,9 +1,9 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { PaintBrush, Circle, Eraser, Trash, SlidersHorizontal, X, Check } from '@phosphor-icons/react';
-import type { AnnotationPoint, AnnotationStroke } from '@cove/contracts';
+import type { AnnotationPoint } from '@cove/contracts';
 import type { useScreenAnnotations } from './useScreenAnnotations';
 import { getContainedVideoRect, mapClientPointToAnnotationPoint } from './annotationGeometry';
-import { renderAnnotationStrokes } from './annotationModel';
+import { composeAnnotationStrokes, renderAnnotationStrokes } from './annotationModel';
 import { annotationStrokeWidth, eraserCursor } from './annotationCursor';
 import './annotationUI.css';
 
@@ -19,10 +19,11 @@ const positionIn = (position: Position, width: number, height: number, bounds: B
 });
 
 /** Tools use the whole host; drawing coordinates use only the contained video. */
-export function ScreenAnnotationLayer({ annotations, self, videoHostRef }: {
+export function ScreenAnnotationLayer({ annotations, self, videoHostRef, diagnosticsMode }: {
   annotations: ReturnType<typeof useScreenAnnotations>;
   self: boolean;
   videoHostRef: RefObject<HTMLDivElement>;
+  diagnosticsMode?: 'compact' | 'expanded';
 }) {
   const [bounds, setBounds] = useState<Bounds>({ left: 0, top: 0, width: 0, height: 0 });
   const [contentBounds, setContentBounds] = useState<Bounds>(bounds);
@@ -148,6 +149,25 @@ export function ScreenAnnotationLayer({ annotations, self, videoHostRef }: {
     });
   }, [bounds, collapsed, toolbarHeight]);
 
+  useLayoutEffect(() => {
+    if (!diagnosticsMode || !annotations.localActive || !annotations.canDraw) return;
+    const root = rootRef.current?.getBoundingClientRect();
+    const panel = videoHostRef.current?.parentElement?.querySelector('.debug-overlay')?.getBoundingClientRect();
+    if (!root || !panel) return;
+    const width = collapsed ? BALL_SIZE : TOOL_WIDTH, height = collapsed ? BALL_SIZE : toolbarHeight;
+    const overlaps = (p: Position) => root.left + p.x < panel.right && root.left + p.x + width > panel.left &&
+      root.top + p.y < panel.bottom && root.top + p.y + height > panel.top;
+    if (!overlaps(position)) return;
+    const candidates = [
+      { x: panel.right - root.left + 8, y: position.y },
+      { x: position.x, y: panel.bottom - root.top + 8 },
+      { x: panel.left - root.left - width - 8, y: position.y },
+      { x: position.x, y: panel.top - root.top - height - 8 },
+    ];
+    const next = candidates.map(candidate => positionIn(candidate, width, height, bounds)).find(candidate => !overlaps(candidate));
+    if (next) setPosition(next);
+  }, [diagnosticsMode, annotations.localActive, annotations.canDraw, position, bounds, collapsed, toolbarHeight, videoHostRef]);
+
   useEffect(() => {
     setCollapsed(false); setPanel(null); setPosition({ x: 12, y: 12 }); drawing.current = null;
   }, [annotations.state?.sessionId]);
@@ -166,7 +186,7 @@ export function ScreenAnnotationLayer({ annotations, self, videoHostRef }: {
     if (!context) return;
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
     context.clearRect(0, 0, contentBounds.width, contentBounds.height);
-    const strokes: AnnotationStroke[] = [...(annotations.state?.strokes ?? []), ...annotations.optimisticStrokes];
+    const strokes = composeAnnotationStrokes(annotations.state?.strokes ?? [], annotations.optimisticStrokes);
     renderAnnotationStrokes(context, strokes, { left: 0, top: 0, width: contentBounds.width, height: contentBounds.height });
   }, [annotations.state?.strokes, annotations.optimisticStrokes, annotations.state?.enabled, contentBounds]);
 

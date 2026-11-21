@@ -4,6 +4,7 @@ const root=path.resolve(__dirname,'../../../..');
 const {runRecoverySoak}=require(path.join(root,'tooling/recovery-soak-scenarios.cjs'));
 const {runRecoveryBrowserScenarios}=require(path.join(root,'tooling/recovery-browser-scenarios.cjs'));
 const testIce=process.argv.includes('--ice-restart');
+const testScreenSound=process.argv.includes('--screen-sound');
 const protocol=process.env.COVE_QA_PROTOCOL==='udp'?'udp':'tcp';const soakSeconds=Number(process.env.COVE_QA_SOAK_SECONDS||0);
 if(!Number.isInteger(soakSeconds)||soakSeconds<0||soakSeconds>3600)throw new Error('Invalid bounded soak duration');
 if(process.env.COVE_QA_RESULT_PATH){const relative=path.relative(path.join(root,'runtime'),path.resolve(process.env.COVE_QA_RESULT_PATH));if(!relative||path.isAbsolute(relative)||relative==='..'||relative.startsWith('..'+path.sep))throw new Error('Acceptance results must stay inside this checkout runtime directory');}
@@ -85,6 +86,7 @@ app.whenReady().then(async()=>{
       const win=new BrowserWindow({show:false,webPreferences:{offscreen:true,backgroundThrottling:false}});windows.push(win);
       win.webContents.on('console-message',(_event,_level,message)=>{if(message.includes('Error')||message.includes('error')||message.includes('[media-recovery]')||message.includes('[mic-uplink]'))console.log('[renderer]',message);});
       const query=new URLSearchParams({base:info.base,room:info.roomId,token:info.accounts[index].token,index:String(index)});
+      if(testScreenSound)query.set('screenSound','1');
       if(testIce&&index===1){query.set('iceProxy',String(proxy.port));query.set('iceProtocol',protocol);}
       await win.loadURL(renderer.origin+'/tests/ui/media-integration.html?'+query);
       await waitFor(win,'Boolean(window.coveMediaQA?.ready)');
@@ -105,7 +107,7 @@ app.whenReady().then(async()=>{
       const accepted=await sender.webContents.executeJavaScript("window.coveMediaQA.socket.timeout(4000).emitWithAck('remote-control:respond',{requestId:window.coveMediaQA.control.requested.requestId,accepted:true})");
       assert.equal(accepted.ok,true);await waitFor(viewer,'window.coveMediaQA.control.active');
     }
-    await sender.webContents.executeJavaScript("window.coveMediaQA.rtc.startScreenShare('1080p',30,false,false,true,true)");
+    await sender.webContents.executeJavaScript(`window.coveMediaQA.rtc.startScreenShare('1080p',30,${testScreenSound},false,true,true)`);
     await waitFor(sender,'Boolean(window.coveMediaQA.rtc.localScreen)');
     await waitFor(viewer,'window.coveMediaQA.rtc.availableScreens.length===1');
     await viewer.webContents.executeJavaScript('window.coveMediaQA.rtc.watchScreen(window.coveMediaQA.rtc.availableScreens[0].socketId)');
@@ -114,6 +116,35 @@ app.whenReady().then(async()=>{
     assert.ok(pixel[0]+pixel[1]+pixel[2]>100,'remote frame must not be black');
     await sender.webContents.executeJavaScript('window.coveMediaQA.rtc.toggleStats()');
     await waitFor(sender,'window.coveMediaQA.rtc.stats.codec==="VP8"');
+    if(testScreenSound){
+      await viewer.webContents.executeJavaScript('window.coveMediaQA.rtc.toggleStats()');
+      await waitFor(viewer,'window.coveMediaQA.screenSound().then(value=>value.combined&&value.rms>.01)');
+      await waitFor(sender,'window.coveMediaQA.screenSound().then(value=>value.senderCnameBound)');
+      await new Promise(resolve=>setTimeout(resolve,3000));
+      const before=await viewer.webContents.executeJavaScript('window.coveMediaQA.screenSound()');
+      const senderBefore=await sender.webContents.executeJavaScript('window.coveMediaQA.screenSound()');
+      const samples=[];
+      for(let index=0;index<100;index++){
+        await new Promise(resolve=>setTimeout(resolve,50));
+        samples.push(await viewer.webContents.executeJavaScript('window.coveMediaQA.screenSound()'));
+      }
+      const after=samples.at(-1),silent=samples.filter(value=>value.rms<.005).length;
+      audioEvidence.screenSound={combined:after.combined,senderCnameBound:true,silentWindows:silent,windows:samples.length,
+        rawSilentWindows:samples.filter(value=>value.rawRms<.005).length,
+        packetDelta:after.packets-before.packets,sampleDelta:after.samples-before.samples,
+        concealmentDelta:after.concealed-before.concealed,presentation:after.presentation,
+        senderBefore,sender:await sender.webContents.executeJavaScript('window.coveMediaQA.screenSound()'),samples};
+      console.log('[screen-sound]',JSON.stringify({...audioEvidence.screenSound,samples:undefined}));
+      assert.ok(samples.every(value=>value.combined),'screen audio/video must remain in one stream');
+      assert.equal(silent,0,'continuous screen sound must have no silent 50ms observation window');
+      assert.ok(after.packets-before.packets>150&&after.samples-before.samples>48000,'actual screen sound RTP and decoded samples must advance');
+      assert.equal(audioEvidence.screenSound.sender.capture.underflows-senderBefore.capture.underflows,0,'steady screen capture must not underrun');
+      assert.equal(audioEvidence.screenSound.sender.capture.droppedFrames-senderBefore.capture.droppedFrames,0,'steady screen capture must not skip captured PCM');
+      assert.ok((after.concealed-before.concealed)/Math.max(1,after.samples-before.samples)<.02,'loopback screen sound must not rely on concealment to hide gaps');
+      assert.ok(after.presentation?.lowFps>0,'actual product viewer must display a numeric 1% low');
+      assert.equal(await viewer.webContents.executeJavaScript(`/观看呈现 1% low[≈\\d.\\s]+fps/.test(document.querySelector('.debug-overlay')?.textContent||'')`),true,
+        'the rendered diagnostics panel must show numeric viewer 1% low');
+    }
     if(testIce){
       const before=await viewer.webContents.executeJavaScript('window.coveMediaQA.ice.snapshot()');
       const recv=before.find(t=>t.direction==='recv');

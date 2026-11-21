@@ -127,7 +127,9 @@ export function createFrameIntervalWindow(
       count < minSamples ? 'sampling' : 'ready';
     const slowFrameCount = Math.ceil(count / 100);
     let lowFps: number | null = null;
-    if (status === 'ready') {
+    // Gaps in browser callbacks retain observed intervals. Report their
+    // estimate with incomplete coverage instead of hiding every rolling window.
+    if (count >= minSamples && !capacityLimited && status !== 'stalled') {
       const sorted = new Float64Array(count);
       for (let offset = 0; offset < count; offset++)
         sorted[offset] = durations[(head + offset) % capacity];

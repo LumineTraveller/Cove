@@ -68,10 +68,12 @@ export function requiresServerAccessRecovery(code: unknown): boolean {
 // Active grants remain process-local. Opted-in account-scoped persistence is
 // handled separately by serverAccessMemory through Android Keystore.
 const accessTokens = new Map<string, ServerAccessGrant>();
+const connectionAccess = new Map<string, { token: string }>();
 const exchangeRevisions = new Map<string, number>();
 let exchangeRevision = 0;
 export function clearAllServerAccessTokens() {
   accessTokens.clear();
+  connectionAccess.clear();
   invalidateServerAccessExchanges();
 }
 export function invalidateServerAccessExchanges() {
@@ -150,6 +152,21 @@ export function getServerAccessToken(serverURL: string): string | null {
   return getServerAccessGrant(serverURL)?.accessToken ?? null;
 }
 
+/** Retain only while the server-admitted socket is connected. Never persisted. */
+export function retainServerAccessForConnection(serverURL: string, token: unknown): () => void {
+  const key = keyFor(serverURL);
+  if (!key || typeof token !== 'string' || !token) return () => {};
+  const connection = { token };
+  connectionAccess.set(key, connection);
+  return () => {
+    if (connectionAccess.get(key) === connection) connectionAccess.delete(key);
+  };
+}
+
+function requestAccessToken(serverURL: string): string | null {
+  return connectionAccess.get(keyFor(serverURL))?.token ?? getServerAccessToken(serverURL);
+}
+
 export function setServerAccessToken(
   serverURL: string,
   grant: ServerAccessGrant,
@@ -166,6 +183,7 @@ export function clearServerAccessToken(serverURL: string): void {
   const key = keyFor(serverURL);
   if (key) {
     accessTokens.delete(key);
+    connectionAccess.delete(key);
     exchangeRevisions.set(key, (exchangeRevisions.get(key) ?? 0) + 1);
   }
 }
@@ -183,7 +201,7 @@ export function serverRequestInit(
   headers.set('X-Cove-Client-Protocol', String(CLIENT_PROTOCOL_VERSION));
   headers.set('X-Cove-Client-Version', MOBILE_RELEASE_VERSION);
   headers.set('X-Cove-Client-Platform', 'mobile');
-  const token = getServerAccessToken(serverURL);
+  const token = requestAccessToken(serverURL);
   if (token) headers.set('Authorization', `Bearer ${token}`);
   return { ...init, headers };
 }
@@ -213,7 +231,7 @@ export function authorizedResourceURL(
   target: string,
 ): string {
   const url = requestURL(serverURL, target);
-  const token = getServerAccessToken(serverURL);
+  const token = requestAccessToken(serverURL);
   try {
     const parsed = new URL(url);
     // Never attach a server token or version metadata to external chat images.

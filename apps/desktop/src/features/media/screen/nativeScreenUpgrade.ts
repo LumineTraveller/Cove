@@ -139,7 +139,58 @@ export async function upgradePublishedScreenCapture(options: NativeScreenUpgrade
         options.onCommit(ready.stream, nativeTrack, committedDimensions.width, committedDimensions.height);
         queue.candidates.delete(ready.stream);
         removeAbort();
-        retireStock();
+        // Keep the already-authorized browser capture as a standby. An optional
+        // native backend failure must not end an otherwise healthy publication.
+        queue.candidates.add(stockStream);
+        let retained = true;
+        let recovering = false;
+        const previousEnded = stockTrack.onended;
+        const nativeStop = nativeTrack.stop.bind(nativeTrack);
+        const releaseStandby = () => {
+          if (!retained) return;
+          retained = false;
+          queue.candidates.delete(stockStream);
+          retireStock();
+        };
+        const ownsNative = () => options.isPublicationCurrent() && options.currentStream() === ready.stream;
+        nativeTrack.stop = () => { releaseStandby(); nativeStop(); };
+        // The browser's stop-sharing control still revokes the whole capture.
+        stockTrack.onended = () => { if (ownsNative()) options.stopPublication(); };
+        nativeTrack.onended = () => {
+          if (!ownsNative()) { releaseStandby(); return; }
+          if (recovering) return;
+          recovering = true;
+          const recover = async () => {
+            if (!ownsNative()) { releaseStandby(); return; }
+            if (!isLive(stockTrack)) { options.stopPublication(); releaseStandby(); return; }
+            try {
+              await producer.replaceTrack({ track: stockTrack });
+              if (!ownsNative() || !isLive(stockTrack)) {
+                if (ownsNative()) options.stopPublication();
+                releaseStandby();
+                return;
+              }
+              const dimensions = dimensionsWithinPreset(stockTrack, stockPlan);
+              if (!dimensions) throw new Error('Browser fallback geometry unavailable');
+              stockTrack.onended = previousEnded;
+              options.onCommit(stockStream, stockTrack, dimensions.width, dimensions.height);
+              retained = false;
+              queue.candidates.delete(stockStream);
+              nativeTrack.onended = null;
+              nativeTrack.stop = nativeStop;
+              ready.stop();
+              console.info('[screen share] native capture ended; browser capture restored');
+            } catch (error) {
+              if (options.isPublicationCurrent() &&
+                  (options.currentStream() === ready.stream || options.currentStream() === stockStream))
+                options.stopPublication();
+              releaseStandby();
+              console.warn('[screen share] browser capture recovery failed', error);
+            }
+          };
+          const recovery = queue.tail.then(recover);
+          queue.tail = recovery.catch(() => {});
+        };
       } catch (error) {
         // A synchronous ownership callback can fail after adopting native.
         // Do not leave an ended attached source advertised as a live share.

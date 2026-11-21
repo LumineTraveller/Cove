@@ -141,6 +141,24 @@ export function createServerRuntime() {
       return disconnectForInvalidServerAccess;
     },
   });
+  const activeServerAccess = new Map<string, Set<Socket>>();
+  function hasServerAccessSession(data: {
+    serverAccessToken?: unknown; serverAccessEpoch?: unknown; serverAccessInvalidated?: unknown;
+  }): boolean {
+    return !serverSecurityEnabled || (
+      !data.serverAccessInvalidated && typeof data.serverAccessToken === 'string' &&
+      serverSecurity.isAccessEpochCurrent(data.serverAccessEpoch)
+    );
+  }
+  function hasActiveServerAccess(token: unknown): boolean {
+    if (typeof token !== 'string') return false;
+    for (const socket of activeServerAccess.get(token) ?? []) {
+      if (socket.connected && socket.data.accountId &&
+          accounts.accountForToken(socket.data.authToken)?.id === socket.data.accountId &&
+          hasServerAccessSession(socket.data)) return true;
+    }
+    return false;
+  }
   const {
     stmtGetRooms,
     stmtGetRoom,
@@ -350,7 +368,7 @@ export function createServerRuntime() {
   const soundpackAccess = createSoundpackAccess({
     accounts, accountSockets, userClientIds, roomMembers, io,
     roomExists: (roomId) => !!stmtGetRoomPrivate.get(roomId),
-    hasServerAccess: (socket) => !serverSecurityEnabled || !!serverSecurity.accessForToken(socket.data.serverAccessToken),
+    hasServerAccess: (socket) => hasServerAccessSession(socket.data),
   });
   const { toPublicSoundpack, broadcastSoundpackAdded, broadcastSoundpackEvent } = createSoundpackService({
     get userClientIds() {
@@ -376,6 +394,7 @@ export function createServerRuntime() {
     requestServerAccessToken,
     requireServerAccess,
   } = createHttpSecurity({
+    hasActiveServerAccess,
     get serverSecurityEnabled() {
       return serverSecurityEnabled;
     },
@@ -418,7 +437,7 @@ export function createServerRuntime() {
     }
     res.setHeader('Cache-Control', 'private, no-store');
     res.setHeader('Referrer-Policy', 'no-referrer');
-    requireServerAccess(req, res, next, true);
+    requireServerAccess(req, res, next, true, true);
   };
 
   // A server password alone must never expose room audio by bare filename.
@@ -485,7 +504,12 @@ export function createServerRuntime() {
     res.status(403).json([]);
   });
 
-  app.use('/api', requireServerAccess);
+  app.use('/api', (req, res, next) => {
+    // An ongoing connection may keep using HTTP resources after expiry. New
+    // account logins/registrations always require an unexpired password grant.
+    const login = /^\/auth\/(?:login|register)\/?$/i.test(req.path);
+    requireServerAccess(req, res, next, false, !login);
+  });
 
   const distPath = path.join(__dirname, '../../../desktop/dist');
 
@@ -937,6 +961,10 @@ export function createServerRuntime() {
       );
       return;
     }
+    if (socket.recovered && hasServerAccessSession(socket.data)) {
+      next();
+      return;
+    }
     const access = serverSecurity.accessForToken(serverAccessToken);
     if (!access) {
       deny(
@@ -961,13 +989,12 @@ export function createServerRuntime() {
   recoveryAdapter.restoreSession = async (pid, offset) => {
     const session = await restoreSession(pid, offset);
     if (session) {
-      const data = session.data as { authToken?: string; serverAccessToken?: string; clientVersion?: unknown; clientPlatform?: unknown; clientProtocol?: unknown };
+      const data = session.data as { authToken?: string; serverAccessToken?: string; serverAccessEpoch?: number; serverAccessInvalidated?: boolean; clientVersion?: unknown; clientPlatform?: unknown; clientProtocol?: unknown };
       const token = data?.authToken;
-      const serverAccessToken = data?.serverAccessToken;
       if (
         !peers.has(session.sid) ||
         !isClientIdentitySupported(data.clientVersion, data.clientPlatform, data.clientProtocol) ||
-        (serverSecurityEnabled && !serverSecurity.accessForToken(serverAccessToken)) ||
+        !hasServerAccessSession(data) ||
         (token && !accounts.accountForToken(token))
       ) {
         // Socket.IO falls back to a fresh connection if snapshot restoration throws.
@@ -990,13 +1017,20 @@ export function createServerRuntime() {
 
   io.on('connection', (socket) => {
     console.log(`[+] ${socket.id} recovered=${socket.recovered}`);
-    // Handshake authentication alone would leave a long-lived socket usable
-    // after its bearer expires or after the server password is rotated. Check
-    // the database-backed session before every client packet as well, then
-    // force a reconnect so the client can obtain a fresh grant.
+    // Expiry is a login deadline, not a deadline for an established connection.
+    // Continue checking revocation on every packet, including recovered sockets.
     if (serverSecurityEnabled) {
+      const token = socket.data.serverAccessToken as string;
+      const connections = activeServerAccess.get(token) ?? new Set<Socket>();
+      connections.add(socket);
+      activeServerAccess.set(token, connections);
+      socket.once('disconnect', () => {
+        connections.delete(socket);
+        if (connections.size === 0) activeServerAccess.delete(token);
+      });
       socket.use((_packet, next) => {
-        if (serverSecurity.accessForToken(socket.data.serverAccessToken)) {
+        if (hasServerAccessSession(socket.data) &&
+            (socket.data.accountId || serverSecurity.accessForToken(socket.data.serverAccessToken))) {
           next();
           return;
         }
@@ -1007,13 +1041,6 @@ export function createServerRuntime() {
         next(error);
         disconnectForInvalidServerAccess(socket);
       });
-      const accessExpiryTimer = setTimeout(() => {
-        // The elapsed-time deadline still ends an idle connection if the wall
-        // clock moved backwards after this fixed expiry timer was scheduled.
-        disconnectForInvalidServerAccess(socket);
-      }, Math.max(1, Number(socket.data.serverAccessExpiresAt ?? Date.now()) - Date.now() + 1));
-      accessExpiryTimer.unref();
-      socket.once('disconnect', () => clearTimeout(accessExpiryTimer));
     }
     disconnectGrace.recover(socket.id);
     if (!peers.has(socket.id)) createPeer(socket.id);

@@ -511,25 +511,30 @@ test('soundpack HTTP, files, mutations and broadcasts enforce current account an
       assert.ok((await list(a, roomA)).some(pack => pack.id === packA.id));
     });
 
-    await t.test('expiry of an existing fourteen-day server grant closes soundpack HTTP and socket access', async () => {
+    await t.test('natural expiry preserves the current soundpack session and rejects a new login', async () => {
       const grant = inspect(db => db.prepare('SELECT createdAt, expiresAt FROM server_access_sessions').get()!);
       assert.equal(Number(grant.expiresAt) - Number(grant.createdAt), 14 * 24 * 60 * 60 * 1000);
       inspect(db => db.prepare('UPDATE server_access_sessions SET expiresAt = ?').run(Date.now() - 1));
-      const expiredList = await api(`/api/soundpacks?roomId=${roomA}`, a.account);
-      assert.equal(expiredList.status, 401);
-      assert.equal((await expiredList.json()).code, 'SERVER_ACCESS_REQUIRED');
+      assert.ok((await list(a, roomA)).some(pack => pack.id === packA.id));
       const expiredLegacyList = await api(`/api/soundpacks?roomId=${roomA}&socketId=${a.socket.id}`);
       assert.equal(expiredLegacyList.status, 403);
       assert.deepEqual(await expiredLegacyList.json(), []);
-      for (const init of [{}, { method: 'HEAD' }, { headers: { range: 'bytes=0-1' } }])
-        await denied(await api(file(packA, roomA), a.account, init));
+      for (const init of [{}, { method: 'HEAD' }, { headers: { range: 'bytes=0-1' } }]) {
+        const response = await api(file(packA, roomA), a.account, init);
+        assert.ok([200, 206].includes(response.status));
+        await response.arrayBuffer();
+      }
       resetEvents();
-      const invalid = bounded(new Promise<any>(resolve => a.socket.once('server:access-invalid', resolve)), 'server access invalid notice');
-      const disconnected = bounded(new Promise<void>(resolve => a.socket.once('disconnect', () => resolve())), 'server access disconnect');
-      a.socket.emit('soundpack:play', { roomId: roomA, soundId: packA.id });
-      assert.equal((await invalid).code, 'SERVER_ACCESS_INVALID');
-      await disconnected;
-      assert.equal(events(a, 'soundpack:play').length, 0);
+      assert.equal((await emit(a.socket, 'soundpack:play', { roomId: roomA, soundId: packA.id })).ok, true);
+      await barrier(a);
+      assert.equal(a.socket.connected, true);
+      assert.equal(events(a, 'soundpack:play').length, 1);
+      const login = await api('/api/auth/login', undefined, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ email: a.account.account.email, password: 'account-fixture-password' }),
+      });
+      assert.equal(login.status, 401);
+      assert.equal((await login.json()).code, 'SERVER_ACCESS_REQUIRED');
     });
   } finally {
     legacyRelease.resolve(); uploadGate?.release.resolve();

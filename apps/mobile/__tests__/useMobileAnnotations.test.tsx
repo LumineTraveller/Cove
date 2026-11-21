@@ -76,6 +76,10 @@ beforeEach(async () => {
           target: undefined,
         };
         ack?.({ ok: true, state: server });
+      } else if (event === 'annotation:clear') {
+        server = { ...server, strokes: [], revision: server.revision + 1, clearRevision: server.revision + 1 };
+        handlers.get('annotation:state')?.(server);
+        ack?.({ ok: true, state: server });
       } else ack?.({ ok: true, state: server });
     }),
   };
@@ -116,6 +120,54 @@ test('everyone viewers draw directly without a permission request', async () => 
     { x: 0, y: 0 },
     { x: 1, y: 1 },
   ]);
+});
+
+test('a new eraser cannot overtake an older pen whose first chunk is waiting on a timer', async () => {
+  await act(async () => { await result.start(); });
+  await act(async () => {
+    result.sendStroke('pen', '#FF0000', 0.02, [{ x: 0.1, y: 0.1 }], 'seed', true);
+    result.sendStroke('pen', '#FF0000', 0.02, [{ x: 0.5, y: 0.5 }], 'queued-pen', true);
+    // A busy renderer can service new pointer input before an overdue timer.
+    jest.setSystemTime(Date.now() + 40);
+    result.sendStroke('eraser', '#FF0000', 0.04, [{ x: 0.5, y: 0.5 }], 'new-eraser', true);
+    jest.advanceTimersByTime(120);
+  });
+  expect(server.strokes.map(stroke => stroke.id)).toEqual(['seed', 'queued-pen', 'new-eraser']);
+});
+
+test('revisiting previous coordinates confirms every point and retires the completed stroke', async () => {
+  await act(async () => { await result.start(); });
+  const points = [{ x: 0.2, y: 0.5 }, { x: 0.4, y: 0.5 }, { x: 0.2, y: 0.5 }];
+  for (const point of points) await act(async () => {
+    result.sendStroke('eraser', '#FF0000', 0.02, [point], 'loop');
+    jest.advanceTimersByTime(40);
+  });
+  await act(async () => { result.finishStroke('loop'); });
+  expect(result.state!.strokes[0].points).toEqual(points);
+  expect(result.optimisticStrokes).toEqual([]);
+});
+
+test('clear cancels queued chunks, rejects the held pointer and ignores old acknowledgements', async () => {
+  await act(async () => { await result.start(); });
+  let lateAck!: (value: unknown) => void;
+  socket.emit.mockImplementationOnce((event: string, payload: any, ack: typeof lateAck) => {
+    expect(event).toBe('annotation:draw'); lateAck = ack;
+  });
+  await act(async () => {
+    result.sendStroke('eraser', '#FF0000', 0.02, [{ x: 0.2, y: 0.5 }], 'old');
+    result.sendStroke('eraser', '#FF0000', 0.02, [{ x: 0.8, y: 0.5 }], 'old');
+  });
+  await act(async () => { await result.clear(); jest.advanceTimersByTime(100); });
+  expect(socket.emit.mock.calls.filter((call: any[]) => call[0] === 'annotation:draw')).toHaveLength(1);
+  expect(result.optimisticStrokes).toEqual([]);
+  expect(result.sendStroke('eraser', '#FF0000', 0.02, [{ x: 0.9, y: 0.5 }], 'old')).toBeNull();
+  await act(async () => { lateAck({ ok: false, error: { code: 'invalid_payload', message: 'old failure' } }); });
+  expect(result.error).toBeNull();
+  await act(async () => {
+    result.sendStroke('pen', '#0000FF', 0.02, [{ x: 0.5, y: 0.5 }], 'fresh', true);
+  });
+  expect(result.state!.strokes.map(item => item.id)).toEqual(['fresh']);
+  expect(socket.emit.mock.calls.filter((call: any[]) => call[0] === 'annotation:draw').at(-1)[1].clearRevision).toBe(server.clearRevision);
 });
 test('disabled or sharer-only sessions do not emit drawing', async () => {
   await act(async () => {

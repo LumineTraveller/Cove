@@ -18,6 +18,7 @@ import { AccountPasswordStore } from './account-password-store';
 import { screenCaptureFeaturePolicy } from './screen-capture-features';
 import { nativeScreenCaptureEnabled } from './native-screen-capture-policy';
 import { NativeScreenCaptureController } from './native-screen-capture';
+import { registerScreenShareActivity } from './screen-share-activity';
 import { nativeScreenStartDiagnostic } from './native-screen-capture-diagnostics';
 import { createNativeScreenTimingLogger } from './native-screen-capture-timing';
 import { registerAccountPasswordIpc } from './account-password-ipc';
@@ -121,6 +122,7 @@ let nativeTimingLogger: ReturnType<typeof createNativeScreenTimingLogger> | unde
 const nativeCompletionPreference = process.env.COVE_NATIVE_GPU_CAPTURE_COMPLETION;
 const nativeScreenCapture = new NativeScreenCaptureController({
   enabled: nativeCaptureEnabled,
+  keepRendererActive: nativeCaptureEnabled,
   timing: nativeTimingEnabled,
   onHelperTiming: nativeTimingEnabled ? (sample, captureNumber) => nativeTimingLogger?.helper(sample, captureNumber) : undefined,
   pixelFormat: process.env.COVE_NATIVE_GPU_CAPTURE_PIXEL_FORMAT === 'nv12' ? 'nv12' : 'bgra',
@@ -261,7 +263,7 @@ function createWindow() {
       const source = sourceId ? `${path.basename(sourceId)}:${line}` : String(line);
       console.log(`[renderer:${level}] ${message} (${source})`);
     });
-    win.webContents.openDevTools({ mode: "detach" });
+    if (process.env.COVE_DEV_TOOLS !== '0') win.webContents.openDevTools({ mode: "detach" });
     // Retry until Vite dev server is ready
     win.webContents.on("did-fail-load", () => {
       setTimeout(() => {
@@ -356,6 +358,9 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  const releaseScreenShareActivity = registerScreenShareActivity(ipcMain, event =>
+    event.sender === mainWindow?.webContents && event.senderFrame === mainWindow?.webContents.mainFrame);
+  app.once('before-quit', releaseScreenShareActivity);
   const integritySender = (event: Electron.IpcMainInvokeEvent) =>
     event.sender === mainWindow?.webContents && event.senderFrame === mainWindow?.webContents.mainFrame;
   ipcMain.handle('cove:native-screen:start', async (event, requestId, options) => {

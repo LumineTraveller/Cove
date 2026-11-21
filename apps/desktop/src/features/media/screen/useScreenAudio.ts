@@ -66,7 +66,7 @@ export function useScreenAudio(deps: useScreenAudioDependencies) {
       try {
         // Keep the captured pipeline in a stable closure. The IPC listener must
         // continue forwarding every PCM chunk to the same MediaStream destination.
-        const audioPipeline = new ApplicationAudioPipeline(deps.screenShareVolumeRef.current);
+        const audioPipeline = new ApplicationAudioPipeline(deps.screenShareVolumeRef.current, 'screen');
         pipeline = audioPipeline;
         // Own the pipeline before awaiting native setup, so teardown can release
         // it immediately even while the start acknowledgement is still pending.
@@ -90,7 +90,7 @@ export function useScreenAudio(deps: useScreenAudioDependencies) {
           return transport.produce({
             track,
             streamId: `screen-${deps.socket.id}`,
-            codecOptions: { opusStereo: true, opusDtx: true, opusFec: true },
+            codecOptions: { opusStereo: true, opusDtx: false, opusFec: true },
             appData: { type: 'screen-audio' },
             stopTracks: false,
             disableTrackOnPause: true,

@@ -2,17 +2,22 @@
 // Capture remains Windows 48 kHz s16 stereo. Only this audio thread advances
 // the read cursor; delayed UI callbacks cannot reschedule the playback clock.
 class CoveApplicationAudioProcessor extends AudioWorkletProcessor {
-  constructor() {
+  constructor(options = {}) {
     super();
     this.inputRate = 48000;
-    this.capacity = 5760; // 120 ms, bounded even if MessagePort delivers a burst.
+    const screen = options.processorOptions?.latencyProfile === 'screen';
+    // Screen capture can delay UI/IPC delivery much longer than a 20ms PCM
+    // packet. Keep its bounded reservoir separate from independent audio share.
+    this.capacity = screen ? 24000 : 5760;
     this.left = new Float32Array(this.capacity);
     this.right = new Float32Array(this.capacity);
     this.read = 0;
     this.count = 0;
     this.phase = 0;
     this.ratio = this.inputRate / sampleRate;
-    this.target = 1440; // 30 ms startup, adaptive 20..80 ms after underruns.
+    this.minimumTarget = screen ? 5760 : 960;
+    this.maximumTarget = screen ? 11520 : 3840;
+    this.target = screen ? 5760 : 1440;
     this.playing = false;
     this.closed = false;
     this.lastLeft = 0;
@@ -97,15 +102,15 @@ class CoveApplicationAudioProcessor extends AudioWorkletProcessor {
           this.read = (this.read + consumed) % this.capacity;
           this.count -= consumed;
           this.stableFrames++;
-          if (this.stableFrames >= sampleRate * 10 && this.target > 960) {
-            this.target = Math.max(960, this.target - 240);
+          if (this.stableFrames >= sampleRate * 10 && this.target > this.minimumTarget) {
+            this.target = Math.max(this.minimumTarget, this.target - 240);
             this.stableFrames = 0;
           }
         } else {
           this.playing = false;
           this.underflows++;
           this.stableFrames = 0;
-          this.target = Math.min(3840, this.target + 480);
+          this.target = Math.min(this.maximumTarget, this.target + 480);
           this.phase = 0;
           this.transition();
         }

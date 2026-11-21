@@ -234,10 +234,20 @@ export function useMediaTransports(deps: useMediaTransportsDependencies) {
       let createdConsumer: Consumer | undefined;
       let createdStream: MediaStream | undefined;
       let stopAudioPlayout = () => {};
+      const isScreenMedia = appData?.type === 'screen' || appData?.type === 'screen-audio';
+      const detachScreenTrack = () => {
+        if (!isScreenMedia || !createdStream || !createdConsumer) return;
+        createdStream.removeTrack(createdConsumer.track);
+        if (deps.screenStreams.current.get(peerId) !== createdStream) return;
+        if (createdStream.getTracks().length === 0) deps.screenStreams.current.delete(peerId);
+        if (createdStream.getVideoTracks().length === 0)
+          deps.setRemoteScreen(current => current?.stream === createdStream ? null : current);
+      };
       const cleanup = () => {
         const consumer = createdConsumer;
         if (consumer) {
           stopAudioPlayout();
+          detachScreenTrack();
           consumer.close();
           deps.consumers.current.delete(consumer.id);
           deps.detachAnalyser(consumer.id);
@@ -250,10 +260,6 @@ export function useMediaTransports(deps: useMediaTransportsDependencies) {
             element.pause();
             element.srcObject = null;
             deps.audioEls.current.delete(consumer.id);
-          }
-          if (kind === 'video' && deps.screenStreams.current.get(peerId) === createdStream) {
-            deps.screenStreams.current.delete(peerId);
-            deps.setRemoteScreen(current => current?.stream === createdStream ? null : current);
           }
           if (sourceTypeForCleanup === 'screen-audio')
             deps.setScreenReceiveHasAudio(
@@ -322,8 +328,7 @@ export function useMediaTransports(deps: useMediaTransportsDependencies) {
         );
 
         consumer.on('trackended', () => {
-          if (kind === 'video')
-            deps.setRemoteScreen((current) => (current?.stream === createdStream ? null : current));
+          detachScreenTrack();
           if (sourceType === 'application-audio')
             deps.removeRemoteApplicationAudio(peerId, producerId);
           if (sourceType === 'screen-audio') {
@@ -336,14 +341,22 @@ export function useMediaTransports(deps: useMediaTransportsDependencies) {
           }
         });
 
-        const stream = new MediaStream([consumer.track]);
+        // Keep both screen tracks in one stable playback stream, regardless of
+        // arrival order. RTP grouping and the HTML video must agree on identity.
+        const stream = isScreenMedia
+          ? deps.screenStreams.current.get(peerId) ?? new MediaStream()
+          : new MediaStream([consumer.track]);
+        if (isScreenMedia) {
+          stream.addTrack(consumer.track);
+          deps.screenStreams.current.set(peerId, stream);
+        }
         createdStream = stream;
+        consumer.observer?.on('close', detachScreenTrack);
 
         if (kind === 'audio') {
           if (sourceType === 'screen-audio') {
-            // 屏幕音频不再并入画面流：媒体元素的 volume 与
-            // createMediaElementSource 对 MediaStream 播放都不生效，只有
-            // Web Audio 增益能真正改变响度（与麦克风、应用音频同一条通路）。
+            // The combined stream keeps screen sync; Web Audio retains volume
+            // and output-device control through one audible gain path.
             try {
               const context = deps.ensureAudioCtx();
               const output = createRemoteAudioOutput(
@@ -454,7 +467,7 @@ export function useMediaTransports(deps: useMediaTransportsDependencies) {
             deps.startMeters();
           }
         } else if (kind === 'video') {
-          // appData.type === 'screen'：画面流只含视频，音频走各自的增益通路。
+          // Late screen audio joins this same object without restarting video.
           deps.screenStreams.current.set(peerId, stream);
           deps.setRemoteScreen({ socketId: peerId, stream });
         }

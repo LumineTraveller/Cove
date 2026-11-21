@@ -106,6 +106,28 @@ test('password rotation revokes every old access token and accepts only the new 
   database.close();
 });
 
+test('admitted sessions survive natural expiry and grant cleanup, but never revocation or clock rollback', async t => {
+  let now = 1_700_000_000_000;
+  const { database, db } = securityDatabase();
+  t.after(() => database.close());
+  const security = createServerSecurityStore(db, {
+    bootstrapToken: 'bootstrap-credential-for-tests', now: () => now, tokenLifetimeMs: 1_000,
+  });
+  const grant = await security.bootstrap('bootstrap-credential-for-tests', 'server-password-123');
+  const admitted = security.accessForToken(grant.accessToken)!;
+  now = grant.expiresAt;
+  assert.equal(security.accessForToken(grant.accessToken), null, 'expired grants cannot admit a login');
+  assert.equal(security.isAccessEpochCurrent(admitted.epoch), true);
+  await security.unlock('server-password-123');
+  assert.equal(security.isAccessEpochCurrent(admitted.epoch), true, 'expired row cleanup cannot end an active session');
+  security.revokeAll();
+  assert.equal(security.isAccessEpochCurrent(admitted.epoch), false);
+  const fresh = await security.unlock('server-password-123');
+  const epoch = security.accessForToken(fresh.accessToken)!.epoch;
+  now -= 1;
+  assert.equal(security.isAccessEpochCurrent(epoch), false, 'clock rollback still revokes admitted sessions');
+});
+
 test('concurrent bootstrap has one winner and cannot overwrite an existing database', async () => {
   const { database, db } = securityDatabase();
   const security = createServerSecurityStore(db, { bootstrapToken: 'bootstrap-credential-for-tests' });

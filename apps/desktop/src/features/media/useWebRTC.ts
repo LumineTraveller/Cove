@@ -1432,7 +1432,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
       return screenDemandActiveRef;
     },
   });
-  const { startScreenShare, updateScreenShare, stopScreenShare } = useScreenPublishing({
+  const { startScreenShare, updateScreenShare, stopScreenShare, isStartingScreenShare } = useScreenPublishing({
     get mediaGeneration() {
       return mediaGeneration;
     },
@@ -1644,6 +1644,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
     leaveVoice,
     toggleMute,
     startScreenShare,
+    isStartingScreenShare,
     updateScreenShare,
     stopScreenShare,
     startApplicationAudioShare,

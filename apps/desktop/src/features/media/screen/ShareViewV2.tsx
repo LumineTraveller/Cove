@@ -111,7 +111,8 @@ export function ShareViewV2({
                 已进入共享屏幕绘画；窗口共享时请切到被共享窗口。Esc 退出。
                 <button onClick={annotations.exit}>退出绘画</button>
               </p>
-            : !floating && <ScreenAnnotationLayer annotations={annotations} self={displayedSelf} videoHostRef={videoHostRef} />}
+            : !floating && <ScreenAnnotationLayer annotations={annotations} self={displayedSelf} videoHostRef={videoHostRef}
+                diagnosticsMode={debug ? diagnosticsCompact ? 'compact' : 'expanded' : undefined} />}
           {overlayError && <p className="annotation-layer-status" role="status">{overlayError}</p>}
           {pictureInPicture.active && <div className="screen-floating-status" role="status">
             <MonitorPlay size={30} />

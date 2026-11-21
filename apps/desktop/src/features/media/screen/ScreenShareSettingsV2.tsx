@@ -14,6 +14,7 @@ export function ScreenShareSettingsV2({
   onGameMode,
   onNativeResolution,
   confirmLabel,
+  busy = false,
   onConfirm,
   onCancel,
 }: {
@@ -28,6 +29,7 @@ export function ScreenShareSettingsV2({
   onGameMode: () => void;
   onNativeResolution: (enabled: boolean) => void;
   confirmLabel: string;
+  busy?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -58,7 +60,7 @@ export function ScreenShareSettingsV2({
             {(Object.keys(SCREEN_PRESETS) as ScreenPreset[]).map((value) => (
               <button
                 key={value}
-                disabled={nativeResolution}
+                disabled={nativeResolution || busy}
                 className={preset === value ? 'active' : ''}
                 onClick={() => onPreset(value)}
               >
@@ -74,6 +76,7 @@ export function ScreenShareSettingsV2({
           </span>
           <input
             type="checkbox"
+            disabled={busy}
             checked={nativeResolution}
             onChange={(event) => onNativeResolution(event.target.checked)}
           />
@@ -84,6 +87,7 @@ export function ScreenShareSettingsV2({
             {SCREEN_FPS_OPTIONS.map((value) => (
               <button
                 key={value}
+                disabled={busy}
                 className={fps === value ? 'active' : ''}
                 onClick={() => onFps(value)}
               >
@@ -97,17 +101,17 @@ export function ScreenShareSettingsV2({
             <b>游戏模式</b>
             <small>持续使用所选帧率，优先稳定动态画面</small>
           </span>
-          <input type="checkbox" checked={gameMode} onChange={onGameMode} />
+          <input type="checkbox" disabled={busy} checked={gameMode} onChange={onGameMode} />
         </label>
         <label className="settings-toggle-card computer-audio-toggle">
           <span>
             <b>共享电脑音频</b>
             <small>排除 Cove 自身声音，作为屏幕共享附带音频</small>
           </span>
-          <input type="checkbox" checked={audio} onChange={onAudio} />
+          <input type="checkbox" disabled={busy} checked={audio} onChange={onAudio} />
         </label>
-        <button className="primary-wide yellow" onClick={onConfirm}>
-          {confirmLabel}
+        <button className="primary-wide yellow" disabled={busy} aria-busy={busy} onClick={onConfirm}>
+          {busy ? '正在开始共享…' : confirmLabel}
         </button>
       </div>
     </div>

@@ -3,6 +3,7 @@ import { type Server } from 'socket.io';
 import {
   type AnnotationAck,
   type AnnotationConfigurePayload,
+  type AnnotationDrawPayload,
   type AnnotationGetTarget,
   type AnnotationLaserEvent,
   type AnnotationPermission,
@@ -52,6 +53,7 @@ type MutableAnnotationState = {
   sharerSocketId: string;
   sessionId: string;
   revision: number;
+  clearRevision: number;
   enabled: boolean;
   permission: AnnotationPermission;
   remoteControlAllowed: boolean;
@@ -159,6 +161,7 @@ export function createAnnotationService(deps: AnnotationServiceDependencies) {
         sharerSocketId: normalized.sharerSocketId,
         sessionId,
         revision: 0,
+        clearRevision: 0,
         enabled: false,
         permission: 'everyone',
         remoteControlAllowed: true,
@@ -388,7 +391,7 @@ export function createAnnotationService(deps: AnnotationServiceDependencies) {
   }
 
   function draw(
-    payload: { target: AnnotationTarget; stroke: AnnotationStrokeInput },
+    payload: AnnotationDrawPayload,
     requesterSocketId: string,
   ): ServiceResult {
     const resolved = resolveTarget(payload?.target, requesterSocketId);
@@ -396,6 +399,8 @@ export function createAnnotationService(deps: AnnotationServiceDependencies) {
     const state = resolved.state;
     const denied = authorizedResult(state, requesterSocketId);
     if (denied) return denied;
+    if (payload.clearRevision !== undefined && payload.clearRevision !== state.clearRevision)
+      return failure('invalid_payload', '画布已清空，请重新落笔');
     const strokeInput = validatedStroke(payload.stroke);
     if (!strokeInput) return failure('invalid_payload', '批注笔画格式无效');
     if (
@@ -488,6 +493,7 @@ export function createAnnotationService(deps: AnnotationServiceDependencies) {
       return failure('rate_limited', '清空画布操作过于频繁');
     state.strokes = [];
     state.revision += 1;
+    state.clearRevision = state.revision;
     emitState(state);
     return snapshotResult(state);
   }

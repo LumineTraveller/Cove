@@ -46,6 +46,8 @@ export interface AnnotationState {
   sessionId: string;
   /** Increments for every state mutation and accepted stroke chunk. */
   revision: number;
+  /** Revision of the last clear; omitted by older servers. */
+  clearRevision?: number;
   enabled: boolean;
   permission: AnnotationPermission;
   remoteControlAllowed: boolean;
@@ -90,6 +92,8 @@ export interface AnnotationRespondPayload {
 
 export interface AnnotationDrawPayload {
   target: AnnotationTarget;
+  /** Clear boundary observed when this stroke started. */
+  clearRevision?: number;
   stroke: AnnotationStrokeInput;
 }
 

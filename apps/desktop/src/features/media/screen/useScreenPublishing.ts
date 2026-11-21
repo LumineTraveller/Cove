@@ -1,4 +1,4 @@
-import { useCallback, useRef } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { Socket } from 'socket.io-client';
 import { Device } from 'mediasoup-client';
 
@@ -119,7 +119,9 @@ function releaseScreenCaptureCandidate(stream: MediaStream) {
 
 export function useScreenPublishing(deps: useScreenPublishingDependencies) {
   const publicationGeneration = useRef(0);
-  const pendingStart = useRef<{ operation: number; isCurrent: () => boolean } | null>(null);
+  const pendingStart = useRef<{ operation: number; isCurrent: () => boolean; cancel: () => void } | null>(null);
+  const [isStartingScreenShare, setIsStartingScreenShare] = useState(false);
+  const rendererActivity = useRef<{ operation: number; release(): void } | null>(null);
   const updateQueue = useRef<ScreenUpdateQueue | null>(null);
   const nativeUpgradeIntent = useRef(0);
   const nativeUpgradeAbort = useRef<{ controller: AbortController; queue: ScreenUpdateQueue } | null>(null);
@@ -206,9 +208,18 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
       initNativeResolution?: boolean,
       initCompatibilityMode?: boolean,
     ) => {
-      if (!deps.inVoice || deps.isSharing || pendingStart.current?.isCurrent()) return;
+      if (deps.isSharing) return true;
+      if (pendingStart.current?.isCurrent()) return false;
+      if (!deps.inVoice) {
+        window.alert('请先加入语音，再开始屏幕共享。');
+        return false;
+      }
       const transport = deps.sendTransport.current;
-      if (!transport) return;
+      const signalConnected = () => deps.socket.connected !== false;
+      if (!transport || transport.closed || !deps.socket.id || !signalConnected()) {
+        window.alert('共享连接正在恢复，请稍后重试。');
+        return false;
+      }
       const preset = initPreset ?? deps.screenPreset;
       const gameMode = initGameMode ?? deps.screenGameMode;
       const nativeResolution = initNativeResolution ?? deps.screenNativeResolution;
@@ -227,7 +238,7 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
       // There is intentionally no full-system/browser fallback.
       if (audio && !window.coveScreenAudio) {
         window.alert('排除 Cove 自身音频的系统音频共享仅可在 Windows 桌面版中使用。');
-        return;
+        return false;
       }
 
       const nativeIntent = cancelNativeUpgrade();
@@ -235,16 +246,56 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
       const operation = ++publicationGeneration.current;
       const generation = deps.mediaGeneration.current;
       const socketId = deps.socket.id;
+      const controller = new AbortController();
+      pendingStart.current?.cancel();
       let acquiredStream: MediaStream | null = null;
       let acquiredProducer: Producer | null = null;
       let videoCommitted = false;
-      const isCurrent = () => operation === publicationGeneration.current &&
+      let activityRelease: (() => void) | undefined;
+      const releaseActivity = () => {
+        const release = activityRelease;
+        activityRelease = undefined;
+        if (rendererActivity.current?.operation === operation) rendererActivity.current = null;
+        try { release?.(); } catch { /* Scheduling policy cannot prevent media cleanup. */ }
+      };
+      controller.signal.addEventListener('abort', () => {
+        releaseActivity();
+        if (!videoCommitted && acquiredStream && deps.localScreenRef.current !== acquiredStream)
+          acquiredStream.getTracks().forEach(track => {
+            track.onended = null;
+            if (track.readyState !== 'ended') track.stop();
+          });
+      }, { once: true });
+      const isCurrent = () => !controller.signal.aborted && operation === publicationGeneration.current &&
         generation === deps.mediaGeneration.current && transport === deps.sendTransport.current &&
         (videoCommitted
           ? acquiredProducer !== null && deps.screenProducer.current === acquiredProducer && !acquiredProducer.closed
-          : socketId === deps.socket.id);
+          : socketId === deps.socket.id || (deps.socket.id === undefined && deps.socket.connected === false));
       const ensureCurrent = () => { if (!isCurrent()) throw new CancelledScreenPublication(); };
-      pendingStart.current = { operation, isCurrent };
+      const waitForSignal = () => {
+        ensureCurrent();
+        if (deps.socket.connected !== false && deps.socket.id === socketId) return Promise.resolve();
+        return new Promise<void>((resolve, reject) => {
+          let settled = false;
+          const finish = (error?: Error) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            deps.socket.off('connect', connected);
+            controller.signal.removeEventListener('abort', cancelled);
+            if (error) reject(error); else resolve();
+          };
+          const connected = () => finish(isCurrent() && deps.socket.id === socketId ? undefined : new CancelledScreenPublication());
+          const cancelled = () => finish(new CancelledScreenPublication());
+          const timer = setTimeout(() => finish(new Error('服务器连接恢复超时，请重试屏幕共享')), 5_000);
+          deps.socket.on('connect', connected);
+          controller.signal.addEventListener('abort', cancelled, { once: true });
+          if (controller.signal.aborted) cancelled();
+          else if (deps.socket.connected && deps.socket.id) connected();
+        });
+      };
+      pendingStart.current = { operation, isCurrent, cancel: () => controller.abort() };
+      setIsStartingScreenShare(true);
       let startupStage = '申请屏幕采集';
       try {
         // rtpCapabilities is the receive-capabilities alias in mediasoup-client.
@@ -265,6 +316,9 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
         ensureCurrent();
         const videoTrack = stream.getVideoTracks()[0];
         if (!videoTrack) throw new Error('没有取得屏幕视频轨道');
+        try { activityRelease = window.coveScreenShareActivity?.acquire(); }
+        catch { console.warn('[screen share] renderer activity unavailable'); }
+        rendererActivity.current = { operation, release: releaseActivity };
         startupStage = '等待屏幕采集轨道就绪';
         await waitForMediaTrackWarmup(videoTrack);
         ensureCurrent();
@@ -302,11 +356,12 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
         let lastProduceError: unknown = null;
         for (const codec of codecCandidates) {
           try {
-            producer = await produceWithSsrcRetry(() => {
+            producer = await produceWithSsrcRetry(async () => {
+              await waitForSignal();
               ensureCurrent();
               return transport.produce({
                 track: videoTrack,
-                streamId: `screen-${deps.socket.id}`,
+                streamId: `screen-${socketId}`,
                 appData: {
                   type: 'screen',
                   adaptation: gameMode ? 'game' : 'content',
@@ -342,6 +397,7 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
         }
         if (!producer) throw lastProduceError ?? new Error('没有可用的屏幕共享视频编码器');
         deps.screenProducer.current = producer;
+        producer.observer?.once('close', releaseActivity);
         const publishedProducer = producer;
         const queue = ensureUpdateQueue(publishedProducer, () => isCurrent() &&
           deps.screenProducer.current === publishedProducer && !publishedProducer.closed);
@@ -352,8 +408,7 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
             stopScreenShare();
         };
         if (videoTrack.readyState === 'ended') {
-          stopScreenShare();
-          return;
+          throw new Error('屏幕采集在启动时结束，请重新开始共享');
         }
         deps.setLocalScreen(stream);
         deps.videoCounterPrev.current = null;
@@ -396,8 +451,10 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
 
         deps.setIsSharing(true);
         beginNativeUpgrade(stream, producer, queue, nativeIntent, initialPlan, currentFps, gameMode);
+        return true;
 
       } catch (e) {
+        releaseActivity();
         const current = isCurrent();
         if (acquiredProducer) {
           if (deps.screenProducer.current === acquiredProducer) deps.screenProducer.current = null;
@@ -407,7 +464,10 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
             acquiredProducer.close();
           }
         }
-        acquiredStream?.getTracks().forEach((track) => { track.onended = null; track.stop(); });
+        acquiredStream?.getTracks().forEach((track) => {
+          track.onended = null;
+          if (track.readyState !== 'ended') track.stop();
+        });
         const cancelled = !current || e instanceof CancelledScreenPublication;
         if (cancelled) {
           console.info('[screen share] startup cancelled', JSON.stringify({
@@ -421,7 +481,7 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
           // Release that preview too, but never clear a successor's capture
           // or producer during late cancellation cleanup.
           if (!acquiredStream || deps.localScreenRef.current !== acquiredStream ||
-              deps.screenProducer.current) return;
+              deps.screenProducer.current) return false;
         } else {
           console.error(`[screen share] ${startupStage}失败`, e);
         }
@@ -432,10 +492,14 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
         deps.setLocalScreen(null);
         deps.setIsSharing(false);
         deps.setScreenEncodingPlan(null);
-        if (!cancelled && !(e instanceof DOMException && e.name === 'NotAllowedError'))
+        if (!cancelled)
           window.alert(`无法开始屏幕共享：${e instanceof Error ? e.message : String(e)}`);
+        return false;
       } finally {
-        if (pendingStart.current?.operation === operation) pendingStart.current = null;
+        if (pendingStart.current?.operation === operation) {
+          pendingStart.current = null;
+          setIsStartingScreenShare(false);
+        }
       }
       // eslint-disable-next-line react-hooks/exhaustive-deps
     },
@@ -663,7 +727,11 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
   const stopScreenShare = useCallback(() => {
     cancelNativeUpgrade();
     publicationGeneration.current += 1;
+    pendingStart.current?.cancel();
     pendingStart.current = null;
+    rendererActivity.current?.release();
+    rendererActivity.current = null;
+    setIsStartingScreenShare(false);
     updateQueue.current?.release();
     updateQueue.current = null;
     deps.stopScreenAnalysis();
@@ -695,5 +763,5 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
     deps.stopScreenAnalysis,
     deps.clearScreenRampGuard,
   ]);
-  return { startScreenShare, updateScreenShare, stopScreenShare };
+  return { startScreenShare, updateScreenShare, stopScreenShare, isStartingScreenShare };
 }

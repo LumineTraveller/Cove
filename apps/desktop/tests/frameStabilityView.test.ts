@@ -7,20 +7,20 @@ test('one percent low labels distinguish absent, insufficient, complete and stal
   const window = createFrameIntervalWindow();
   assert.equal(frameStabilityLabel(null), '—');
   window.observe(0, 0);
-  assert.equal(frameStabilityLabel(window.snapshot(0)), '采样中');
+  assert.equal(frameStabilityLabel(window.snapshot(0)), '采样中 0/100');
   for (let frame = 1; frame <= 120; frame++) window.observe(frame * 1_000 / 120, frame * 1_000 / 120);
   assert.equal(frameStabilityLabel(window.snapshot(1_000)), '120.0 fps');
   assert.equal(frameStabilityLabel(window.snapshot(2_001)), '暂无新帧');
 });
 
-test('incomplete frame coverage never displays an estimated low FPS', () => {
+test('incomplete callback coverage displays an explicitly marked interval estimate', () => {
   const window = createFrameIntervalWindow();
   for (let frame = 0; frame <= 120; frame++)
     window.observe(frame * 10, frame * 10, frame === 60 ? 2 : 0);
   const snapshot = window.snapshot(1_200);
-  assert.equal(frameStabilityLabel(snapshot), '采样不完整');
+  assert.equal(frameStabilityLabel(snapshot), '≈100.0 fps');
   assert.match(frameStabilityDetail(snapshot), /120个间隔，漏采2帧/);
-  assert.doesNotMatch(frameStabilityLabel(snapshot), /fps/);
+  assert.match(frameStabilityDetail(snapshot), /估计值/);
 });
 
 test('export definitions distinguish delivery and composition without changing other timing definitions', () => {
