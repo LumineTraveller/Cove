@@ -7,6 +7,8 @@
 
     也可传入 mobile\build\updates\mobile-vX.Y.Z\update.json，在公开
     GitHub APK 后、推送仓库更新清单前先完成服务器镜像。
+
+    可通过 -VerifiedApkPath 使用已下载的正式 APK，仍按 GitHub 附件和清单校验。
 #>
 [CmdletBinding()]
 param(
@@ -17,7 +19,8 @@ param(
     [string]$SshTarget = 'Cove_server',
     [ValidatePattern('^/[A-Za-z0-9._/-]+$')]
     [string]$RemoteRoot = '/var/www/cove-download',
-    [uri]$PublicBaseUrl = 'https://cove.luxe'
+    [uri]$PublicBaseUrl = 'https://cove.luxe',
+    [string]$VerifiedApkPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -83,7 +86,14 @@ $staging = "/tmp/cove-mobile-cloud-$tag-$([guid]::NewGuid().ToString('N'))"
 $completed = $false
 try {
     New-Item -ItemType Directory -Path $tempDir | Out-Null
-    Invoke-ReleaseHttp 'download' ([string]$asset[0].browser_download_url) 'cove-mobile-cloud-publisher' $apkPath | Out-Null
+    if ($VerifiedApkPath) {
+        if ($asset[0].digest -ne "sha256:$($item.sha256.ToLowerInvariant())") {
+            throw 'GitHub 正式附件的 SHA-256 与更新清单不一致。'
+        }
+        Copy-Item -LiteralPath $VerifiedApkPath -Destination $apkPath
+    } else {
+        Invoke-ReleaseHttp 'download' ([string]$asset[0].browser_download_url) 'cove-mobile-cloud-publisher' $apkPath | Out-Null
+    }
     if ((Get-Item -LiteralPath $apkPath).Length -ne $item.size -or
         (Get-FileHash -LiteralPath $apkPath -Algorithm SHA256).Hash -ne $item.sha256) {
         throw '下载的 GitHub APK 与更新清单的大小或 SHA-256 不一致。'
