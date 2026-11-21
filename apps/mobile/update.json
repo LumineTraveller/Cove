@@ -3,13 +3,13 @@
   "platform": "android",
   "release": {
     "packageName": "com.cove.mobile",
-    "versionName": "0.8.5",
-    "versionCode": 18,
+    "versionName": "0.8.6",
+    "versionCode": 19,
     "minAndroidApi": 24,
-    "tag": "mobile-v0.8.5",
-    "filename": "Cove-Mobile-0.8.5.apk",
-    "size": 56772458,
-    "sha256": "1a55ab53f3eef4a41631cdb98e52817416c18d7098d7c86cd89e0b16b5d9f6e3",
-    "notes": "# Cove Mobile v0.8.5\n\nAndroid 版本号 18。\n\n- 配合新版 Cove 服务端，服务器凭证自然到期时保留当前已登录会话。下次登录需重新输入服务器密码。\n- 在凭证自然到期后的当前会话中，继续加载房间内容和语音包。\n\n下载 `Cove-Mobile-0.8.5.apk` 覆盖安装。支持 ARM64 和 ARMv7，最低 Android 7.0。"
+    "tag": "mobile-v0.8.6",
+    "filename": "Cove-Mobile-0.8.6.apk",
+    "size": 56777158,
+    "sha256": "04eac1d7eef9a7a1dbc2639bc20351f005f9c97ddcd089c7826a80a81c872df7",
+    "notes": "# Cove Mobile v0.8.6\n\nAndroid 版本号 19。\n\n- 全屏观看共享时，闲置 3 秒隐藏状态栏、手势条和控件。轻点画面恢复控件，捏合缩放保持控件状态。音量键位于退出键下方，手机横过来时自动横屏。\n- 更新包在 Cove 内下载并校验，校验后自动打开 Android 安装确认。首次若系统要求，请授权 Cove 安装更新。\n- 更新页可在 GitHub 和已配置的 HTTPS 更新服务器之间选择下载源。\n\n支持 ARM64 和 ARMv7，最低 Android 7.0。"
   }
 }
