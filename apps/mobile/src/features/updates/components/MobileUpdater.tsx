@@ -17,6 +17,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
@@ -28,6 +29,7 @@ import {
   checkAndroidUpdate,
   getMobileUpdateServerBaseUrl,
   SOURCE_NAMES,
+  UPDATE_SOURCES,
   withUpdateTimeout,
   type AndroidRelease,
   type InstalledVersion,
@@ -45,6 +47,8 @@ import { subscribeClientUpgrade } from '../versionPolicy';
 
 interface UpdateBridge {
   getInstalledVersion(): Promise<InstalledVersion>;
+  getUpdateServerBaseUrl?(): Promise<string>;
+  setUpdateServerBaseUrl?(address: string): Promise<string>;
   fetchUpdateFeed(source: UpdateSource, serverURL: string): Promise<string>;
   downloadApk(
     source: UpdateSource,
@@ -115,13 +119,20 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
   const [checking, setChecking] = useState(false);
   const [required, setRequired] = useState(false);
   const [candidate, setCandidate] = useState<UpdateCandidate | null>(null);
-  const [source, setSource] = useState<UpdateSource>('github');
+  const [selectedSource, setSource] = useState<UpdateSource | null>(null);
+  const [serverBase, setServerBase] = useState('');
+  const [serverAddress, setServerAddress] = useState('');
+  const [savingServer, setSavingServer] = useState(false);
   const [message, setMessage] = useState('');
   const [downloading, setDownloading] = useState(false);
   const [progress, setProgress] = useState<DownloadProgress | null>(null);
   const [verifiedHash, setVerifiedHash] = useState<string | null>(null);
   const [opening, setOpening] = useState(false);
   const [installPermission, setInstallPermission] = useState(false);
+  const openingRef = useRef(false);
+  const pendingInstallSettings = useRef<{ hash: string; opened: Promise<void> } | null>(null);
+  const serverAddressEdited = useRef(false);
+  const serverSave = useRef(false);
   const mounted = useRef(false);
   const running = useRef(false);
   const checkGeneration = useRef(0);
@@ -165,9 +176,36 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const install = useCallback(async (hash: string) => {
+    if (!mounted.current || !foreground.current || openingRef.current) return;
+    openingRef.current = true;
+    setOpening(true);
+    try {
+      const bridge = bridgeFor();
+      if (typeof bridge.installApk !== 'function')
+        throw new Error('当前安装包缺少系统安装组件。');
+      await bridge.installApk(hash);
+      if (mounted.current) {
+        setInstallPermission(false);
+        setMessage('已打开 Android 安装确认。');
+      }
+    } catch (error) {
+      if (mounted.current) {
+        const permissionRequired =
+          (error as { code?: string } | null)?.code === 'INSTALL_PERMISSION_REQUIRED';
+        setInstallPermission(permissionRequired);
+        if (!permissionRequired) setVerifiedHash(null);
+        setMessage(error instanceof Error ? error.message : '无法启动安装，请重试。');
+      }
+    } finally {
+      openingRef.current = false;
+      if (mounted.current) setOpening(false);
+    }
+  }, []);
+
   const startDownload = useCallback(
-    async (update: UpdateCandidate, selected: UpdateSource) => {
-      if (downloadOperation.current || !foreground.current) return;
+    async (update: UpdateCandidate, selected: UpdateSource, serverURL: string) => {
+      if (downloadOperation.current || openingRef.current || !foreground.current) return;
       const operation = {
         id: `apk-${Date.now().toString(36)}-${++downloadSequence}`,
         release: update.release,
@@ -183,9 +221,8 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
       });
       setVerifiedHash(null);
       setInstallPermission(false);
-      setMessage(
-        '正在应用内下载更新。请保持 Cove 在前台；安装前会校验文件、版本和签名。',
-      );
+      setMessage('正在下载更新，请保持 Cove 在前台。');
+      let verified: string | null = null;
       try {
         const bridge = bridgeFor();
         if (
@@ -197,21 +234,16 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
           throw new Error(
             '当前安装包缺少完整的应用内更新组件，请使用包含此功能的官方客户端。',
           );
-        const serverURL =
-          selected === 'cloud'
-            ? getMobileUpdateServerBaseUrl(UPDATE_DOWNLOAD_BASE_URL) ?? ''
-            : '';
         const hash = await withUpdateTimeout(
-          bridge.downloadApk(selected, serverURL, update.release, operation.id),
+          bridge.downloadApk(selected, selected === 'cloud' ? serverURL : '', update.release, operation.id),
           6 * 60 * 1000,
         );
         if (!mounted.current || downloadOperation.current !== operation) return;
         if (hash !== update.release.sha256)
           throw new Error('安装包校验结果与清单不一致，已拒绝安装。');
+        verified = hash;
         setVerifiedHash(hash);
-        setMessage(
-          '下载完成，文件、应用版本和签名均已校验。点击安装后由 Android 请求最终确认。',
-        );
+        setMessage('校验完成，正在打开安装确认。');
       } catch (error) {
         if (!mounted.current || downloadOperation.current !== operation) return;
         automaticDownloadDeclined.current = true;
@@ -236,8 +268,11 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
           }
         }
       }
+      // Android moves Cove to the background when it opens the installer.
+      // Clear the completed download first so the background callback cannot cancel it.
+      if (verified) await install(verified);
     },
-    [],
+    [install],
   );
 
   const check = useCallback(
@@ -247,6 +282,7 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
       if (
         running.current ||
         downloadOperation.current ||
+        openingRef.current ||
         (!manual && Date.now() < nextAutomaticCheck.current)
       )
         return;
@@ -269,9 +305,13 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
           !isSupportedClientVersion(installed.versionName, minimum.current);
         setRequired(requiredRef.current);
         if (requiredRef.current) setVisible(true);
-        const serverURL = getMobileUpdateServerBaseUrl(
-          UPDATE_DOWNLOAD_BASE_URL,
-        );
+        const address = bridge.getUpdateServerBaseUrl
+          ? await withUpdateTimeout(bridge.getUpdateServerBaseUrl(), 5000)
+          : UPDATE_DOWNLOAD_BASE_URL;
+        if (!current()) return;
+        const serverURL = getMobileUpdateServerBaseUrl(address);
+        setServerBase(serverURL ?? '');
+        if (!serverAddressEdited.current) setServerAddress(serverURL ?? '');
         const sources: UpdateSource[] = serverURL
           ? ['github', 'cloud']
           : ['github'];
@@ -320,7 +360,6 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
           return;
         }
         if (update) {
-          setSource(update.sources[0]);
           if (
             manual ||
             requiredRef.current ||
@@ -334,7 +373,7 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
             !automaticDownloadDeclined.current &&
             verifiedHash !== update.release.sha256
           )
-            void startDownload(update, update.sources[0]);
+            void startDownload(update, update.sources[0], serverURL ?? '');
         }
       } catch (error) {
         if (!current()) return;
@@ -406,11 +445,17 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
     }, 1000);
     const subscription = AppState.addEventListener('change', state => {
       foreground.current = state === 'active';
-      if (state === 'active') void checkRef.current(requiredRef.current);
-      else void cancel(true);
+      if (state === 'active') {
+        const pending = pendingInstallSettings.current;
+        if (pending) {
+          pendingInstallSettings.current = null;
+          void pending.opened.then(() => install(pending.hash), () => {});
+        } else void checkRef.current(requiredRef.current);
+      } else void cancel(true);
     });
     return () => {
       mounted.current = false;
+      pendingInstallSettings.current = null;
       invalidateChecks();
       const operation = downloadOperation.current;
       downloadOperation.current = null;
@@ -421,53 +466,23 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
       subscription.remove();
       progressSubscription?.remove();
     };
-  }, [cancel, invalidateChecks]);
+  }, [cancel, install, invalidateChecks]);
 
-  const install = async () => {
-    if (!verifiedHash || opening) return;
-    setOpening(true);
-    try {
-      const bridge = bridgeFor();
-      if (typeof bridge.installApk !== 'function')
-        throw new Error(
-          '当前安装包缺少系统安装组件，请使用包含此功能的官方客户端。',
-        );
-      await bridge.installApk(verifiedHash);
-      if (mounted.current) {
-        setInstallPermission(false);
-        setMessage(
-          '已打开 Android 安装确认。如果取消安装，可返回再次点击安装。',
-        );
-      }
-    } catch (error) {
-      if (mounted.current) {
-        const permissionRequired =
-          (error as { code?: string }).code === 'INSTALL_PERMISSION_REQUIRED';
-        setInstallPermission(permissionRequired);
-        if (!permissionRequired) setVerifiedHash(null);
-        setMessage(
-          error instanceof Error
-            ? error.message
-            : '无法启动安装，请重新校验后重试。',
-        );
-      }
-    } finally {
-      if (mounted.current) setOpening(false);
-    }
-  };
   const openInstallSettings = async () => {
-    if (opening) return;
+    if (!verifiedHash || openingRef.current) return;
+    openingRef.current = true;
     setOpening(true);
     try {
       const bridge = bridgeFor();
       if (typeof bridge.openInstallSettings !== 'function')
         throw new Error('当前安装包缺少系统安装权限设置组件。');
-      await bridge.openInstallSettings();
+      const opened = withUpdateTimeout(bridge.openInstallSettings(), 5000);
+      pendingInstallSettings.current = { hash: verifiedHash, opened };
+      await opened;
       if (mounted.current)
-        setMessage(
-          '请自行决定是否允许此来源安装。返回后点击安装重试；拒绝权限不会自动再次打开设置。',
-        );
+        setMessage('允许 Cove 安装更新后，返回应用即可继续。');
     } catch (error) {
+      pendingInstallSettings.current = null;
       if (mounted.current)
         setMessage(
           error instanceof Error
@@ -475,15 +490,55 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
             : '无法打开系统安装权限设置，请重试。',
         );
     } finally {
+      openingRef.current = false;
       if (mounted.current) setOpening(false);
     }
   };
+
+  const saveServer = async () => {
+    if (serverSave.current || running.current || downloadOperation.current || openingRef.current) return;
+    const raw = serverAddress.trim();
+    const address = raw ? getMobileUpdateServerBaseUrl(raw) : '';
+    if (address === null) {
+      setMessage('请输入 HTTPS 更新服务器地址。');
+      return;
+    }
+    serverSave.current = true;
+    setSavingServer(true);
+    try {
+      const bridge = bridgeFor();
+      if (!bridge.setUpdateServerBaseUrl) throw new Error('当前版本无法保存更新服务器。');
+      const saved = await withUpdateTimeout(bridge.setUpdateServerBaseUrl(address), 5000);
+      if (!mounted.current) return;
+      serverAddressEdited.current = false;
+      setServerBase(saved);
+      setServerAddress(saved);
+      setCandidate(null);
+      setVerifiedHash(null);
+      setInstallPermission(false);
+      invalidateChecks();
+      void check(true);
+    } catch (error) {
+      if (mounted.current)
+        setMessage(error instanceof Error ? error.message : '无法保存更新服务器。');
+    } finally {
+      serverSave.current = false;
+      if (mounted.current) setSavingServer(false);
+    }
+  };
+
   const close = () => {
-    if (!requiredRef.current) setVisible(false);
+    if (requiredRef.current || openingRef.current) return;
+    void cancel();
+    setVisible(false);
   };
   const percentage = progress
     ? Math.floor((progress.receivedBytes / progress.totalBytes) * 100)
     : 0;
+  const source = selectedSource ?? candidate?.sources[0] ?? 'github';
+  const sourceBusy = checking || downloading || opening || savingServer;
+  const canDownload = candidate?.sources.includes(source) &&
+    (source !== 'cloud' || (serverBase !== '' && serverAddress === serverBase));
 
   return (
     <UpdateContext.Provider
@@ -513,6 +568,7 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
           <ScrollView
             style={styles.card}
             contentContainerStyle={styles.cardContent}
+            keyboardShouldPersistTaps="handled"
           >
             <Text style={styles.title}>
               {required
@@ -527,6 +583,49 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
               当前版本：{version || MOBILE_RELEASE_VERSION}
               {required ? ` · 最低要求：${minimum.current}` : ''}
             </Text>
+            <Text style={styles.hint}>下载源</Text>
+            <View style={styles.sources}>
+              {UPDATE_SOURCES.map(item => (
+                <TouchableOpacity
+                  key={item}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: item === source, disabled: sourceBusy }}
+                  disabled={sourceBusy}
+                  onPress={() => setSource(item)}
+                  style={[styles.source, item === source && styles.selected]}
+                >
+                  <Text style={styles.body}>{SOURCE_NAMES[item]}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            {source === 'cloud' && (
+              <View style={styles.serverSettings}>
+                <Text style={styles.hint}>更新服务器地址</Text>
+                <TextInput
+                  style={styles.serverInput}
+                  accessibilityLabel="更新服务器地址"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  keyboardType="url"
+                  placeholder="https://"
+                  placeholderTextColor={colors.textFaint}
+                  editable={!sourceBusy}
+                  value={serverAddress}
+                  onChangeText={value => {
+                    serverAddressEdited.current = true;
+                    setServerAddress(value);
+                  }}
+                />
+                <TouchableOpacity
+                  accessibilityRole="button"
+                  disabled={sourceBusy || serverAddress === serverBase}
+                  onPress={() => { void saveServer(); }}
+                  style={styles.secondary}
+                >
+                  <Text style={styles.body}>{savingServer ? '正在保存…' : '保存并检查'}</Text>
+                </TouchableOpacity>
+              </View>
+            )}
             {checking ? (
               <ActivityIndicator color={colors.blue} style={styles.spinner} />
             ) : candidate ? (
@@ -538,26 +637,10 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
                 </ScrollView>
                 <Text style={styles.hint}>
                   安装包：{(candidate.release.size / 1024 / 1024).toFixed(1)} MB
-                  · 下载来源
                 </Text>
-                <View style={styles.sources}>
-                  {candidate.sources.map(s => (
-                    <TouchableOpacity
-                      key={s}
-                      accessibilityRole="button"
-                      accessibilityState={{ selected: s === source }}
-                      disabled={downloading || opening}
-                      onPress={() => setSource(s)}
-                      style={[styles.source, s === source && styles.selected]}
-                    >
-                      <Text style={styles.body}>{SOURCE_NAMES[s]}</Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
-                <Text style={styles.hint}>
-                  安装包保存在 Cove 私有目录。校验通过后仅打开 Android
-                  系统安装界面，由你最终确认。
-                </Text>
+                {!candidate.sources.includes(source) && (source !== 'cloud' || serverBase !== '') && (
+                  <Text style={styles.hint}>此下载源暂无这个版本，请选择可用的下载源。</Text>
+                )}
                 {downloading ? (
                   <>
                     {progress?.phase === 'verifying' ? (
@@ -616,19 +699,20 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
                     accessibilityRole="button"
                     disabled={opening}
                     onPress={() => {
-                      void install();
+                      if (installPermission) void openInstallSettings();
+                      else void install(candidate.release.sha256);
                     }}
                     style={styles.primary}
                   >
                     <Text style={styles.primaryText}>
-                      {opening ? '正在准备安装…' : '安装已校验更新'}
+                      {opening ? '正在打开安装确认…' : installPermission ? '打开安装权限设置' : '重新打开安装确认'}
                     </Text>
                   </TouchableOpacity>
                 ) : (
                   <TouchableOpacity
                     accessibilityRole="button"
                     disabled={
-                      opening ||
+                      sourceBusy || !canDownload ||
                       (required &&
                         !isSupportedClientVersion(
                           candidate.release.versionName,
@@ -636,24 +720,13 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
                         ))
                     }
                     onPress={() => {
+                      if (!canDownload) return;
                       automaticDownloadDeclined.current = false;
-                      void startDownload(candidate, source);
+                      void startDownload(candidate, source, serverBase);
                     }}
                     style={styles.primary}
                   >
-                    <Text style={styles.primaryText}>下载并校验更新</Text>
-                  </TouchableOpacity>
-                )}
-                {installPermission && (
-                  <TouchableOpacity
-                    accessibilityRole="button"
-                    disabled={opening}
-                    onPress={() => {
-                      void openInstallSettings();
-                    }}
-                    style={styles.secondary}
-                  >
-                    <Text style={styles.body}>打开安装权限设置</Text>
+                    <Text style={styles.primaryText}>下载并安装更新</Text>
                   </TouchableOpacity>
                 )}
               </>
@@ -671,7 +744,7 @@ export function MobileUpdateProvider({ children }: { children: ReactNode }) {
               {!checking && (
                 <TouchableOpacity
                   accessibilityRole="button"
-                  disabled={downloading || opening}
+                  disabled={sourceBusy}
                   onPress={() => {
                     void check(true);
                   }}
@@ -740,6 +813,15 @@ const createStyles = (colors: CoveColors) =>
     },
     notes: { maxHeight: 220, marginVertical: 10 },
     spinner: { margin: 24 },
+    serverSettings: { marginBottom: 12 },
+    serverInput: {
+      minHeight: 44,
+      borderWidth: 1,
+      borderColor: colors.border,
+      borderRadius: 10,
+      color: colors.text,
+      paddingHorizontal: 12,
+    },
     sources: {
       flexDirection: 'row',
       flexWrap: 'wrap',

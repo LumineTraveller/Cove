@@ -142,6 +142,29 @@ function mobilePreparedSoundpackReleaseOverrides(evidence, originalHashes, previ
   assert.equal(overrides.size,mobilePreparedSoundpackReleaseAllowlist.size,'the single prepared soundpack exception must be documented');
   return overrides;
 }
+const mobileViewerUpdateAllowlist = new Map([
+  ['apps/mobile/android/app/src/main/java/com/covemobile/CoveNativePackage.kt', {
+    baseSha256:'bb42db264a136dc3e27e71ede40b75196f364010a3dbefd5eb2175cf45504e8f',
+    sha256:'1a848f79ab8f2116258dd326194a6757fe0ee87d0486af33840a7d4a3888b8c5',
+  }],
+  ['apps/mobile/android/app/src/main/java/com/covemobile/MobileUpdateModule.kt', {
+    baseSha256:'564811cadda69f7ff3bfe22ccc752045538a88f07a11091c61c44cfc76f311b8',
+    sha256:'4df71f73273fc01af9c34b82caf07c022f21ba17a25cbd344eb1e6512ca7b10a',
+  }],
+]);
+function applyMobileViewerUpdateOverrides(evidence, overrides) {
+  assert.equal(evidence?.baseCommit,'ce8bb53dd56df32e9299923285a1136b01aa1f6d');
+  assert.ok(Array.isArray(evidence.modifiedOriginal));
+  assert.equal(evidence.modifiedOriginal.length,mobileViewerUpdateAllowlist.size);
+  for (const entry of evidence.modifiedOriginal) {
+    const accepted=mobileViewerUpdateAllowlist.get(entry.path);
+    assert.ok(accepted,'unreviewed mobile viewer or update exception: '+entry.path);
+    assert.equal(overrides.get(entry.path),accepted.baseSha256,'previous reviewed hash changed: '+entry.path);
+    for (const key of ['baseSha256','sha256']) assert.equal(entry[key],accepted[key],key+': '+entry.path);
+    assert.ok(typeof entry.reason==='string'&&entry.reason.trim());
+    overrides.set(entry.path,entry.sha256);
+  }
+}
 function files(dir){return fs.readdirSync(dir,{withFileTypes:true}).flatMap(entry=>entry.isDirectory()?files(path.join(dir,entry.name)):[path.join(dir,entry.name)]);}
 function inventory(text){
   const source=ts.createSourceFile('source.ts',text,ts.ScriptTarget.Latest,true);
@@ -268,6 +291,7 @@ test('accepted native capture, DSP and Android code survives relocation',()=>{
     ...mobileUpdateCandidateOverrides(contracts.nativeExtensionEvidence.mobileInAppUpdateCandidate,originalHashes),
     ...mobilePreparedSoundpackReleaseOverrides(contracts.nativeExtensionEvidence.mobilePreparedSoundpackRelease,originalHashes,integratedOverrides),
   ]);
+  applyMobileViewerUpdateOverrides(contracts.nativeExtensionEvidence.mobileViewerUpdate,overrides);
   for(const file of contracts.native){
     const buffer=fs.readFileSync(path.join(root,file.path));
     let content=file.path.endsWith('.wasm')?buffer:buffer.toString('utf8').replace(/\r\n/g,'\n');

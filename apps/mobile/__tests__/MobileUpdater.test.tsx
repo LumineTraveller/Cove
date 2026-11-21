@@ -8,6 +8,7 @@ import {
   NativeModules,
   Platform,
   Text,
+  TextInput,
   TouchableOpacity,
   type AppStateStatus,
 } from 'react-native';
@@ -144,7 +145,7 @@ async function startup(serverURL = '') {
   await act(async () => jest.advanceTimersByTimeAsync(1001));
 }
 
-test('startup prompts and downloads in app only after the user clicks, then requires a separate install action', async () => {
+test('the update button downloads in app and immediately opens Android confirmation after verification', async () => {
   await startup();
   expect(fetchFeed.mock.calls).toEqual([
     ['github', ''],
@@ -153,15 +154,14 @@ test('startup prompts and downloads in app only after the user clicks, then requ
   expect(visible()).toBe(true);
   expect(download).not.toHaveBeenCalled();
   expect(contents()).toContain('session remains usable');
-  await press('下载并校验更新');
+  await press('下载并安装更新');
   expect(download).toHaveBeenCalledWith(
     'cloud',
     updateConfig.UPDATE_DOWNLOAD_BASE_URL,
     release,
     expect.stringMatching(/^apk-/),
   );
-  expect(install).not.toHaveBeenCalled();
-  await press('安装已校验更新');
+  expect(install).toHaveBeenCalledTimes(1);
   expect(install).toHaveBeenCalledWith(release.sha256);
   expect(Linking.openURL).not.toHaveBeenCalled();
 });
@@ -173,13 +173,43 @@ test('chat server selection never becomes a download source or browser fallback'
   expect(label('从服务器下载')).toBeUndefined();
   expect(label('打开发布页面')).toBeUndefined();
   expect(label('浏览器备用下载更新')).toBeUndefined();
-  await press('下载并校验更新');
+  await press('下载并安装更新');
   expect(download).toHaveBeenCalledWith(
     'github',
     '',
     release,
     expect.any(String),
   );
+  expect(Linking.openURL).not.toHaveBeenCalled();
+});
+
+test('an explicitly configured HTTPS server appears with GitHub and uses the same native update flow', async () => {
+  let saved = '';
+  const save = jest.fn(async (address: string) => {
+    saved = address;
+    return address;
+  });
+  NativeModules.CoveMobileUpdate.getUpdateServerBaseUrl = async () => saved;
+  NativeModules.CoveMobileUpdate.setUpdateServerBaseUrl = save;
+  await startup('https://other-chat.example.test');
+  expect(fetchFeed.mock.calls).toEqual([['github', '']]);
+  expect(label('GitHub')).toBeTruthy();
+  await press('服务器');
+  expect(label('下载并安装更新')?.props.disabled).toBe(true);
+  const field = () => renderer!.root.findAllByType(TextInput).find(
+    input => input.props.accessibilityLabel === '更新服务器地址',
+  )!;
+  await act(async () => field().props.onChangeText('http://download.example.test'));
+  await press('保存并检查');
+  expect(save).not.toHaveBeenCalled();
+  expect(contents()).toContain('请输入 HTTPS');
+  await act(async () => field().props.onChangeText('https://download.example.test/cove/'));
+  await press('保存并检查');
+  expect(save).toHaveBeenCalledWith('https://download.example.test/cove');
+  expect(fetchFeed).toHaveBeenCalledWith('cloud', saved);
+  await press('下载并安装更新');
+  expect(download).toHaveBeenCalledWith('cloud', saved, release, expect.any(String));
+  expect(install).toHaveBeenCalledWith(release.sha256);
   expect(Linking.openURL).not.toHaveBeenCalled();
 });
 
@@ -190,7 +220,7 @@ test('a failed source uses its confirmed mirror without opening a browser', asyn
       : Promise.resolve(feed()),
   );
   await startup();
-  await press('下载并校验更新');
+  await press('下载并安装更新');
   expect(download).toHaveBeenCalledWith(
     'cloud',
     updateConfig.UPDATE_DOWNLOAD_BASE_URL,
@@ -209,7 +239,7 @@ test('offline automatic failure keeps supported sessions usable and manual retry
   expect(contents()).toContain('均无法检查更新');
   fetchFeed.mockResolvedValue(feed());
   await press('重新检查');
-  expect(label('下载并校验更新')).toBeTruthy();
+  expect(label('下载并安装更新')).toBeTruthy();
   expect(Linking.openURL).not.toHaveBeenCalled();
 });
 
@@ -225,7 +255,7 @@ test('foreground checks retain throttling and avoid repeating ordinary prompts',
 });
 
 test.each(['0.7.9', '0.8.0-rc.1'])(
-  'unsupported %s blocks connection and downloads but never auto-installs',
+  'unsupported %s blocks connection and opens system confirmation after downloading',
   async versionName => {
     getVersion.mockResolvedValue({
       versionName,
@@ -236,7 +266,7 @@ test.each(['0.7.9', '0.8.0-rc.1'])(
     expect(contents()).not.toContain('session remains usable');
     expect(contents()).toContain('必须升级');
     expect(download).toHaveBeenCalledTimes(1);
-    expect(install).not.toHaveBeenCalled();
+    expect(install).toHaveBeenCalledWith(release.sha256);
     expect(label('以后再说')).toBeUndefined();
     await act(async () =>
       renderer!.root.findByType(Modal).props.onRequestClose(),
@@ -297,25 +327,26 @@ test('incompatible feed never downloads a downgrade', async () => {
   await startup();
   expect(download).not.toHaveBeenCalled();
   expect(contents()).toContain('尚无适配安装包');
-  expect(label('下载并校验更新')).toBeUndefined();
+  expect(label('下载并安装更新')).toBeUndefined();
 });
 
 test('integrity failure cannot install and explicit retry verifies again', async () => {
   download.mockResolvedValue('wrong-hash');
   await startup();
-  await press('下载并校验更新');
+  await press('下载并安装更新');
   expect(contents()).toContain('校验结果与清单不一致');
-  expect(label('安装已校验更新')).toBeUndefined();
+  expect(install).not.toHaveBeenCalled();
+  expect(label('重新打开安装确认')).toBeUndefined();
   expect(cancelDownload).toHaveBeenCalledWith(requestId());
   download.mockResolvedValue(release.sha256);
-  await press('下载并校验更新');
-  expect(label('安装已校验更新')).toBeTruthy();
+  await press('下载并安装更新');
+  expect(label('重新打开安装确认')).toBeTruthy();
 });
 
 test('progress comes from matching native byte counts and rejects stale, invalid or mismatched events', async () => {
   download.mockReturnValue(new Promise(() => {}));
   await startup();
-  await press('下载并校验更新');
+  await press('下载并安装更新');
   const id = requestId();
   await progress(id, release.size / 2);
   expect(contents()).toContain('50');
@@ -333,7 +364,7 @@ test('progress comes from matching native byte counts and rejects stale, invalid
   expect(progressbar().props.accessibilityValue.now).toBe(50);
   await progress(id, release.size, { phase: 'verifying' });
   expect(contents()).toContain('正在校验安装包');
-  expect(label('安装已校验更新')).toBeUndefined();
+  expect(label('重新打开安装确认')).toBeUndefined();
 });
 
 test('cancel and immediate retry isolate old completion, progress and cancellation from the new request', async () => {
@@ -342,21 +373,21 @@ test('cancel and immediate retry isolate old completion, progress and cancellati
     () => new Promise(resolve => finishes.push(resolve)),
   );
   await startup();
-  await press('下载并校验更新');
+  await press('下载并安装更新');
   const oldId = requestId();
   await press('取消下载');
   expect(cancelDownload).toHaveBeenCalledWith(oldId);
-  await press('下载并校验更新');
+  await press('下载并安装更新');
   const newId = requestId();
   expect(newId).not.toBe(oldId);
   await act(async () => finishes[0](release.sha256));
   await progress(oldId, release.size);
-  expect(label('安装已校验更新')).toBeUndefined();
+  expect(label('重新打开安装确认')).toBeUndefined();
   expect(label('取消下载')).toBeTruthy();
   expect(cancelDownload.mock.calls).toEqual([[oldId]]);
   await act(async () => finishes[1](release.sha256));
-  expect(label('安装已校验更新')).toBeTruthy();
-  expect(install).not.toHaveBeenCalled();
+  expect(label('重新打开安装确认')).toBeTruthy();
+  expect(install).toHaveBeenCalledTimes(1);
 });
 
 test('background interruption cancels by ID and requires an explicit safe retry', async () => {
@@ -380,20 +411,20 @@ test('background interruption cancels by ID and requires an explicit safe retry'
   await act(async () => finish(release.sha256));
   await act(async () => onState('active'));
   expect(download).toHaveBeenCalledTimes(1);
-  expect(label('安装已校验更新')).toBeUndefined();
-  await press('下载并校验更新');
+  expect(label('重新打开安装确认')).toBeUndefined();
+  await press('下载并安装更新');
   expect(download).toHaveBeenCalledTimes(2);
 });
 
 test('download deadline cancels only its request and exposes retry without installation', async () => {
   download.mockReturnValue(new Promise(() => {}));
   await startup();
-  await press('下载并校验更新');
+  await press('下载并安装更新');
   const id = requestId();
   await act(async () => jest.advanceTimersByTimeAsync(6 * 60 * 1000 + 1));
   expect(cancelDownload).toHaveBeenCalledWith(id);
-  expect(label('安装已校验更新')).toBeUndefined();
-  expect(label('下载并校验更新')).toBeTruthy();
+  expect(label('重新打开安装确认')).toBeUndefined();
+  expect(label('下载并安装更新')).toBeTruthy();
 });
 
 test('a check finishing after backgrounding never starts a new automatic download', async () => {
@@ -415,28 +446,26 @@ test('a check finishing after backgrounding never starts a new automatic downloa
   expect(download).toHaveBeenCalledTimes(1);
 });
 
-test('permission refusal opens settings only by a separate user action and never auto-installs on return', async () => {
-  install.mockRejectedValue(
+test('returning from permission settings automatically retries the system confirmation once', async () => {
+  install.mockRejectedValueOnce(
     Object.assign(new Error('请允许安装来源'), {
       code: 'INSTALL_PERMISSION_REQUIRED',
     }),
   );
   await startup();
-  await press('下载并校验更新');
-  await press('安装已校验更新');
+  await press('下载并安装更新');
+  expect(install).toHaveBeenCalledTimes(1);
   expect(openSettings).not.toHaveBeenCalled();
   await press('打开安装权限设置');
   expect(openSettings).toHaveBeenCalledTimes(1);
   await act(async () => onState('background'));
   await act(async () => onState('active'));
-  expect(install).toHaveBeenCalledTimes(1);
-  expect(cancelDownload).not.toHaveBeenCalled();
-  await press('安装已校验更新');
   expect(install).toHaveBeenCalledTimes(2);
   expect(openSettings).toHaveBeenCalledTimes(1);
-  install.mockResolvedValue(undefined);
-  await press('安装已校验更新');
-  expect(install).toHaveBeenCalledTimes(3);
+  expect(cancelDownload).not.toHaveBeenCalled();
+  await act(async () => onState('background'));
+  await act(async () => onState('active'));
+  expect(install).toHaveBeenCalledTimes(2);
 });
 
 test('a changed or missing downloaded package cannot be installed again without verification', async () => {
@@ -446,10 +475,10 @@ test('a changed or missing downloaded package cannot be installed again without 
     }),
   );
   await startup();
-  await press('下载并校验更新');
-  await press('安装已校验更新');
-  expect(label('安装已校验更新')).toBeUndefined();
-  expect(label('下载并校验更新')).toBeTruthy();
+  await press('下载并安装更新');
+  expect(install).toHaveBeenCalledTimes(1);
+  expect(label('重新打开安装确认')).toBeUndefined();
+  expect(label('下载并安装更新')).toBeTruthy();
 });
 
 test('missing update module gives a clear message while keeping supported sessions usable', async () => {
@@ -468,7 +497,7 @@ test('storage and acceptance identity failures remain visible and never launch i
     }),
   );
   await startup();
-  await press('下载并校验更新');
+  await press('下载并安装更新');
   expect(contents()).toContain('存储空间不足');
   download.mockRejectedValue(
     Object.assign(
@@ -476,7 +505,7 @@ test('storage and acceptance identity failures remain visible and never launch i
       { code: 'APK_IDENTITY' },
     ),
   );
-  await press('下载并校验更新');
+  await press('下载并安装更新');
   expect(contents()).toContain('应用身份不同');
   expect(install).not.toHaveBeenCalled();
 });
@@ -490,15 +519,15 @@ test('unmount cancels active work, and a remounted updater does not restore unve
       }),
   );
   await startup();
-  await press('下载并校验更新');
+  await press('下载并安装更新');
   const id = requestId();
   await act(async () => renderer!.unmount());
   renderer = undefined;
   expect(cancelDownload).toHaveBeenCalledWith(id);
   await act(async () => finish(release.sha256));
   await startup();
-  expect(label('安装已校验更新')).toBeUndefined();
-  expect(label('下载并校验更新')).toBeTruthy();
+  expect(label('重新打开安装确认')).toBeUndefined();
+  expect(label('下载并安装更新')).toBeTruthy();
 });
 
 test('hung native version reads time out without locking the supported app', async () => {

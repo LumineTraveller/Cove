@@ -64,7 +64,8 @@ internal fun mobileApkDownloadUrl(source: String, serverURL: String, release: Mo
 // stay on GitHub's HTTPS release hosts; a configured mirror stays on its own origin.
 internal fun safeApkRedirect(initial: HttpUrl, previous: HttpUrl, location: String): HttpUrl? {
   val next = previous.resolve(location)?.let { strictApkUrl(it.toString()) } ?: return null
-  return if (initial.host == "github.com") {
+  return if (initial.host == "github.com" &&
+      initial.encodedPath.startsWith("/LumineTraveller/Cove/releases/download/")) {
     next.takeIf { it.port == 443 && it.host in setOf("github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "github-releases.githubusercontent.com") }
   } else next.takeIf { it.host == initial.host && it.port == initial.port }
 }
@@ -205,10 +206,11 @@ internal class MobileApkUpdater(private val context: Context) {
   private var installation: MobileApkInstall? = null
   companion object { private val busy = AtomicBoolean(false) }
 
-  @Synchronized fun prepareDownload(requestId: String, source: String, serverURL: String, release: MobileApkRelease): MobileApkDownload {
+  @Synchronized fun prepareDownload(requestId: String, source: String, serverURL: String,
+    release: MobileApkRelease, configuredServerBase: String): MobileApkDownload {
     check(installation == null) { "An APK installation is being prepared" }
     check(active?.isCancelled() != false) { "Another APK operation is running" }
-    val initial = mobileApkDownloadUrl(source, serverURL, release) ?: error("Invalid HTTPS APK source")
+    val initial = mobileApkDownloadUrl(source, serverURL, release, configuredServerBase) ?: error("Invalid HTTPS APK source")
     val job = MobileApkDownload(requestId, release, initial)
     active = job
     verified = null
@@ -313,7 +315,7 @@ internal class MobileApkUpdater(private val context: Context) {
       check(sha256 == release.sha256 && fileMatchesApk(file, release)) { "Verified APK is no longer available" }
       verifyIdentity(file, release)
       if (Build.VERSION.SDK_INT >= 26 && !context.packageManager.canRequestPackageInstalls())
-        throw MobileUpdateException("INSTALL_PERMISSION_REQUIRED", "请在系统设置中允许 Cove 安装更新，然后返回点击安装。")
+        throw MobileUpdateException("INSTALL_PERMISSION_REQUIRED", "请在系统设置中允许 Cove 安装更新。")
       val uri = FileProvider.getUriForFile(context, "${context.packageName}.updates", file)
       val intent = Intent(Intent.ACTION_INSTALL_PACKAGE).setData(uri)
         .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)

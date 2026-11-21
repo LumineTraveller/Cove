@@ -54,6 +54,7 @@ import {
   MousePointer2,
 } from 'lucide-react-native';
 import { ZoomableScreenVideo } from '../../media/screen/components/ZoomableScreenVideo';
+import { FullscreenScreenViewer } from './FullscreenScreenViewer';
 import { useRemoteControlPolicy } from '../../remote-control/useRemoteControlPolicy';
 import type { AnnotationPoint } from '@cove/contracts';
 import { useMobileRemoteControl } from '../../remote-control/useMobileRemoteControl';
@@ -212,7 +213,6 @@ export function RoomScreen({
   });
   const [remoteKeyboardOpen, setRemoteKeyboardOpen] = useState(false);
   const [remoteToolsOpen, setRemoteToolsOpen] = useState(false);
-  const [fullscreenVolumeOpen, setFullscreenVolumeOpen] = useState(false);
   const [remoteText, setRemoteText] = useState('');
   const remoteTextRef = useRef(remoteText);
   remoteTextRef.current = remoteText;
@@ -227,12 +227,11 @@ export function RoomScreen({
   const controlling = Boolean(remote.session);
   const setRemoteInputEnabled = remote.setInputEnabled;
   useEffect(() => {
-    setRemoteInputEnabled(controlling);
-    if (!controlling) setRemoteKeyboardOpen(false);
-  }, [controlling, setRemoteInputEnabled]);
+    setRemoteInputEnabled(controlling && !fullscreen);
+    if (!controlling || fullscreen) setRemoteKeyboardOpen(false);
+  }, [controlling, fullscreen, setRemoteInputEnabled]);
   useEffect(() => {
     setRemoteToolsOpen(false);
-    setFullscreenVolumeOpen(false);
   }, [screenURL, fullscreen]);
   const interaction = useMemo(() => {
     if (!controlling) return undefined;
@@ -1015,75 +1014,13 @@ export function RoomScreen({
         </SafeAreaView>
       </Modal>
 
-      <Modal
-        visible={fullscreen}
-        animationType="fade"
-        statusBarTranslucent
-        navigationBarTranslucent
-        hardwareAccelerated
-        supportedOrientations={['portrait', 'landscape']}
-        onRequestClose={() => setFullscreen(false)}
-      >
-        <View style={styles.fullscreen}>
-          <StatusBar hidden />
-          <KeyboardAvoidingView
-            style={{ flex: 1 }}
-            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          >
-            <View style={{ flex: 1 }}>
-              {screenURL ? (
-                <ZoomableScreenVideo
-                  key={screenURL}
-                  streamURL={screenURL}
-                  interaction={interaction}
-                />
-              ) : null}
-            </View>
-            {screenURL && remoteToolsOpen && (
-              <SafeAreaView edges={['bottom', 'left', 'right']}>
-                {screenTools}
-              </SafeAreaView>
-            )}
-          </KeyboardAvoidingView>
-          {screenURL && fullscreenVolumeOpen && (
-            <SafeAreaView
-              style={styles.fullscreenVolume}
-              edges={['bottom', 'left', 'right']}
-            >
-              {screenVolumeControls}
-            </SafeAreaView>
-          )}
-          <SafeAreaView style={styles.fullscreenSafe} edges={['top', 'right']}>
-            <TouchableOpacity
-              style={styles.closeFullscreen}
-              accessibilityLabel="全屏共享音量"
-              onPress={() => {
-                setFullscreenVolumeOpen(value => !value);
-                setRemoteToolsOpen(false);
-              }}
-            >
-              <Volume2 size={22} color={colors.onVideo} />
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.closeFullscreen}
-              accessibilityLabel="远控操作"
-              onPress={() => {
-                setRemoteToolsOpen(value => !value);
-                setFullscreenVolumeOpen(false);
-              }}
-            >
-              <MousePointer2 size={22} color={colors.onVideo} />
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.closeFullscreen}
-              onPress={() => setFullscreen(false)}
-              accessibilityLabel="关闭全屏共享"
-            >
-              <X size={22} color={colors.onVideo} />
-            </TouchableOpacity>
-          </SafeAreaView>
-        </View>
-      </Modal>
+      {fullscreen && screenURL && (
+        <FullscreenScreenViewer
+          streamURL={screenURL}
+          volumeControls={screenVolumeControls}
+          onClose={() => setFullscreen(false)}
+        />
+      )}
 
       <Modal
         visible={remoteKeyboardOpen && controlling}

@@ -1,6 +1,8 @@
 import TestRenderer, { act } from 'react-test-renderer';
 import {
   Modal,
+  NativeModules,
+  Platform,
   StyleSheet, Text,
   TouchableOpacity } from 'react-native';
 import type { Socket } from 'socket.io-client';
@@ -402,6 +404,9 @@ describe('room audio settings', () => {
     expect(
       modal.findAllByProps({ accessibilityLabel: '申请远控' }),
     ).toHaveLength(0);
+    expect(
+      modal.findAllByType(TouchableOpacity).map(node => node.props.accessibilityLabel),
+    ).toEqual(['关闭全屏共享', '全屏共享音量']);
     await act(async () => button('全屏共享音量').props.onPress());
     expect(
       modal.findByProps({ accessibilityLabel: '共享屏幕音量' }).props
@@ -411,6 +416,42 @@ describe('room audio settings', () => {
     expect(
       modal.findAllByProps({ accessibilityLabel: '共享屏幕音量' }),
     ).toHaveLength(0);
+  });
+  test('fullscreen idles both buttons and the volume panel until the video is tapped', async () => {
+    await watch();
+    const originalPlatform = Platform.OS;
+    const originalBridge = NativeModules.CoveScreenViewer;
+    const setScreenViewerOrientation = jest.fn();
+    const setScreenViewerImmersive = jest.fn();
+    Platform.OS = 'android';
+    NativeModules.CoveScreenViewer = { setScreenViewerOrientation, setScreenViewerImmersive };
+    jest.useFakeTimers();
+    try {
+      await act(async () => button('全屏观看共享').props.onPress());
+      const modal = audioModal();
+      const video = () => modal.findByType('ZoomableScreenVideo' as any);
+      await act(async () => modal.props.onShow({ nativeEvent: { target: 42 } }));
+      expect(setScreenViewerOrientation).toHaveBeenCalledWith(true);
+      expect(setScreenViewerImmersive).not.toHaveBeenCalled();
+      await act(async () => button('全屏共享音量').props.onPress());
+      expect(modal.findAllByProps({ accessibilityLabel: '共享屏幕音量' }).length).toBeGreaterThan(0);
+      await act(async () => jest.advanceTimersByTime(3000));
+      expect(setScreenViewerImmersive).toHaveBeenCalledWith(42, true);
+      expect(modal.findAllByType(TouchableOpacity)).toHaveLength(0);
+      expect(video().props.showZoomControl).toBe(false);
+      await act(async () => video().props.onTap());
+      expect(modal.findAllByType(TouchableOpacity).map(node => node.props.accessibilityLabel))
+        .toEqual(['关闭全屏共享', '全屏共享音量']);
+      expect(modal.findAllByProps({ accessibilityLabel: '共享屏幕音量' })).toHaveLength(0);
+      expect(setScreenViewerImmersive).toHaveBeenCalledTimes(1);
+      await act(async () => button('关闭全屏共享').props.onPress());
+      expect(setScreenViewerImmersive).toHaveBeenLastCalledWith(42, false);
+      expect(setScreenViewerOrientation).toHaveBeenLastCalledWith(false);
+    } finally {
+      NativeModules.CoveScreenViewer = originalBridge;
+      Platform.OS = originalPlatform;
+      jest.useRealTimers();
+    }
   });
   test('toolbar text has an explicit centered line box and never wraps as separate flex rows', () => {
     const toolbar = renderer.root

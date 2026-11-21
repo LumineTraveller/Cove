@@ -1396,6 +1396,23 @@
         "Unknown-source permission remains a user-controlled Android setting; no silent install or automatic permission grant",
         "Native JVM/API compilation and mocked JavaScript checks do not establish real-device PackageManager, FileProvider or OEM installation acceptance"
       ]
+    },
+    "mobileViewerUpdate": {
+      "baseCommit": "ce8bb53dd56df32e9299923285a1136b01aa1f6d",
+      "modifiedOriginal": [
+        {
+          "path": "apps/mobile/android/app/src/main/java/com/covemobile/CoveNativePackage.kt",
+          "baseSha256": "bb42db264a136dc3e27e71ede40b75196f364010a3dbefd5eb2175cf45504e8f",
+          "sha256": "1a848f79ab8f2116258dd326194a6757fe0ee87d0486af33840a7d4a3888b8c5",
+          "reason": "Register the fullscreen viewer's sensor orientation and Android system-bar bridge."
+        },
+        {
+          "path": "apps/mobile/android/app/src/main/java/com/covemobile/MobileUpdateModule.kt",
+          "baseSha256": "564811cadda69f7ff3bfe22ccc752045538a88f07a11091c61c44cfc76f311b8",
+          "sha256": "4df71f73273fc01af9c34b82caf07c022f21ba17a25cbd344eb1e6512ca7b10a",
+          "reason": "Persist the explicitly configured HTTPS update source and use it for the existing verified download and install flow."
+        }
+      ]
     }
   }
 }

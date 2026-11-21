@@ -33,6 +33,9 @@ export interface ScreenTouchInteraction {
   onEnd(): void;
 }
 
+const TAP_MAX_DURATION = 300;
+const TAP_MAX_MOVEMENT = 10;
+
 // Secondary pointers often report unreliable locationX/locationY on Android.
 // Distance and pan deltas are translation-invariant in page space; the pinch
 // focal point is converted back to view space with a measured origin.
@@ -55,10 +58,14 @@ export function ZoomableScreenVideo({
   streamURL,
   interaction,
   overlay,
+  onTap,
+  showZoomControl = true,
 }: {
   streamURL: string;
   interaction?: ScreenTouchInteraction;
   overlay?: (viewport: Size, video?: Size) => ReactNode;
+  onTap?: () => void;
+  showZoomControl?: boolean;
 }) {
   const surfaceRef = useRef<View>(null);
   const viewport = useRef<Size>({ width: 1, height: 1 });
@@ -88,6 +95,9 @@ export function ZoomableScreenVideo({
   const previousInteraction = useRef(interaction);
   const touchingInk = useRef(false);
   const pinching = useRef(false);
+  const tap = useRef<{ point: Point; startedAt: number } | null>(null);
+  const tapHandler = useRef(onTap);
+  tapHandler.current = onTap;
   const pointFor = (point: Point) =>
     originReady.current
       ? normalizedScreenPoint(
@@ -191,6 +201,10 @@ export function ZoomableScreenVideo({
         const generation = ++gestureGeneration.current;
         const points = touches(event);
         pinching.current = points.length > 1;
+        tap.current =
+          points.length === 1 && !interactionRef.current
+            ? { point: points[0], startedAt: Date.now() }
+            : null;
         begin(points);
         calibrateGrantOrigin(event, () => {
           if (generation !== gestureGeneration.current || pinching.current)
@@ -205,6 +219,15 @@ export function ZoomableScreenVideo({
       onPanResponderMove: event => {
         const points = touches(event);
         const initial = gesture.current;
+        const pressed = tap.current;
+        if (
+          pressed &&
+          (points.length !== 1 ||
+            Math.hypot(
+              points[0].x - pressed.point.x,
+              points[0].y - pressed.point.y,
+            ) > TAP_MAX_MOVEMENT)
+        ) tap.current = null;
         if (!points.length) return;
         if (!originReady.current) return;
         if (points.length > 1) {
@@ -243,12 +266,17 @@ export function ZoomableScreenVideo({
         apply(next);
       },
       onPanResponderRelease: () => {
+        const pressed = tap.current;
+        tap.current = null;
         ++gestureGeneration.current;
         endInteraction();
         pinching.current = false;
         gesture.current = null;
+        if (pressed && Date.now() - pressed.startedAt <= TAP_MAX_DURATION)
+          tapHandler.current?.();
       },
       onPanResponderTerminate: () => {
+        tap.current = null;
         ++gestureGeneration.current;
         endInteraction();
         pinching.current = false;
@@ -260,6 +288,7 @@ export function ZoomableScreenVideo({
   ).current;
 
   useEffect(() => {
+    tap.current = null;
     ++gestureGeneration.current;
     ++measurementGeneration.current;
     endInteraction();
@@ -272,6 +301,7 @@ export function ZoomableScreenVideo({
     // Switching between drawing/control cancels the held gesture. Resuming
     // control must begin with a new press, never reuse the drawing finger.
     if (previousInteraction.current !== interaction) {
+      tap.current = null;
       previousInteraction.current?.onEnd();
       touchingInk.current = false;
       gesture.current = null;
@@ -295,6 +325,10 @@ export function ZoomableScreenVideo({
         collapsable={false}
         style={StyleSheet.absoluteFill}
         {...responder.panHandlers}
+        onTouchStart={event => {
+          // A second finger cancels a tap even if it is lifted without moving.
+          if (event.nativeEvent.touches.length > 1) tap.current = null;
+        }}
         onLayout={event => {
           const { width, height } = event.nativeEvent.layout;
           const sizeChanged =
@@ -343,21 +377,21 @@ export function ZoomableScreenVideo({
           {overlay?.(surfaceSize, videoSize)}
         </Animated.View>
       </View>
-      <View pointerEvents="box-none" style={styles.zoomControls}>
-        {percent > 100 ? (
-          <TouchableOpacity
-            onPress={reset}
-            style={styles.reset}
-            accessibilityLabel="还原共享画面缩放"
-          >
-            <Text style={styles.hint}>{percent}% · 还原</Text>
-          </TouchableOpacity>
-        ) : (
-          <Text pointerEvents="none" style={styles.hint}>
-            {interaction ? '单指操作 · 双指缩放' : '双指缩放'}
-          </Text>
-        )}
-      </View>
+      {showZoomControl && (percent > 100 || interaction) && (
+        <View pointerEvents="box-none" style={styles.zoomControls}>
+          {percent > 100 ? (
+            <TouchableOpacity
+              onPress={reset}
+              style={styles.reset}
+              accessibilityLabel="还原共享画面缩放"
+            >
+              <Text style={styles.hint}>{percent}% · 还原</Text>
+            </TouchableOpacity>
+          ) : (
+            <Text pointerEvents="none" style={styles.hint}>单指操作</Text>
+          )}
+        </View>
+      )}
     </View>
   );
 }

@@ -1,5 +1,6 @@
 package com.covemobile
 
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -71,6 +72,7 @@ internal fun readMobileUpdateFeed(client: OkHttpClient, initial: HttpUrl): Strin
 }
 
 class MobileUpdateModule(context: ReactApplicationContext) : ReactContextBaseJavaModule(context), LifecycleEventListener {
+  private val settings = context.getSharedPreferences("cove_mobile_update", Context.MODE_PRIVATE)
   private val executor = Executors.newFixedThreadPool(2)
   private val downloadExecutor = Executors.newSingleThreadExecutor()
   private val client = createMobileUpdateClient()
@@ -79,6 +81,25 @@ class MobileUpdateModule(context: ReactApplicationContext) : ReactContextBaseJav
 
   init { context.addLifecycleEventListener(this) }
   override fun getName() = "CoveMobileUpdate"
+
+  private fun configuredServerBase() =
+    settings.getString("base_url", BuildConfig.COVE_UPDATE_DOWNLOAD_BASE_URL).orEmpty()
+
+  @ReactMethod fun getUpdateServerBaseUrl(promise: Promise) {
+    promise.resolve(configuredServerBase())
+  }
+
+  @ReactMethod fun setUpdateServerBaseUrl(address: String, promise: Promise) {
+    val value = address.trim()
+    val normalized = if (value.isEmpty()) "" else strictApkUrl(value)?.takeIf { it.query == null }
+      ?.toString()?.trimEnd('/')
+    if (normalized == null) {
+      promise.reject("UPDATE_SOURCE", "请输入 HTTPS 更新服务器地址。")
+      return
+    }
+    settings.edit().putString("base_url", normalized).apply()
+    promise.resolve(normalized)
+  }
 
   @Suppress("DEPRECATION")
   @ReactMethod fun getInstalledVersion(promise: Promise) {
@@ -94,8 +115,8 @@ class MobileUpdateModule(context: ReactApplicationContext) : ReactContextBaseJav
   }
 
   @ReactMethod fun fetchUpdateFeed(source: String, serverURL: String, promise: Promise) {
-    val url = mobileUpdateFeedUrl(source, serverURL)?.toHttpUrlOrNull()
-    if (url == null) { promise.reject("UPDATE_SOURCE", "更新来源不在允许的官方 HTTPS 地址中。"); return }
+    val url = mobileUpdateFeedUrl(source, serverURL, configuredServerBase())?.toHttpUrlOrNull()
+    if (url == null) { promise.reject("UPDATE_SOURCE", "更新来源无效，请检查已保存的 HTTPS 更新服务器地址。"); return }
     executor.execute {
       try { promise.resolve(readMobileUpdateFeed(client, url)) }
       catch (error: Exception) { promise.reject("UPDATE_FETCH", "更新检查失败，请检查网络连接后重试。", error) }
@@ -116,7 +137,7 @@ class MobileUpdateModule(context: ReactApplicationContext) : ReactContextBaseJav
       )
       if (reactApplicationContext.packageName != expected.packageName)
         throw MobileUpdateException("APK_IDENTITY", "此独立测试包与正式 Cove 的应用身份不同，不能安装正式更新；请使用对应测试候选。")
-      val job = apkUpdater.prepareDownload(requestId, source, serverURL, expected)
+      val job = apkUpdater.prepareDownload(requestId, source, serverURL, expected, configuredServerBase())
       downloadExecutor.execute {
         try {
           if (reactApplicationContext.lifecycleState != LifecycleState.RESUMED) {

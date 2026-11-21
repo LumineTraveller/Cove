@@ -47,6 +47,38 @@ const pinchEvent = (distance: number, usePageCoords = false) => {
 const surfaceOf = (renderer: TestRenderer.ReactTestRenderer) =>
   renderer.root.findAllByType(View).find(view => view.props.onResponderMove)!;
 
+test('a tap reveals playback controls, but panning or adding a second finger does not', async () => {
+  const spy = createResponderSpy();
+  const onTap = jest.fn();
+  let renderer!: TestRenderer.ReactTestRenderer;
+  await act(async () => {
+    renderer = TestRenderer.create(
+      <ZoomableScreenVideo streamURL="screen" onTap={onTap} showZoomControl={false} />,
+    );
+  });
+  const gesture = () => surfaceOf(renderer).props;
+  const finger = (x: number) => ({ nativeEvent: { touches: [{ locationX: x, locationY: 40 }] } });
+  await act(async () => {
+    gesture().onResponderGrant(finger(40));
+    gesture().onResponderRelease();
+    gesture().onResponderGrant(finger(40));
+    gesture().onResponderMove(finger(75));
+    gesture().onResponderRelease();
+    gesture().onResponderGrant(finger(40));
+    gesture().onTouchStart(pinchEvent(100));
+    gesture().onResponderRelease();
+    gesture().onResponderGrant(finger(40));
+    gesture().onResponderMove(pinchEvent(100));
+    gesture().onResponderMove(pinchEvent(160));
+    gesture().onResponderRelease();
+  });
+  expect(onTap).toHaveBeenCalledTimes(1);
+  expect(renderer.root.findAllByType(TouchableOpacity)).toHaveLength(0);
+  expect(JSON.stringify(renderer.toJSON())).not.toContain('双指缩放');
+  await act(async () => renderer.unmount());
+  spy.mockRestore();
+});
+
 test('two-finger movement zooms, reset restores, and a new stream clears the old zoom', async () => {
   const spy = createResponderSpy();
   let renderer!: TestRenderer.ReactTestRenderer;

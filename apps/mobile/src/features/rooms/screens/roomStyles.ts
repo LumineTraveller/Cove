@@ -674,10 +674,10 @@ export const createRoomStyles = (colors: CoveColors) =>
     fullscreenVolume: { position: 'absolute', left: 16, right: 16, bottom: 16 },
     fullscreen: { flex: 1, backgroundColor: colors.video },
     fullscreenSafe: {
-      flexDirection: 'row',
-      gap: 8,
+      alignItems: 'flex-end',
       position: 'absolute', top: 0, right: 0,
     },
+    fullscreenVolumeButton: { marginTop: 0 },
     closeFullscreen: {
       margin: 12,
       width: 44,
