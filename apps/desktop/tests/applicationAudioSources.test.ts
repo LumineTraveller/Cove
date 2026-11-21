@@ -18,6 +18,7 @@ function harness({ platform = 'win32', packaged = false, result = JSON.stringify
     exports: module.exports, __dirname: '/app/dist-electron',
     require: (id: string) => {
       if (id === './pcmChunkQueue') return { PcmChunkQueue };
+      if (id === './windowsScreenAudioCapture') return {};
       if (id === 'electron') return { app: { isPackaged: packaged } }; // No desktopCapturer.
       if (id === 'node:path') return path.posix;
       if (id === 'util') return { promisify: (fn: unknown) => fn };

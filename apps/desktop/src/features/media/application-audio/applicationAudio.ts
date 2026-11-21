@@ -1,4 +1,4 @@
-import { PcmChunkQueue } from '../../../../electron/pcmChunkQueue';
+import { PCM_SAMPLE_RATE, PcmChunkQueue, SCREEN_PCM_QUEUE_MAX_BYTES } from '../../../../electron/pcmChunkQueue';
 
 export interface ApplicationAudioSource {
   id: string;
@@ -11,7 +11,7 @@ export interface ApplicationAudioSource {
 
 // The Windows loopback helper emits 48 kHz, signed 16-bit, interleaved stereo PCM.
 // Scheduled 80 ms buffers are retained ONLY for legacy A/B and worklet fallback.
-const SAMPLE_RATE = 48_000;
+const SAMPLE_RATE = PCM_SAMPLE_RATE;
 const MIN_LEAD = 0.04;
 const TARGET_LEAD = 0.08;
 const MAX_HORIZON = 0.35;
@@ -27,7 +27,7 @@ export class ApplicationAudioPipeline {
   private abortInitialization: (() => void) | null = null;
   private disposedNodes = new WeakSet<AudioWorkletNode>();
   private initialization: Promise<void> | null = null;
-  private pendingPcm = new PcmChunkQueue();
+  private readonly pendingPcm: PcmChunkQueue;
   private sequence = 0;
   private inFlightSequence: number | null = null;
   private workletFailed = false;
@@ -46,6 +46,7 @@ export class ApplicationAudioPipeline {
   >();
 
   constructor(initialVolume: number, private readonly latencyProfile: 'application' | 'screen' = 'application') {
+    this.pendingPcm = new PcmChunkQueue(latencyProfile === 'screen' ? SCREEN_PCM_QUEUE_MAX_BYTES : undefined);
     let legacy = false;
     try {
       legacy = window.coveAudioLatencyProfile === 'legacy'
@@ -192,14 +193,18 @@ export class ApplicationAudioPipeline {
     for (const entry of this.scheduled.values()) {
       if (entry.end <= now) entry.cleanup();
     }
-    // A delayed capture/IPC callback can deliver seconds of old PCM at once.
-    // Keep the newest complete frames inside the existing 350ms horizon.
+    // The screen path can receive a catch-up batch after the renderer stalls.
+    // Retain room for it while using the compatibility scheduler.
+    const screen = this.latencyProfile === 'screen';
+    const minLead = screen ? 0.01 : MIN_LEAD;
+    const targetLead = screen ? 0.24 : TARGET_LEAD;
+    const maxHorizon = screen ? 0.75 : MAX_HORIZON;
     const totalFrames = Math.floor(chunk.byteLength / 4);
-    const frames = Math.min(totalFrames, Math.floor(SAMPLE_RATE * (MAX_HORIZON - TARGET_LEAD)));
+    const frames = Math.min(totalFrames, Math.floor(SAMPLE_RATE * (maxHorizon - targetLead)));
     const duration = frames / SAMPLE_RATE;
-    if (this.nextStart < now + MIN_LEAD || this.nextStart + duration > now + MAX_HORIZON) {
+    if (this.nextStart < now + minLead || this.nextStart + duration > now + maxHorizon) {
       this.discardScheduledPcm(now);
-      this.nextStart = now + TARGET_LEAD;
+      this.nextStart = now + targetLead;
     }
     const buffer = this.context.createBuffer(2, frames, SAMPLE_RATE);
     const left = buffer.getChannelData(0);

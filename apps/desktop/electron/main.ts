@@ -151,6 +151,7 @@ const applicationAudioCapture = new ApplicationAudioCaptureController();
 // capture which excludes the Cove process tree.
 const screenAudioCapture = new ApplicationAudioCaptureController(
   "cove:screen-audio:chunk",
+  "screen",
 );
 const systemAudioCapture = new ApplicationAudioCaptureController(
   "cove:system-audio:chunk",
@@ -656,14 +657,14 @@ app.whenReady().then(() => {
     applicationAudioCapture.stop();
     return true;
   });
-  ipcMain.handle("cove:screen-audio:start", (event) => {
+  ipcMain.handle("cove:screen-audio:start", async (event) => {
     if (event.sender !== mainWindow?.webContents)
       return { ok: false, error: "无效的系统音频请求。" };
     try {
       // The main process is the root of the renderer/GPU/audio process tree.
       // The native process-loopback API's exclude mode therefore removes all
       // audio rendered by Cove while retaining other desktop applications.
-      screenAudioCapture.startExcludingProcess(event.sender, process.pid);
+      await screenAudioCapture.startExcludingProcess(event.sender, process.pid);
       return { ok: true };
     } catch (error) {
       console.error("[screen-audio] 启动失败", error);

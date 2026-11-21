@@ -8,16 +8,16 @@ class CoveApplicationAudioProcessor extends AudioWorkletProcessor {
     const screen = options.processorOptions?.latencyProfile === 'screen';
     // Screen capture can delay UI/IPC delivery much longer than a 20ms PCM
     // packet. Keep its bounded reservoir separate from independent audio share.
-    this.capacity = screen ? 24000 : 5760;
+    this.capacity = screen ? 28800 : 5760;
     this.left = new Float32Array(this.capacity);
     this.right = new Float32Array(this.capacity);
     this.read = 0;
     this.count = 0;
     this.phase = 0;
     this.ratio = this.inputRate / sampleRate;
-    this.minimumTarget = screen ? 5760 : 960;
-    this.maximumTarget = screen ? 11520 : 3840;
-    this.target = screen ? 5760 : 1440;
+    this.minimumTarget = screen ? 11520 : 960;
+    this.maximumTarget = screen ? 17280 : 3840;
+    this.target = screen ? this.minimumTarget : 1440;
     this.playing = false;
     this.closed = false;
     this.lastLeft = 0;
@@ -52,10 +52,9 @@ class CoveApplicationAudioProcessor extends AudioWorkletProcessor {
     const view = new DataView(buffer);
     const total = Math.floor(view.byteLength / 4);
     if (!total) return;
-    // A large delayed callback is stale history, not a new steady-state water
-    // level. Rejoin near the current target rather than remaining ~120 ms late
-    // indefinitely. Ordinary 10..40 ms capture packets are left untouched.
-    const staleBurst = total >= this.capacity || this.count + total > this.capacity;
+    // A packet larger than the whole ring is stale history. For ordinary
+    // packets keep queued PCM and drop only the exact overflow.
+    const staleBurst = total >= this.capacity;
     const keep = staleBurst ? Math.min(this.capacity, this.target + 480) : this.capacity;
     const frames = Math.min(total, keep);
     const skip = total - frames;
@@ -66,7 +65,7 @@ class CoveApplicationAudioProcessor extends AudioWorkletProcessor {
       this.count -= discard;
       this.phase = 0;
       this.stableFrames = 0;
-      this.transition();
+      if (this.playing) this.transition();
     }
     let write = (this.read + this.count) % this.capacity;
     for (let i = skip; i < total; i++) {

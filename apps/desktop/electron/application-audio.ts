@@ -2,7 +2,8 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import path from 'node:path';
 import { app, type WebContents } from 'electron';
-import { PcmChunkQueue } from './pcmChunkQueue';
+import { PcmChunkQueue, SCREEN_PCM_QUEUE_MAX_BYTES } from './pcmChunkQueue';
+import { WindowsScreenAudioCapture } from './windowsScreenAudioCapture';
 
 const execFileAsync = promisify(execFile);
 
@@ -80,30 +81,40 @@ export async function resolveApplicationAudioSource(sourceId: string): Promise<A
 }
 
 export class ApplicationAudioCaptureController {
-  constructor(private readonly chunkChannel = 'cove:application-audio:chunk') {}
+  constructor(
+    private readonly chunkChannel = 'cove:application-audio:chunk',
+    private readonly profile: 'application' | 'screen' = 'application',
+  ) {
+    this.boundedQueue = new PcmChunkQueue(profile === 'screen' ? SCREEN_PCM_QUEUE_MAX_BYTES : undefined);
+    this.legacy = profile !== 'screen' && process.env.COVE_AUDIO_LATENCY_PROFILE === 'legacy';
+  }
 
-  private capture: LoopbackCapture | null = null;
+  private capture: { stop(): void } | null = null;
   private owner: WebContents | null = null;
   private queued: Buffer[] = [];
-  private boundedQueue = new PcmChunkQueue();
+  private readonly boundedQueue: PcmChunkQueue;
   private sequence = 0;
   private inFlightSequence: number | null = null;
-  private readonly legacy = process.env.COVE_AUDIO_LATENCY_PROFILE === 'legacy';
+  private readonly legacy: boolean;
   private flushTimer: NodeJS.Timeout | null = null;
+
+  private bindCapture(owner: WebContents, capture: { stop(): void }) {
+    this.stop();
+    this.capture = capture;
+    this.owner = owner;
+    this.flushTimer = setInterval(() => this.flush(), this.legacy ? 40 : 10);
+  }
 
   private startCapture(
     owner: WebContents,
     start: (capture: LoopbackCapture, onChunk: (chunk: Buffer) => void) => void,
   ) {
-    this.stop();
     if (process.platform !== 'win32') throw new Error('应用音频共享目前仅支持 Windows。');
     // N-API keeps this binary ABI-stable across Node and Electron releases.
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const addon = require('loopback-capture') as LoopbackCaptureModule;
     const capture = new addon.LoopbackCapture();
-    this.capture = capture;
-    this.owner = owner;
-    this.flushTimer = setInterval(() => this.flush(), this.legacy ? 40 : 10);
+    this.bindCapture(owner, capture);
     try {
       start(capture, chunk => {
         if (this.capture !== capture || !Buffer.isBuffer(chunk) || !chunk.length) return;
@@ -133,9 +144,32 @@ export class ApplicationAudioCaptureController {
   startExcludingProcess(owner: WebContents, processId: number) {
     if (!Number.isSafeInteger(processId) || processId <= 0)
       throw new Error('无效的 Cove 进程标识。');
+    if (this.profile === 'screen') return this.startScreenCapture(owner, processId);
     this.startCapture(owner, (capture, onChunk) => {
       capture.start(processId, false, onChunk);
     });
+  }
+
+  private async startScreenCapture(owner: WebContents, processId: number) {
+    if (process.platform !== 'win32') throw new Error('屏幕共享声音目前仅支持 Windows。');
+    const executable = app.isPackaged
+      ? path.join(process.resourcesPath, 'screen-audio-loopback.exe')
+      : path.resolve(__dirname, '..', 'build', 'screen-audio-loopback.exe');
+    const capture = new WindowsScreenAudioCapture(executable);
+    this.bindCapture(owner, capture);
+    try {
+      await capture.start(processId,
+        pcm => { if (this.capture === capture) this.boundedQueue.push(pcm); },
+        frames => { if (this.capture === capture) this.boundedQueue.pushSilence(frames); },
+        error => {
+          if (this.capture !== capture) return;
+          console.error('[screen-audio] 采集停止', error);
+          this.stop();
+        });
+    } catch (error) {
+      if (this.capture === capture) this.stop();
+      throw error;
+    }
   }
 
   stop() {

@@ -8,7 +8,7 @@ const EMBEDDED_MANIFEST_PATH = 'resources/cove-integrity.json';
 const REQUIRED_FILES = [
   'Cove.exe', 'resources/app.asar',
   'resources/annotation-window-helper.exe', 'resources/remote-input-helper.exe',
-  'resources/application-audio-helper.exe', 'resources/elevate.exe',
+  'resources/application-audio-helper.exe', 'resources/screen-audio-loopback.exe', 'resources/elevate.exe',
   'resources/native-screen-capture-helper.exe', 'resources/native-screen-handles.node',
 ];
 // Review new Electron payload names here instead of accidentally publishing
@@ -187,6 +187,7 @@ async function generateInstallationIntegrity({ appOutDir, outputDir, version, pl
     if (!entries.some(entry => entry.relative === required)) throw new Error(`Missing required version payload: ${required}`);
   }
   assertX64Executable(path.join(root, 'Cove.exe'));
+  assertX64Executable(path.join(root, 'resources', 'screen-audio-loopback.exe'));
   assertX64Executable(path.join(root, 'resources', 'native-screen-capture-helper.exe'));
   assertX64Executable(path.join(root, 'resources', 'native-screen-handles.node'));
   const files = [];

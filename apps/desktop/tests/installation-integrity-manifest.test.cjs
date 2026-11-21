@@ -43,6 +43,7 @@ function fixture(t) {
     'resources/application-audio-helper.exe', 'resources/elevate.exe',
     'resources/app.asar.unpacked/node_modules/loopback-capture/build/Release/capture.node',
   ]) write(file);
+  write('resources/screen-audio-loopback.exe', pe());
   write('resources/native-screen-capture-helper.exe', pe());
   write('resources/native-screen-handles.node', pe());
   const options = { appOutDir: root, outputDir: output, version: '2.0.3', platform: 'win32', arch: 'x64' };
@@ -62,6 +63,7 @@ test('inventories final Electron, app.asar, helpers and unpacked native packages
   assert.deepEqual(fs.readFileSync(result.assetPath), fs.readFileSync(result.embeddedPath));
   assert.ok(result.manifest.files.some(file => file.path.endsWith('capture.node')));
   assert.ok(result.manifest.files.some(file => file.path === 'resources/elevate.exe'));
+  assert.ok(result.manifest.files.some(file => file.path === 'resources/screen-audio-loopback.exe'));
   assert.ok(result.manifest.files.some(file => file.path === 'resources/native-screen-capture-helper.exe'));
   assert.ok(result.manifest.files.some(file => file.path === 'resources/native-screen-handles.node'));
   assert.deepEqual(result.manifest.files.map(file => file.path), result.manifest.files.map(file => file.path).sort());
@@ -76,13 +78,14 @@ test('inventories final Electron, app.asar, helpers and unpacked native packages
 
 test('never self-hashes or includes user data, voice packs, caches, uninstallers or shortcuts', async t => {
   const { write, options } = fixture(t);
+  const clean = await generateInstallationIntegrity(options);
   for (const file of [
     EMBEDDED_MANIFEST_PATH, '.cove/accounts.json', 'userData/settings.json',
     'Cache/data', 'soundpacks/user-voice.wav', 'resources/userData/chats.db',
     'Uninstall Cove.exe', 'Cove.lnk', 'accounts.json', 'settings.json', 'chat.db',
   ]) write(file, 'PRIVATE DO NOT HASH');
   const first = await generateInstallationIntegrity(options);
-  assert.equal(first.manifest.files.length, 16);
+  assert.deepEqual(first.manifest, clean.manifest);
   assert.ok(first.manifest.files.every(file => file.path !== EMBEDDED_MANIFEST_PATH));
   const second = await generateInstallationIntegrity(options);
   assert.deepEqual(first.manifest, second.manifest);
@@ -119,7 +122,7 @@ test('refuses missing mandatory helpers instead of describing a partial release'
   await assert.rejects(generateInstallationIntegrity(options), /Missing required version payload/);
 });
 
-for (const native of ['native-screen-capture-helper.exe', 'native-screen-handles.node']) {
+for (const native of ['screen-audio-loopback.exe', 'native-screen-capture-helper.exe', 'native-screen-handles.node']) {
   test(`requires a Windows x64 ${native} in the packaged payload`, async t => {
     const { root, write, options } = fixture(t);
     const relative = `resources/${native}`;

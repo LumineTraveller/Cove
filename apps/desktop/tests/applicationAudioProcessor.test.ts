@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
-import { PcmChunkQueue } from '../electron/pcmChunkQueue';
+import { PcmChunkQueue, SCREEN_PCM_QUEUE_MAX_BYTES } from '../electron/pcmChunkQueue';
 
 const source = readFileSync(new URL('../src/features/media/application-audio/applicationAudioProcessor.js', import.meta.url), 'utf8');
 function harness(rate = 48000, latencyProfile = 'application') {
@@ -42,17 +42,36 @@ test('ring starts with 30 ms of capture and emits stereo silence before priming'
   assert.equal(h.processor.target, 1440);
 });
 
-test('screen sound survives 100ms PCM delivery bursts without changing independent audio latency', () => {
+test('screen sound survives 200 ms PCM delivery bursts without underrunning or discarding samples', () => {
   const h = harness(48000, 'screen');
-  h.push(5760);
-  for (let block = 0; block < 30; block++) {
-    for (let quantum = 0; quantum < 37; quantum++) h.render();
-    h.push(37 * 128, 5760 + block * 37 * 128);
+  const pending = new PcmChunkQueue(SCREEN_PCM_QUEUE_MAX_BYTES);
+  const packet = Buffer.alloc(480 * 4);
+  for (let offset = 0; offset < packet.length; offset += 2) packet.writeInt16LE(8192, offset);
+  h.push(11520, 0, () => 0.25);
+  let sequence = 0;
+  for (let burst = 0; burst < 6; burst++) {
+    for (let tick = 0; tick < 20; tick++) {
+      pending.push(packet);
+      const { left } = h.render(480);
+      const settled = burst === 0 && tick === 0 ? left.subarray(240) : left;
+      assert.ok(settled.every(sample => sample > 0.24));
+    }
+    h.processor.port.onmessage({ data: { type: 'pcm', buffer: pending.drain()!.buffer, sequence: ++sequence } });
   }
+  assert.equal(pending.droppedFrames, 0);
   assert.equal(h.processor.underflows, 0);
   assert.equal(h.processor.droppedFrames, 0);
-  assert.equal(h.processor.target, 5760);
+  assert.equal(h.processor.target, 11520);
   assert.equal(harness().processor.target, 1440);
+});
+
+test('a small screen ring overflow removes only the excess and plays buffered PCM in order', () => {
+  const h = harness(48000, 'screen');
+  h.push(h.processor.capacity - 600, 0, () => 0.4);
+  h.push(960, 0, () => -0.4);
+  assert.equal(h.processor.droppedFrames, 360);
+  assert.equal(h.processor.count, h.processor.capacity);
+  assert.ok(h.render(512).left.subarray(240).every(value => value > 0.39));
 });
 
 test('48 kHz preserves PCM exactly after fade, across variable render quanta', () => {

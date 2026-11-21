@@ -1,6 +1,6 @@
 {
   "name": "cove-client",
-  "version": "2.1.5",
+  "version": "2.1.6",
   "description": "Cove - 即时通讯客户端",
   "author": "Cove",
   "private": true,
@@ -118,6 +118,10 @@
         {
           "from": "build/application-audio-helper.exe",
           "to": "application-audio-helper.exe"
+        },
+        {
+          "from": "build/screen-audio-loopback.exe",
+          "to": "screen-audio-loopback.exe"
         },
         {
           "from": "build/native-screen-capture-helper.exe",

@@ -6,12 +6,14 @@ import ts from 'typescript';
 import * as childProcess from 'node:child_process';
 import * as util from 'node:util';
 import * as path from 'node:path';
-import { PcmChunkQueue } from '../electron/pcmChunkQueue';
+import { PcmChunkQueue, SCREEN_PCM_QUEUE_MAX_BYTES } from '../electron/pcmChunkQueue';
+import { ScreenPcmReader } from '../electron/windowsScreenAudioCapture';
 
-function harness(legacy = false) {
+function harness(legacy = false, profile: 'application' | 'screen' = 'application') {
   const intervalDelays: number[] = [];
   let tick = () => {};
   let callback = (_: Buffer) => {};
+  let silent = (_: number) => {};
   const callbacks: ((chunk: Buffer) => void)[] = [];
   let stops = 0;
   const sent: any[][] = [];
@@ -22,6 +24,7 @@ function harness(legacy = false) {
   }).outputText;
   const exports: any = {};
   runInNewContext(compiled, { exports, Buffer, Uint8Array, console,
+    __dirname: '/desktop/dist-electron',
     process: { platform: 'win32', env: legacy ? { COVE_AUDIO_LATENCY_PROFILE: 'legacy' } : {} },
     setInterval(fn: () => void, delay: number) { tick = fn; intervalDelays.push(delay); return 1; }, clearInterval() { tick = () => {}; },
     require(name: string) {
@@ -29,7 +32,15 @@ function harness(legacy = false) {
       if (name === 'util') return util;
       if (name === 'node:path') return path;
       if (name === 'electron') return { app: { isPackaged: false } };
-      if (name === './pcmChunkQueue') return { PcmChunkQueue };
+      if (name === './pcmChunkQueue') return { PcmChunkQueue, SCREEN_PCM_QUEUE_MAX_BYTES };
+      if (name === './windowsScreenAudioCapture') return { WindowsScreenAudioCapture: class {
+        async start(_pid: number, cb: (chunk: Buffer) => void, onSilence: (frames: number) => void) {
+          callback = cb;
+          silent = onSilence;
+          callbacks.push(cb);
+        }
+        stop() { stops++; }
+      } };
       if (name === 'loopback-capture') return { LoopbackCapture: class {
         start(_pid: number, _include: boolean, cb: (chunk: Buffer) => void) { callback = cb; callbacks.push(cb); }
         stop() { stops++; }
@@ -37,10 +48,11 @@ function harness(legacy = false) {
       throw new Error(name);
     },
   });
-  const controller = new exports.ApplicationAudioCaptureController('test:chunk');
+  const controller = new exports.ApplicationAudioCaptureController('test:chunk', profile);
   const start = () => controller.startExcludingProcess(owner, 1234);
   start();
   return { controller, owner, sent, intervalDelays, start, callbacks, get stops() { return stops; },
+    silence: (frames: number) => silent(frames),
     push: (frames: number, byte: number) => callback(Buffer.alloc(frames * 4, byte)),
     tick: () => tick(), destroy: () => { destroyed = true; },
   };
@@ -88,4 +100,44 @@ test('legacy profile preserves 40 ms transport and requires no ACK', () => {
   h.push(480, 1); h.tick(); h.push(480, 2); h.tick();
   assert.equal(h.sent.length, 2);
   assert.equal(h.sent[0].length, 2);
+});
+
+test('screen capture retains a 240 ms PCM burst behind the renderer ACK and includes silent frames', () => {
+  const h = harness(false, 'screen');
+  h.push(480, 1);
+  h.tick();
+  const sequence = h.sent[0][2];
+  for (let i = 0; i < 23; i++) h.push(480, i + 2);
+  h.silence(480);
+  h.tick();
+  assert.equal(h.sent.length, 1);
+  h.controller.acknowledge(h.owner, sequence);
+  const caughtUp = h.sent[1][1] as Uint8Array;
+  assert.equal(caughtUp.byteLength, 24 * 480 * 4);
+  assert.equal(caughtUp[0], 2);
+  assert.equal(caughtUp[23 * 480 * 4 - 1], 24);
+  assert.ok(caughtUp.subarray(-480 * 4).every(byte => byte === 0));
+});
+
+function nativePacket(position: bigint, frames: number, payload = Buffer.alloc(0)) {
+  const header = Buffer.alloc(16);
+  header.writeBigUInt64LE(position);
+  header.writeUInt32LE(frames, 8);
+  header.writeUInt32LE(payload.length, 12);
+  return Buffer.concat([header, payload]);
+}
+
+test('Windows packets retain quiet PCM and cover silent packets and gaps at their sample positions', () => {
+  const queue = new PcmChunkQueue(96);
+  let ready = 0;
+  const reader = new ScreenPcmReader(() => { ready++; }, pcm => queue.push(pcm), frames => queue.pushSilence(frames));
+  const quiet = Buffer.from([6, 0, 250, 255]);
+  const audible = Buffer.from([32, 14, 32, 14]);
+  const stream = Buffer.concat([Buffer.from('COVEPCM1'), nativePacket(100n, 1, quiet),
+    nativePacket(101n, 2), nativePacket(105n, 1, audible)]);
+  for (let offset = 0; offset < stream.length; offset += 7) reader.write(stream.subarray(offset, offset + 7));
+  assert.equal(ready, 1);
+  assert.deepEqual(Buffer.from(queue.drain()!), Buffer.concat([quiet, Buffer.alloc(16), audible]));
+  assert.equal(queue.droppedFrames, 0);
+  assert.throws(() => reader.write(nativePacket(105n, 1, audible)), /采样位置回退/);
 });

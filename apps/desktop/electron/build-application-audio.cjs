@@ -10,10 +10,15 @@ const compiler = ['Framework64', 'Framework'].map(framework =>
 if (!compiler) throw new Error('未找到 Windows C# 编译器，无法构建应用音频枚举组件');
 const outputDir = path.resolve(__dirname, '..', 'build');
 fs.mkdirSync(outputDir, { recursive: true });
-const result = spawnSync(compiler, [
-  '/nologo', '/target:exe', '/optimize+', '/platform:x64',
-  `/out:${path.join(outputDir, 'application-audio-helper.exe')}`,
-  '/reference:System.Web.Extensions.dll', '/reference:System.Drawing.dll',
-  path.join(__dirname, 'application-audio-helper.cs'),
-], { stdio: 'inherit' });
-if (result.status !== 0) throw new Error(`应用音频枚举组件构建失败（${result.status ?? 'unknown'}）`);
+for (const [name, references] of [
+  ['application-audio-helper', ['System.Web.Extensions.dll', 'System.Drawing.dll']],
+  ['screen-audio-loopback', []],
+]) {
+  const result = spawnSync(compiler, [
+    '/nologo', '/target:exe', '/optimize+', '/platform:x64', `/out:${path.join(outputDir, name + '.exe')}`,
+    ...references.map(reference => `/reference:${reference}`),
+    path.join(__dirname, name + '.cs'),
+  ], { stdio: 'inherit', windowsHide: true });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(`${name} 构建失败（${result.status}）`);
+}

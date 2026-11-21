@@ -132,6 +132,7 @@ function compileHelpers(desktop) {
     ['annotation-window-helper', []],
     ['remote-input-helper', ['System.Web.Extensions.dll', 'System.Windows.Forms.dll']],
     ['application-audio-helper', ['System.Web.Extensions.dll', 'System.Drawing.dll']],
+    ['screen-audio-loopback', []],
   ].map(([name, references]) => {
     const source = path.join(root, 'apps/desktop/electron', name + '.cs');
     const executable = path.join(desktop, 'resources', name + '.exe');
