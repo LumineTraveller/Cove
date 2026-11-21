@@ -114,7 +114,14 @@ export async function prepareDifferentialBaseline(options: {
   }
   // Never trust a legacy root map by existence/size: electron-updater 6.8.9
   // may have copied the NEXT version's blockmap here before installation.
-  if (!blockmap) blockmap = await options.downloadOldBlockmap();
+  if (!blockmap) {
+    blockmap = await options.downloadOldBlockmap();
+    // A same-size write during the download can leave file timestamps unchanged.
+    const current = await hashStableFile(installer, options.checkCancelled);
+    if (current.sha512 !== verified.sha512) {
+      throw cacheError('COVE_BASELINE_CHANGED', 'Installer baseline changed after verification');
+    }
+  }
   validateBlockmap(blockmap, verified.stat.size);
   options.checkCancelled?.();
   if (!sameFile(verified.stat, regularCacheFile(installer))) {

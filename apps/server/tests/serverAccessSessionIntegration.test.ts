@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { once } from 'node:events';
+import { once as waitForEvent } from 'node:events';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -34,7 +34,8 @@ const emit = (socket: Socket, event: string, data?: unknown): Promise<any> => ne
   else socket.timeout(3_000).emit(event, data, ack);
 });
 
-test('expiry keeps desktop/mobile online and recoverable, but login and auto-login require the server password', { timeout: 20_000 }, async () => {
+test('expiry keeps desktop/mobile online and recoverable, but login and auto-login require the server password', { timeout: 20_000 }, async t => {
+  const once = (socket: Socket, event: string) => waitForEvent(socket, event, { signal: t.signal });
   const keys = ['COVE_DATA_DIR', 'COVE_DOWNLOAD_DIR', 'COVE_SERVER_SECURITY_ENABLED', 'COVE_BOOTSTRAP_TOKEN', 'COVE_BOOTSTRAP_TOKEN_FILE'];
   const saved = Object.fromEntries(keys.map(key => [key, process.env[key]]));
   const globals = ['window', 'localStorage'].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const);
@@ -46,7 +47,7 @@ test('expiry keeps desktop/mobile online and recoverable, but login and auto-log
   const bootstrap = 'public-bootstrap-fixture';
   const identity = { clientProtocol: 3, clientVersion: '2.1.2', clientPlatform: 'desktop' };
   const headers = { 'x-cove-client-protocol': '3', 'x-cove-client-version': '2.1.2', 'x-cove-client-platform': 'desktop' };
-  let now = Date.now();
+  let earliestServerTime = 0;
   let base = '';
   let stopServer: (() => Promise<void>) | undefined;
   let security: ReturnType<typeof import('../src/features/security/serverSecurity').createServerSecurityStore> | undefined;
@@ -65,7 +66,11 @@ test('expiry keeps desktop/mobile online and recoverable, but login and auto-log
     if (request === './serverSecurity' && /[/\\]securityStore\.ts$/.test(parent?.filename ?? '')) return {
       ...loaded,
       createServerSecurityStore(db: any, options: any) {
-        security = loaded.createServerSecurityStore(db, { ...options, now: () => now, tokenLifetimeMs: 2_000 });
+        security = loaded.createServerSecurityStore(db, {
+          ...options,
+          now: () => Math.max(earliestServerTime, Date.now()),
+          tokenLifetimeMs: 2_000,
+        });
         return security;
       },
     };
@@ -80,9 +85,6 @@ test('expiry keeps desktop/mobile online and recoverable, but login and auto-log
     const server = await import('../src/index');
     stopServer = server.stopServer;
     base = `http://127.0.0.1:${await server.startServer(0)}`;
-    // Anchor the short fixture deadline after module loading, so this also
-    // exercises the production idle-expiry timer without changing system time.
-    now = Date.now();
     const grant = await desktopAccess.bootstrapServer(base, bootstrap, password);
     mobileAccess.setServerAccessToken(base, grant);
     const bearerHeaders = { ...headers, authorization: `Bearer ${grant.accessToken}` };
@@ -111,7 +113,7 @@ test('expiry keeps desktop/mobile online and recoverable, but login and auto-log
     assert.equal((await emit(desktop.socket, 'room:join', { roomId: room.id })).ok, true);
     const notices: unknown[] = [];
     sockets.forEach(socket => socket.on('server:access-invalid', notice => notices.push(notice)));
-    now = grant.expiresAt;
+    earliestServerTime = grant.expiresAt;
     await new Promise(resolve => setTimeout(resolve, Math.max(1, grant.expiresAt - Date.now() + 30)));
     assert.deepEqual(notices, [], 'an idle connected user must not be kicked at the deadline');
     for (const [index, socket] of [desktop.socket, mobile].entries()) {

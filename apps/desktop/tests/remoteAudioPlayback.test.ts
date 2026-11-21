@@ -12,9 +12,10 @@ import * as disconnectGrace from '../src/features/connection/disconnectGrace';
 function playbackHarness() {
   const callbacks: Function[] = [];
   const activations: FakeAudio[] = [];
-  const graph: { source: any; gain?: any; stream: any }[] = [];
+  const graph: { source: any; gain?: any; stream: any; audioTrackId: string }[] = [];
   const streams: { tracks: { id: string }[] }[] = [];
   const consumed: { producerId: string; streamId: string }[] = [];
+  const producerKinds = new Map<string, string>();
   const consumerEvents = new Map<string, Record<string, Function>>();
   const signals = new Map<string, number>();
   const meters: any[] = [];
@@ -38,12 +39,12 @@ function playbackHarness() {
       return { gain: { value: 1 }, disconnected: false, connect() {}, disconnect() { this.disconnected = true; } };
     },
     createMediaStreamSource(stream: any) {
-      const entry: any = { stream };
+      const entry: any = { stream, audioTrackId: stream.getAudioTracks()[0].id };
       entry.source = {
         disconnected: false,
         connect(target: any) {
           entry.gain = target;
-          if (target.getByteTimeDomainData) target.trackId = stream.tracks[0].id;
+          if (target.getByteTimeDomainData) target.trackId = entry.audioTrackId;
           return target;
         },
         disconnect() { this.disconnected = true; },
@@ -66,12 +67,14 @@ function playbackHarness() {
     async consume(params: any) {
       consumed.push(params);
       const events: Record<string, Function> = {};
+      const observerEvents: Record<string, Function> = {};
       consumerEvents.set(params.producerId, events);
       return {
         id: params.producerId,
-        track: { id: params.producerId, kind: 'audio', enabled: true, muted: false, readyState: 'live' },
+        track: { id: params.producerId, kind: params.kind, enabled: true, muted: false, readyState: 'live' },
         on(event: string, handler: Function) { events[event] = handler; },
-        close() {},
+        observer: { on(event: string, handler: Function) { observerEvents[event] = handler; } },
+        close() { observerEvents.close?.(); },
       };
     },
   };
@@ -81,7 +84,9 @@ function playbackHarness() {
     on() {},
     off() {},
     once() {},
-    emit(_event: string, data: any, callback?: Function) { callback?.(data ?? {}); },
+    emit(event: string, data: any, callback?: Function) {
+      callback?.(event === 'ms:consume' ? { ...data, kind: producerKinds.get(data.producerId) } : data ?? {});
+    },
   };
   function loadModule(moduleURL: URL): any {
   const exports: any = {};
@@ -124,8 +129,10 @@ function playbackHarness() {
     Audio: FakeAudio,
     URL,
     MediaStream: class {
-      constructor(public tracks: any[]) { streams.push(this); }
+      constructor(public tracks: any[] = []) { streams.push(this); }
+      getTracks() { return [...this.tracks]; }
       getAudioTracks() { return this.tracks.filter(track => track.kind === 'audio'); }
+      getVideoTracks() { return this.tracks.filter(track => track.kind === 'video'); }
       addTrack(track: any) { this.tracks.push(track); }
       removeTrack(track: any) { this.tracks = this.tracks.filter(item => item !== track); }
     },
@@ -143,20 +150,24 @@ function playbackHarness() {
   }
   const rtc = loadModule(new URL('../src/features/media/useWebRTC.ts', import.meta.url)).useWebRTC(socket, 'test-room');
   const setup = callbacks.find(fn => fn.toString().includes("'ms:capabilities'"));
-  const consume = callbacks.find(fn => fn.toString().includes("'ms:consume'"));
+  const consumeProducer = callbacks.find(fn => fn.toString().includes("'ms:consume'"));
   // consumeProducer also closes orphan server consumers on failure. Select the
   // explicit close callback, not that async consume callback's cleanup path.
   const close = callbacks.find(fn => fn.toString().includes("'ms:close-consumer'") &&
     !fn.toString().includes("'ms:consume'"));
-  assert.ok(setup && consume && close, 'expected actual hook callbacks');
+  assert.ok(setup && consumeProducer && close, 'expected actual hook callbacks');
+  const consume = (producerId: string, peerId: string, kind: string, appData: Record<string, unknown>) => {
+    producerKinds.set(producerId, kind);
+    return consumeProducer(producerId, peerId, kind, appData);
+  };
   const outputFor = (id: string) => {
-    const entry = graph.find(entry => entry.stream.tracks[0].id === id && entry.gain?.gain);
+    const entry = graph.find(entry => entry.audioTrackId === id && entry.gain?.gain);
     assert.ok(entry, `missing gain output for ${id}`);
     return entry;
   };
   const audibleElementFor = (id: string) => {
     const element = activations.find(element =>
-      (element.srcObject as { tracks?: { id: string }[] } | null)?.tracks?.[0]?.id === id && !element.muted);
+      (element.srcObject as { tracks?: { id: string }[] } | null)?.tracks?.some(track => track.id === id) && !element.muted);
     assert.ok(element, `missing audible media element for ${id}`);
     return element;
   };
@@ -180,8 +191,8 @@ test('screen audio plays through its own gain output instead of the video elemen
   assert.equal(await h.consume('mic-1', 'alice', 'audio', { type: 'mic' }), true);
   assert.equal(await h.consume('app-1', 'alice', 'audio', { type: 'application-audio' }), true);
   const screen = h.streams.find(stream => stream.tracks.some(track => track.id === 'video-1'));
-  assert.deepEqual(Array.from(screen?.tracks ?? [], track => track.id), ['video-1'],
-    'the picture stream must stay video-only: element volume cannot scale MediaStream playback');
+  assert.deepEqual(Array.from(screen?.tracks ?? [], track => track.id), ['video-1', 'screen-1']);
+  assert.equal(h.outputFor('screen-1').stream, screen, 'screen audio and video share one playback stream');
   // 媒体元素的 volume 对 MediaStream 无效，只有增益通路能真正改变响度。
   assert.equal(h.outputFor('screen-1').gain.gain.value, 0.25);
   h.rtc.setScreenReceiveVolume(1.5);
@@ -201,6 +212,7 @@ test('screen audio plays through its own gain output instead of the video elemen
   h.rtc.setScreenReceiveVolume(1);
   h.close('screen-1', true);
   assert.equal(h.outputFor('screen-1').gain.disconnected, true, 'closing the consumer releases its gain output');
+  assert.deepEqual(Array.from(screen?.tracks ?? [], track => track.id), ['video-1']);
   assert.equal(await h.consume('screen-2', 'alice', 'audio', { type: 'screen-audio' }), true);
   assert.equal(h.outputFor('screen-2').gain.gain.value, 1);
   h.endTrack('screen-2');
@@ -238,10 +250,12 @@ test('screen audio that arrives before the picture still gets its own gain outpu
   await h.setup();
   h.rtc.setScreenReceiveVolume(0.6);
   await h.consume('screen-early', 'bob', 'audio', { type: 'screen-audio' });
+  const audioOutput = h.outputFor('screen-early');
   await h.consume('video-late', 'bob', 'video', { type: 'screen' });
   const stream = h.streams.find(item => item.tracks.some(track => track.id === 'video-late'));
-  assert.deepEqual(Array.from(stream?.tracks ?? [], track => track.id), ['video-late']);
-  assert.equal(h.outputFor('screen-early').gain.gain.value, 0.6);
+  assert.equal(stream, audioOutput.stream);
+  assert.deepEqual(Array.from(stream?.tracks ?? [], track => track.id), ['screen-early', 'video-late']);
+  assert.equal(audioOutput.gain.gain.value, 0.6);
   h.close('screen-early', true);
   assert.equal(h.outputFor('screen-early').gain.disconnected, true);
 });

@@ -419,7 +419,7 @@ export function useMediaTransports(deps: useMediaTransportsDependencies) {
             }
           }
           if (!usesGainOutput) {
-            // 麦克风和独立应用音频的兼容回退；屏幕音频由视频元素播放。
+            // 麦克风和独立应用音频的兼容回退。
             const el = new Audio();
             el.autoplay = true;
             el.volume = Math.min(1, volume);
