@@ -20,7 +20,9 @@ function bridge(enabled = true, options = {}) {
     close() { this.closed++; events.push(['close', this]); }
   };
   const electron = { contextBridge: { exposeInMainWorld: (name, value) => { api[name] = value; } },
-    ipcRenderer: ipc, sharedTexture: options.sharedTexture === false ? {} : { setSharedTextureReceiver: callback => { receiver = callback; } } };
+    ipcRenderer: ipc, sharedTexture: options.sharedTexture === false ? {} : {
+      setSharedTextureReceiver: callback => { receiver = callback; }, subtle: options.subtle,
+    } };
   vm.runInNewContext(source, { require: name => { assert.equal(name, 'electron'); return electron; }, exports: {},
     process: { platform: options.platform ?? 'win32', env: {}, versions: options.versions ?? { electron: '44.0.0' }, argv: [
       ...(enabled ? ['--cove-native-gpu-capture=1'] : []), ...(options.argv ?? []),
@@ -32,6 +34,7 @@ function bridge(enabled = true, options = {}) {
     ...(options.Promise ? { Promise: options.Promise } : {}) });
   return { api: api.coveNativeScreen, activity: api.coveScreenShareActivity, ipc, calls, sent, events, cpuFrames, timers, timerDelays, receive: (...args) => receiver(...args),
     receiveCpu: (...args) => ipc.listeners('cove:native-screen:cpu-frame')[0]({}, ...args),
+    receiveCachedGpu: (...args) => ipc.listeners('cove:native-screen:cached-gpu-frame')[0]({}, ...args),
     hasReceiver: () => Boolean(receiver), hasCpuReceiver: () => ipc.listenerCount('cove:native-screen:cpu-frame') > 0 };
 }
 test('screen-share activity works without a native backend and releases only its own token once', () => {
@@ -53,6 +56,29 @@ function texture() {
 }
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const plain = value => JSON.parse(JSON.stringify(value));
+
+test('GPU frames keep the current capture timestamp and acknowledge only after Electron releases the GPU reference', async () => {
+  let released, transferOptions, calls = 0;
+  const frame = { timestamp: metadata.timestamp, close() { calls++; } };
+  const b = bridge(true, { subtle: {
+    finishTransferSharedTexture(options) {
+      transferOptions = options;
+      return { getVideoFrame: () => frame, release(callback) { released = callback; } };
+    },
+  } });
+  b.api.onFrame(metadata.requestId, async (actual, received) => {
+    assert.equal(actual, frame);
+    assert.equal(received, metadata);
+  });
+  const transfer = Object.freeze({ transfer: 'owned-mailbox', timestamp: 0 });
+  await b.receiveCachedGpu(metadata, transfer);
+  assert.deepEqual(plain(transferOptions), { transfer: 'owned-mailbox', timestamp: 1000 });
+  assert.equal(transfer.timestamp, 0);
+  assert.equal(calls, 1);
+  assert.deepEqual(b.sent, []);
+  released();
+  assert.deepEqual(b.sent, [['cove:native-screen:cached-gpu-frame-done', metadata]]);
+});
 
 test('Canvas preference requires exact flag, qualified runtime and native support', () => {
   assert.equal(bridge(true, { argv: ['--cove-native-frame-sink=canvas'] }).api.preferredFrameSink, 'canvas');
@@ -638,6 +664,30 @@ test('CPU accepts a genuine cross-realm ArrayBuffer without relying on instanceo
   b.api.onFrame(metadata.requestId, async () => {});
   await b.receiveCpu(cpuMetadata, data);
   assert.equal(b.cpuFrames[0].data, data); assert.equal(b.cpuFrames[0].closed, 1); assert.equal(b.calls.length, 0);
+});
+
+test('CPU region updates reconstruct both planes and require the exact preceding frame', async () => {
+  const b = bridge(), full = cpuBytes();
+  new Uint8Array(full).fill(17);
+  b.api.onFrame(cpuMetadata.requestId, async () => {});
+  await b.receiveCpu(cpuMetadata, full, 0);
+  const rows = new Uint8Array(64 * 3).fill(17);
+  rows.set([30,31,32,33], 4);
+  rows.set([40,41,42,43], 64 + 4);
+  rows.set([129,130,131,132], 128 + 4);
+  const patch = rows.buffer;
+  const next = { ...cpuMetadata, serial: 2, timestamp: 2000, update: [4, 6, 4, 2] };
+  await b.receiveCpu(next, patch, 1);
+  const frame = b.cpuFrames[1], pixels = new Uint8Array(frame.data);
+  assert.equal(frame.init.transfer.length, 0);
+  assert.deepEqual([...pixels.subarray(6 * 64 + 4, 6 * 64 + 8)], [30,31,32,33]);
+  assert.deepEqual([...pixels.subarray(7 * 64 + 4, 7 * 64 + 8)], [40,41,42,43]);
+  assert.deepEqual([...pixels.subarray(67 * 64 + 4, 67 * 64 + 8)], [129,130,131,132]);
+  assert.equal(pixels[6 * 64 + 3], 17); assert.equal(pixels[6 * 64 + 8], 17);
+  assert.ok(new Uint8Array(full).every(pixel => pixel === 17));
+  await b.receiveCpu({ ...next, serial: 4, timestamp: 4000 }, patch, 3);
+  assert.equal(b.cpuFrames.length, 2);
+  assert.deepEqual(b.calls, [['cove:native-screen:stop', cpuMetadata.requestId, 'receiver_failed']]);
 });
 
 test('CPU BT601 constructs limited SMPTE170M on every component and keeps the close/ACK barrier', async () => {

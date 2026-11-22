@@ -119,6 +119,9 @@ test('stock fallback, unknown sender tracks and inactive brokers never pass nati
   ], nativeGpu: { bridgeSupported: true, localScreenTrackMatchesSender: true } };
   const broker = { activeSessions: 1, helpers: 1, frames: 1, disabled: false };
   assert.equal(nativeUpgradeEvidence(sample, broker).passed, true);
+  const standby = { kind: 'native-display-capture', trackState: 'live', isLiveSenderSource: false };
+  assert.equal(nativeUpgradeEvidence({ ...sample, sources: [standby, sample.sources[1]] }, broker).passed, true);
+  assert.equal(nativeUpgradeEvidence({ ...sample, sources: [sample.sources[1], { ...standby, isLiveSenderSource: true }] }, broker).passed, false);
   assert.equal(nativeUpgradeEvidence({ ...sample, sources: [{ kind: 'native-display-capture', trackState: 'live', isLiveSenderSource: true }] }, broker).passed, false);
   assert.equal(nativeUpgradeEvidence({ ...sample, nativeGpu: { bridgeSupported: true, localScreenTrackMatchesSender: false } }, broker).passed, false);
   assert.equal(nativeUpgradeEvidence(sample, { ...broker, frames: 0 }).passed, false);

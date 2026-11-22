@@ -14,6 +14,7 @@ export interface ScreenPreferences {
   gameMode: boolean;
   nativeResolution: boolean;
   compatibilityMode: boolean;
+  gpuEncoding: boolean;
 }
 
 export const DEFAULT_SCREEN_PREFERENCES: Readonly<ScreenPreferences> = {
@@ -23,6 +24,7 @@ export const DEFAULT_SCREEN_PREFERENCES: Readonly<ScreenPreferences> = {
   gameMode: false,
   nativeResolution: false,
   compatibilityMode: false,
+  gpuEncoding: false,
 };
 
 /** Older partial settings retain supported values; missing/invalid fields use safe defaults. */
@@ -45,6 +47,7 @@ export function normalizeScreenPreferences(value: unknown): ScreenPreferences {
         : DEFAULT_SCREEN_PREFERENCES.nativeResolution,
     compatibilityMode: typeof saved.compatibilityMode === 'boolean'
       ? saved.compatibilityMode : DEFAULT_SCREEN_PREFERENCES.compatibilityMode,
+    gpuEncoding: saved.gpuEncoding === true,
   };
 }
 

@@ -495,9 +495,10 @@ class FakeTransport {
 // by this fixture. This lets the production hook and all of its state paths run.
 const devicePrototype = Device.prototype as any;
 devicePrototype.load = async function load() {
-  Object.defineProperty(this, "rtpCapabilities", {
-    configurable: true,
-    value: { codecs: [], headerExtensions: [], fecMechanisms: [] },
+  const capabilities = { codecs: [], headerExtensions: [], fecMechanisms: [] };
+  Object.defineProperties(this, {
+    rtpCapabilities: { configurable: true, value: capabilities },
+    sendRtpCapabilities: { configurable: true, value: capabilities },
   });
 };
 devicePrototype.createSendTransport = function createSendTransport(params: any) {

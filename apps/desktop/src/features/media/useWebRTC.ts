@@ -81,6 +81,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
     initialScreenPreferences.nativeResolution,
   );
   const [screenCompatibilityMode, setScreenCompatibilityMode] = useState(initialScreenPreferences.compatibilityMode);
+  const [screenGpuEncoding, setScreenGpuEncoding] = useState(initialScreenPreferences.gpuEncoding);
   useEffect(() => {
     saveScreenPreferences({
       preset: screenPreset,
@@ -89,8 +90,9 @@ export function useWebRTC(socket: Socket, roomId: string) {
       gameMode: screenGameMode,
       nativeResolution: screenNativeResolution,
       compatibilityMode: screenCompatibilityMode,
+      gpuEncoding: screenGpuEncoding,
     });
-  }, [screenPreset, fps, shareAudio, screenGameMode, screenNativeResolution, screenCompatibilityMode]);
+  }, [screenPreset, fps, shareAudio, screenGameMode, screenNativeResolution, screenCompatibilityMode, screenGpuEncoding]);
   const [screenActivity, setScreenActivity] = useState<ScreenActivity>('active');
   const [screenEncodingPlan, setScreenEncodingPlan] = useState<ScreenEncodingPlan | null>(null);
   const [screenViewerCount, setScreenViewerCount] = useState(0);
@@ -1460,6 +1462,12 @@ export function useWebRTC(socket: Socket, roomId: string) {
     get setScreenCompatibilityMode() {
       return setScreenCompatibilityMode;
     },
+    get screenGpuEncoding() {
+      return screenGpuEncoding;
+    },
+    get setScreenGpuEncoding() {
+      return setScreenGpuEncoding;
+    },
     get shareAudio() {
       return shareAudio;
     },
@@ -1627,6 +1635,8 @@ export function useWebRTC(socket: Socket, roomId: string) {
     screenNativeResolution,
     screenCompatibilityMode,
     setScreenCompatibilityMode,
+    screenGpuEncoding,
+    screenGpuEncodingAvailable: window.coveNativeScreen?.hardwareAv1Encoding === true,
     isApplicationAudioSharing,
     applicationAudioLabel,
     applicationAudioShareVolume,

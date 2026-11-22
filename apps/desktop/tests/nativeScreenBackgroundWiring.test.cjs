@@ -20,12 +20,14 @@ for (const isPackaged of [false, true]) {
       vm.runInNewContext(factory, {
         NativeScreenCaptureController: class { constructor(value) { configuration = value; } },
         nativeCaptureEnabled: enabled, nativeTimingEnabled: false, nativeTimingLogger: undefined,
+        screenHardwareAv1Enabled: enabled,
         nativeCompletionPreference: undefined,
         process: { env: {}, resourcesPath: '/isolated-resources' },
         app: { isPackaged }, path, __dirname: '/isolated-electron',
       });
       assert.equal(configuration.keepRendererActive, enabled);
       assert.equal(configuration.enabled, enabled);
+      assert.equal(configuration.allowCpuNv12, enabled);
       assert.equal(configuration.pixelFormat, 'bgra');
       assert.equal(configuration.storage, 'gpu');
       assert.equal(configuration.timing, false);

@@ -26,6 +26,7 @@ contextBridge.exposeInMainWorld('coveScreenShareActivity', {
 // context bridge. Each imported texture has its own transfer/release barrier.
 const nativeFrameListeners = new Map<string, (frame: unknown, metadata: NativeScreenFrame) => Promise<void>>();
 const nativeEndListeners = new Map<string, (reason: string) => void>();
+const nativeCpuReferences = new Map<string, { sessionId: string; serial: number; bytes: Uint8Array }>();
 const nativeReleasePermits = new Map<string, () => void>();
 const nativeEarlyPermits = new Set<string>();
 const nativeRequestId = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9_-]{8,80}$/.test(value);
@@ -207,9 +208,42 @@ if (nativeEnabled) {
   });
   ipcRenderer.on('cove:native-screen:ended', (_event, event: { requestId: string; reason: string }) => {
     if (!event || !nativeRequestId(event.requestId) || typeof event.reason !== 'string') return;
+    nativeCpuReferences.delete(event.requestId);
     nativeEndListeners.get(event.requestId)?.(event.reason);
   });
-  ipcRenderer.on('cove:native-screen:cpu-frame', async (_event, metadata: NativeScreenFrame, data: ArrayBuffer) => {
+  ipcRenderer.on('cove:native-screen:cached-gpu-frame',
+    async (_event, metadata: NativeScreenFrame, transfer: Electron.SharedTextureTransfer) => {
+      if (!nativeFrameValid(metadata) || metadata.storage !== undefined) return;
+      let imported: Electron.SharedTextureImportedSubtle | undefined;
+      let frame: ReturnType<Electron.SharedTextureImportedSubtle['getVideoFrame']> | undefined;
+      let failed = false;
+      const stopReceiver = () => {
+        if (failed) return;
+        failed = true;
+        void ipcRenderer.invoke('cove:native-screen:stop', metadata.requestId, 'receiver_failed').catch(() => {});
+      };
+      try {
+        imported = sharedTexture.subtle.finishTransferSharedTexture({ ...transfer, timestamp: metadata.timestamp });
+        const listener = nativeFrameListeners.get(metadata.requestId);
+        if (listener) {
+          frame = imported.getVideoFrame();
+          if (frame.timestamp !== metadata.timestamp) throw new Error('invalid_gpu_frame_timestamp');
+          await listener(frame, metadata);
+        }
+      } catch {
+        stopReceiver();
+      } finally {
+        try { frame?.close(); } catch { stopReceiver(); }
+        // Electron waits for the VideoFrame's downstream GPU references here.
+        // It does not release the main process's persistent slot import.
+        try {
+          imported?.release(() => {
+            ipcRenderer.send('cove:native-screen:cached-gpu-frame-done', metadata);
+          });
+        } catch { stopReceiver(); }
+      }
+    });
+  ipcRenderer.on('cove:native-screen:cpu-frame', async (_event, metadata: NativeScreenFrame, data: ArrayBuffer, baseSerial?: number) => {
     if (!nativeFrameValid(metadata) || metadata.storage !== 'cpu' || metadata.pixelFormat !== 'nv12' ||
         (metadata.colorSpace !== 'bt601-limited' && metadata.colorSpace !== 'bt709-limited') ||
         metadata.width % 2 !== 0 || metadata.height % 2 !== 0) {
@@ -229,24 +263,51 @@ if (nativeEnabled) {
     };
     try {
       const expectedBytes = metadata.width * metadata.height * 3 / 2;
-      if (expectedBytes > 16 * 1024 * 1024 || nativeArrayBufferByteLength.call(data) !== expectedBytes) {
+      const byteLength = nativeArrayBufferByteLength.call(data);
+      if (expectedBytes > 16 * 1024 * 1024 || ((baseSerial === undefined || baseSerial === 0) && byteLength !== expectedBytes)) {
         throw new TypeError('invalid_native_cpu_frame_bytes');
       }
       const listener = nativeFrameListeners.get(metadata.requestId);
       if (listener) {
+        let frameData = data;
+        let transfer = [data];
+        if (baseSerial === 0) {
+          nativeCpuReferences.set(metadata.requestId, { sessionId: metadata.sessionId, serial: metadata.serial,
+            bytes: new Uint8Array(data.slice(0)) });
+        } else if (baseSerial === undefined) nativeCpuReferences.delete(metadata.requestId);
+        else {
+          const reference = nativeCpuReferences.get(metadata.requestId);
+          const region = metadata.update;
+          if (!reference || reference.sessionId !== metadata.sessionId || reference.serial !== baseSerial ||
+              baseSerial !== metadata.serial - 1 || reference.bytes.byteLength !== expectedBytes ||
+              !Array.isArray(region) || region.length !== 4 || !region.every(value => Number.isInteger(value) && value >= 0 && value % 2 === 0))
+            throw new TypeError('invalid_native_cpu_frame_reference');
+          const [x, y, width, height] = region;
+          if (!width || !height || x + width > metadata.width || y + height > metadata.height ||
+              height * 2 >= metadata.height || byteLength !== metadata.width * height * 3 / 2)
+            throw new TypeError('invalid_native_cpu_frame_patch');
+          const patch = new Uint8Array(data), stride = metadata.width;
+          const yBytes = height * stride;
+          reference.bytes.set(patch.subarray(0, yBytes), y * stride);
+          reference.bytes.set(patch.subarray(yBytes), (metadata.height + y / 2) * stride);
+          reference.serial = metadata.serial;
+          // WebCodecs copies the retained reference when no transfer is given.
+          // Upcoming patches must never modify a frame already sent to WebRTC.
+          frameData = reference.bytes.buffer as ArrayBuffer; transfer = [];
+        }
         const CpuVideoFrame = (globalThis as { VideoFrame?: NativeCpuVideoFrameConstructor }).VideoFrame;
         if (typeof CpuVideoFrame !== 'function') throw new TypeError('native_cpu_video_frame_unavailable');
         const matrix = metadata.colorSpace === 'bt601-limited' ? 'smpte170m' : 'bt709';
         const constructStartedAt = nativeCpuFrameTimingNow();
         try {
-          frame = new CpuVideoFrame(data, {
+          frame = new CpuVideoFrame(frameData, {
             format: 'NV12', codedWidth: metadata.width, codedHeight: metadata.height,
             displayWidth: metadata.width, displayHeight: metadata.height, timestamp: metadata.timestamp,
             layout: [{ offset: 0, stride: metadata.width }, { offset: metadata.width * metadata.height, stride: metadata.width }],
             colorSpace: { primaries: matrix, transfer: matrix, matrix, fullRange: false },
             // Implementations may consume the ArrayBuffer; correctness also holds
             // when the constructor copies it and ignores this transfer hint.
-            transfer: [data],
+            transfer,
           });
         } finally { nativeCpuFrameTimingRecord('construct', constructStartedAt); }
         const listenerStartedAt = nativeCpuFrameTimingNow();
@@ -254,6 +315,7 @@ if (nativeEnabled) {
         finally { nativeCpuFrameTimingRecord('listener', listenerStartedAt); }
       }
     } catch (error) {
+      nativeCpuReferences.delete(metadata.requestId);
       console.warn('[native-screen] renderer_cpu_frame_error', error instanceof Error ? error.name : 'unknown');
       stopReceiver();
     } finally {
@@ -314,6 +376,9 @@ if (nativeEnabled) {
 }
 contextBridge.exposeInMainWorld('coveNativeScreen', {
   supported: nativeEnabled,
+  hardwareAv1Encoding: nativeEnabled && process.argv.includes('--cove-native-screen-hardware-av1=1'),
+  startAv1WithNative: nativeEnabled && process.argv.includes('--cove-native-screen-av1-initial=1'),
+  opaqueAv1Input: nativeEnabled && process.argv.includes('--cove-native-av1-opaque=1'),
   // Experimental handoff only; the qualified runtime and explicit launch flag
   // are required. This grants no additional IPC, source or renderer authority.
   preferredFrameSink: nativeEnabled && process.versions?.electron === '44.0.0'
@@ -333,7 +398,10 @@ contextBridge.exposeInMainWorld('coveNativeScreen', {
   onFrame: (requestId: string, listener: (frame: unknown, metadata: NativeScreenFrame) => Promise<void>) => {
     if (!nativeRequestId(requestId) || typeof listener !== 'function') return () => {};
     nativeFrameListeners.set(requestId, listener);
-    return () => { if (nativeFrameListeners.get(requestId) === listener) nativeFrameListeners.delete(requestId); };
+    return () => {
+      if (nativeFrameListeners.get(requestId) !== listener) return;
+      nativeFrameListeners.delete(requestId); nativeCpuReferences.delete(requestId);
+    };
   },
   onEnded: (requestId: string, listener: (reason: string) => void) => {
     if (!nativeRequestId(requestId) || typeof listener !== 'function') return () => {};

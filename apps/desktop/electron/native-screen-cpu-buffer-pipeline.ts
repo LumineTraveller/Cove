@@ -19,6 +19,10 @@ export interface NativeCpuBufferPipelineOptions {
   /** Sends imported then released for this exact source, including explicit discard. */
   releaseSource(metadata: NativeCpuScreenFrame, disposition: 'copied' | 'discarded'): boolean;
   send(metadata: NativeCpuScreenFrame, data: ArrayBuffer): void;
+  /** The receiver gets a synchronous serialization, independent of this buffer. */
+  reuseSerializedBuffer?: boolean;
+  /** The next in-order send can fill a smaller payload directly from the helper. */
+  frameBytes?(metadata: NativeCpuScreenFrame): number;
   onFinalAck(metadata: NativeCpuScreenFrame): boolean;
   onFailure(code: NativeCpuFrameFailure): void;
   now?(): number;
@@ -74,6 +78,7 @@ export function createNativeCpuBufferPipeline(options: NativeCpuBufferPipelineOp
   const native = new Map<number, FrameLease>();
   const main = new Map<number, FrameLease>();
   const buffers: MainBuffer[] = Array.from({ length: NATIVE_SCREEN_POOL_SIZE }, () => ({}));
+  let serializedBuffer: ArrayBuffer | undefined, serializedRows: ArrayBuffer | undefined;
   const ready: FrameLease[] = [];
   const counters: NativeCpuPipelineCounters = { sourceCopied: 0, sourceDiscarded: 0, sourceReleased: 0,
     mainSent: 0, finalAck: 0, pendingSuperseded: 0, pendingExpired: 0 };
@@ -98,6 +103,7 @@ export function createNativeCpuBufferPipeline(options: NativeCpuBufferPipelineOp
     }
     native.clear(); main.clear(); ready.length = 0; pending = undefined;
     for (const buffer of buffers) { buffer.lease = undefined; buffer.data = undefined; }
+    serializedBuffer = undefined; serializedRows = undefined;
   }
   function fail(code: NativeCpuFrameFailure): void {
     if (stopped) return;
@@ -121,7 +127,8 @@ export function createNativeCpuBufferPipeline(options: NativeCpuBufferPipelineOp
     const frame = value as NativeCpuScreenFrame;
     const metadata: NativeCpuScreenFrame = { requestId: frame.requestId, sessionId: frame.sessionId,
       slot: frame.slot, serial: frame.serial, timestamp: frame.timestamp, width: frame.width, height: frame.height,
-      refresh: frame.refresh, pixelFormat: frame.pixelFormat, storage: frame.storage, colorSpace: frame.colorSpace };
+      refresh: frame.refresh, pixelFormat: frame.pixelFormat, storage: frame.storage, colorSpace: frame.colorSpace,
+      ...(frame.update ? { update: frame.update } : {}) };
     return valid(metadata) ? Object.freeze(metadata) : undefined;
   }
   function releaseSource(lease: FrameLease, disposition: 'copied' | 'discarded', reason?: 'superseded' | 'expired'): boolean {
@@ -189,12 +196,24 @@ export function createNativeCpuBufferPipeline(options: NativeCpuBufferPipelineOp
     // same stdout task could supersede it. Exactly one copy/send still runs per turn.
     ready.shift(); clearTimeout(lease.pendingTimer); lease.pendingTimer = undefined;
     main.set(lease.metadata.serial, lease);
-    const data = buffer.data ??= new ArrayBuffer(expectedBytes);
-    if (data.byteLength !== expectedBytes) { fail('cpu_frame_failed'); return; }
+    // The logical ACK slots are still independent. drain() is serialized and
+    // Electron finishes cloning the payload before send() returns.
+    const frameBytes = options.frameBytes?.(lease.metadata) ?? expectedBytes;
+    if (!positiveInteger(frameBytes) || frameBytes > expectedBytes ||
+        (frameBytes !== expectedBytes && !options.reuseSerializedBuffer)) { fail('cpu_frame_failed'); return; }
+    let data: ArrayBuffer;
+    if (frameBytes !== expectedBytes) {
+      if (serializedRows?.byteLength !== frameBytes) serializedRows = new ArrayBuffer(frameBytes);
+      data = serializedRows;
+    } else {
+      data = options.reuseSerializedBuffer ? serializedBuffer ??= new ArrayBuffer(expectedBytes)
+        : buffer.data ??= new ArrayBuffer(expectedBytes);
+    }
+    if (data.byteLength !== frameBytes) { fail('cpu_frame_failed'); return; }
     try { options.readFrame(lease.handle!, data, lease.metadata); }
     finally { eraseHandle(lease); }
     if (!nativeLive(lease) || !mainLive(lease)) return;
-    if (data.byteLength !== expectedBytes) { fail('cpu_frame_failed'); return; }
+    if (data.byteLength !== frameBytes) { fail('cpu_frame_failed'); return; }
     count('sourceCopied');
     if (!nativeLive(lease) || !mainLive(lease) || !withinDeadline(lease) || !nativeLive(lease)) return;
     if (!releaseSource(lease, 'copied') || !mainLive(lease)) return;
@@ -288,5 +307,6 @@ export function createNativeCpuBufferPipeline(options: NativeCpuBufferPipelineOp
   return { deliver, acknowledge, stop, snapshot: () => ({ ownership: 'copy-complete', ...counters,
     inFlight: main.size, stopped, frames: counters.mainSent, released: counters.finalAck, expectedBytes,
     activeNativeLeases: native.size, mainBuffersInUse: buffers.filter(value => value.lease).length,
-    allocatedBuffers: buffers.filter(value => value.data).length, readyFrames: ready.length, pendingFrames: pending ? 1 : 0 }) };
+    allocatedBuffers: Number(!!serializedBuffer) + Number(!!serializedRows) + buffers.filter(value => value.data).length,
+    readyFrames: ready.length, pendingFrames: pending ? 1 : 0 }) };
 }

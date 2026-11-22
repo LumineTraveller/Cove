@@ -5,7 +5,7 @@ import type { NativeCpuScreenFrame, NativeCpuFrameFailure } from '../electron/na
 
 interface Timer { due: number; callback(): void; unref(): void }
 interface Immediate { callback(): void }
-function fixture(context: TestContext) {
+function fixture(context: TestContext, reuseSerializedBuffer = false) {
   let time = 0;
   const timers = new Set<Timer>(), allTimers: Timer[] = [];
   const immediates = new Set<Immediate>(), allImmediates: Immediate[] = [];
@@ -31,6 +31,7 @@ function fixture(context: TestContext) {
   };
   const options: NativeCpuBufferPipelineOptions = {
     requestId: 'request-1', sessionId: 'session-1', width: 4, height: 2, colorSpace: 'bt709-limited', fps: 120,
+    reuseSerializedBuffer,
     now: () => { hooks.clock(); return time; },
     scheduler: {
       setImmediate(callback) { const value = { callback }; immediates.add(value); allImmediates.push(value); return value as any; },
@@ -116,6 +117,23 @@ test('copy ownership releases the native source before send and final ACK releas
   snapshot.sourceCopied = 99;
   f.pipeline.stop(); assert.equal(f.pipeline.snapshot().sourceCopied, 1);
   assert.equal(f.pipeline.snapshot().allocatedBuffers, 0); assert.equal(f.timers.size, 0);
+});
+
+test('synchronous serialization reuses one scratch buffer and preserves three independent ACK credits', context => {
+  const f = fixture(context, true);
+  for (let serial = 1; serial <= 3; serial++) { f.issue(serial); f.run(); }
+  assert.equal(new Set(f.reads.map(value => value.target)).size, 1);
+  assert.deepEqual(f.sent.map(frame => frame.pixels[0]), [1, 2, 3]);
+  assert.equal(f.pipeline.snapshot().allocatedBuffers, 1);
+  assert.equal(f.pipeline.snapshot().mainBuffersInUse, 3);
+  f.issue(4);
+  assert.equal(f.immediates.size, 0);
+  assert.equal(f.pipeline.acknowledge(f.sent[1].metadata), true);
+  f.run();
+  assert.equal(f.sent[3].pixels[0], 4);
+  assert.equal(f.pipeline.acknowledge(f.sent[0].metadata), true);
+  assert.equal(f.pipeline.acknowledge(f.sent[1].metadata), false);
+  assert.deepEqual(f.failures, []);
 });
 
 test('one helper slot can feed three distinct main buffers before any old final ACK arrives', context => {

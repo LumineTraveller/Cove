@@ -157,6 +157,8 @@ export default function ChatRoomV2({
     pendingGameMode,
     pendingNativeResolution,
     setPendingNativeResolution,
+    pendingGpuEncoding,
+    setPendingGpuEncoding,
     editingScreen,
     setPendingPreset,
     setPendingFps,
@@ -845,6 +847,13 @@ export default function ChatRoomV2({
           gameMode={pendingGameMode}
           nativeResolution={pendingNativeResolution}
           onNativeResolution={setPendingNativeResolution}
+          gpuEncoding={rtc.screenGpuEncodingAvailable && pendingGpuEncoding && !rtc.screenCompatibilityMode}
+          gpuEncodingUnavailableReason={
+            !rtc.screenGpuEncodingAvailable ? '当前客户端不支持 GPU 编码'
+              : rtc.screenCompatibilityMode ? '关闭兼容观看后可使用 GPU 编码'
+              : editingScreen ? '停止当前共享后可更改' : undefined
+          }
+          onGpuEncoding={setPendingGpuEncoding}
           confirmLabel={editingScreen ? '更新共享' : '开始共享'}
           busy={rtc.isStartingScreenShare}
           onPreset={setPendingPreset}
@@ -862,6 +871,7 @@ export default function ChatRoomV2({
               pendingGameMode,
               pendingNativeResolution,
               rtc.screenCompatibilityMode,
+              rtc.screenGpuEncodingAvailable && pendingGpuEncoding && !rtc.screenCompatibilityMode,
             ).then(started => {
               if (shouldUpdate || started) {
                 setEditingScreen(false);

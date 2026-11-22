@@ -12,6 +12,7 @@ import {
   NATIVE_SCREEN_POOL_SIZE, NATIVE_SCREEN_START_TIMEOUT_MS, NATIVE_SCREEN_STOP_TIMEOUT_MS,
   validNativeScreenOptions, validNativeScreenRequestId,
   type NativeScreenFrame, type NativeScreenOptions, type NativeScreenSourceSelection, type NativeScreenStartResult, type NativeScreenColorSpace,
+  type NativeScreenRegion,
 } from './native-screen-capture-protocol';
 
 const MAX_LINE_BYTES = 8 * 1024;
@@ -22,6 +23,7 @@ const MAX_REQUEST_IDS = 4096;
 const SELECTION_LIFETIME_MS = 10_000;
 const CAPTURE_STALL_TIMEOUT_MS = 5_000;
 const TIMING_BUCKET_LIMITS_MS = [1, 2, 4, 1000 / 120, 1000 / 60, 1000 / 30];
+const gpuNv12ColorSpace = { primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', range: 'limited' } as const;
 type TimingStage = 'import' | 'transfer' | 'reference';
 interface TimingMetric { count: number; totalMs: number; maxMs: number; buckets: number[] }
 function emptyTimingMetric(): TimingMetric { return { count: 0, totalMs: 0, maxMs: 0, buckets: Array(7).fill(0) }; }
@@ -40,6 +42,8 @@ interface NativeScreenChildHandleBridge {
   readFrame?(handle: Buffer, expectedBytes: number): ArrayBuffer;
   readFrameCached?(slot: number, handle: Buffer, expectedBytes: number): ArrayBuffer;
   readFrameCachedInto?(slot: number, handle: Buffer, target: ArrayBuffer): void;
+  readFrameCachedRowsInto?(slot: number, handle: Buffer, target: ArrayBuffer, width: number, height: number,
+    y: number, rows: number): void;
   cpuSeconds?(): number;
   close(): void;
 }
@@ -54,8 +58,14 @@ interface Lease {
   permitSent: boolean;
   referencesReleased: boolean;
   credited: boolean;
+  cachedFrameSent?: boolean;
   transferTimer?: ReturnType<typeof setTimeout>;
   referenceTimer?: ReturnType<typeof setTimeout>;
+}
+interface CachedTexture {
+  handle: bigint;
+  texture: Electron.SharedTextureImportedSubtle;
+  transfer: Electron.SharedTextureTransfer;
 }
 interface Session {
   target: WebContents;
@@ -64,6 +74,10 @@ interface Session {
   sessionId: string;
   options: NativeScreenOptions;
   selection: NativeScreenSourceSelection;
+  storage: Ready['storage'];
+  pixelFormat: Ready['pixelFormat'];
+  cpuOwnership: NativeCpuOwnership;
+  packedScreenCapture: boolean;
   child: ChildProcessWithoutNullStreams;
   childHandles?: NativeScreenChildHandleBridge;
   childHandlesClosed: boolean;
@@ -75,6 +89,8 @@ interface Session {
   lastTimestamp: number;
   pending: Buffer;
   leases: Map<number, Lease>;
+  cachedTextures?: Map<number, CachedTexture>;
+  cachedDrainTimer?: ReturnType<typeof setTimeout>;
   cpuDelivery?: NativeCpuFrameDelivery;
   cpuPipeline?: NativeCpuBufferPipeline;
   cpuBuffers?: Map<number, ArrayBuffer>;
@@ -95,6 +111,24 @@ function record(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
+function cpuFrameRegion(value: unknown, width: number, height: number): NativeScreenRegion | undefined {
+  if (!Array.isArray(value) || value.length !== 4 || !value.every(part => integer(part, 0, 4096) && part % 2 === 0))
+    return;
+  const [x, y, w, h] = value as number[];
+  if (!w || !h || x + w > width || y + h > height || h * 2 >= height) return;
+  return [x, y, w, h];
+}
+
+function copyCpuFrameRows(frame: ArrayBuffer, patch: ArrayBuffer, width: number, height: number, region: NativeScreenRegion) {
+  const [, y, , rows] = region;
+  // Full-width row bands cost two bulk copies, even when the changed area is narrow.
+  const yStart = y * width, yBytes = rows * width;
+  const uvStart = (height + y / 2) * width;
+  const full = new Uint8Array(frame), part = new Uint8Array(patch);
+  part.set(full.subarray(yStart, yStart + yBytes), 0);
+  part.set(full.subarray(uvStart, uvStart + yBytes / 2), yBytes);
+}
+
 /** Owns only children it creates. Renderer IPC never provides a texture handle. */
 export class NativeScreenCaptureController {
   private readonly sessions = new Set<Session>();
@@ -109,13 +143,17 @@ export class NativeScreenCaptureController {
   private refreshFrames = 0;
   private transferredFrames = 0;
   private releasedFrames = 0;
+  private textureImports = 0;
+  private cpuPatchedFrames = 0;
+  private cpuPatchedBytes = 0;
+  private cpuSourceBytes = 0;
   private lastEndReason: FailureCode | null = null;
   private handles?: NativeScreenHandleBridge;
   private readonly timing = { import: emptyTimingMetric(), transfer: emptyTimingMetric(), reference: emptyTimingMetric() };
   private readonly cpuOwnershipCounters: NativeCpuPipelineCounters = { sourceCopied: 0, sourceDiscarded: 0,
     sourceReleased: 0, mainSent: 0, finalAck: 0, pendingSuperseded: 0, pendingExpired: 0 };
 
-  constructor(private readonly config: { enabled: boolean; helperPath: string; handles?: NativeScreenHandleBridge; timing?: boolean; onHelperTiming?: (sample: Readonly<NativeScreenHelperTiming>, captureNumber: number) => void; pixelFormat?: 'bgra' | 'nv12'; storage?: 'gpu' | 'cpu'; completion?: 'query' | 'fence'; cpuDeliveryScheduling?: NativeCpuDeliveryScheduling; cpuOwnership?: NativeCpuOwnership; keepRendererActive?: boolean }) {
+  constructor(private readonly config: { enabled: boolean; helperPath: string; handles?: NativeScreenHandleBridge; timing?: boolean; onHelperTiming?: (sample: Readonly<NativeScreenHelperTiming>, captureNumber: number) => void; pixelFormat?: 'bgra' | 'nv12'; storage?: 'gpu' | 'cpu'; completion?: 'query' | 'fence'; cpuDeliveryScheduling?: NativeCpuDeliveryScheduling; cpuOwnership?: NativeCpuOwnership; keepRendererActive?: boolean; reuseGpuTextures?: boolean; preferPackedScreenCapture?: () => boolean; cpuPatches?: boolean; allowGpuNv12?: boolean; allowCpuNv12?: boolean }) {
     this.handles = config.handles;
   }
 
@@ -126,9 +164,12 @@ export class NativeScreenCaptureController {
   async start(target: WebContents, requestId: string, options: NativeScreenOptions): Promise<NativeScreenStartResult> {
     if (!validNativeScreenRequestId(requestId) || !validNativeScreenOptions(options))
       return { ok: false, reason: 'invalid_request' };
-    // GPU NV12 has not passed runtime qualification. Keep stock before loading
-    // the handle bridge, spawning a helper or consuming its source selection.
-    if (this.config.pixelFormat === 'nv12' && this.config.storage !== 'cpu')
+    const requireCpuNv12 = options.cpuNv12 === true;
+    if (requireCpuNv12 && (!this.config.allowCpuNv12 || process.versions.electron !== '44.0.0'))
+      return { ok: false, reason: 'unavailable' };
+    // GPU NV12 is limited to a host that explicitly selects the lab route.
+    if (this.config.pixelFormat === 'nv12' && this.config.storage !== 'cpu' &&
+        (this.config.allowGpuNv12 !== true || process.versions.electron !== '44.0.0'))
       return { ok: false, reason: 'unsupported_pixel_format' };
     // Unknown codecs cannot select a safe CPU YUV conversion. Reject before
     // loading/opening the handle bridge or consuming the stock selection.
@@ -146,6 +187,8 @@ export class NativeScreenCaptureController {
       return { ok: false, reason: 'unavailable' };
     if (this.config.storage === 'cpu' && this.config.cpuOwnership === 'copy-complete' && this.handles.supportsCachedCpuFramesInto !== true)
       return { ok: false, reason: 'unavailable' };
+    const canDeliverCpuNv12 = this.handles.supportsCpuFrames === true && this.handles.supportsCachedCpuFramesInto === true;
+    if (requireCpuNv12 && !canDeliverCpuNv12) return { ok: false, reason: 'unavailable' };
     if (this.requestIds.has(requestId)) return { ok: false, reason: 'duplicate_request' };
     if (this.requestIds.size >= MAX_REQUEST_IDS || this.sessions.size >= MAX_SESSIONS)
       return { ok: false, reason: 'busy' };
@@ -159,6 +202,14 @@ export class NativeScreenCaptureController {
       !Number.isFinite(age) || age < 0 || age > SELECTION_LIFETIME_MS ||
       !integer(selection.sourceWidth, 2, 16384) || !integer(selection.sourceHeight, 2, 16384) ||
       selection.sourceWidth < selection.sourceHeight) return { ok: false, reason: 'source_ineligible' };
+    const packedScreenCapture = requireCpuNv12 || (process.versions.electron === '44.0.0' && this.config.storage !== 'cpu' &&
+      options.colorSpace === 'bt709-limited' && options.fps === 120 &&
+      options.maxWidth >= 1728 && options.maxWidth <= 1920 && options.maxHeight === 1080 &&
+      integer(selection.sourceWidth, 2558, 2562) && integer(selection.sourceHeight, 1598, 1602) &&
+      canDeliverCpuNv12 && this.config.preferPackedScreenCapture?.() === true);
+    const storage = packedScreenCapture ? 'cpu' : this.config.storage ?? 'gpu';
+    const pixelFormat = packedScreenCapture ? 'nv12' : this.config.pixelFormat ?? 'bgra';
+    const cpuOwnership = packedScreenCapture ? 'copy-complete' : this.config.cpuOwnership ?? 'final-ack';
     this.requestIds.add(requestId);
     let frame: WebFrameMain;
     let child: ChildProcessWithoutNullStreams;
@@ -166,9 +217,8 @@ export class NativeScreenCaptureController {
       frame = target.mainFrame;
       child = spawn(this.config.helperPath, ['--owner-pid', String(process.pid),
         '--max-width', String(options.maxWidth), '--max-height', String(options.maxHeight), '--fps', String(options.fps),
-        ...(this.config.pixelFormat === 'nv12' ? ['--pixel-format', 'nv12'] : []),
-        ...(this.config.storage === 'cpu' ? ['--frame-storage', 'cpu'] : []),
-        ...(this.config.storage === 'cpu' ? ['--color-space', options.colorSpace!] : []),
+        ...(pixelFormat === 'nv12' ? ['--pixel-format', 'nv12'] : []),
+        ...(storage === 'cpu' ? ['--frame-storage', 'cpu', '--color-space', options.colorSpace!] : []),
         ...(this.config.completion ? ['--completion', this.config.completion] : [])],
       { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     } catch {
@@ -180,8 +230,12 @@ export class NativeScreenCaptureController {
     let resolveStop!: () => void;
     const stopPromise = new Promise<void>(resolve => { resolveStop = resolve; });
     const session: Session = { target, frame, child, requestId, sessionId: randomUUID(), options: { ...options }, selection,
+      storage, pixelFormat, cpuOwnership, packedScreenCapture,
       active: true, closed: false, notified: false, childHandlesClosed: false, lastSerial: 0, lastTimestamp: 0, pending: Buffer.alloc(0),
       leases: new Map(), resolveStart, stopPromise, resolveStop, detach: () => {} };
+    if (this.config.reuseGpuTextures && process.versions.electron === '44.0.0' && storage !== 'cpu' &&
+        typeof sharedTexture.subtle?.importSharedTexture === 'function')
+      session.cachedTextures = new Map();
     this.sessions.add(session);
     this.started++;
     const captureNumber = this.started;
@@ -239,10 +293,10 @@ export class NativeScreenCaptureController {
     session.startTimer.unref();
     try { session.childHandles = this.handles.openChild(child.pid!); }
     catch { this.retire(session, 'helper_unavailable', true); }
-    if (session.active && this.config.storage === 'cpu' && this.config.cpuOwnership !== 'copy-complete' &&
+    if (session.active && storage === 'cpu' && cpuOwnership !== 'copy-complete' &&
         typeof session.childHandles?.readFrame !== 'function')
       this.retire(session, 'helper_unavailable', true);
-    if (session.active && this.config.storage === 'cpu' && this.config.cpuOwnership === 'copy-complete' &&
+    if (session.active && storage === 'cpu' && cpuOwnership === 'copy-complete' &&
         typeof session.childHandles?.readFrameCachedInto !== 'function') this.retire(session, 'helper_unavailable', true);
     return result;
   }
@@ -263,6 +317,33 @@ export class NativeScreenCaptureController {
     return session?.cpuDelivery?.acknowledge(metadata) ?? false;
   }
 
+  acknowledgeGpuFrame(target: WebContents, frame: WebFrameMain | null, metadata: unknown): void {
+    if (!record(metadata) || !integer(metadata.slot, 0, NATIVE_SCREEN_POOL_SIZE - 1)) return;
+    const session = [...this.sessions].find(value => value.target === target && value.frame === frame &&
+      value.requestId === metadata.requestId && value.sessionId === metadata.sessionId);
+    const lease = session?.leases.get(metadata.slot);
+    if (!session?.cachedTextures || !lease?.cachedFrameSent || lease.referencesReleased ||
+        lease.metadata.serial !== metadata.serial || lease.metadata.timestamp !== metadata.timestamp) return;
+    lease.referencesReleased = true;
+    clearTimeout(lease.referenceTimer);
+    this.recordTiming('reference', lease.createdAt);
+    this.transferredFrames++;
+    this.releasedFrames++;
+    if (!session.active || this.command(session, `released ${metadata.slot} ${metadata.serial}\n`))
+      session.leases.delete(metadata.slot);
+    if (!session.active && session.leases.size === 0) {
+      this.releaseCachedTextures(session);
+    }
+  }
+
+  gpuProcessGone(): void {
+    for (const session of this.sessions) {
+      if (!session.cachedTextures) continue;
+      this.retire(session, 'import_failed', true);
+      this.releaseCachedTextures(session);
+    }
+  }
+
   reset(): void {
     this.selection = undefined;
     for (const session of this.sessions) this.retire(session, 'stopped', false);
@@ -273,7 +354,9 @@ export class NativeScreenCaptureController {
     const sessions = [...this.sessions];
     const leases = new Set([...this.retainedLeases, ...sessions.flatMap(value => [...value.leases.values()])]);
     const active = sessions.filter(value => value.active);
-    const cpuOwnership = this.config.storage === 'cpu' ? this.config.cpuOwnership ?? 'final-ack' : 'final-ack';
+    const current = active[0] ?? sessions[0];
+    const storage = current?.storage ?? this.config.storage;
+    const cpuOwnership = storage === 'cpu' ? current?.cpuOwnership ?? this.config.cpuOwnership ?? 'final-ack' : 'final-ack';
     let helperCpuSeconds: number | null = null;
     if (active.length === 1 && active[0].childHandles?.cpuSeconds) {
       try {
@@ -284,8 +367,9 @@ export class NativeScreenCaptureController {
     return { sessions: sessions.length, activeSessions: active.length, helperCpuSeconds,
       keepRendererActive: this.config.keepRendererActive === true,
       rendererActivityLeases: sessions.filter(value => value.releaseRendererActivity !== undefined).length,
-      cpuDeliveryScheduling: cpuOwnership === 'copy-complete' ? 'yield' : this.config.storage === 'cpu' ? this.config.cpuDeliveryScheduling ?? 'immediate' : 'immediate',
+      cpuDeliveryScheduling: cpuOwnership === 'copy-complete' ? 'yield' : storage === 'cpu' ? this.config.cpuDeliveryScheduling ?? 'immediate' : 'immediate',
       cpuOwnership, ...this.cpuOwnershipCounters,
+      cpuPatchedFrames: this.cpuPatchedFrames, cpuPatchedBytes: this.cpuPatchedBytes, cpuSourceBytes: this.cpuSourceBytes,
       activeNativeLeases: sessions.reduce((sum, value) => sum + (value.cpuPipeline?.snapshot().activeNativeLeases ?? value.cpuDelivery?.snapshot().inFlight ?? 0), 0),
       mainBuffersInUse: sessions.reduce((sum, value) => sum + (value.cpuPipeline?.snapshot().mainBuffersInUse ?? value.cpuDelivery?.snapshot().inFlight ?? 0), 0),
       pendingFrames: sessions.reduce((sum, value) => sum + (value.cpuPipeline?.snapshot().pendingFrames ?? 0), 0),
@@ -295,11 +379,12 @@ export class NativeScreenCaptureController {
       cpuFrameBuffers: sessions.reduce((sum, value) => sum + (value.cpuPipeline?.snapshot().allocatedBuffers ?? value.cpuBuffers?.size ?? 0), 0),
       helpers: sessions.filter(value => !value.closed).length,
       childHandles: sessions.filter(value => value.childHandles && !value.childHandlesClosed).length,
-      imports: [...leases].filter(value => value.imported && !value.mainReleased).length,
-      pendingReferences: [...leases].filter(value => value.imported && !value.referencesReleased).length,
+      imports: [...leases].filter(value => value.imported && !value.mainReleased).length +
+        sessions.reduce((sum, value) => sum + (value.cachedTextures?.size ?? 0), 0),
+      pendingReferences: [...leases].filter(value => (value.imported || value.cachedFrameSent) && !value.referencesReleased).length,
       busySlots: sessions.reduce((sum, value) => sum + value.leases.size + (value.cpuPipeline?.snapshot().activeNativeLeases ?? value.cpuDelivery?.snapshot().inFlight ?? 0), 0), started: this.started, stopped: this.stopped,
       frames: this.frames, refreshFrames: this.refreshFrames, transferredFrames: this.transferredFrames,
-      releasedFrames: this.releasedFrames, lastEndReason: this.lastEndReason,
+      releasedFrames: this.releasedFrames, textureImports: this.textureImports, lastEndReason: this.lastEndReason,
       disabled: this.disabledAfterFailure, failureCode: this.failureCode,
       timing: this.config.timing ? Object.fromEntries(Object.entries(this.timing).map(([name, metric]) =>
         [name, { ...metric, buckets: [...metric.buckets] }])) : null };
@@ -360,8 +445,8 @@ export class NativeScreenCaptureController {
     const nv12 = cpu || (message.protocol === 3 && message.pixelFormat === 'nv12' && message.colorSpace === 'bt709-limited');
     const pixelFormat = nv12 ? 'nv12' : 'bgra';
     const storage = cpu ? 'cpu' : 'gpu';
-    if (session.ready || (!bgra && !nv12) || pixelFormat !== (this.config.pixelFormat ?? 'bgra') ||
-      storage !== (this.config.storage ?? 'gpu') || (!cpu && message.storage !== undefined) ||
+    if (session.ready || (!bgra && !nv12) || pixelFormat !== session.pixelFormat ||
+      storage !== session.storage || (!cpu && message.storage !== undefined) ||
       message.poolSize !== NATIVE_SCREEN_POOL_SIZE || message.cursorSupported !== true ||
       !integer(message.sourceWidth, 2, 16384) || !integer(message.sourceHeight, 2, 16384) ||
       message.sourceWidth < message.sourceHeight || Math.abs(message.sourceWidth - session.selection.sourceWidth!) > 2 ||
@@ -376,12 +461,25 @@ export class NativeScreenCaptureController {
     }
     session.ready = { width, height, sourceWidth: message.sourceWidth, sourceHeight: message.sourceHeight, pixelFormat, storage,
       ...(cpu ? { colorSpace: cpuColorSpace as NativeScreenColorSpace } : {}) };
-    if (cpu && this.config.cpuOwnership === 'copy-complete') {
+    if (cpu && session.cpuOwnership === 'copy-complete') {
+      const useCpuPatches = session.packedScreenCapture && this.config.cpuPatches === true;
+      const readRowsDirectly = useCpuPatches && typeof session.childHandles?.readFrameCachedRowsInto === 'function';
+      const fullBytes = width * height * 3 / 2;
+      let previousPatchSerial: number | undefined;
+      let patchBuffer: ArrayBuffer | undefined;
       session.cpuPipeline = createNativeCpuBufferPipeline({ requestId: session.requestId, sessionId: session.sessionId,
         width, height, colorSpace: session.ready.colorSpace!, fps: session.options.fps,
+        reuseSerializedBuffer: useCpuPatches,
+        frameBytes: readRowsDirectly ? ({ update, serial }) =>
+          update && previousPatchSerial === serial - 1 ? width * update[3] * 3 / 2 : fullBytes : undefined,
         readFrame: (handle, target, metadata) => {
           if (!session.active || session.childHandlesClosed) throw new Error('inactive_session');
-          session.childHandles!.readFrameCachedInto!(metadata.slot, handle, target);
+          if (target.byteLength === fullBytes) session.childHandles!.readFrameCachedInto!(metadata.slot, handle, target);
+          else {
+            const [, y, , rows] = metadata.update!;
+            session.childHandles!.readFrameCachedRowsInto!(metadata.slot, handle, target, width, height, y, rows);
+          }
+          this.cpuSourceBytes += target.byteLength;
         },
         // One write preserves command order without waiting to submit a second write.
         // Pipe delivery is still a byte stream; errors retire the session as before.
@@ -389,7 +487,23 @@ export class NativeScreenCaptureController {
           `imported ${metadata.slot} ${metadata.serial}\nreleased ${metadata.slot} ${metadata.serial}\n`),
         send: (metadata, data) => {
           if (!session.active) throw new Error('inactive_session');
-          session.frame.send('cove:native-screen:cpu-frame', metadata, data);
+          const region = useCpuPatches ? metadata.update : undefined;
+          if (region && previousPatchSerial === metadata.serial - 1) {
+            const patchBytes = width * region[3] * 3 / 2;
+            if (data.byteLength === fullBytes) {
+              if (patchBuffer?.byteLength !== patchBytes) patchBuffer = new ArrayBuffer(patchBytes);
+              copyCpuFrameRows(data, patchBuffer, width, height, region);
+              data = patchBuffer;
+            }
+            session.frame.send('cove:native-screen:cpu-frame', metadata, data, previousPatchSerial);
+            this.cpuPatchedFrames++; this.cpuPatchedBytes += patchBytes;
+          } else {
+            // A gap or a full desktop update invalidates the renderer's reference.
+            patchBuffer = undefined;
+            if (region) session.frame.send('cove:native-screen:cpu-frame', metadata, data, 0);
+            else session.frame.send('cove:native-screen:cpu-frame', metadata, data);
+          }
+          previousPatchSerial = region ? metadata.serial : undefined;
           this.frames++; if (metadata.refresh) this.refreshFrames++;
         },
         onFinalAck: () => {
@@ -443,6 +557,7 @@ export class NativeScreenCaptureController {
     clearTimeout(session.startTimer); session.startTimer = undefined;
     this.watchHealth(session);
     session.resolveStart({ ok: true, sessionId: session.sessionId, width, height, ...(nv12 ? { pixelFormat: 'nv12' as const } : {}),
+      ...(session.packedScreenCapture ? { preferredContentHint: 'detail' as const } : {}),
       ...(cpu ? { storage: 'cpu' as const, colorSpace: session.ready.colorSpace! } : {}) });
   }
 
@@ -459,11 +574,14 @@ export class NativeScreenCaptureController {
       BigInt(message.handle) === 0n || BigInt(message.handle) === 0xffffffffffffffffn) {
       this.retire(session, 'invalid_protocol', true); return;
     }
+    const update = this.config.cpuPatches && session.packedScreenCapture && !message.refresh
+      ? cpuFrameRegion(message.update, session.ready.width, session.ready.height) : undefined;
     const metadata: NativeScreenFrame = { requestId: session.requestId, sessionId: session.sessionId, slot: message.slot,
       serial: message.serial, width: session.ready.width, height: session.ready.height,
       timestamp: message.timestamp, refresh: message.refresh,
       ...(session.ready.pixelFormat === 'nv12' ? { pixelFormat: 'nv12' as const } : {}),
-      ...(session.ready.storage === 'cpu' ? { storage: 'cpu' as const, colorSpace: session.ready.colorSpace! } : {}) };
+      ...(session.ready.storage === 'cpu' ? { storage: 'cpu' as const, colorSpace: session.ready.colorSpace! } : {}),
+      ...(update ? { update } : {}) };
     if (session.ready.storage === 'cpu') {
       session.lastSerial = metadata.serial; session.lastTimestamp = metadata.timestamp;
       this.watchHealth(session);
@@ -479,6 +597,10 @@ export class NativeScreenCaptureController {
     session.lastSerial = metadata.serial;
     session.lastTimestamp = metadata.timestamp;
     this.watchHealth(session);
+    if (session.cachedTextures) {
+      this.sendCachedGpuFrame(session, lease, BigInt(message.handle));
+      return;
+    }
     const handle = Buffer.alloc(8);
     handle.writeBigUInt64LE(BigInt(message.handle));
     let owned: ReturnType<NativeScreenChildHandleBridge['duplicate']> | undefined;
@@ -490,9 +612,7 @@ export class NativeScreenCaptureController {
         throw new Error('invalid_owned_handle');
       lease.imported = sharedTexture.importSharedTexture({ textureInfo: { handle: { ntHandle: owned.handle },
         codedSize: { width: metadata.width, height: metadata.height }, pixelFormat: session.ready.pixelFormat, timestamp: metadata.timestamp,
-        ...(session.ready.pixelFormat === 'nv12' ? { colorSpace: {
-          primaries: 'bt709' as const, transfer: 'bt709' as const, matrix: 'bt709' as const, range: 'limited' as const,
-        } } : {}) },
+        ...(session.ready.pixelFormat === 'nv12' ? { colorSpace: gpuNv12ColorSpace } : {}) },
       allReferencesReleased: () => {
         this.recordTiming('reference', lease.createdAt);
         this.releasedFrames++;
@@ -501,6 +621,7 @@ export class NativeScreenCaptureController {
         this.credit(session, lease);
         this.cleanupLease(session, lease);
       } });
+      this.textureImports++;
     } catch {
       this.retire(session, 'import_failed', true); return;
     } finally {
@@ -547,6 +668,66 @@ export class NativeScreenCaptureController {
       clearTimeout(lease.transferTimer); lease.transferTimer = undefined;
       this.cleanupLease(session, lease);
     });
+  }
+
+  private sendCachedGpuFrame(session: Session, lease: Lease, handleValue: bigint): void {
+    const { metadata } = lease;
+    const cache = session.cachedTextures!;
+    let cached = cache.get(metadata.slot);
+    if (cached && cached.handle !== handleValue) {
+      this.retire(session, 'invalid_protocol', true);
+      return;
+    }
+    if (!cached) {
+      const handle = Buffer.alloc(8);
+      handle.writeBigUInt64LE(handleValue);
+      let owned: ReturnType<NativeScreenChildHandleBridge['duplicate']> | undefined;
+      let texture: Electron.SharedTextureImportedSubtle | undefined;
+      try {
+        owned = session.childHandles!.duplicate(handle);
+        if (!Buffer.isBuffer(owned.handle) || owned.handle.length !== 8 || owned.handle.readBigUInt64LE() === 0n)
+          throw new Error('invalid_owned_handle');
+        texture = sharedTexture.subtle.importSharedTexture({
+          handle: { ntHandle: owned.handle }, pixelFormat: session.pixelFormat,
+          codedSize: { width: metadata.width, height: metadata.height },
+          ...(session.pixelFormat === 'nv12' ? { colorSpace: gpuNv12ColorSpace } : {}),
+        });
+        cached = { handle: handleValue, texture, transfer: texture.startTransferSharedTexture() };
+        cache.set(metadata.slot, cached);
+        this.textureImports++;
+        this.recordTiming('import', lease.createdAt);
+      } catch {
+        try { texture?.release(); } catch { /* No frame can use this texture. */ }
+        this.retire(session, 'import_failed', true);
+        return;
+      } finally {
+        handle.fill(0);
+        try { owned?.close(); } catch { this.retire(session, 'import_failed', true); }
+        if (Buffer.isBuffer(owned?.handle)) owned.handle.fill(0);
+      }
+    }
+    if (!this.command(session, `imported ${metadata.slot} ${metadata.serial}\n`)) return;
+    this.frames++;
+    if (metadata.refresh) this.refreshFrames++;
+    lease.referenceTimer = setTimeout(() => this.retire(session, 'capture_stalled', true), CAPTURE_STALL_TIMEOUT_MS);
+    lease.referenceTimer.unref();
+    try {
+      session.frame.send('cove:native-screen:cached-gpu-frame', metadata, cached.transfer);
+      lease.cachedFrameSent = true;
+    }
+    catch { this.retire(session, 'transfer_failed', true); }
+  }
+
+  private releaseCachedTextures(session: Session): void {
+    if (!session.cachedTextures) return;
+    clearTimeout(session.cachedDrainTimer);
+    session.cachedDrainTimer = undefined;
+    session.leases.clear();
+    for (const { texture } of session.cachedTextures.values()) {
+      try { texture.release(); } catch { this.disable('release_failed'); }
+    }
+    session.cachedTextures.clear();
+    if (session.closed) this.sessions.delete(session);
   }
 
   private releaseMain(session: Session, lease: Lease): void {
@@ -617,7 +798,17 @@ export class NativeScreenCaptureController {
     for (const lease of session.leases.values()) {
       clearTimeout(lease.transferTimer); lease.transferTimer = undefined;
       clearTimeout(lease.referenceTimer); lease.referenceTimer = undefined;
-      this.releaseMain(session, lease);
+      if (!session.cachedTextures) this.releaseMain(session, lease);
+      else if (!lease.cachedFrameSent || lease.referencesReleased) session.leases.delete(lease.metadata.slot);
+    }
+    if (session.cachedTextures) {
+      // Stop returns no further slot credits. Keep the imports until queued
+      // renderer transfers finish, with a deadline for detached renderers.
+      if (session.leases.size === 0 || session.target.isDestroyed()) this.releaseCachedTextures(session);
+      else {
+        session.cachedDrainTimer = setTimeout(() => this.releaseCachedTextures(session), NATIVE_SCREEN_START_TIMEOUT_MS);
+        session.cachedDrainTimer.unref();
+      }
     }
     try {
       if (!session.child.stdin.destroyed && session.child.exitCode === null && session.child.signalCode === null)
@@ -640,9 +831,11 @@ export class NativeScreenCaptureController {
     session.startTimer = undefined; session.stopTimer = undefined;
     session.detach();
     session.pending = Buffer.alloc(0);
-    for (const lease of session.leases.values()) {
-      this.releaseMain(session, lease);
-      this.cleanupLease(session, lease);
+    if (!session.cachedTextures) {
+      for (const lease of session.leases.values()) {
+        this.releaseMain(session, lease);
+        this.cleanupLease(session, lease);
+      }
     }
     if (session.leases.size === 0) this.sessions.delete(session);
     session.resolveStop();

@@ -181,7 +181,8 @@ const HELPER_TIMING_COUNTS = ['ticks', 'missedTicks', 'acquireSuccess', 'acquire
   'sourcePresents', 'pointerOnly', 'accumulatedFrames', 'maxAccumulatedFrames', 'newFrames', 'refreshFrames',
   'openSlotCreditWaitUs', 'periodUs', 'elapsedUs', 'readinessRetries', 'readinessExpired', 'readinessCancelled',
   'readinessSlotWaitWindows', 'readinessPresentWaitWindows', 'readinessRecoveredSlot', 'readinessRecoveredPresent',
-  'cpuMapAttempts', 'cpuMapStillDrawing', 'cpuMapCancelled', 'cpuMapTimeouts'];
+  'cpuMapAttempts', 'cpuMapStillDrawing', 'cpuMapCancelled', 'cpuMapTimeouts',
+  'packedPartialFrames', 'packedFullFrames', 'packedConvertedPixels', 'packedReadbackBytes', 'packedSectionBytes'];
 const HELPER_TIMING_STAGES = ['acquire', 'draw', 'gpuWait', 'gpuFlush', 'gpuQuery', 'frameRelease', 'output',
   'tickWork', 'tickLateness', 'timerWait', 'timerOvershoot', 'slotCreditWait', 'cpuReadback',
   'gpuFenceCheck', 'gpuEventArm', 'gpuEventWait', 'cpuMapWait', 'acquireSuccessWait', 'acquireTimeoutWait'];
@@ -303,9 +304,12 @@ function createNativeStartupCollector(onSample, maximumSamples = 120) {
 function nativeBrokerSnapshot(controller) {
   if (!controller) return null;
   const snapshot = controller.snapshot(), safe = {};
-  for (const key of ['sessions', 'activeSessions', 'helpers', 'imports', 'pendingReferences', 'childHandles', 'busySlots', 'started', 'stopped', 'frames', 'refreshFrames', 'transferredFrames', 'releasedFrames', 'cpuFramesInFlight', 'cpuFrameBuffers', 'sourceCopied', 'sourceDiscarded', 'sourceReleased', 'mainSent', 'finalAck', 'pendingSuperseded', 'pendingExpired', 'activeNativeLeases', 'mainBuffersInUse', 'pendingFrames']) {
+  for (const key of ['sessions', 'activeSessions', 'helpers', 'imports', 'pendingReferences', 'childHandles', 'busySlots', 'started', 'stopped', 'frames', 'refreshFrames', 'transferredFrames', 'releasedFrames', 'textureImports', 'cpuFramesInFlight', 'cpuFrameBuffers', 'sourceCopied', 'sourceDiscarded', 'sourceReleased', 'mainSent', 'finalAck', 'pendingSuperseded', 'pendingExpired', 'activeNativeLeases', 'mainBuffersInUse', 'pendingFrames']) {
     const value = snapshot[key];
     if (Number.isSafeInteger(value) && value >= 0) safe[key] = value;
+  }
+  for (const key of ['cpuPatchedFrames', 'cpuPatchedBytes', 'cpuSourceBytes']) {
+    if (Number.isSafeInteger(snapshot[key]) && snapshot[key] >= 0) safe[key] = snapshot[key];
   }
   if (typeof snapshot.disabled === 'boolean') safe.disabled = snapshot.disabled;
   if (typeof snapshot.keepRendererActive === 'boolean') safe.keepRendererActive = snapshot.keepRendererActive;
@@ -369,7 +373,9 @@ function nativeResourcesReleased(snapshot) {
 function nativeUpgradeEvidence(sample, broker, expectedFormat, expectedStorage) {
   const source = sample?.sources?.find(item => item.isLiveSenderSource === true);
   const nativeSource = source?.kind === 'native-gpu-adapter' && source.trackState === 'live';
-  const stockTrackEnded = sample?.sources?.some(item => item.kind === 'native-display-capture' && item.trackState === 'ended') === true;
+  const stockTracks = sample?.sources?.filter(item => item.kind === 'native-display-capture') ?? [];
+  const stockTracksDetached = stockTracks.length > 0 && stockTracks.every(item =>
+    item.trackState === 'ended' || (item.trackState === 'live' && item.isLiveSenderSource === false));
   const localScreenTrackMatchesSender = sample?.nativeGpu?.localScreenTrackMatchesSender === true;
   const bridgeSupported = sample?.nativeGpu?.bridgeSupported === true;
   const brokerActive = broker?.activeSessions === 1 && broker?.helpers === 1 && broker.frames > 0 && broker.disabled === false;
@@ -377,8 +383,8 @@ function nativeUpgradeEvidence(sample, broker, expectedFormat, expectedStorage) 
     ['bgra', 'nv12'].includes(expectedFormat) && broker?.pixelFormat === expectedFormat;
   const frameStorageMatched = expectedStorage === undefined ||
     ['gpu', 'cpu'].includes(expectedStorage) && broker?.frameStorage === expectedStorage;
-  return { nativeSource, stockTrackEnded, localScreenTrackMatchesSender, bridgeSupported, brokerActive, pixelFormatMatched, frameStorageMatched,
-    passed: nativeSource && stockTrackEnded && localScreenTrackMatchesSender && bridgeSupported && brokerActive && pixelFormatMatched && frameStorageMatched };
+  return { nativeSource, stockTracksDetached, localScreenTrackMatchesSender, bridgeSupported, brokerActive, pixelFormatMatched, frameStorageMatched,
+    passed: nativeSource && stockTracksDetached && localScreenTrackMatchesSender && bridgeSupported && brokerActive && pixelFormatMatched && frameStorageMatched };
 }
 
 module.exports = { nativePerformanceEnabled, nativePerformancePaths, nativeUpgradeRequired, nativeBrokerSnapshot,

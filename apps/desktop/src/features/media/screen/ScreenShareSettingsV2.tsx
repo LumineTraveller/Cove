@@ -8,11 +8,14 @@ export function ScreenShareSettingsV2({
   audio,
   gameMode,
   nativeResolution,
+  gpuEncoding,
+  gpuEncodingUnavailableReason,
   onPreset,
   onFps,
   onAudio,
   onGameMode,
   onNativeResolution,
+  onGpuEncoding,
   confirmLabel,
   busy = false,
   onConfirm,
@@ -23,11 +26,14 @@ export function ScreenShareSettingsV2({
   audio: boolean;
   gameMode: boolean;
   nativeResolution: boolean;
+  gpuEncoding: boolean;
+  gpuEncodingUnavailableReason?: string;
   onPreset: (preset: ScreenPreset) => void;
   onFps: (fps: Fps) => void;
   onAudio: () => void;
   onGameMode: () => void;
   onNativeResolution: (enabled: boolean) => void;
+  onGpuEncoding: (enabled: boolean) => void;
   confirmLabel: string;
   busy?: boolean;
   onConfirm: () => void;
@@ -109,6 +115,22 @@ export function ScreenShareSettingsV2({
             <small>排除 Cove 自身声音，作为屏幕共享附带音频</small>
           </span>
           <input type="checkbox" disabled={busy} checked={audio} onChange={onAudio} />
+        </label>
+        <label className="settings-toggle-card">
+          <span>
+            <b id="screen-gpu-encoding-label">采用GPU编码</b>
+            <small id="screen-gpu-encoding-description">
+              {gpuEncodingUnavailableReason ?? '用显卡编码整屏画面，降低 CPU 占用'}
+            </small>
+          </span>
+          <input
+            type="checkbox"
+            aria-labelledby="screen-gpu-encoding-label"
+            aria-describedby="screen-gpu-encoding-description"
+            disabled={busy || Boolean(gpuEncodingUnavailableReason)}
+            checked={gpuEncoding}
+            onChange={(event) => onGpuEncoding(event.target.checked)}
+          />
         </label>
         <button className="primary-wide yellow" disabled={busy} aria-busy={busy} onClick={onConfirm}>
           {busy ? '正在开始共享…' : confirmLabel}

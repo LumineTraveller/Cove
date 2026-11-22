@@ -2,6 +2,7 @@
 // Generated-source throughput does not measure Windows desktop capture.
 import * as nativeScreenCaptureDiagnostics from '../../src/features/media/screen/nativeScreenCapture';
 import patternLayouts from './screen-performance-pattern-layouts.json';
+import qualityChart from './screen-performance-quality-chart.json';
 type VideoGenerator = MediaStreamTrack & { writable: WritableStream<VideoFrame> };
 type GeneratorConstructor = new (options: { kind: 'video' }) => VideoGenerator;
 type SafeStat = Record<string, number | string | boolean | null>;
@@ -18,6 +19,7 @@ type OwnedPatternRead = { markersMatched: boolean[]; capturedSequence: number | 
   frameColorSpace: { primaries: string | null; transfer: string | null; matrix: string | null; fullRange: boolean | null } | null;
   markerRgbAbsoluteErrorMaxima: { byMarker: Array<{ r: number; g: number; b: number; max: number }>;
     byChannel: { r: number; g: number; b: number }; max: number } | null;
+  detailQuality?: Array<{barWidth: number; moving: boolean; error: number; contrast: number}>;
   error?: string };
 
 const VIDEO_FIELDS = [
@@ -352,12 +354,41 @@ export function installScreenPerformanceFixture(
     callbackId: number | null; callbacks: number; firstPresentedFrames: number | null;
     latestPresentedFrames: number | null; firstAt: number | null; lastAt: number | null;
     mediaTime: number | null; processingDuration: number | null;
+    ageProbes: { sequence: number; snapshotAt: number }[];
   }>();
   let disposed = false;
   const inspectOwnedPattern = params.get('ownedPattern') === '1';
+  const inspectDetailQuality = inspectOwnedPattern && params.get('detailQuality') === '1';
   const sourceAgeFlag = params.get('sourceAge');
   if (sourceAgeFlag !== null && !['0', '1'].includes(sourceAgeFlag)) throw new Error('Invalid source age option');
   const sourceAgeEnabled = sourceAgeFlag === '1';
+  // One small strip from the decoded frame, sampled at most every 80 ms. A
+  // snapshot freezes the pixels before the asynchronous GPU readback.
+  async function probeFrameAge(video: HTMLVideoElement) {
+    const snapshotAt = performance.timeOrigin + performance.now();
+    const frame = new VideoFrame(video, { timestamp: Math.round(performance.now() * 1000) });
+    try {
+      const visible = frame.visibleRect;
+      if (!visible || visible.height < 2) return;
+      const bits = patternLayout.bits;
+      const centers = Array.from({ length: bits.count }, (_, bit) => visible.x +
+        Math.floor(visible.width * (bits.left + (bit + .5) * bits.width / bits.count)));
+      const left = centers[0] & ~1, right = (centers.at(-1)! + 2) & ~1;
+      const y = (visible.y + Math.floor(visible.height * bits.sampleY)) & ~1;
+      const rect = { x: left, y, width: right - left, height: 2 };
+      const isYuv = frame.format === 'NV12' || frame.format === 'I420' || frame.format === 'I420A';
+      const options: VideoFrameCopyToOptions = isYuv ? { rect } : { rect, format: 'RGBA' };
+      const bytes = new Uint8Array(frame.allocationSize(options));
+      const [layout] = await frame.copyTo(bytes, options);
+      let sequence = 0;
+      for (let bit = 0; bit < centers.length; bit++) {
+        const offset = layout.offset + (centers[bit] - left) * (isYuv ? 1 : 4);
+        const luma = isYuv ? bytes[offset] : (bytes[offset] + bytes[offset + 1] + bytes[offset + 2]) / 3;
+        if (luma > 128) sequence |= 1 << bit;
+      }
+      return { sequence, snapshotAt };
+    } finally { frame.close(); }
+  }
   const patternReadbackMode = params.get('ownedPatternReadback') ?? 'full';
   if (!['full', 'roi'].includes(patternReadbackMode)) throw new Error('Invalid owned-pattern readback mode');
   // Both controlled observer variants inspect the same twenty points from one
@@ -407,6 +438,7 @@ export function installScreenPerformanceFixture(
       const positions = points.map(([x, y]) => ({ x: originX + Math.floor(patternRect.x + patternRect.width * x),
         y: originY + Math.floor(patternRect.y + patternRect.height * y) }));
       const colors: number[][] = Array.from({ length: points.length }, () => []);
+      let fullPlane: { pixels: Uint8Array; layout: PlaneLayout } | undefined;
       const copyRegion = async (indexes: number[], rect?: DOMRectInit) => {
         const options = { format: 'RGBA' as const, ...(rect ? { rect } : {}) };
         const pixels = new Uint8Array(frame!.allocationSize(options)); buffers.push(pixels);
@@ -420,6 +452,7 @@ export function installScreenPerformanceFixture(
           measured.observerCopiedBytes += pixels.byteLength;
         }
         if (layouts.length !== 1) throw new Error('RGBA copy did not produce one packed plane');
+        if (inspectDetailQuality && !rect) fullPlane = { pixels, layout: layouts[0] };
         measured.observerReadbackPixels += (rect?.width ?? width) * (rect?.height ?? height);
         const readStarted = performance.now();
         for (const index of indexes) {
@@ -462,6 +495,28 @@ export function installScreenPerformanceFixture(
           if (colors[bit + 4].reduce((sum, value) => sum + value, 0) > 380) sequence |= 1 << bit;
         }
         measured.capturedSequence = sequence;
+        if (fullPlane && source instanceof HTMLVideoElement) {
+          const { pixels, layout } = fullPlane;
+          measured.detailQuality = qualityChart.bands.map(band => {
+            const moving = band.motionEvery > 0;
+            const phase = moving ? Math.floor(sequence / band.motionEvery) : 0;
+            const row = Math.floor(patternRect.y + patternRect.height *
+              (band.top + qualityChart.bandHeight / 2) / qualityChart.height);
+            let error = 0, bright = 0, dark = 0;
+            for (let stripe = 0; stripe < band.bars; stripe += 1) {
+              const col = Math.floor(patternRect.x + patternRect.width *
+                (qualityChart.left + (stripe + 0.5) * band.barWidth) / qualityChart.width);
+              const at = layout.offset + row * layout.stride + col * 4;
+              const luma = (pixels[at] * 3 + pixels[at + 1] * 6 + pixels[at + 2]) / 10;
+              const light = (stripe + phase) % 2 === 0;
+              error += Math.abs(luma - (light ? qualityChart.light : qualityChart.dark));
+              if (light) bright += luma;
+              else dark += luma;
+            }
+            return { barWidth: band.barWidth, moving, error: error / band.bars,
+              contrast: 2 * (bright - dark) / band.bars };
+          });
+        }
       }
       measured.observerReadMs += performance.now() - readStarted;
     } catch (error) { measured.error = String(error); patternSnapshotResources.errors++; }
@@ -577,6 +632,7 @@ export function installScreenPerformanceFixture(
         firstPresentedFrames: null as number | null, latestPresentedFrames: null as number | null,
         firstAt: null as number | null, lastAt: null as number | null,
         mediaTime: null as number | null, processingDuration: null as number | null,
+        ageProbes: [] as { sequence: number; snapshotAt: number }[],
       };
       presentations.set(video, state);
       if (typeof video.requestVideoFrameCallback !== 'function') continue;
@@ -597,6 +653,15 @@ export function installScreenPerformanceFixture(
   const mutationObserver = new MutationObserver(observeVideos);
   mutationObserver.observe(document.documentElement, { childList: true, subtree: true });
   observeVideos();
+  let ageProbeTask: Promise<void> | undefined;
+  const ageProbeTimer = sourceAgeEnabled ? setInterval(() => {
+    const video = document.querySelector('video');
+    const state = video && presentations.get(video);
+    if (disposed || ageProbeTask || !video || !state || video.readyState < 2 || state.ageProbes.length >= 64) return;
+    ageProbeTask = probeFrameAge(video).then(value => {
+      if (value && !disposed) state.ageProbes.push(value);
+    }, () => {}).finally(() => { ageProbeTask = undefined; });
+  }, 80) : undefined;
 
   const capture: typeof navigator.mediaDevices.getDisplayMedia = async constraints => {
     if (disposed) throw new Error('Screen performance fixture was disposed');
@@ -803,12 +868,13 @@ export function installScreenPerformanceFixture(
     const videoSenders = [...peerConnections].flatMap(connection => connection.getSenders())
       .filter(sender => sender.track?.kind === 'video' && sender.track.readyState === 'live');
     // getDisplayMedia cannot observe the generator created by the product's
-    // background upgrade. Register only the actual replacement shared by the
-    // live sender and localScreen, after the owned stock capture ended.
+    // background upgrade. Register the replacement only when the sole active
+    // video sender and localScreen both use it. Stock capture may stay live
+    // as a fallback after it is detached from the sender.
     if (configuration.nativeGpuCapture && sourceMode === 'native' && fixtureWindow.coveNativeScreen?.supported &&
       localScreenTrack && videoSenders.length === 1 && videoSenders[0].track === localScreenTrack &&
       !sources.some(source => source.track === localScreenTrack) &&
-      sources.some(source => source.kind === 'native-display-capture' && source.track.readyState === 'ended')) {
+      sources.some(source => source.kind === 'native-display-capture')) {
       const track = localScreenTrack, settings = track.getSettings();
       sources.push({ kind: 'native-gpu-adapter', track, width: settings.width ?? null, height: settings.height ?? null,
         requestedFps: null, uniqueFramesDrawn: null, uniqueFramesWritten: null, skippedDeadlines: null,
@@ -1005,6 +1071,7 @@ export function installScreenPerformanceFixture(
           processingDurationSeconds: state.processingDuration,
           totalVideoFrames: quality?.totalVideoFrames ?? null,
           droppedVideoFrames: quality?.droppedVideoFrames ?? null,
+          ...(sourceAgeEnabled ? { ageProbes: state.ageProbes.splice(0) } : {}),
           note: 'Compositor/video-element counters, not proof of physical display scan-out.' };
       }),
     };
@@ -1018,6 +1085,7 @@ export function installScreenPerformanceFixture(
   }
   async function finishCleanup() {
     disposed = true;
+    if (ageProbeTimer !== undefined) clearInterval(ageProbeTimer);
     mutationObserver.disconnect();
     if (HTMLCanvasElement.prototype.getContext === profiledGetContext) HTMLCanvasElement.prototype.getContext = originalGetContext;
     for (const restore of restoreAnalysisContexts) restore();
@@ -1034,7 +1102,7 @@ export function installScreenPerformanceFixture(
       video.cancelVideoFrameCallback?.(state.callbackId); state.callbackId = null;
     }
     if (navigator.mediaDevices.getDisplayMedia === capture) navigator.mediaDevices.getDisplayMedia = originalCapture;
-    await Promise.all([...closingAudio, ...generatedNv12Closures]);
+    await Promise.all([...closingAudio, ...generatedNv12Closures, ageProbeTask]);
     const resources = { disposed, liveSourceTracks: sources.filter(source => source.track.readyState === 'live').length,
       liveStockCaptureKeepalives: stockCaptureKeepalives.filter(track => track.readyState === 'live').length,
       liveSyntheticAudioTracks: testAudio.filter(audio => audio.track.readyState === 'live').length,

@@ -14,6 +14,9 @@ navigator.mediaDevices.enumerateDevices = async () => [];
 const captures: MediaStreamConstraints[] = [];
 const alerts: string[] = [];
 window.alert = (message?: unknown) => { alerts.push(String(message)); };
+Object.defineProperty(window, 'coveNativeScreen', {
+  value: { supported: false, hardwareAv1Encoding: true },
+});
 
 await import('./share-chat-qa');
 

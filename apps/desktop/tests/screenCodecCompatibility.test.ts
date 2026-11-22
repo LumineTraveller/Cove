@@ -17,6 +17,8 @@ function fixture(t: TestContext, compatibilityMode: boolean, sendCodecs: string[
   let captures = 0;
   let sharing = false;
   let produceError: Error | undefined;
+  const testWindow = { alert: (message: string) => alerts.push(message),
+    coveNativeScreen: undefined as { supported: boolean; hardwareAv1Encoding: boolean } | undefined };
   const track = {
     readyState: 'live', contentHint: '', onended: null,
     getSettings: () => ({ width: 1920, height: 1080 }),
@@ -24,7 +26,7 @@ function fixture(t: TestContext, compatibilityMode: boolean, sendCodecs: string[
   };
   const stream = { getVideoTracks: () => [track], getAudioTracks: () => [], getTracks: () => [track] };
   replace('navigator', { mediaDevices: { getDisplayMedia: async () => { captures++; return stream; } } });
-  replace('window', { alert: (message: string) => alerts.push(message) });
+  replace('window', testWindow);
   replace('requestAnimationFrame', (callback: FrameRequestCallback) => { callback(0); return 0; });
   const ref = () => ({ current: null });
   const noop = () => {};
@@ -32,9 +34,9 @@ function fixture(t: TestContext, compatibilityMode: boolean, sendCodecs: string[
     mediaGeneration: { current: 0 },
     inVoice: true, get isSharing() { return sharing; },
     screenPreset: '1080p', fps: 60, screenGameMode: false, screenNativeResolution: false,
-    screenCompatibilityMode: compatibilityMode, shareAudio: false,
+    screenCompatibilityMode: compatibilityMode, screenGpuEncoding: false, shareAudio: false,
     setScreenPreset: noop, setFps: noop, setShareAudio: noop, setScreenGameMode: noop,
-    setScreenNativeResolution: noop, setScreenCompatibilityMode: noop,
+    setScreenNativeResolution: noop, setScreenCompatibilityMode: noop, setScreenGpuEncoding: noop,
     setLocalScreen: noop, setScreenEncodingPlan: noop, setScreenViewerCount: noop, setScreenActivity: noop, setStats: noop,
     setIsSharing: (value: boolean) => { sharing = value; },
     localScreenRef: ref(), videoCounterPrev: ref(), remoteLossPrev: ref(), screenProducer: ref(),
@@ -58,6 +60,7 @@ function fixture(t: TestContext, compatibilityMode: boolean, sendCodecs: string[
   function Probe() { api = useScreenPublishing(deps); return null; }
   renderToStaticMarkup(createElement(Probe));
   return { api, alerts, produced, captures: () => captures, sharing: () => sharing,
+    enableEncodingOption: () => { testWindow.coveNativeScreen = { supported: false, hardwareAv1Encoding: true }; },
     failProduce: () => { produceError = new Error('encoder unavailable'); } };
 }
 
@@ -111,6 +114,24 @@ test('default publishing preserves its AV1 preference', async t => {
   assert.equal(f.produced[0]?.codec.mimeType, 'video/AV1');
 });
 
+test('GPU encoding off selects the software AV1 mode without changing the requested frame rate', async t => {
+  const f = fixture(t, false, ['video/AV1', 'video/VP9']);
+  f.enableEncodingOption();
+  await f.api.startScreenShare();
+  assert.equal(f.produced[0].appData.gpuEncoding, false);
+  assert.equal(f.produced[0].encodings[0].scalabilityMode, 'L1T2');
+  assert.equal(f.produced[0].encodings[0].maxFramerate, 60);
+  assert.equal(f.produced[0].encodings[0].scaleResolutionDownBy, 1);
+});
+
+test('an unsupported GPU encoding request cannot silently start a software share', async t => {
+  const f = fixture(t, false, ['video/AV1']);
+  assert.equal(await f.api.startScreenShare(undefined, undefined, undefined, undefined, undefined, false, true), false);
+  assert.equal(f.captures(), 0);
+  assert.equal(f.produced.length, 0);
+  assert.match(f.alerts[0], /GPU 编码/);
+});
+
 test('an active share cannot pretend replaceTrack changed its codec mode', async t => {
   const f = fixture(t, false, ['video/AV1', 'video/VP8']);
   await f.api.startScreenShare();
@@ -124,12 +145,13 @@ test('an active share cannot pretend replaceTrack changed its codec mode', async
 test('the share dialog leaves compatibility selection in capture settings', () => {
   const noop = () => {};
   const markup = renderToStaticMarkup(createElement(ScreenShareSettingsV2, {
-    preset: '1080p', fps: 60, audio: false, gameMode: false, nativeResolution: false,
-    onPreset: noop, onFps: noop, onAudio: noop, onGameMode: noop, onNativeResolution: noop,
+    preset: '1080p', fps: 60, audio: false, gameMode: false, nativeResolution: false, gpuEncoding: false,
+    onPreset: noop, onFps: noop, onAudio: noop, onGameMode: noop, onNativeResolution: noop, onGpuEncoding: noop,
     confirmLabel: '共享', onConfirm: noop, onCancel: noop,
   }));
   assert.doesNotMatch(markup, /兼容观看|VP8/);
   assert.match(markup, /分辨率/);
   assert.match(markup, /帧率/);
   assert.match(markup, /共享电脑音频/);
+  assert.match(markup, /共享电脑音频[\s\S]*采用GPU编码[\s\S]*<button class="primary-wide/);
 });

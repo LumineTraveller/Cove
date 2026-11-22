@@ -101,6 +101,32 @@ function findButton(tree, text) {
 const requirement = { serverURL: 'https://server.test', minimumClientVersion: '3.0.0',
   downloadUrl: 'https://updates.test/downloads/Cove-Setup.exe' };
 
+test('the update settings suggest the connected HTTPS server only when no update address is saved', async () => {
+  const h = createViewHarness();
+  h.updater.settings = { serverUrl: '', automaticEnabled: false };
+  try {
+    h.render({ embedded: true });
+    await h.flush();
+    const first = h.render({ embedded: true, serverURL: 'https://chat.test:8443/cove/' });
+    assert.match(first.html, /id="update-server-url"[^>]*value="https:\/\/chat\.test:8443\/cove"/);
+    assert.match(first.html, /默认填入当前服务器地址/);
+    const switched = h.render({ embedded: true, serverURL: 'https://other.test' });
+    assert.match(switched.html, /id="update-server-url"[^>]*value="https:\/\/other\.test"/);
+    const http = h.render({ embedded: true, serverURL: 'http://local.test:3001' });
+    assert.match(http.html, /id="update-server-url"[^>]*value=""/);
+    assert.deepEqual(h.updater.settings, { serverUrl: '', automaticEnabled: false });
+    assert.equal(h.updater.checks, 0);
+  } finally { h.dispose(); }
+
+  const saved = createViewHarness();
+  try {
+    saved.render({ embedded: true, serverURL: 'https://chat.test' });
+    await saved.flush();
+    assert.match(saved.render({ embedded: true, serverURL: 'https://chat.test' }).html,
+      /id="update-server-url"[^>]*value="https:\/\/updates\.test"/);
+  } finally { saved.dispose(); }
+});
+
 test('the real update view starts one check, cannot dismiss a gate, and retains retry/download actions after failure', async () => {
   const h = createViewHarness();
   try {
@@ -184,7 +210,7 @@ test('the embedded update view exposes the saved update source and explicit GitH
     const view = h.render({ embedded: true });
     assert.match(view.html, /更新服务器地址/);
     assert.match(view.html, /GitHub 检查并下载/);
-    assert.match(view.html, /留空时不自动检查或下载更新/);
+    assert.match(view.html, /保存空地址可关闭自动更新/);
     assert.match(view.html, /https:\/\/updates\.test/);
     assert.equal(h.updater.checks, 0, 'opening settings must not start an automatic check');
   } finally { h.dispose(); }

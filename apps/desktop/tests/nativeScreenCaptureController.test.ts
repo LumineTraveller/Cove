@@ -36,7 +36,7 @@ const helperTimingLine = () => Buffer.from('COVE_NATIVE_CAPTURE_TIMING ' + JSON.
 }) + '\n');
 const flush = async () => { for (let n = 0; n < 6; n++) await Promise.resolve(); };
 
-function harness(overrides: { enabled?: boolean; platform?: string; electron?: string; missingBridge?: boolean; timing?: boolean; onHelperTiming?: (sample: Readonly<captureTiming.NativeScreenHelperTiming>, captureNumber: number) => void; pixelFormat?: 'bgra' | 'nv12'; storage?: 'gpu' | 'cpu'; completion?: 'query' | 'fence'; cpuDeliveryScheduling?: cpuDelivery.NativeCpuDeliveryScheduling; cpuOwnership?: cpuPipeline.NativeCpuOwnership; supportsCpuFrames?: boolean; supportsCachedCpuFrames?: boolean; supportsCachedCpuFramesInto?: boolean; missingReadInto?: boolean; keepRendererActive?: boolean } = {}) {
+function harness(overrides: { enabled?: boolean; platform?: string; electron?: string; missingBridge?: boolean; timing?: boolean; onHelperTiming?: (sample: Readonly<captureTiming.NativeScreenHelperTiming>, captureNumber: number) => void; pixelFormat?: 'bgra' | 'nv12'; storage?: 'gpu' | 'cpu'; completion?: 'query' | 'fence'; cpuDeliveryScheduling?: cpuDelivery.NativeCpuDeliveryScheduling; cpuOwnership?: cpuPipeline.NativeCpuOwnership; supportsCpuFrames?: boolean; supportsCachedCpuFrames?: boolean; supportsCachedCpuFramesInto?: boolean; missingReadInto?: boolean; keepRendererActive?: boolean; reuseGpuTextures?: boolean; preferPackedScreenCapture?: () => boolean } = {}) {
   let now = 100_000, uuid = 0, importError = false, sendError = false, sendThrows = false, sendFrameError = false;
   let duplicateError = false, closeError = false, openError = false;
   let cpuReadError = false;
@@ -99,9 +99,9 @@ function harness(overrides: { enabled?: boolean; platform?: string; electron?: s
     childHandles.push(owner); return owner;
   } };
   const target = Object.assign(new EventEmitter(), { isDestroyed: () => false,
-    mainFrame: { send(channel: string, data: unknown, binary?: ArrayBuffer) {
+    mainFrame: { send(channel: string, data: unknown, binary?: ArrayBuffer, baseSerial?: number) {
       if (sendFrameError) throw Error('target unavailable');
-      sent.push({ channel, data, ...(binary ? { binary } : {}) });
+      sent.push({ channel, data, ...(binary ? { binary } : {}), ...(baseSerial === undefined ? {} : { baseSerial }) });
     } } });
   const spawn = (file: string, args: string[], config: unknown) => {
     if (spawnError) throw Error('spawn failed');
@@ -116,6 +116,15 @@ function harness(overrides: { enabled?: boolean; platform?: string; electron?: s
     children.push(child); return child;
   };
   const sharedTexture = {
+    subtle: {
+      importSharedTexture(textureInfo: any) {
+        if (importError) throw Error('contains_sensitive_error_not_forwarded');
+        const transfer = { transfer: String(imports.length + 1), timestamp: 0 };
+        const imported = { textureInfo, released: 0, handle: Buffer.from(textureInfo.handle.ntHandle),
+          startTransferSharedTexture: () => transfer, release() { imported.released++; } };
+        imports.push(imported); return imported;
+      },
+    },
     importSharedTexture(config: any) {
       if (importError) throw Error('contains_sensitive_error_not_forwarded');
       const imported = { config, released: 0, handle: Buffer.from(config.textureInfo.handle.ntHandle),
@@ -173,7 +182,7 @@ function harness(overrides: { enabled?: boolean; platform?: string; electron?: s
       throw Error(`Unexpected import ${name}`);
     },
   });
-  const config = { enabled: overrides.enabled ?? true, helperPath: 'owned-helper.exe', timing: overrides.timing, onHelperTiming: overrides.onHelperTiming, pixelFormat: overrides.pixelFormat, storage: overrides.storage, completion: overrides.completion, cpuDeliveryScheduling: overrides.cpuDeliveryScheduling, cpuOwnership: overrides.cpuOwnership, keepRendererActive: overrides.keepRendererActive };
+  const config = { enabled: overrides.enabled ?? true, helperPath: 'owned-helper.exe', timing: overrides.timing, onHelperTiming: overrides.onHelperTiming, pixelFormat: overrides.pixelFormat, storage: overrides.storage, completion: overrides.completion, cpuDeliveryScheduling: overrides.cpuDeliveryScheduling, cpuOwnership: overrides.cpuOwnership, keepRendererActive: overrides.keepRendererActive, reuseGpuTextures: overrides.reuseGpuTextures, preferPackedScreenCapture: overrides.preferPackedScreenCapture, cpuPatches: false, allowGpuNv12: false };
   const controller = new module.exports.NativeScreenCaptureController(config);
   const choose = (patch: Partial<protocol.NativeScreenSourceSelection> = {}) => controller.noteStockSelection({ sourceId: 'screen:0:0',
     displayId: '123', primaryDisplayId: '123', displayCount: 1, sourceWidth: 2560, sourceHeight: 1440, selectedAt: now, ...patch });
@@ -188,6 +197,142 @@ function harness(overrides: { enabled?: boolean; platform?: string; electron?: s
     failCpuRead() { cpuReadError = true; },
     failTargetSend() { sendFrameError = true; } };
 }
+
+test('cached GPU slots import once and reuse only after an acknowledgment from the owning frame', async () => {
+  const h = harness({ reuseGpuTextures: true });
+  const started = h.start(), child = h.children[0];
+  child.emitMessage(ready); assert.equal((await started).ok, true);
+  child.emitMessage(frame(1)); const first = h.sent[0];
+  assert.equal(first.channel, 'cove:native-screen:cached-gpu-frame');
+  assert.equal(h.imports.length, 1); assert.equal(h.duplicates[0].closes, 1);
+  const target = h.target as any, ack = (metadata: unknown) =>
+    h.controller.acknowledgeGpuFrame(target, target.mainFrame, metadata);
+  h.controller.acknowledgeGpuFrame(target, {} as any, first.data);
+  assert.deepEqual(child.writes, ['imported 0 1\n']);
+  ack(first.data);
+  child.emitMessage(frame(2)); const second = h.sent[1];
+  assert.equal(first.binary, second.binary);
+  assert.equal(second.data.timestamp, 2000);
+  assert.equal(h.imports.length, 1); assert.equal(h.duplicates.length, 1);
+  ack(first.data);
+  assert.deepEqual(child.writes, ['imported 0 1\n', 'released 0 1\n', 'imported 0 2\n']);
+
+  const stopped = h.controller.stop(target, 'request_01');
+  child.close(); await stopped;
+  assert.equal(h.imports[0].released, 0, 'ordinary stop drains queued renderer references');
+  ack(second.data);
+  assert.equal(h.imports[0].released, 1);
+  assert.deepEqual(child.writes, ['imported 0 1\n', 'released 0 1\n', 'imported 0 2\n', 'stop\n']);
+  assert.equal(h.controller.snapshot().sessions, 0);
+});
+
+test('GPU process loss releases cached imports without returning stale slot credits', async () => {
+  const h = harness({ reuseGpuTextures: true });
+  const started = h.start(), child = h.children[0];
+  child.emitMessage(ready); await started;
+  child.emitMessage(frame());
+  h.controller.gpuProcessGone();
+  child.close();
+  const target = h.target as any;
+  h.controller.acknowledgeGpuFrame(target, target.mainFrame, h.sent[0].data);
+  assert.deepEqual(child.writes, ['imported 0 1\n', 'stop\n']);
+  assert.equal(h.imports[0].released, 1);
+  assert.equal(h.controller.snapshot().sessions, 0);
+  assert.equal(h.controller.snapshot().failureCode, 'import_failed');
+});
+
+test('cached NV12 GPU slots preserve the texture format and limited BT709 metadata', async () => {
+  const h = harness({ pixelFormat: 'nv12', storage: 'gpu', reuseGpuTextures: true });
+  h.config.allowGpuNv12 = true;
+  const started = h.start(), child = h.children[0];
+  child.emitMessage({ ...ready, protocol: 3, pixelFormat: 'nv12', colorSpace: 'bt709-limited' });
+  assert.equal((await started).ok, true);
+  child.emitMessage({ ...frame(), pixelFormat: 'nv12' });
+  assert.equal(h.sent[0].channel, 'cove:native-screen:cached-gpu-frame');
+  assert.equal(h.imports[0].textureInfo.pixelFormat, 'nv12');
+  assert.deepEqual({ ...h.imports[0].textureInfo.colorSpace },
+    { primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', range: 'limited' });
+  h.controller.acknowledgeGpuFrame(h.target as any, h.target.mainFrame as any, h.sent[0].data);
+  h.controller.reset(); child.close();
+});
+
+test('the qualified AV1 capture selects packed CPU buffers without changing the requested geometry or FPS', async () => {
+  const h = harness({ preferPackedScreenCapture: () => true, supportsCachedCpuFramesInto: true });
+  h.choose({ sourceWidth: 2561, sourceHeight: 1601 });
+  const started = h.controller.start(h.target as any, 'request_01', {
+    maxWidth: 1728, maxHeight: 1080, fps: 120, colorSpace: 'bt709-limited',
+  });
+  const child = h.children[0];
+  assert.deepEqual(Array.from(child.args).slice(-6), ['--pixel-format', 'nv12', '--frame-storage', 'cpu', '--color-space', 'bt709-limited']);
+  child.emitMessage({ ...cpuReady, width: 1728, sourceHeight: 1600 });
+  const result = await started;
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.width, 1728); assert.equal(result.height, 1080);
+    assert.equal(result.preferredContentHint, 'detail');
+  }
+  assert.equal(h.controller.snapshot().cpuOwnership, 'copy-complete');
+  h.controller.reset(); child.close();
+});
+
+test('packed CPU capture sends complete references after a serial gap or full desktop update', async () => {
+  const h = harness({ preferPackedScreenCapture: () => true, supportsCachedCpuFramesInto: true });
+  h.config.cpuPatches = true;
+  h.choose({ sourceWidth: 2560, sourceHeight: 1600 });
+  const started = h.controller.start(h.target as any, 'request_01', {
+    maxWidth: 1728, maxHeight: 1080, fps: 120, colorSpace: 'bt709-limited',
+  });
+  const child = h.children[0];
+  child.emitMessage({ ...cpuReady, width: 1728, sourceHeight: 1600 });
+  assert.equal((await started).ok, true);
+  const fullBytes = 1728 * 1080 * 3 / 2;
+  const region = [64, 16, 128, 32];
+  for (const [serial, update, baseSerial] of [
+    [1, region, 0], [2, region, 1], [4, region, 0], [5, undefined, undefined], [6, region, 0],
+  ] as const) {
+    child.emitMessage({ ...cpuFrame(serial), width: 1728, byteLength: fullBytes, update });
+    h.runImmediate();
+    const sent = h.sent.at(-1);
+    assert.equal(sent.channel, 'cove:native-screen:cpu-frame');
+    assert.equal(sent.baseSerial, baseSerial);
+    assert.equal(sent.binary.byteLength, baseSerial ? 1728 * 32 * 3 / 2 : fullBytes);
+    assert.equal(h.controller.acknowledgeCpuFrame(h.target as any, sent.data), true);
+  }
+  assert.equal(h.controller.snapshot().cpuPatchedFrames, 1);
+  assert.equal(h.controller.snapshot().cpuFrameBuffers, 1);
+  h.controller.reset(); child.close();
+});
+
+test('packed CPU capture reads directly into the smaller payload only for an in-order update', async () => {
+  const h = harness({ preferPackedScreenCapture: () => true, supportsCachedCpuFramesInto: true });
+  h.config.cpuPatches = true;
+  h.choose({ sourceWidth: 2560, sourceHeight: 1600 });
+  const started = h.controller.start(h.target as any, 'request_01', {
+    maxWidth: 1728, maxHeight: 1080, fps: 120, colorSpace: 'bt709-limited',
+  });
+  const rowReads: number[][] = [];
+  h.childHandles[0].readFrameCachedRowsInto = (slot: number, _handle: Buffer, target: ArrayBuffer,
+    width: number, height: number, y: number, rows: number) => {
+    rowReads.push([slot, target.byteLength, width, height, y, rows]);
+    new Uint8Array(target).fill(19);
+  };
+  const child = h.children[0], fullBytes = 1728 * 1080 * 3 / 2, patchBytes = 1728 * 32 * 3 / 2;
+  child.emitMessage({ ...cpuReady, width: 1728, sourceHeight: 1600 });
+  assert.equal((await started).ok, true);
+  for (const serial of [1, 2, 4]) {
+    child.emitMessage({ ...cpuFrame(serial), width: 1728, byteLength: fullBytes, update: [64, 16, 128, 32] });
+    h.runImmediate();
+    const sent = h.sent.at(-1);
+    assert.equal(sent.baseSerial, serial === 2 ? 1 : 0);
+    assert.equal(sent.binary.byteLength, serial === 2 ? patchBytes : fullBytes);
+    if (serial === 2) assert.equal(new Uint8Array(sent.binary)[0], 19);
+    assert.equal(h.controller.acknowledgeCpuFrame(h.target as any, sent.data), true);
+  }
+  assert.deepEqual(rowReads, [[0, patchBytes, 1728, 1080, 16, 32]]);
+  assert.equal(h.cpuReads.length, 2);
+  assert.equal(h.controller.snapshot().cpuSourceBytes, 2 * fullBytes + patchBytes);
+  h.controller.reset(); child.close();
+});
 
 function installRendererPolicy(h: ReturnType<typeof harness>, initial = true) {
   let policy = initial, reads = 0;

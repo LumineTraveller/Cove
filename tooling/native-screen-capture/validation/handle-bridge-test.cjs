@@ -44,6 +44,16 @@ const deadline = setTimeout(() => { child.kill(); process.exitCode = 3; }, 15000
   assert.throws(() => api.openChild(NaN), /invalid_child_pid/);
   assert.throws(() => api.openChild('1'), /invalid_child_pid/);
   session = api.openChild(child.pid);
+  const section = buffer(ready.section), band = new ArrayBuffer(24);
+  assert.throws(() => session.readFrameCachedRowsInto(0, section, band, 8, 8, 3, 2), /invalid_nv12_rows/);
+  assert.throws(() => session.readFrameCachedRowsInto(0, section, band, 8, 8, 8, 2), /invalid_nv12_rows/);
+  assert.throws(() => session.readFrameCachedRowsInto(0, section, new ArrayBuffer(8), 8, 8, 2, 2), /invalid_nv12_rows/);
+  session.readFrameCachedRowsInto(0, section, band, 8, 8, 2, 2);
+  const full = new ArrayBuffer(96);
+  session.readFrameCachedInto(0, section, full);
+  const bytes = new Uint8Array(full);
+  assert.deepEqual([...new Uint8Array(band)], [...bytes.subarray(16, 32), ...bytes.subarray(72, 80)]);
+  assert.equal(bytes[16], 16); assert.equal(bytes[72], 72);
   let helperCpuSeconds = session.cpuSeconds();
   assert.equal(typeof helperCpuSeconds, 'number');
   assert.ok(Number.isFinite(helperCpuSeconds) && helperCpuSeconds >= 0);
@@ -92,7 +102,7 @@ const deadline = setTimeout(() => { child.kill(); process.exitCode = 3; }, 15000
   session.close(); session.close();
   assert.throws(() => session.duplicate(source), /child_unavailable/);
   assert.throws(() => session.cpuSeconds(), /child_unavailable/);
-  console.log(JSON.stringify({ passed: true, gpu: false, desktopCapture: false, actualChild: true,
+  console.log(JSON.stringify({ passed: true, gpu: false, desktopCapture: false, actualChild: true, nv12RowsMatchFull: true,
     explicitCloseInvalidatedHandle: true, recycledHandleSurvivedRepeatedClose: recycled,
     gcFinalizerClosedHandle: finalized, childExitRejected: true, closedSessionRejected: true,
     helperCpuSecondsNumeric: true, helperCpuSecondsNondecreasing: true, cpuSecondsClosedRejected: true }));

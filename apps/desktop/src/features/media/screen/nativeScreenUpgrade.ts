@@ -1,5 +1,5 @@
 import type { Producer } from '../desktopMediaSupport';
-import type { NativeCaptureCandidate, NativeScreenCaptureOptions } from './nativeScreenCapture';
+import { nativeScreenContentHint, type NativeCaptureCandidate, type NativeScreenCaptureOptions } from './nativeScreenCapture';
 import { SCREEN_PRESETS, type ScreenEncodingPlan, type ScreenFps } from './screenCapture';
 import { nativeScreenColorSpaceForCodecs } from './nativeScreenColorPolicy';
 
@@ -69,6 +69,17 @@ function candidateDimensions(track: MediaStreamTrack, stockTrack: MediaStreamTra
   return native;
 }
 
+async function limitStandbyCapture(track: MediaStreamTrack, width: number, height: number) {
+  try {
+    const original = track.getConstraints();
+    await track.applyConstraints({ ...original, width: { max: width }, height: { max: height }, frameRate: { max: 2 } });
+    return original;
+  } catch {
+    // Some browser sources cannot change their cadence in place.
+    return undefined;
+  }
+}
+
 /** Acquire outside the stock commit queue; serialize only replace and rollback. */
 export async function upgradePublishedScreenCapture(options: NativeScreenUpgradeOptions): Promise<void> {
   if (options.maxFps === 30) return;
@@ -123,7 +134,7 @@ export async function upgradePublishedScreenCapture(options: NativeScreenUpgrade
         }
       };
       try {
-        nativeTrack.contentHint = stockTrack.contentHint;
+        nativeTrack.contentHint = nativeScreenContentHint(nativeTrack, stockTrack.contentHint);
         await producer.replaceTrack({ track: nativeTrack });
         attached = true;
         const committedDimensions = candidateDimensions(nativeTrack, stockTrack, stockPlan);
@@ -156,6 +167,7 @@ export async function upgradePublishedScreenCapture(options: NativeScreenUpgrade
         nativeTrack.stop = () => { releaseStandby(); nativeStop(); };
         // The browser's stop-sharing control still revokes the whole capture.
         stockTrack.onended = () => { if (ownsNative()) options.stopPublication(); };
+        const standby = limitStandbyCapture(stockTrack, committedDimensions.width, committedDimensions.height);
         nativeTrack.onended = () => {
           if (!ownsNative()) { releaseStandby(); return; }
           if (recovering) return;
@@ -164,6 +176,10 @@ export async function upgradePublishedScreenCapture(options: NativeScreenUpgrade
             if (!ownsNative()) { releaseStandby(); return; }
             if (!isLive(stockTrack)) { options.stopPublication(); releaseStandby(); return; }
             try {
+              const original = await standby;
+              if (!ownsNative() || !isLive(stockTrack)) { releaseStandby(); return; }
+              if (original) await stockTrack.applyConstraints(original);
+              if (!ownsNative() || !isLive(stockTrack)) { releaseStandby(); return; }
               await producer.replaceTrack({ track: stockTrack });
               if (!ownsNative() || !isLive(stockTrack)) {
                 if (ownsNative()) options.stopPublication();

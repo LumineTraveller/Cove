@@ -25,9 +25,14 @@ function deferred<T>() {
 const flush = () => new Promise<void>(resolve => setImmediate(resolve));
 
 function capture(width: number | undefined = 1280, height: number | undefined = 720) {
+  let constraints: MediaTrackConstraints = {
+    width: { max: width }, height: { max: height }, frameRate: { ideal: 120, max: 120 },
+  };
   const track = {
     readyState: 'live', contentHint: 'detail', onended: null as (() => void) | null, stops: 0,
     getSettings: () => ({ width, height }),
+    getConstraints: () => constraints,
+    async applyConstraints(next: MediaTrackConstraints) { constraints = next; },
     stop() { if (this.readyState !== 'ended') { this.stops++; this.readyState = 'ended'; } },
   };
   const stream = { getTracks: () => [track], getVideoTracks: () => [track] } as unknown as MediaStream;
@@ -100,7 +105,13 @@ test('native acquisition leaves the published stock track and stock commit queue
 
 test('native backend failure restores the original browser source without closing the publication', async () => {
   const f = fixture();
+  const original = f.stock.track.getConstraints();
   await f.run();
+  assert.deepEqual(f.stock.track.getConstraints(), { ...original, frameRate: { max: 2 } });
+  assert.deepEqual(f.native.track.getConstraints().frameRate, { ideal: 120, max: 120 });
+  f.replace(async track => {
+    if (track === f.stock.track) assert.deepEqual(f.stock.track.getConstraints(), original);
+  });
   f.native.track.readyState = 'ended';
   f.native.track.onended?.();
   await f.queue.tail;
@@ -108,6 +119,42 @@ test('native backend failure restores the original browser source without closin
   assert.equal(f.current(), f.stock.stream);
   assert.equal(f.stock.track.readyState, 'live');
   assert.deepEqual(f.replacements, [f.native.track, f.stock.track]);
+  assert.equal(f.queue.candidates.size, 0);
+});
+
+test('a source that cannot reduce standby cadence remains available for recovery', async () => {
+  const f = fixture();
+  let constraintAttempts = 0;
+  f.stock.track.applyConstraints = async () => {
+    constraintAttempts++;
+    throw new Error('OverconstrainedError');
+  };
+  await f.run();
+  f.native.track.readyState = 'ended';
+  f.native.track.onended?.();
+  await f.queue.tail;
+  assert.equal(constraintAttempts, 1);
+  assert.equal(f.current(), f.stock.stream);
+  assert.equal(f.stopped(), 0);
+});
+
+test('stopping during standby restoration prevents a late browser replacement', async () => {
+  const f = fixture(), restoring = deferred<void>();
+  const apply = f.stock.track.applyConstraints;
+  f.stock.track.applyConstraints = async constraints => {
+    if (typeof constraints.frameRate === 'object' && constraints.frameRate.max === 120) await restoring.promise;
+    await apply(constraints);
+  };
+  await f.run();
+  f.native.track.onended?.();
+  await flush();
+  assert.deepEqual(f.replacements, [f.native.track]);
+  f.setPublication(false);
+  f.native.track.stop();
+  restoring.resolve();
+  await f.queue.tail;
+  assert.deepEqual(f.replacements, [f.native.track]);
+  assert.equal(f.stock.track.readyState, 'ended');
   assert.equal(f.queue.candidates.size, 0);
 });
 

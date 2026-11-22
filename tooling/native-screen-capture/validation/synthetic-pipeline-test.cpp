@@ -20,6 +20,49 @@ static void completed(ID3D11Device* device, ID3D11DeviceContext* context) {
   }
   check(device->GetDeviceRemovedReason(), "test_gpu_device_lost");
 }
+
+static void packedRegionPixels(ID3D11Device* device, ID3D11DeviceContext* context) {
+  const Size source{256, 160}, target{172, 108};
+  Pipeline whole(device, source, target, true, Nv12ColorSpace::Bt709Limited, false, true);
+  Pipeline incremental(device, source, target, true, Nv12ColorSpace::Bt709Limited, false, true);
+  std::vector<uint32_t> pixels(size_t(source.width) * source.height, 0xff213a57);
+  CursorShape cursor;
+  cursor.width = 4; cursor.height = 4; cursor.type = DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR;
+  cursor.bytes.resize(size_t(cursor.width) * cursor.height * 4, 192);
+  for (auto* pipeline : {&whole, &incremental}) {
+    pipeline->uploadCursor(device, cursor);
+    pipeline->values.cursorVisible = 1; pipeline->values.cursorX = 99; pipeline->values.cursorY = 46;
+    context->UpdateSubresource(pipeline->desktop.Get(), 0, nullptr, pixels.data(), source.width * 4, 0);
+    pipeline->drawPackedNv12(context, nullptr);
+  }
+  completed(device, context);
+  for (UINT frame = 1; frame <= 8; ++frame) {
+    const RECT update{105, 39, 129, 64};
+    for (LONG y = update.top; y < update.bottom; ++y) for (LONG x = update.left; x < update.right; ++x)
+      pixels[size_t(y) * source.width + x] = 0xff00aa50 + frame * 0x110507;
+    RECT damage = update;
+    includeDamage(damage, cursorDamage(incremental.values));
+    for (auto* pipeline : {&whole, &incremental}) {
+      pipeline->values.cursorX = 97 + INT(frame) * 2;
+      pipeline->values.cursorY = 49;
+      pipeline->values.cursorVisible = frame % 3 != 0;
+      context->UpdateSubresource(pipeline->desktop.Get(), 0, nullptr, pixels.data(), source.width * 4, 0);
+    }
+    includeDamage(damage, cursorDamage(incremental.values));
+    const auto region = projectDamage(damage, source, target);
+    require(bool(region), "test_region_was_full");
+    whole.drawPackedNv12(context, nullptr);
+    incremental.drawPackedNv12(context, nullptr, region);
+    completed(device, context);
+    D3D11_MAPPED_SUBRESOURCE before{}, after{};
+    check(context->Map(whole.packedStaging(), 0, D3D11_MAP_READ, 0, &before), "test_full_map_failed");
+    const auto mapped = context->Map(incremental.packedStaging(), 0, D3D11_MAP_READ, 0, &after);
+    const bool same = SUCCEEDED(mapped) && std::memcmp(before.pData, after.pData, tightNv12ByteLength(target)) == 0;
+    if (SUCCEEDED(mapped)) context->Unmap(incremental.packedStaging(), 0);
+    context->Unmap(whole.packedStaging(), 0);
+    require(same, "test_packed_region_mismatch");
+  }
+}
 // The fence matrix exercises the production completion object itself, including
 // its real event wait and input pump. Run it from a parent with stdin kept open
 // as an anonymous pipe (run-completion.cjs does this), not a console handle.
@@ -35,7 +78,7 @@ class ProductionTestCompletion {
 public:
   ProductionTestCompletion(ID3D11Device* device, ID3D11DeviceContext* context)
       : context_(context), owner_(OpenProcess(SYNCHRONIZE, FALSE, GetCurrentProcessId())),
-        completion_(device, context, CompletionMode::Fence) {
+        completion_(device, context, CompletionPolicy::Fence) {
     require(owner_.value && ownerAlive(owner_.value), "test_owner_handle_failed");
     timing_.enabled = true; timing_.selectedCompletion = CompletionMode::Fence;
   }
@@ -615,6 +658,7 @@ int main(int argc, char** argv) {
       levels, 1, D3D11_SDK_VERSION, reader.GetAddressOf(), nullptr, readerContext.GetAddressOf()), "test_reader_device_failed");
     TestCompletion writerCompletion(device.Get(), context.Get(), completionMode);
     TestCompletion readerCompletion(reader.Get(), readerContext.Get(), completionMode);
+    packedRegionPixels(device.Get(), context.Get());
     DXGI_OUTDUPL_POINTER_SHAPE_INFO info{}; info.Type = DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR;
     info.Width = 4; info.Height = 3; info.Pitch = 20; info.HotSpot = {3,2};
     const unsigned char colors[]{
@@ -679,7 +723,7 @@ int main(int argc, char** argv) {
       << ",\"cpuMapAttempts\":" << writerCompletion.mapAttempts() + readerCompletion.mapAttempts()
       << ",\"cpuMapStillDrawing\":" << writerCompletion.mapStillDrawing() + readerCompletion.mapStillDrawing()
       << ",\"cpuMapWaitUs\":" << writerCompletion.mapWaitUs() + readerCompletion.mapWaitUs()
-      << ",\"cases\":" << caseCount
+      << ",\"cases\":" << caseCount << ",\"packedRegionFramesMatched\":8"
       << ",\"frames\":" << total.frames << ",\"pixels\":" << total.pixels << ",\"values\":" << total.values
       << ",\"maxChannelError\":" << total.error << ",\"tolerance\":2,\"maxConversionError\":" << total.conversionError
       << ",\"conversionTolerance\":1,\"ySamples\":" << total.ySamples << ",\"uvSamples\":" << total.uvSamples

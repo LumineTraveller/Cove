@@ -9,6 +9,7 @@ import {
   type ScreenPreset,
 } from './screenCapture';
 import { updateScreenEncodingParametersIfNeeded } from './screenEncodingParameterUpdate';
+import { nativeScreenContentHint } from './nativeScreenCapture';
 
 import { Producer, Fps } from '../desktopMediaSupport';
 
@@ -69,6 +70,7 @@ export function useScreenAnalysis(deps: useScreenAnalysisDependencies) {
         nativeResolution,
         rampGuard: Date.now() < deps.screenRampGuardUntil.current,
       });
+      plan.contentHint = nativeScreenContentHint(track, plan.contentHint);
       deps.screenActivityRef.current = activity;
       deps.setScreenActivity(activity);
       deps.setScreenEncodingPlan(plan);

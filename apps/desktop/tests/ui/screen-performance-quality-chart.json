@@ -1,0 +1,14 @@
+{
+  "width": 1920,
+  "height": 1080,
+  "left": 544,
+  "bandHeight": 44,
+  "dark": 32,
+  "light": 224,
+  "bands": [
+    { "top": 126, "barWidth": 4, "bars": 176, "motionEvery": 0 },
+    { "top": 184, "barWidth": 8, "bars": 88, "motionEvery": 0 },
+    { "top": 242, "barWidth": 4, "bars": 176, "motionEvery": 8 },
+    { "top": 300, "barWidth": 8, "bars": 88, "motionEvery": 8 }
+  ]
+}

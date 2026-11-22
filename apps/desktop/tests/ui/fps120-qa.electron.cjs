@@ -65,6 +65,7 @@ app.whenReady().then(async () => {
   const fps = value => `.fps-grid button:nth-child(${value === 30 ? 1 : value === 60 ? 2 : 3})`;
   const nativeToggle = '.screen-settings .settings-toggle-card:nth-of-type(1) input';
   const gameToggle = '.screen-settings .settings-toggle-card:nth-of-type(2) input';
+  const gpuToggle = 'input[aria-labelledby="screen-gpu-encoding-label"]';
   const joinVoice = async () => {
     await wait('Boolean(window.coveFpsQa?.ready && document.querySelector(".control-ball"))', 'real room fixture');
     await click('[title="加入语音"]', 'join synthetic voice');
@@ -84,6 +85,17 @@ app.whenReady().then(async () => {
   const stored = 'window.coveFpsQa.snapshot().preferences';
   try {
     await load();
+    await check(`(() => {
+      const toggle = document.querySelector(${JSON.stringify(gpuToggle)});
+      const row = toggle?.closest('label');
+      return toggle && !toggle.checked && !toggle.disabled &&
+        row.previousElementSibling?.classList.contains('computer-audio-toggle') &&
+        row.nextElementSibling?.classList.contains('primary-wide');
+    })()`, 'GPU encoding is off by default, after audio and before sharing');
+    await click(gpuToggle, 'enable GPU encoding for the next share');
+    await check(`document.querySelector(${JSON.stringify(gpuToggle)})?.checked === true`, 'GPU encoding checkbox can be selected');
+    await capture('gpu-encoding-option');
+    await click(gpuToggle, 'restore software encoding for the synthetic share');
     await check('[...document.querySelectorAll(".fps-grid button")].map(b=>b.textContent.trim()).join(",") === "30 fps,60 fps,120 fps"', 'real settings render 30/60/120 FPS in normal mode');
     await click('.resolution-grid button:nth-child(3)', 'choose 1080p');
     await click(fps(120), 'choose 120 FPS in normal mode');
@@ -104,7 +116,8 @@ app.whenReady().then(async () => {
     await wait('Boolean(document.querySelector(".mode-self"))', 'synthetic normal share active');
     await wait(`${stored}.fps === 120 && ${stored}.preset === '1080p' && ${stored}.nativeResolution === true && ${stored}.gameMode === false`, 'actual hook persisted normal120 preferences');
     await check('window.coveFpsQa.snapshot().captures.some(c=>c.video?.frameRate?.ideal===120&&c.video?.frameRate?.max===120&&!c.video?.frameRate?.min)', 'real normal publishing hook requests ideal/max120 without a hard minimum');
-    await check('window.coveFpsQa.snapshot().alerts.length===0', 'synthetic120 normal share completes without product alert');
+    await check('window.coveFpsQa.snapshot().alerts.length===0 && window.coveFpsQa.snapshot().preferences.gpuEncoding===false',
+      'synthetic120 normal share completes with software encoding selected');
     await win.webContents.session.flushStorageData();
 
     // A fresh renderer reads the product hook\'s stored preference. No fixture

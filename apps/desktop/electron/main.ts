@@ -14,9 +14,10 @@ import {
   screen,
 } from "electron";
 import path from "path";
+import { cpus } from "node:os";
 import { AccountPasswordStore } from './account-password-store';
 import { screenCaptureFeaturePolicy } from './screen-capture-features';
-import { nativeScreenCaptureEnabled } from './native-screen-capture-policy';
+import { nativeScreenCaptureEnabled, supportsPackedScreenCapture } from './native-screen-capture-policy';
 import { NativeScreenCaptureController } from './native-screen-capture';
 import { registerScreenShareActivity } from './screen-share-activity';
 import { nativeScreenStartDiagnostic } from './native-screen-capture-diagnostics';
@@ -57,22 +58,6 @@ for (const stream of [process.stdout, process.stderr]) {
   });
 }
 
-// Feature switches must precede app.whenReady(). Chromium 152 only selects WGC
-// for monitors on Windows 11 24H2+, irrespective of the older AllowWgc flag.
-// Its zero-copy conversion path also reduces copies on the DXGI fallback.
-// COVE_DISABLE_ZERO_COPY_DESKTOP_CAPTURE=1 restores Chromium's legacy path.
-if (process.platform === "win32") {
-  const features = screenCaptureFeaturePolicy({
-    platform: process.platform,
-    chromiumVersion: process.versions.chrome,
-    enabledFeatures: app.commandLine.getSwitchValue('enable-features'),
-    disabledFeatures: app.commandLine.getSwitchValue('disable-features'),
-    disableZeroCopy: process.env.COVE_DISABLE_ZERO_COPY_DESKTOP_CAPTURE === '1',
-  });
-  app.commandLine.appendSwitch('enable-features', features.enabledFeatures);
-  if (features.disabledFeatures) app.commandLine.appendSwitch('disable-features', features.disabledFeatures);
-}
-
 const isDev = !app.isPackaged;
 function readPackagedBuildFlavor(): string | undefined {
   if (!app.isPackaged) return undefined;
@@ -94,6 +79,22 @@ const nativeCaptureEnabled = nativeScreenCaptureEnabled({
   isPackaged: app.isPackaged, buildFlavor,
   optIn: process.env.COVE_NATIVE_GPU_CAPTURE, disable: process.env.COVE_DISABLE_NATIVE_GPU_CAPTURE,
 });
+const screenHardwareAv1Enabled = nativeCaptureEnabled && process.versions.electron === '44.0.0';
+if (process.platform === 'win32') {
+  // Chromium must discover the hardware encoder at startup. The sender
+  // selects the AV1 encoding mode separately for each screen publication.
+  const features = screenCaptureFeaturePolicy({
+    platform: process.platform,
+    chromiumVersion: process.versions.chrome,
+    enabledFeatures: [app.commandLine.getSwitchValue('enable-features'),
+      ...(screenHardwareAv1Enabled ? ['MediaFoundationAV1Encoding', 'WebRtcAV1HWEncode'] : [])].filter(Boolean).join(','),
+    disabledFeatures: app.commandLine.getSwitchValue('disable-features'),
+    // Select the capture configuration qualified for republishing AV1 at 120 FPS.
+    disableZeroCopy: screenHardwareAv1Enabled || process.env.COVE_DISABLE_ZERO_COPY_DESKTOP_CAPTURE === '1',
+  });
+  app.commandLine.appendSwitch('enable-features', features.enabledFeatures);
+  if (features.disabledFeatures) app.commandLine.appendSwitch('disable-features', features.disabledFeatures);
+}
 const nativeFrameSinkPreference = process.env.COVE_NATIVE_FRAME_SINK;
 const nativeExperimentalFrameSink = nativeCaptureEnabled && process.versions.electron === '44.0.0' &&
   (nativeFrameSinkPreference === 'worker' || nativeFrameSinkPreference === 'gpu-snapshot') &&
@@ -120,9 +121,20 @@ let mainWindow: BrowserWindow | null = null;
 const nativeTimingEnabled = nativeCaptureEnabled && process.env.COVE_NATIVE_GPU_CAPTURE_TIMING === '1';
 let nativeTimingLogger: ReturnType<typeof createNativeScreenTimingLogger> | undefined;
 const nativeCompletionPreference = process.env.COVE_NATIVE_GPU_CAPTURE_COMPLETION;
+let usePackedScreenCapture = false;
+if (nativeCaptureEnabled && process.versions.electron === '44.0.0' &&
+    process.env.COVE_DISABLE_PACKED_SCREEN_CAPTURE !== '1') {
+  void app.whenReady().then(() => app.getGPUInfo('basic')).then(info => {
+    usePackedScreenCapture = supportsPackedScreenCapture(info, cpus()[0]?.model ?? '');
+  }).catch(() => {});
+}
 const nativeScreenCapture = new NativeScreenCaptureController({
   enabled: nativeCaptureEnabled,
   keepRendererActive: nativeCaptureEnabled,
+  reuseGpuTextures: process.env.COVE_DISABLE_NATIVE_GPU_TEXTURE_REUSE !== '1',
+  preferPackedScreenCapture: () => usePackedScreenCapture,
+  allowCpuNv12: screenHardwareAv1Enabled,
+  cpuPatches: true,
   timing: nativeTimingEnabled,
   onHelperTiming: nativeTimingEnabled ? (sample, captureNumber) => nativeTimingLogger?.helper(sample, captureNumber) : undefined,
   pixelFormat: process.env.COVE_NATIVE_GPU_CAPTURE_PIXEL_FORMAT === 'nv12' ? 'nv12' : 'bgra',
@@ -130,7 +142,10 @@ const nativeScreenCapture = new NativeScreenCaptureController({
   completion: nativeCompletionPreference === 'query' || nativeCompletionPreference === 'fence'
     ? nativeCompletionPreference : undefined,
   helperPath: app.isPackaged ? path.join(process.resourcesPath, 'native-screen-capture-helper.exe') :
-    path.join(__dirname, '../build/native-screen-capture-helper.exe'),
+    process.env.COVE_DEV_NATIVE_SCREEN_HELPER || path.join(__dirname, '../build/native-screen-capture-helper.exe'),
+});
+app.on('child-process-gone', (_event, details) => {
+  if (details.type === 'GPU') nativeScreenCapture.gpuProcessGone();
 });
 if (nativeTimingEnabled) {
   nativeTimingLogger = createNativeScreenTimingLogger({
@@ -210,6 +225,7 @@ function createWindow() {
       contextIsolation: true,
       preload: path.join(__dirname, "preload.js"),
       additionalArguments: nativeCaptureEnabled ? ['--cove-native-gpu-capture=1',
+        ...(screenHardwareAv1Enabled ? ['--cove-native-screen-hardware-av1=1'] : []),
         ...(nativeExperimentalFrameSink ? ['--cove-native-frame-sink=' + nativeExperimentalFrameSink] : [])] : [],
     },
   });
@@ -379,6 +395,11 @@ app.whenReady().then(() => {
     if (event.sender === mainWindow?.webContents && !event.sender.isDestroyed() &&
         event.senderFrame === mainWindow?.webContents.mainFrame)
       nativeScreenCapture.acknowledgeCpuFrame(event.sender, metadata);
+  });
+  ipcMain.on('cove:native-screen:cached-gpu-frame-done', (event, metadata) => {
+    if (event.sender === mainWindow?.webContents && !event.sender.isDestroyed() &&
+        event.senderFrame === mainWindow?.webContents.mainFrame)
+      nativeScreenCapture.acknowledgeGpuFrame(event.sender, event.senderFrame, metadata);
   });
   const unavailableIntegrityState: InstallationIntegrityState = {
     status: 'disabled', version: app.getVersion(), platform: process.platform, arch: process.arch,

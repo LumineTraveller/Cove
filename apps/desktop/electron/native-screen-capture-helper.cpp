@@ -331,6 +331,8 @@ struct CaptureTiming {
   uint64_t readinessSlotWaitWindows = 0, readinessPresentWaitWindows = 0;
   uint64_t readinessRecoveredSlot = 0, readinessRecoveredPresent = 0;
   uint64_t cpuMapAttempts = 0, cpuMapStillDrawing = 0, cpuMapCancelled = 0, cpuMapTimeouts = 0;
+  uint64_t packedPartialFrames = 0, packedFullFrames = 0, packedConvertedPixels = 0;
+  uint64_t packedSectionBytes = 0;
   ResidenceTiming leaseResidence, importedResidence;
   DeliveryTiming delivery;
   uint64_t currentTickLatenessUs = 0;
@@ -383,6 +385,9 @@ struct CaptureTiming {
       << ",\"readinessRecoveredSlot\":" << readinessRecoveredSlot
       << ",\"readinessRecoveredPresent\":" << readinessRecoveredPresent
       << ",\"cpuMapAttempts\":" << cpuMapAttempts << ",\"cpuMapStillDrawing\":" << cpuMapStillDrawing
+      << ",\"packedPartialFrames\":" << packedPartialFrames << ",\"packedFullFrames\":" << packedFullFrames
+      << ",\"packedConvertedPixels\":" << packedConvertedPixels
+      << ",\"packedSectionBytes\":" << packedSectionBytes
       << ",\"cpuMapCancelled\":" << cpuMapCancelled << ",\"cpuMapTimeouts\":" << cpuMapTimeouts
       << ",\"openSlotCreditWaitUs\":" << (creditWaitBegin ? now - creditWaitBegin : 0);
     out << ",\"leaseResidence\":"; leaseResidence.write(out);
@@ -760,18 +765,21 @@ static CursorShape decodeCursor(const DXGI_OUTDUPL_POINTER_SHAPE_INFO& info,
   return shape;
 }
 
-// Exact area coverage in each axis, in gamma-encoded UNORM space like a CPU box
-// scaler. No bilinear shortcut. Cursor operations happen on source texels before
-// horizontal integration, so XOR/masks and cursor edges scale with the image.
-// Half-float intermediate avoids a second 8-bit rounding; final output is BGRA8.
+// Area coverage in each axis, in gamma-encoded UNORM space like a CPU box
+// scaler. The small-reduction shader groups adjacent weighted texels into a
+// linear texture read. Cursor operations still happen on individual source
+// texels before integration, so XOR/masks and cursor edges scale with the image.
+// Small reductions fit in one draw. Larger reductions use separable passes
+// with a half-float intermediate to keep the number of texture reads bounded.
 static const char* kShader = R"HLSL(
 cbuffer Params : register(b0) {
   uint sourceWidth, sourceHeight, targetWidth, targetHeight;
   int cursorX, cursorY; uint cursorWidth, cursorHeight;
-  uint cursorType, cursorVisible, reserved0, reserved1;
+  uint cursorType, cursorVisible, packedOriginX, packedOriginY;
 };
 Texture2D<float4> image : register(t0);
 Texture2D<uint4> cursor : register(t1);
+SamplerState areaSampler : register(s0);
 struct Vertex { float4 position : SV_Position; };
 Vertex vertexMain(uint id : SV_VertexID) {
   Vertex v;
@@ -789,6 +797,54 @@ float4 sourcePixel(int2 p) {
   else if (cursorType == 4) base.rgb = float3(c.a == 0 ? c.zyx : (b ^ c.zyx)) / 255;
   else { float alpha = float(c.a) / 255; base.rgb = float3(c.zyx) / 255 * alpha + base.rgb * (1 - alpha); }
   return base;
+}
+float4 areaPixel(int2 p) {
+  if (sourceWidth == targetWidth && sourceHeight == targetHeight) return sourcePixel(p);
+  float2 sourceSize = float2(sourceWidth, sourceHeight);
+  float2 targetSize = float2(targetWidth, targetHeight);
+  float2 lo = float2(p) * sourceSize / targetSize;
+  float2 hi = float2(p + 1) * sourceSize / targetSize;
+  int2 first = int2(floor(lo));
+  int2 end = min(int2(ceil(hi)), int2(sourceWidth, sourceHeight));
+  int2 cursorStart = int2(cursorX, cursorY);
+  int2 cursorEnd = cursorStart + int2(cursorWidth, cursorHeight);
+  float2 coverage = hi - lo;
+  if (cursorVisible == 0 || any(end <= cursorStart) || any(first >= cursorEnd)) {
+    // A footprint no wider than two pixels covers at most three texels in
+    // each axis. Interpolate the first pair at its weighted center, then add
+    // any remaining footprint at the third texel's center.
+    float2 edge = float2(first + 1);
+    float2 firstWeight = min(hi, edge) - lo;
+    float2 secondWeight = saturate(hi - edge);
+    float2 pairWeight = firstWeight + secondWeight;
+    float2 tailWeight = max(0.0, coverage - pairWeight);
+    float2 pair = (float2(first) + 0.5 + secondWeight / pairWeight) / sourceSize;
+    float2 tail = (float2(first) + 2.5) / sourceSize;
+    float4 area = image.SampleLevel(areaSampler, pair, 0) * (pairWeight.x * pairWeight.y);
+    if (tailWeight.x > 0) {
+      area += image.SampleLevel(areaSampler, float2(tail.x, pair.y), 0) * (tailWeight.x * pairWeight.y);
+    }
+    if (tailWeight.y > 0) {
+      area += image.SampleLevel(areaSampler, float2(pair.x, tail.y), 0) * (pairWeight.x * tailWeight.y);
+      if (tailWeight.x > 0)
+        area += image.SampleLevel(areaSampler, tail, 0) * (tailWeight.x * tailWeight.y);
+    }
+    return area / (coverage.x * coverage.y);
+  }
+  float4 sum = 0;
+  [loop] for (int y = first.y; y < end.y; ++y) {
+    float4 row = 0;
+    [loop] for (int x = first.x; x < end.x; ++x) {
+      float weight = max(0.0, min(hi.x, float(x + 1)) - max(lo.x, float(x)));
+      row += sourcePixel(int2(x, y)) * weight;
+    }
+    float weight = max(0.0, min(hi.y, float(y + 1)) - max(lo.y, float(y)));
+    sum += row * weight;
+  }
+  return sum / (coverage.x * coverage.y);
+}
+float4 areaMain(Vertex v) : SV_Target {
+  return areaPixel(int2(v.position.xy));
 }
 float4 horizontalMain(Vertex v) : SV_Target {
   int2 p = int2(v.position.xy);
@@ -836,6 +892,32 @@ float4 nv12ChromaMain(Vertex v) : SV_Target {
     + image.Load(int3(p + int2(0,1), 0)).rgb + image.Load(int3(p + int2(1,1), 0)).rgb) * .25;
   return float4(nv12Convert(rgb).yz, 0, 1);
 }
+RWByteAddressBuffer packedNv12 : register(u0);
+uint outputByte(float value) { return uint(round(saturate(value) * 255)); }
+// Each thread writes two aligned rows of luma and the matching interleaved UV.
+// Round to BGRA8 precision before converting to match the texture path.
+[numthreads(16, 8, 1)]
+void nv12PackedMain(uint3 tid : SV_DispatchThreadID) {
+  uint x = packedOriginX + tid.x * 4, y = packedOriginY + tid.y * 2;
+  if (x >= targetWidth || y >= targetHeight) return;
+  uint firstRow = 0, secondRow = 0;
+  float3 leftPair = 0, rightPair = 0;
+  [loop] for (uint pixel = 0; pixel < 8; pixel++) {
+    uint col = pixel & 3, row = pixel >> 2;
+    float3 rgb = round(saturate(areaPixel(int2(x + col, y + row)).rgb) * 255) / 255;
+    uint luma = outputByte(nv12Convert(rgb).x) << (col * 8);
+    if (row == 0) firstRow |= luma;
+    else secondRow |= luma;
+    if (col < 2) leftPair += rgb;
+    else rightPair += rgb;
+  }
+  float2 leftUv = nv12Convert(leftPair * .25).yz, rightUv = nv12Convert(rightPair * .25).yz;
+  uint uv = outputByte(leftUv.x) | (outputByte(leftUv.y) << 8) |
+    (outputByte(rightUv.x) << 16) | (outputByte(rightUv.y) << 24);
+  packedNv12.Store(y * targetWidth + x, firstRow);
+  packedNv12.Store((y + 1) * targetWidth + x, secondRow);
+  packedNv12.Store((targetHeight + y / 2) * targetWidth + x, uv);
+}
 )HLSL";
 static ComPtr<ID3DBlob> compile(const char* entry, const char* target,
     Nv12ColorSpace colorSpace = Nv12ColorSpace::Bt709Limited) {
@@ -858,47 +940,138 @@ static D3D11_TEXTURE2D_DESC textureDesc(UINT width, UINT height, DXGI_FORMAT for
 struct Constants {
   UINT sourceWidth, sourceHeight, targetWidth, targetHeight;
   INT cursorX = 0, cursorY = 0;
-  UINT cursorWidth = 0, cursorHeight = 0, cursorType = 0, cursorVisible = 0, reserved0 = 0, reserved1 = 0;
+  UINT cursorWidth = 0, cursorHeight = 0, cursorType = 0, cursorVisible = 0, packedOriginX = 0, packedOriginY = 0;
 };
 static_assert(sizeof(Constants) == 48, "HLSL constant buffer layout");
+
+struct PackedRegion {
+  UINT x = 0, y = 0, width = 0, height = 0;
+  explicit operator bool() const { return width && height; }
+};
+
+struct ByteRange { UINT start, end; };
+
+static std::array<ByteRange, 2> packedRows(Size target, PackedRegion region) {
+  const UINT y = region.y * target.width;
+  const UINT uv = (target.height + region.y / 2) * target.width;
+  const UINT byteRows = region.height * target.width;
+  return {{{y, y + byteRows}, {uv, uv + byteRows / 2}}};
+}
+
+static bool nonempty(const RECT& rect) { return rect.left < rect.right && rect.top < rect.bottom; }
+
+static void includeDamage(RECT& bounds, const RECT& rect) {
+  if (!nonempty(rect)) return;
+  if (!nonempty(bounds)) { bounds = rect; return; }
+  bounds = {std::min(bounds.left, rect.left), std::min(bounds.top, rect.top),
+    std::max(bounds.right, rect.right), std::max(bounds.bottom, rect.bottom)};
+}
+
+static RECT cursorDamage(const Constants& values) {
+  if (!values.cursorVisible) return {};
+  return {values.cursorX, values.cursorY, values.cursorX + LONG(values.cursorWidth),
+    values.cursorY + LONG(values.cursorHeight)};
+}
+
+static bool desktopDamage(IDXGIOutputDuplication* duplication, const DXGI_OUTDUPL_FRAME_INFO& info,
+    Size source, RECT& bounds) {
+  // Dense or unusually fragmented metadata can always use the whole acquired surface.
+  std::array<RECT, 64> dirty{};
+  std::array<DXGI_OUTDUPL_MOVE_RECT, 32> moves{};
+  if (!info.TotalMetadataBufferSize || info.TotalMetadataBufferSize > sizeof(dirty) + sizeof(moves)) return false;
+  UINT dirtyBytes = 0, moveBytes = 0;
+  if (FAILED(duplication->GetFrameMoveRects(UINT(sizeof(moves)), moves.data(), &moveBytes)) ||
+      FAILED(duplication->GetFrameDirtyRects(UINT(sizeof(dirty)), dirty.data(), &dirtyBytes)) ||
+      moveBytes > sizeof(moves) || dirtyBytes > sizeof(dirty) ||
+      moveBytes % sizeof(moves[0]) || dirtyBytes % sizeof(dirty[0])) return false;
+  const auto add = [&](const RECT& rect) {
+    if (!nonempty(rect) || rect.left < 0 || rect.top < 0 ||
+        rect.right > LONG(source.width) || rect.bottom > LONG(source.height)) return false;
+    includeDamage(bounds, rect);
+    return true;
+  };
+  // Read the destination pixels from the current desktop; never move already
+  // scaled pixels, whose box filter phase can differ after the translation.
+  for (size_t i = 0; i < moveBytes / sizeof(moves[0]); ++i) if (!add(moves[i].DestinationRect)) return false;
+  for (size_t i = 0; i < dirtyBytes / sizeof(dirty[0]); ++i) if (!add(dirty[i])) return false;
+  return nonempty(bounds);
+}
+
+static PackedRegion projectDamage(RECT bounds, Size source, Size target) {
+  // Include a source pixel on each side to cover floating-point edge rounding.
+  if (!nonempty(bounds)) return {};
+  --bounds.left; --bounds.top; ++bounds.right; ++bounds.bottom;
+  bounds.left = std::clamp(bounds.left, 0L, LONG(source.width));
+  bounds.top = std::clamp(bounds.top, 0L, LONG(source.height));
+  bounds.right = std::clamp(bounds.right, 0L, LONG(source.width));
+  bounds.bottom = std::clamp(bounds.bottom, 0L, LONG(source.height));
+  if (!nonempty(bounds)) return {};
+  // A changed source pixel invalidates every touching output box. Round out
+  // again to whole compute groups so both luma rows and the UV pairs agree.
+  const UINT x = UINT(uint64_t(bounds.left) * target.width / source.width) / 64 * 64;
+  const UINT y = UINT(uint64_t(bounds.top) * target.height / source.height) / 16 * 16;
+  const UINT right = std::min(target.width,
+    UINT((uint64_t(bounds.right) * target.width + source.width * 64 - 1) / (source.width * 64)) * 64);
+  const UINT bottom = std::min(target.height,
+    UINT((uint64_t(bounds.bottom) * target.height + source.height * 16 - 1) / (source.height * 16)) * 16);
+  if (uint64_t(right - x) * (bottom - y) * 2 >= uint64_t(target.width) * target.height) return {};
+  return {x, y, right - x, bottom - y};
+}
+
 class Pipeline {
   ComPtr<ID3D11VertexShader> vertex_;
-  ComPtr<ID3D11PixelShader> horizontal_, vertical_, luma_, chroma_;
+  ComPtr<ID3D11PixelShader> area_, horizontal_, vertical_, luma_, chroma_;
+  ComPtr<ID3D11SamplerState> areaSampler_;
   ComPtr<ID3D11Buffer> constants_;
   ComPtr<ID3D11RasterizerState> rasterizer_;
   ComPtr<ID3D11DepthStencilState> depth_;
   ComPtr<ID3D11ShaderResourceView> sourceView_, intermediateView_, cursorView_;
   ComPtr<ID3D11RenderTargetView> intermediateTarget_;
   ComPtr<ID3D11Texture2D> intermediate_, cursorTexture_;
+  ComPtr<ID3D11Texture2D> directSource_;
+  ComPtr<ID3D11ShaderResourceView> directView_;
   ComPtr<ID3D11Texture2D> nv12Scratch_;
   ComPtr<ID3D11ShaderResourceView> nv12ScratchView_;
   ComPtr<ID3D11RenderTargetView> nv12ScratchTarget_;
+  ComPtr<ID3D11ComputeShader> packedShader_;
+  ComPtr<ID3D11Buffer> packedData_, packedStaging_;
+  ComPtr<ID3D11UnorderedAccessView> packedOutput_;
   std::vector<unsigned char> cursorBytes_;
 public:
   ComPtr<ID3D11Texture2D> desktop;
   Constants values;
   Pipeline(ID3D11Device* device, Size source, Size target, bool nv12 = false,
-      Nv12ColorSpace colorSpace = Nv12ColorSpace::Bt709Limited)
+      Nv12ColorSpace colorSpace = Nv12ColorSpace::Bt709Limited, bool deferDesktopCopy = false, bool packedCpu = false)
       : values{source.width, source.height, target.width, target.height} {
-    auto desc = textureDesc(source.width, source.height, DXGI_FORMAT_B8G8R8A8_UNORM, D3D11_BIND_SHADER_RESOURCE);
-    check(device->CreateTexture2D(&desc, nullptr, desktop.GetAddressOf()), "desktop_texture_failed");
-    check(device->CreateShaderResourceView(desktop.Get(), nullptr, sourceView_.GetAddressOf()), "source_view_failed");
-    desc = textureDesc(target.width, source.height, DXGI_FORMAT_R16G16B16A16_FLOAT,
-      D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET);
-    check(device->CreateTexture2D(&desc, nullptr, intermediate_.GetAddressOf()), "intermediate_texture_failed");
-    check(device->CreateShaderResourceView(intermediate_.Get(), nullptr, intermediateView_.GetAddressOf()), "intermediate_view_failed");
-    check(device->CreateRenderTargetView(intermediate_.Get(), nullptr, intermediateTarget_.GetAddressOf()), "intermediate_target_failed");
-    const auto vertex = compile("vertexMain", "vs_4_0"), horizontal = compile("horizontalMain", "ps_4_0"),
-      vertical = compile("verticalMain", "ps_4_0");
+    if (!deferDesktopCopy) initializeDesktopCopy(device);
+    const auto vertex = compile("vertexMain", "vs_4_0");
     check(device->CreateVertexShader(vertex->GetBufferPointer(), vertex->GetBufferSize(), nullptr,
       vertex_.GetAddressOf()), "vertex_shader_failed");
-    check(device->CreatePixelShader(horizontal->GetBufferPointer(), horizontal->GetBufferSize(), nullptr,
-      horizontal_.GetAddressOf()), "pixel_shader_failed");
-    check(device->CreatePixelShader(vertical->GetBufferPointer(), vertical->GetBufferSize(), nullptr,
-      vertical_.GetAddressOf()), "pixel_shader_failed");
-    if (nv12) {
+    if (source.width <= target.width * 2 && source.height <= target.height * 2) {
+      const auto area = compile("areaMain", "ps_4_0");
+      check(device->CreatePixelShader(area->GetBufferPointer(), area->GetBufferSize(), nullptr,
+        area_.GetAddressOf()), "pixel_shader_failed");
+      D3D11_SAMPLER_DESC sampler{};
+      sampler.Filter = D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT;
+      sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+      sampler.MaxAnisotropy = 1;
+      sampler.ComparisonFunc = D3D11_COMPARISON_NEVER;
+      check(device->CreateSamplerState(&sampler, areaSampler_.GetAddressOf()), "area_sampler_failed");
+    } else {
+      const auto desc = textureDesc(target.width, source.height, DXGI_FORMAT_R16G16B16A16_FLOAT,
+        D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET);
+      check(device->CreateTexture2D(&desc, nullptr, intermediate_.GetAddressOf()), "intermediate_texture_failed");
+      check(device->CreateShaderResourceView(intermediate_.Get(), nullptr, intermediateView_.GetAddressOf()), "intermediate_view_failed");
+      check(device->CreateRenderTargetView(intermediate_.Get(), nullptr, intermediateTarget_.GetAddressOf()), "intermediate_target_failed");
+      const auto horizontal = compile("horizontalMain", "ps_4_0"), vertical = compile("verticalMain", "ps_4_0");
+      check(device->CreatePixelShader(horizontal->GetBufferPointer(), horizontal->GetBufferSize(), nullptr,
+        horizontal_.GetAddressOf()), "pixel_shader_failed");
+      check(device->CreatePixelShader(vertical->GetBufferPointer(), vertical->GetBufferSize(), nullptr,
+        vertical_.GetAddressOf()), "pixel_shader_failed");
+    }
+    if (nv12 && !packedCpu) {
       require(target.width % 2 == 0 && target.height % 2 == 0, "invalid_nv12_dimensions");
-      desc = textureDesc(target.width, target.height, DXGI_FORMAT_B8G8R8A8_UNORM,
+      const auto desc = textureDesc(target.width, target.height, DXGI_FORMAT_B8G8R8A8_UNORM,
         D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET);
       check(device->CreateTexture2D(&desc, nullptr, nv12Scratch_.GetAddressOf()), "nv12_scratch_failed");
       check(device->CreateShaderResourceView(nv12Scratch_.Get(), nullptr, nv12ScratchView_.GetAddressOf()), "nv12_scratch_view_failed");
@@ -909,6 +1082,26 @@ public:
         luma_.GetAddressOf()), "nv12_luma_shader_failed");
       check(device->CreatePixelShader(chroma->GetBufferPointer(), chroma->GetBufferSize(), nullptr,
         chroma_.GetAddressOf()), "nv12_chroma_shader_failed");
+    }
+    if (packedCpu) {
+      require(nv12 && target.width % 4 == 0 &&
+        source.width <= target.width * 2 && source.height <= target.height * 2, "invalid_packed_nv12_dimensions");
+      const auto code = compile("nv12PackedMain", "cs_5_0", colorSpace);
+      check(device->CreateComputeShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr,
+        packedShader_.GetAddressOf()), "nv12_packed_shader_failed");
+      D3D11_BUFFER_DESC data{};
+      data.ByteWidth = UINT(tightNv12ByteLength(target));
+      data.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+      data.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+      check(device->CreateBuffer(&data, nullptr, packedData_.GetAddressOf()), "nv12_packed_buffer_failed");
+      D3D11_UNORDERED_ACCESS_VIEW_DESC output{};
+      output.Format = DXGI_FORMAT_R32_TYPELESS;
+      output.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+      output.Buffer.NumElements = data.ByteWidth / 4;
+      output.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
+      check(device->CreateUnorderedAccessView(packedData_.Get(), &output, packedOutput_.GetAddressOf()), "nv12_packed_view_failed");
+      data.Usage = D3D11_USAGE_STAGING; data.BindFlags = 0; data.CPUAccessFlags = D3D11_CPU_ACCESS_READ; data.MiscFlags = 0;
+      check(device->CreateBuffer(&data, nullptr, packedStaging_.GetAddressOf()), "nv12_packed_staging_failed");
     }
     D3D11_BUFFER_DESC buffer{}; buffer.ByteWidth = sizeof(Constants); buffer.Usage = D3D11_USAGE_DEFAULT;
     buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
@@ -921,6 +1114,38 @@ public:
     // Bound even while invisible, so no driver samples an unbound UINT texture.
     CursorShape empty; empty.width = empty.height = 1; empty.type = DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR;
     empty.bytes.assign(4, 0); uploadCursor(device, empty);
+  }
+  void initializeDesktopCopy(ID3D11Device* device) {
+    if (desktop) return;
+    const auto desc = textureDesc(values.sourceWidth, values.sourceHeight, DXGI_FORMAT_B8G8R8A8_UNORM,
+      D3D11_BIND_SHADER_RESOURCE);
+    check(device->CreateTexture2D(&desc, nullptr, desktop.GetAddressOf()), "desktop_texture_failed");
+    check(device->CreateShaderResourceView(desktop.Get(), nullptr, sourceView_.GetAddressOf()), "source_view_failed");
+  }
+  ID3D11ShaderResourceView* desktopView(ID3D11Device* device, ID3D11DeviceContext* context, IDXGIResource* resource,
+      bool updated) {
+    ComPtr<ID3D11Texture2D> input; check(resource->QueryInterface(IID_PPV_ARGS(input.GetAddressOf())), "desktop_texture_query_failed");
+    D3D11_TEXTURE2D_DESC desc{}; input->GetDesc(&desc);
+    require(desc.Width == values.sourceWidth && desc.Height == values.sourceHeight &&
+      desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM && desc.SampleDesc.Count == 1, "desktop_geometry_changed");
+    if (!desktop) {
+      // Reuse a view for the same DXGI resource. Its contents are sampled only
+      // between acquisition and ReleaseFrame, after the GPU completion fence.
+      if (directSource_.Get() != input.Get()) {
+        directView_.Reset();
+        if ((desc.BindFlags & D3D11_BIND_SHADER_RESOURCE) &&
+            SUCCEEDED(device->CreateShaderResourceView(input.Get(), nullptr, directView_.GetAddressOf())))
+          directSource_ = input;
+        else {
+          directSource_.Reset();
+          initializeDesktopCopy(device);
+          updated = true;
+        }
+      }
+      if (directView_) return directView_.Get();
+    }
+    if (updated) context->CopyResource(desktop.Get(), input.Get());
+    return sourceView_.Get();
   }
   ~Pipeline() { if (!cursorBytes_.empty()) SecureZeroMemory(cursorBytes_.data(), cursorBytes_.size()); }
   bool uploadCursor(ID3D11Device* device, const CursorShape& cursor) {
@@ -936,21 +1161,28 @@ public:
     cursorBytes_ = cursor.bytes;
     return true;
   }
-  void draw(ID3D11DeviceContext* context, ID3D11RenderTargetView* destination) {
+  void draw(ID3D11DeviceContext* context, ID3D11RenderTargetView* destination, ID3D11ShaderResourceView* image = nullptr) {
     context->UpdateSubresource(constants_.Get(), 0, nullptr, &values, 0, 0);
     ID3D11Buffer* constants = constants_.Get(); context->PSSetConstantBuffers(0, 1, &constants);
     context->IASetInputLayout(nullptr); context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     context->VSSetShader(vertex_.Get(), nullptr, 0);
     context->RSSetState(rasterizer_.Get()); context->OMSetDepthStencilState(depth_.Get(), 0);
     context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
-    ID3D11ShaderResourceView* views[]{sourceView_.Get(), cursorView_.Get()};
-    ID3D11RenderTargetView* target = intermediateTarget_.Get();
-    D3D11_VIEWPORT viewport{0, 0, FLOAT(values.targetWidth), FLOAT(values.sourceHeight), 0, 1};
+    ID3D11ShaderResourceView* views[]{image ? image : sourceView_.Get(), cursorView_.Get()};
+    ID3D11ShaderResourceView* none[]{nullptr, nullptr};
+    ID3D11RenderTargetView* target = area_ ? destination : intermediateTarget_.Get();
+    const UINT firstPassHeight = area_ ? values.targetHeight : values.sourceHeight;
+    D3D11_VIEWPORT viewport{0, 0, FLOAT(values.targetWidth), FLOAT(firstPassHeight), 0, 1};
     context->RSSetViewports(1, &viewport); context->OMSetRenderTargets(1, &target, nullptr);
-    context->PSSetShaderResources(0, 2, views); context->PSSetShader(horizontal_.Get(), nullptr, 0);
+    context->PSSetShaderResources(0, 2, views); context->PSSetShader(area_ ? area_.Get() : horizontal_.Get(), nullptr, 0);
+    if (areaSampler_) {
+      ID3D11SamplerState* sampler = areaSampler_.Get();
+      context->PSSetSamplers(0, 1, &sampler);
+    }
     context->Draw(3, 0);
-    ID3D11ShaderResourceView* none[]{nullptr, nullptr}; context->PSSetShaderResources(0, 2, none);
+    context->PSSetShaderResources(0, 2, none);
     context->OMSetRenderTargets(0, nullptr, nullptr);
+    if (area_) return;
     views[0] = intermediateView_.Get(); views[1] = nullptr;
     viewport.Height = FLOAT(values.targetHeight); context->RSSetViewports(1, &viewport);
     context->OMSetRenderTargets(1, &destination, nullptr); context->PSSetShaderResources(0, 2, views);
@@ -961,10 +1193,31 @@ public:
   // or exports this local texture. One scratch is safe because gpuComplete
   // finishes every draw before any subsequent frame or scratch reuse.
   ID3D11Texture2D* nv12Scratch() const { return nv12Scratch_.Get(); }
+  ID3D11Buffer* packedStaging() const { return packedStaging_.Get(); }
+  void drawPackedNv12(ID3D11DeviceContext* context, ID3D11ShaderResourceView* image, PackedRegion region = {},
+      bool stage = true) {
+    values.packedOriginX = region.x; values.packedOriginY = region.y;
+    context->UpdateSubresource(constants_.Get(), 0, nullptr, &values, 0, 0);
+    ID3D11Buffer* constants = constants_.Get(); context->CSSetConstantBuffers(0, 1, &constants);
+    ID3D11ShaderResourceView* views[]{image ? image : sourceView_.Get(), cursorView_.Get()};
+    ID3D11SamplerState* sampler = areaSampler_.Get(); context->CSSetSamplers(0, 1, &sampler);
+    context->CSSetShaderResources(0, 2, views);
+    ID3D11UnorderedAccessView* output = packedOutput_.Get();
+    context->CSSetUnorderedAccessViews(0, 1, &output, nullptr);
+    context->CSSetShader(packedShader_.Get(), nullptr, 0);
+    context->Dispatch(((region ? region.width : values.targetWidth) + 63) / 64,
+      ((region ? region.height : values.targetHeight) + 15) / 16, 1);
+    ID3D11ShaderResourceView* none[]{nullptr, nullptr}; context->CSSetShaderResources(0, 2, none);
+    output = nullptr; context->CSSetUnorderedAccessViews(0, 1, &output, nullptr);
+    if (stage) stagePackedNv12(context);
+  }
+  void stagePackedNv12(ID3D11DeviceContext* context) {
+    context->CopyResource(packedStaging_.Get(), packedData_.Get());
+  }
   void drawNv12(ID3D11DeviceContext* context, ID3D11RenderTargetView* yTarget,
-      ID3D11RenderTargetView* uvTarget) {
+      ID3D11RenderTargetView* uvTarget, ID3D11ShaderResourceView* image = nullptr) {
     require(nv12Scratch_ && luma_ && chroma_ && yTarget && uvTarget, "nv12_pipeline_unavailable");
-    draw(context, nv12ScratchTarget_.Get());
+    draw(context, nv12ScratchTarget_.Get(), image);
     ID3D11ShaderResourceView* view = nv12ScratchView_.Get(); context->PSSetShaderResources(0, 1, &view);
     D3D11_VIEWPORT viewport{0, 0, FLOAT(values.targetWidth), FLOAT(values.targetHeight), 0, 1};
     context->RSSetViewports(1, &viewport); context->OMSetRenderTargets(1, &yTarget, nullptr);
@@ -1095,7 +1348,7 @@ public:
   }
   CompletionMode mode() const { return mode_; }
   bool complete(HANDLE owner, Timer& timer, Input& input, std::array<Slot, 3>& slots,
-      const Clock& clock, CaptureTiming& timing) {
+      const Clock& clock, CaptureTiming& timing, Pipeline* stageAfterSignal = nullptr) {
     const uint64_t begin = clock.us();
     require(begin <= std::numeric_limits<uint64_t>::max() - 500000, "gpu_completion_timeout");
     // One absolute host deadline includes submission, GPU completion and any
@@ -1104,12 +1357,13 @@ public:
     if (mode_ == CompletionMode::Query)
       return gpuComplete(context_, query_.Get(), owner, timer, input, slots, clock, timing, deadline_);
     Measure waitTiming(timing, CaptureTiming::GpuWait, clock);
-    // Signal is ordered after the draw and optional staging copy on this
-    // immediate context. Flush submits it; Flush itself is never the barrier.
+    // The fence protects all desktop reads. A copy after it can only use the
+    // owned packed buffer, and Map still protects access to the staging data.
     require(value_ < std::numeric_limits<uint64_t>::max() - 1, "completion_fence_exhausted");
     const uint64_t target = ++value_;
     { Measure flushTiming(timing, CaptureTiming::GpuFlush, clock);
       checked(context4_->Signal(fence_.Get(), target), "completion_fence_signal_failed");
+      if (stageAfterSignal) stageAfterSignal->stagePackedNv12(context_);
       context_->Flush(); }
     // These are host wall-time stages, not GPU execution timestamps. TimerWait
     // may overlap gpuEventWait, as query-mode timer waits overlap gpuWait.
@@ -1117,8 +1371,7 @@ public:
       [&] { return input.pump(owner, slots); },
       [&] { Measure checkTiming(timing, CaptureTiming::GpuFenceCheck, clock); return fence_->GetCompletedValue(); },
       [&] { Measure armTiming(timing, CaptureTiming::GpuEventArm, clock);
-        // Auto-reset consumes each wake; reset also removes a late signal from
-        // a prior already-completed target before registering this target.
+        // Auto-reset consumes each wake. Reset clears any signal for an older target.
         require(ResetEvent(event_.value), "completion_event_failed");
         checked(fence_->SetEventOnCompletion(target, event_.value), "completion_fence_event_failed"); },
       [&](uint64_t us) { Measure eventTiming(timing, CaptureTiming::GpuEventWait, clock);
@@ -1160,7 +1413,7 @@ static bool waitForCpuMap(uint64_t deadline, CpuMapProgress& progress,
   progress.elapsedUs = now() - begin;
   return ready;
 }
-static bool mapCpuReadback(ID3D11DeviceContext* context, ID3D11Texture2D* texture,
+static bool mapCpuReadback(ID3D11DeviceContext* context, ID3D11Resource* texture,
     uint64_t deadline, HANDLE owner, Timer& timer, Input& input, std::array<Slot, 3>& slots,
     const Clock& clock, CaptureTiming& timing, D3D11_MAPPED_SUBRESOURCE& mapped,
     CpuMapProgress* result = nullptr) {
@@ -1200,9 +1453,14 @@ static bool mapCpuReadback(ID3D11DeviceContext* context, ID3D11Texture2D* textur
     throw;
   }
 }
+static void createCpuSection(Slot& slot, Size size) {
+  const size_t cpuBytes = tightNv12ByteLength(size);
+  slot.local.value = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, DWORD(cpuBytes), nullptr);
+  require(slot.local.value != nullptr, "cpu_shared_memory_failed");
+  slot.cpuView.open(slot.local.value, cpuBytes);
+}
 static void createSlot(ID3D11Device* device, Slot& slot, Size size, bool nv12 = false, bool cpu = false) {
   require(!cpu || nv12, "invalid_cpu_frame_layout");
-  const size_t cpuBytes = cpu ? tightNv12ByteLength(size) : 0;
   require(!nv12 || (size.width % 2 == 0 && size.height % 2 == 0), "invalid_nv12_dimensions");
   auto desc = textureDesc(size.width, size.height, nv12 ? DXGI_FORMAT_NV12 : DXGI_FORMAT_B8G8R8A8_UNORM,
     D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
@@ -1226,9 +1484,7 @@ static void createSlot(ID3D11Device* device, Slot& slot, Size size, bool nv12 = 
     check(device->CreateTexture2D(&staging, nullptr, slot.staging.GetAddressOf()), "cpu_staging_texture_failed");
     // Null attributes mean a non-inheritable handle with the process's default
     // security descriptor. This unnamed pagefile section changes no ACL policy.
-    slot.local.value = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, DWORD(cpuBytes), nullptr);
-    require(slot.local.value != nullptr, "cpu_shared_memory_failed");
-    slot.cpuView.open(slot.local.value, cpuBytes);
+    createCpuSection(slot, size);
     return;
   }
   check(slot.texture.As(&slot.mutex), "shared_mutex_failed");
@@ -1261,12 +1517,24 @@ static void capture(const Options& option) {
     D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels, 1, D3D11_SDK_VERSION,
     device.GetAddressOf(), nullptr, context.GetAddressOf()), "hardware_device_failed");
   startup.next(StartupTiming::Pipeline);
-  Pipeline pipeline(device.Get(), source, size, option.nv12, option.colorSpace);
+  const bool packedCpu = option.cpu && size.width % 4 == 0 &&
+    source.width <= size.width * 2 && source.height <= size.height * 2;
+  wchar_t packedFlag[2]{};
+  const bool sparsePacked = packedCpu && !(GetEnvironmentVariableW(
+    L"COVE_NATIVE_CAPTURE_PACKED_FULL_FRAME", packedFlag, 2) == 1 && packedFlag[0] == L'1');
+  Pipeline pipeline(device.Get(), source, size, option.nv12, option.colorSpace, true, packedCpu);
   startup.next(StartupTiming::Slots);
   std::array<Slot, 3> slots;
-  for (auto& slot : slots) createSlot(device.Get(), slot, size, option.nv12, option.cpu);
+  for (auto& slot : slots) {
+    // Packed output uses a single GPU and staging buffer. Slot ownership begins
+    // after the readback is copied to that slot's independent CPU section.
+    if (packedCpu) createCpuSection(slot, size);
+    else createSlot(device.Get(), slot, size, option.nv12, option.cpu);
+  }
   startup.next(StartupTiming::Query);
   GpuCompletion completion(device.Get(), context.Get(), option.completion);
+  const bool canSplitReadback = packedCpu && completion.mode() == CompletionMode::Fence &&
+    GetEnvironmentVariableW(L"COVE_NATIVE_CAPTURE_PACKED_SPLIT_READBACK", packedFlag, 2) == 1 && packedFlag[0] == L'1';
   timing.selectedCompletion = completion.mode(); startup.selectCompletion(completion.mode());
   startup.next(StartupTiming::ValidateOutput);
   validateOutput(output);
@@ -1302,6 +1570,7 @@ static void capture(const Options& option) {
   const uint64_t period = 1000000 / option.fps;
   timing.start(nextTick, period);
   bool running = true;
+  auto latest = slots.end();
   while (running) {
     if (!input.pump(owner.value, slots)) break;
     uint64_t now = clock.us();
@@ -1325,6 +1594,8 @@ static void capture(const Options& option) {
     auto available = slots.end();
     ReadinessWindow window(nextTick, kNonblockingAcquire);
     bool frameReady = false, refresh = false, lastUnavailableSlot = false;
+    PackedRegion region{};
+    ID3D11ShaderResourceView* desktopView = nullptr;
     while (window.open(clock.us())) {
       if (!input.pump(owner.value, slots)) { window.cancel(); running = false; break; }
       now = clock.us();
@@ -1363,14 +1634,12 @@ static void capture(const Options& option) {
           timing.maxAccumulatedFrames = std::max(timing.maxAccumulatedFrames, uint64_t(info.AccumulatedFrames));
           if (!info.LastPresentTime.QuadPart) ++timing.pointerOnly;
         }
-        if (info.LastPresentTime.QuadPart > lastPresent || !haveDesktop) {
+        const bool updated = info.LastPresentTime.QuadPart > lastPresent || !haveDesktop;
+        const bool canUpdateRegion = sparsePacked && latest != slots.end();
+        const RECT oldCursor = canUpdateRegion ? cursorDamage(pipeline.values) : RECT{};
+        bool cursorChanged = false;
+        if (updated) {
           if (timing.enabled) ++timing.sourcePresents;
-          ComPtr<ID3D11Texture2D> texture; check(resource.As(&texture), "desktop_texture_query_failed");
-          D3D11_TEXTURE2D_DESC desc{}; texture->GetDesc(&desc);
-          require(desc.Width == source.width && desc.Height == source.height &&
-            desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM && desc.SampleDesc.Count == 1,
-            "desktop_geometry_changed");
-          context->CopyResource(pipeline.desktop.Get(), texture.Get());
           haveDesktop = true; dirty = true; lastPresent = info.LastPresentTime.QuadPart;
         }
         if (info.LastMouseUpdateTime.QuadPart > lastMouse) {
@@ -1386,6 +1655,7 @@ static void capture(const Options& option) {
             pipeline.values.cursorX = pointer.Position.x; pipeline.values.cursorY = pointer.Position.y;
           }
           dirty = dirty || changed; lastMouse = info.LastMouseUpdateTime.QuadPart;
+          cursorChanged = changed;
         }
         if (info.PointerShapeBufferSize) {
           require(info.PointerShapeBufferSize <= kMaxCursorBytes, "unsupported_cursor_shape");
@@ -1399,10 +1669,22 @@ static void capture(const Options& option) {
             const auto shape = decodeCursor(shapeInfo, raw.data(), needed);
             const bool changed = pipeline.uploadCursor(device.Get(), shape); haveShape = true;
             dirty = dirty || (changed && pipeline.values.cursorVisible);
+            cursorChanged = cursorChanged || (changed && pipeline.values.cursorVisible);
           } catch (...) { SecureZeroMemory(raw.data(), raw.size()); throw; }
           SecureZeroMemory(raw.data(), raw.size());
         }
         require(!pipeline.values.cursorVisible || haveShape, "visible_cursor_shape_unavailable");
+        if (dirty) {
+          desktopView = pipeline.desktopView(device.Get(), context.Get(), resource.Get(), updated);
+          RECT bounds{};
+          if (canUpdateRegion && (!updated || desktopDamage(duplication.Get(), info, source, bounds))) {
+            if (cursorChanged) {
+              includeDamage(bounds, oldCursor);
+              includeDamage(bounds, cursorDamage(pipeline.values));
+            }
+            region = projectDamage(bounds, source, size);
+          }
+        }
       }
       now = clock.us();
       refresh = !dirty && haveDesktop && now - lastSent >= 250000;
@@ -1435,27 +1717,60 @@ static void capture(const Options& option) {
       if (window.waitedSlot) ++timing.readinessRecoveredSlot;
       if (window.waitedPresent) ++timing.readinessRecoveredPresent;
     }
+    // A direct duplication view is only readable while the DXGI frame is held.
+    // On a heartbeat, the last completed output already contains the right pixels.
+    const bool replay = refresh && !pipeline.desktop && latest != slots.end();
+    if (replay && !latest->lease.busy) available = latest;
     auto& slot = *available;
+    // Full conversions overlap staging readiness with the earlier fence.
+    // Small updates retain their measured copy-before-fence ordering.
+    const bool splitReadback = canSplitReadback && !region;
     // Key 0 matches Electron's DXGI shared texture import. Credits, rather than
     // mutex availability alone, govern reuse while encoder references exist.
     bool locked = false;
-    if (!option.cpu) { require(slot.mutex->AcquireSync(0, 0) == S_OK, "shared_mutex_unavailable"); locked = true; }
+    bool replayLocked = false;
+    if (replay && latest != available && !option.cpu) {
+      const HRESULT lock = latest->mutex->AcquireSync(0, 0);
+      if (lock == WAIT_TIMEOUT) { acquired.release(); continue; }
+      require(lock == S_OK, "shared_mutex_unavailable");
+      replayLocked = true;
+    }
     try {
-      { Measure drawTiming(timing, CaptureTiming::Draw, clock);
-        if (option.nv12) pipeline.drawNv12(context.Get(), slot.target.Get(), slot.chromaTarget.Get());
-        else pipeline.draw(context.Get(), slot.target.Get()); }
-      if (option.cpu) context->CopyResource(slot.staging.Get(), slot.texture.Get());
-      running = completion.complete(owner.value, timer, input, slots, clock, timing);
+      if (replay && packedCpu && latest != available) {
+        std::memcpy(slot.cpuView.value, latest->cpuView.value, slot.cpuView.byteLength);
+      } else if (!replay || (latest != available && !packedCpu)) {
+        if (!option.cpu) { require(slot.mutex->AcquireSync(0, 0) == S_OK, "shared_mutex_unavailable"); locked = true; }
+        { Measure drawTiming(timing, CaptureTiming::Draw, clock);
+          if (packedCpu) {
+            pipeline.drawPackedNv12(context.Get(), desktopView, region, !splitReadback);
+            if (timing.enabled) {
+              if (region) ++timing.packedPartialFrames;
+              else ++timing.packedFullFrames;
+              timing.packedConvertedPixels += region ? uint64_t(region.width) * region.height : uint64_t(size.width) * size.height;
+            }
+          }
+          else if (replay) context->CopyResource(slot.texture.Get(), latest->texture.Get());
+          else if (option.nv12) pipeline.drawNv12(context.Get(), slot.target.Get(), slot.chromaTarget.Get(), desktopView);
+          else pipeline.draw(context.Get(), slot.target.Get(), desktopView); }
+        if (option.cpu && !packedCpu) context->CopyResource(slot.staging.Get(), slot.texture.Get());
+        running = completion.complete(owner.value, timer, input, slots, clock, timing, splitReadback ? &pipeline : nullptr);
+      }
       if (locked) { check(slot.mutex->ReleaseSync(0), "shared_mutex_release_failed"); locked = false; }
-    } catch (...) { if (locked) slot.mutex->ReleaseSync(0); throw; }
+      if (replayLocked) { check(latest->mutex->ReleaseSync(0), "shared_mutex_release_failed"); replayLocked = false; }
+    } catch (...) {
+      if (locked) slot.mutex->ReleaseSync(0);
+      if (replayLocked) latest->mutex->ReleaseSync(0);
+      throw;
+    }
     // Restore the GPU-sharing ownership boundary: renderer references/credits
     // may outlive this completed GPU read, so they must not retain its DDA input.
     if (!option.cpu) { Measure releaseTiming(timing, CaptureTiming::FrameRelease, clock); acquired.release(); }
     if (!running) break;
-    if (option.cpu) {
+    if (option.cpu && (!replay || (latest != available && !packedCpu))) {
+      ID3D11Resource* staging = packedCpu ? static_cast<ID3D11Resource*>(pipeline.packedStaging()) : slot.staging.Get();
       D3D11_MAPPED_SUBRESOURCE mapped{};
       try {
-        running = mapCpuReadback(context.Get(), slot.staging.Get(), completion.deadline(),
+        running = mapCpuReadback(context.Get(), staging, completion.deadline(),
           owner.value, timer, input, slots, clock, timing, mapped);
       } catch (...) {
         // Preserve the fixed failure while making the final attempt/timeout
@@ -1466,14 +1781,29 @@ static void capture(const Options& option) {
       if (!running) break;
       {
         Measure copyTiming(timing, CaptureTiming::CpuReadback, clock);
-        try { copyNv12Rows(mapped, size, slot.cpuView.value, slot.cpuView.byteLength); }
-        catch (...) { context->Unmap(slot.staging.Get(), 0); throw; }
-        context->Unmap(slot.staging.Get(), 0);
+        try {
+          require(mapped.pData, "invalid_cpu_frame_layout");
+          if (packedCpu) {
+            if (region && latest == available) {
+              // This credited section still contains the preceding full frame.
+              const auto* bytes = static_cast<const unsigned char*>(mapped.pData);
+              for (const auto& rows : packedRows(size, region)) {
+                std::memcpy(slot.cpuView.value + rows.start, bytes + rows.start, rows.end - rows.start);
+                if (timing.enabled) timing.packedSectionBytes += rows.end - rows.start;
+              }
+            } else {
+              std::memcpy(slot.cpuView.value, mapped.pData, slot.cpuView.byteLength);
+              if (timing.enabled) timing.packedSectionBytes += slot.cpuView.byteLength;
+            }
+          } else copyNv12Rows(mapped, size, slot.cpuView.value, slot.cpuView.byteLength);
+        } catch (...) { context->Unmap(staging, 0); throw; }
+        context->Unmap(staging, 0);
       }
       // The GPU and CPU copies are complete. Release DDA input before exporting
       // the section; its reuse depends only on the original per-slot ACKs.
       { Measure releaseTiming(timing, CaptureTiming::FrameRelease, clock); acquired.release(); }
     }
+    if (option.cpu && replay && (packedCpu || latest == available)) acquired.release();
     check(device->GetDeviceRemovedReason(), "gpu_device_lost");
     validateOutputFast(output);
     require(serial < kSafeInteger, "serial_exhausted");
@@ -1489,12 +1819,14 @@ static void capture(const Options& option) {
       if (option.nv12) std::cout << ",\"pixelFormat\":\"nv12\"";
       if (option.cpu) std::cout << ",\"storage\":\"cpu\",\"byteLength\":" << slot.cpuView.byteLength
         << ",\"colorSpace\":\"" << nv12ColorSpaceName(option.colorSpace) << '"';
+      if (region) std::cout << ",\"update\":[" << region.x << ',' << region.y << ',' << region.width
+        << ',' << region.height << ']';
       std::cout << ",\"refresh\":" << (refresh ? "true" : "false") << "}" << std::endl; }
     require(bool(std::cout), "owner_output_closed");
     timing.recordDelivery(slot.sentAt, refresh, deliverySnapshot);
     if (refresh) ++refreshFrames; else ++newFrames;
     if (timing.enabled) { if (refresh) ++timing.refreshFrames; else ++timing.newFrames; }
-    dirty = false; lastSent = slot.sentAt;
+    dirty = false; lastSent = slot.sentAt; latest = available;
   }
   { Measure releaseTiming(timing, CaptureTiming::FrameRelease, clock); acquired.release(); }
   timing.report(clock.us(), true);
@@ -2319,7 +2651,9 @@ static void selfTest() {
   for (const auto& pixel : odd) scaledSum += pixel[3];
   expect(std::abs(originalSum / checker.size() - scaledSum / odd.size()) < 1e-9);
   // CPU compiler only. Shader compilation is not a GPU execution/quality test.
-  compile("vertexMain", "vs_4_0"); compile("horizontalMain", "ps_4_0"); compile("verticalMain", "ps_4_0"); checks += 3;
+  compile("vertexMain", "vs_4_0"); compile("areaMain", "ps_4_0");
+  compile("horizontalMain", "ps_4_0"); compile("verticalMain", "ps_4_0"); checks += 4;
+  compile("nv12PackedMain", "cs_5_0"); checks++;
   for (const auto colorSpace : {Nv12ColorSpace::Bt601Limited, Nv12ColorSpace::Bt709Limited}) {
     compile("nv12LumaMain", "ps_4_0", colorSpace); compile("nv12ChromaMain", "ps_4_0", colorSpace); checks += 2;
   }

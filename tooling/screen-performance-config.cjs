@@ -22,6 +22,11 @@ function validatePerformanceCases(cases) {
       throw Error('ownedWindowFullscreen must be a boolean');
     if (config.nativeResolution !== undefined && typeof config.nativeResolution !== 'boolean')
       throw Error('nativeResolution must be a boolean');
+    if (config.gpuEncoding !== undefined && typeof config.gpuEncoding !== 'boolean')
+      throw Error('gpuEncoding must be a boolean');
+    if (config.gpuEncodingUpdate !== undefined && (config.gpuEncodingUpdate !== true ||
+        config.gpuEncoding !== true || config.preset !== '1080p' || config.fps !== 60 || config.nativeResolution))
+      throw Error('gpuEncodingUpdate requires a 1080p 60 FPS hardware encoding case');
     if (config.nativeWindowPath !== undefined && (typeof config.nativeWindowPath !== 'boolean' ||
         config.source !== 'native' || config.captureTarget !== 'window'))
       throw Error('nativeWindowPath is a boolean for native window cases only');
@@ -30,7 +35,8 @@ function validatePerformanceCases(cases) {
 }
 
 function screenShareStartArguments(config) {
-  return [config.preset, config.fps, false, Boolean(config.game), Boolean(config.nativeResolution), Boolean(config.compatibility)];
+  const args = [config.preset, config.fps, false, Boolean(config.game), Boolean(config.nativeResolution), Boolean(config.compatibility)];
+  return config.gpuEncoding === undefined ? args : [...args, config.gpuEncoding];
 }
 
 // Reports must follow the live capture/sender or the receiver actually feeding

@@ -291,6 +291,7 @@ function UpdateProgress({
 export function UpdateCenter({
   embedded = false,
   allowDetails = true,
+  serverURL,
   requiredUpgrade,
   onRetryVersion,
 }: {
@@ -522,7 +523,7 @@ export function UpdateCenter({
   if (embedded) {
     return (
       <section className="update-center-details" aria-label="Cove 更新详情">
-        <UpdateSourceSettings settings={settings} busy={busy} loadError={settingsError} onSaved={setSettings}
+        <UpdateSourceSettings settings={settings} currentServerUrl={serverURL} busy={busy} loadError={settingsError} onSaved={setSettings}
           onGithubCheck={() => { void checkNow(true, 'github'); }} />
         <div className="update-details-summary">
           <StatusIcon state={state} />

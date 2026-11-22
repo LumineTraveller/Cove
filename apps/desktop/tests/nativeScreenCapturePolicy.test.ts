@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { nativeScreenCaptureEnabled } from '../electron/native-screen-capture-policy';
+import { nativeScreenCaptureEnabled, supportsPackedScreenCapture } from '../electron/native-screen-capture-policy';
 
 const release = {
   platform: 'win32', arch: 'x64', electronVersion: '44.0.0', isPackaged: true,
@@ -9,6 +9,16 @@ const release = {
 const versions = [undefined, '', '43.9.9', '44.0.0', '44.0.1', '44.4.1', '45.0.0'];
 const flavors = [undefined, '', 'native-capture-lab', 'network-lab', 'annotation-fix', 'media-fix', 'unknown'];
 const environmentValues = [undefined, '', '0', '1', 'true'];
+
+test('packed capture selects the qualified GPU and CPU profile only', () => {
+  const device = { vendorId: 0x10de, deviceId: 0x28e0, driverVersion: '32.0.15.6094' };
+  const cpu = 'AMD Ryzen 9 7945HX with Radeon Graphics';
+  assert.equal(supportsPackedScreenCapture({ gpuDevice: [device, device, { vendorId: 0x1414 }] }, cpu), true);
+  assert.equal(supportsPackedScreenCapture({ gpuDevice: [device] }, 'AMD Ryzen 5 5600'), false);
+  assert.equal(supportsPackedScreenCapture({ gpuDevice: [{ ...device, driverVersion: '32.0.15.0000' }] }, cpu), false);
+  assert.equal(supportsPackedScreenCapture({ gpuDevice: [device, { vendorId: 0x1002 }] }, cpu), false);
+  assert.equal(supportsPackedScreenCapture({ gpuDevice: [] }, cpu), false);
+});
 
 test('only the exact qualified Windows x64 release runtime gains a default', () => {
   for (const platform of ['win32', 'darwin', 'linux']) {

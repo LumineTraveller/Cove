@@ -7395,7 +7395,7 @@ body .cove-window-controls button {
     flex-wrap: wrap;
   }
   .update-details-summary .update-check-button {
-    width: 100%;
+    width: calc(100% - 44px);
     margin-left: 44px;
   }
   .update-step-list {
@@ -9230,6 +9230,16 @@ html.viewport-resizing .cove-shell :is(.member-row, .control-ball, .share-status
 .update-source-settings form { display: grid; gap: 10px; }
 .update-source-settings .field { min-width: 0; margin: 0; }
 .update-source-settings .field input { width: 100%; min-width: 0; }
+.update-source-prefill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-self: start;
+  min-height: 24px;
+  color: var(--ink);
+  font-size: 12px;
+}
+.update-source-prefill input { flex: 0 0 auto; accent-color: var(--blue); }
 .update-source-help { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
 .update-source-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .update-source-actions button {

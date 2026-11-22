@@ -14,6 +14,9 @@ import { createNativeOpaqueFrameMetrics, writeOpaqueDesktopFrame, type NativeOpa
 
 export interface NativeScreenBridge {
   readonly supported: boolean;
+  readonly hardwareAv1Encoding?: boolean;
+  readonly startAv1WithNative?: boolean;
+  readonly opaqueAv1Input?: boolean;
   readonly preferredFrameSink?: 'canvas' | 'worker' | 'gpu-snapshot';
   start(requestId: string, options: NativeScreenOptions): Promise<NativeScreenStartResult>;
   stop(requestId: string, fault?: 'renderer_failed' | 'receiver_failed'): Promise<boolean>;
@@ -62,9 +65,14 @@ export interface NativeScreenCaptureDiagnostics {
 }
 
 const captureDiagnostics = new WeakMap<MediaStreamTrack, NativeScreenCaptureDiagnostics>();
+const detailTracks = new WeakSet<MediaStreamTrack>();
 const canvasDiagnostics = new WeakMap<MediaStreamTrack, () => NativeCanvasFrameSinkSnapshot>();
 const workerDiagnostics = new WeakMap<MediaStreamTrack, () => NativeWorkerFrameSinkSnapshot>();
 const gpuSnapshotDiagnostics = new WeakMap<MediaStreamTrack, () => NativeGpuSnapshotFrameSinkSnapshot>();
+
+export function nativeScreenContentHint<T extends string>(track: MediaStreamTrack | undefined, ordinary: T): T | 'detail' {
+  return track && detailTracks.has(track) ? 'detail' : ordinary;
+}
 
 type NativeFrameIntervalWindow = ReturnType<typeof createFrameIntervalWindow>;
 interface NativeFrameStabilitySource {
@@ -155,7 +163,7 @@ function validDimensions(width: number, height: number, options: NativeScreenOpt
     width >= 2 && height >= 2 && width <= options.maxWidth && height <= options.maxHeight;
 }
 
-/** Attempt an upgrade of an already published stock stream, without acquiring another source. */
+/** Prepare the selected stock source's native track without acquiring a second source selection. */
 export async function tryNativeScreenCapture(
   stockStream: MediaStream,
   options: NativeScreenCaptureOptions,
@@ -185,7 +193,8 @@ export async function tryNativeScreenCapture(
       (window as Window & { coveNativeScreen?: NativeScreenBridge }).coveNativeScreen;
     const Generator = (globalThis as typeof globalThis & { MediaStreamTrackGenerator?: GeneratorConstructor }).MediaStreamTrackGenerator;
     const selectedTrack = stockStream.getVideoTracks()[0];
-    if (!candidateBridge?.supported || !Generator || typeof MediaStream !== 'function' || options.nativeResolution) {
+    if (!candidateBridge?.supported || !Generator || typeof MediaStream !== 'function' ||
+        (options.nativeResolution && !options.cpuNv12)) {
       finishAttempt('ineligible'); return null;
     }
     if (options.signal.aborted) { finishAttempt('abort'); return null; }
@@ -488,7 +497,8 @@ export async function tryNativeScreenCapture(
     startIssued = true;
     attempt.bridgeStartMs = attemptElapsed();
     void bridge.start(requestId, { maxWidth: options.maxWidth, maxHeight: options.maxHeight, fps: options.fps,
-      ...(options.colorSpace ? { colorSpace: options.colorSpace } : {}) }).then((result) => {
+      ...(options.colorSpace ? { colorSpace: options.colorSpace } : {}),
+      ...(options.cpuNv12 ? { cpuNv12: true } : {}) }).then((result) => {
       attempt.helperResponseMs = attemptElapsed();
       attempt.helperResponseDurationMs = Math.max(0, attempt.helperResponseMs - attempt.bridgeStartMs!);
       attempt.helperResponseOk = result.ok === true;
@@ -499,9 +509,11 @@ export async function tryNativeScreenCapture(
       if (!result.ok || typeof result.sessionId !== 'string' || !result.sessionId ||
           (result.pixelFormat !== undefined && result.pixelFormat !== 'bgra' && result.pixelFormat !== 'nv12') ||
           (result.storage !== undefined && (result.storage !== 'cpu' || result.pixelFormat !== 'nv12')) ||
+          (options.cpuNv12 === true && result.storage !== 'cpu') ||
           (result.colorSpace !== undefined && result.colorSpace !== 'bt601-limited' && result.colorSpace !== 'bt709-limited') ||
           (result.storage === 'cpu' && ((result.colorSpace ?? 'bt709-limited') !== options.colorSpace)) ||
           (result.storage !== 'cpu' && result.colorSpace !== undefined) ||
+          (result.preferredContentHint !== undefined && (result.preferredContentHint !== 'detail' || result.storage !== 'cpu')) ||
           !validDimensions(result.width, result.height, options)) {
         stop(false, result.ok ? 'invalid_start_result' : 'start_rejected'); return;
       }
@@ -509,6 +521,10 @@ export async function tryNativeScreenCapture(
       attempt.phase = 'helper-ready';
       diagnostics.pixelFormat = result.pixelFormat ?? 'bgra';
       diagnostics.frameStorage = result.storage ?? 'gpu';
+      if (result.preferredContentHint === 'detail') {
+        detailTracks.add(track);
+        track.contentHint = 'detail';
+      }
       if (bridge.preferredFrameSink === 'worker') {
         if (result.storage === undefined && (result.pixelFormat ?? 'bgra') === 'bgra') {
           try {

@@ -311,10 +311,14 @@ static bool supportsCachedCpuFramesInto() {
   return compareObjectHandles && api.napi_is_arraybuffer && api.napi_is_detached_arraybuffer &&
     api.napi_get_arraybuffer_info;
 }
-static napi_value readFrameCachedCore(napi_env env, napi_callback_info info, bool into) {
-  napi_value arguments[4]{}, self = nullptr; size_t count = 4;
+enum class FrameCopy { Allocate, Into, Rows };
+static napi_value readFrameCachedCore(napi_env env, napi_callback_info info, FrameCopy copy) {
+  const bool into = copy != FrameCopy::Allocate;
+  const bool rows = copy == FrameCopy::Rows;
+  napi_value arguments[8]{}, self = nullptr; size_t count = 8;
   if (!ok(env, api.napi_get_cb_info(env, info, &count, arguments, &self, nullptr))) return nullptr;
-  if (count != 3) return fail(env, into ? "expected_slot_source_handle_and_target" :
+  if (rows && count != 7) return fail(env, "expected_slot_source_handle_target_and_nv12_rows", true);
+  if (!rows && count != 3) return fail(env, into ? "expected_slot_source_handle_and_target" :
     "expected_slot_source_handle_and_byte_length", true);
   auto* child = static_cast<ChildOwner*>(unwrap(env, self, kChildTag));
   if (!child) return nullptr;
@@ -353,6 +357,27 @@ static napi_value readFrameCachedCore(napi_env env, napi_callback_info info, boo
       return fail(env, "invalid_frame_byte_length", true);
     bytes = size_t(number);
   }
+  size_t yStart = 0, uvStart = 0, yBytes = 0;
+  if (rows) {
+    size_t geometry[4]{};
+    for (size_t i = 0; i < 4; ++i) {
+      if (!ok(env, api.napi_typeof(env, arguments[3 + i], &type))) return nullptr;
+      double number = 0;
+      if (type != napi_number) return fail(env, "invalid_nv12_rows", true);
+      if (!ok(env, api.napi_get_value_double(env, arguments[3 + i], &number))) return nullptr;
+      if (!std::isfinite(number) || number < 0 || number > 4096 || std::floor(number / 2) * 2 != number)
+        return fail(env, "invalid_nv12_rows", true);
+      geometry[i] = size_t(number);
+    }
+    const auto [width, height, y, rowCount] = geometry;
+    if (!width || !height || !rowCount || y + rowCount > height || bytes != width * rowCount * 3 / 2)
+      return fail(env, "invalid_nv12_rows", true);
+    bytes = width * height * 3 / 2;
+    if (bytes > 16 * 1024 * 1024) return fail(env, "invalid_nv12_rows", true);
+    yStart = y * width;
+    uvStart = (height + y / 2) * width;
+    yBytes = rowCount * width;
+  }
   auto& cached = child->frames[size_t(slotNumber)];
   if (cached.section && (cached.source != source || cached.bytes != bytes))
     return fail(env, "cached_frame_mismatch");
@@ -371,8 +396,12 @@ static napi_value readFrameCachedCore(napi_env env, napi_callback_info info, boo
     if (!ok(env, api.napi_create_arraybuffer(env, bytes, &destination, &result))) return nullptr;
     if (!destination) return fail(env, "native_frame_allocation_failed");
   }
-  SIZE_T copied = 0;
-  if (!ReadProcessMemory(GetCurrentProcess(), view, destination, bytes, &copied) || copied != bytes)
+  const auto read = [&](size_t sourceOffset, size_t targetOffset, size_t length) {
+    SIZE_T copied = 0;
+    return ReadProcessMemory(GetCurrentProcess(), static_cast<const uint8_t*>(view) + sourceOffset,
+      static_cast<uint8_t*>(destination) + targetOffset, length, &copied) && copied == length;
+  };
+  if (rows ? !read(yStart, 0, yBytes) || !read(uvStart, yBytes, yBytes / 2) : !read(0, 0, bytes))
     return fail(env, "source_frame_copy_failed");
   if (!cached.section) {
     // Publish only a fully validated, successfully copied slot. Initial map,
@@ -383,10 +412,13 @@ static napi_value readFrameCachedCore(napi_env env, napi_callback_info info, boo
   return result;
 }
 static napi_value NAPI_CDECL readFrameCached(napi_env env, napi_callback_info info) {
-  return readFrameCachedCore(env, info, false);
+  return readFrameCachedCore(env, info, FrameCopy::Allocate);
 }
 static napi_value NAPI_CDECL readFrameCachedInto(napi_env env, napi_callback_info info) {
-  return readFrameCachedCore(env, info, true);
+  return readFrameCachedCore(env, info, FrameCopy::Into);
+}
+static napi_value NAPI_CDECL readFrameCachedRowsInto(napi_env env, napi_callback_info info) {
+  return readFrameCachedCore(env, info, FrameCopy::Rows);
 }
 static napi_value NAPI_CDECL openChild(napi_env env, napi_callback_info info) {
   napi_value arguments[2]{}; size_t count = 2;
@@ -402,10 +434,11 @@ static napi_value NAPI_CDECL openChild(napi_env env, napi_callback_info info) {
     {"readFrame", nullptr, readFrame, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"readFrameCached", nullptr, readFrameCached, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"readFrameCachedInto", nullptr, readFrameCachedInto, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"readFrameCachedRowsInto", nullptr, readFrameCachedRowsInto, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"close", nullptr, closeChild, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"cpuSeconds", nullptr, cpuSeconds, nullptr, nullptr, nullptr, napi_default, nullptr},
   };
-  if (!ok(env, api.napi_define_properties(env, object, 6, properties))) return nullptr;
+  if (!ok(env, api.napi_define_properties(env, object, sizeof(properties) / sizeof(properties[0]), properties))) return nullptr;
   auto* owned = new (std::nothrow) ChildOwner(process.get());
   if (!owned) return fail(env, "native_handle_allocation_failed");
   process.take();
