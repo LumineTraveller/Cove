@@ -1,7 +1,7 @@
-import type {
-  NativeScreenFrame,
-  NativeScreenOptions,
-  NativeScreenStartResult,
+import {
+  NATIVE_SCREEN_MAX_WIDTH, NATIVE_SCREEN_MAX_HEIGHT,
+  NATIVE_SCREEN_START_TIMEOUT_MS, NATIVE_SCREEN_GPU_ENCODING_START_TIMEOUT_MS,
+  type NativeScreenFrame, type NativeScreenOptions, type NativeScreenStartResult,
 } from '../../../../electron/native-screen-capture-protocol';
 import { nativeScreenFailureReason, type NativeScreenFailureReason } from '../../../../electron/native-screen-capture-diagnostics';
 import { createNativeFrameWriteQueue } from './nativeFrameWriteQueue';
@@ -154,7 +154,6 @@ export function getLastNativeScreenCaptureAttempt(): Readonly<NativeScreenCaptur
 type GeneratorTrack = MediaStreamTrack & { writable: WritableStream<VideoFrame> };
 type GeneratorConstructor = new (options: { kind: 'video' }) => GeneratorTrack;
 
-const START_TIMEOUT_MS = 1_500;
 const POOL_SIZE = 3;
 const SETTINGS_POLL_MS = 5;
 
@@ -168,6 +167,7 @@ export async function tryNativeScreenCapture(
   stockStream: MediaStream,
   options: NativeScreenCaptureOptions,
 ): Promise<NativeCaptureCandidate | null> {
+  const startTimeoutMs = options.cpuNv12 ? NATIVE_SCREEN_GPU_ENCODING_START_TIMEOUT_MS : NATIVE_SCREEN_START_TIMEOUT_MS;
   // Async callbacks retain this attempt only; a late predecessor cannot replace
   // the single current diagnostic record installed by a newer invocation.
   const attempt: CaptureAttemptState = {
@@ -202,8 +202,8 @@ export async function tryNativeScreenCapture(
     if (selectedTrack && selectedTrack.readyState !== 'live') { finishAttempt('stock_ended'); return null; }
     if (!selectedTrack ||
         selectedTrack.getSettings().displaySurface !== 'monitor' ||
-        !Number.isInteger(options.maxWidth) || options.maxWidth < 2 || options.maxWidth > 4096 ||
-        !Number.isInteger(options.maxHeight) || options.maxHeight < 2 || options.maxHeight > 2560 ||
+        !Number.isInteger(options.maxWidth) || options.maxWidth < 2 || options.maxWidth > NATIVE_SCREEN_MAX_WIDTH ||
+        !Number.isInteger(options.maxHeight) || options.maxHeight < 2 || options.maxHeight > NATIVE_SCREEN_MAX_HEIGHT ||
         ![30, 60, 120].includes(options.fps)) { finishAttempt('ineligible'); return null; }
     bridge = candidateBridge;
     stockTrack = selectedTrack;
@@ -482,7 +482,7 @@ export async function tryNativeScreenCapture(
     // Existing publisher stop paths must also release the helper and writer.
     track.stop = () => stop();
     deadline = setTimeout(() => stop(false, 'deadline_timeout'),
-      bridge.preferredFrameSink === 'worker' ? Math.max(0, START_TIMEOUT_MS - attemptElapsed()) : START_TIMEOUT_MS);
+      bridge.preferredFrameSink === 'worker' ? Math.max(0, startTimeoutMs - attemptElapsed()) : startTimeoutMs);
     options.signal.addEventListener('abort', onCancelled, { once: true });
     stockTrack.addEventListener('ended', onCancelled, { once: true });
     track.addEventListener('ended', onTrackEnded, { once: true });
@@ -498,7 +498,8 @@ export async function tryNativeScreenCapture(
     attempt.bridgeStartMs = attemptElapsed();
     void bridge.start(requestId, { maxWidth: options.maxWidth, maxHeight: options.maxHeight, fps: options.fps,
       ...(options.colorSpace ? { colorSpace: options.colorSpace } : {}),
-      ...(options.cpuNv12 ? { cpuNv12: true } : {}) }).then((result) => {
+      ...(options.cpuNv12 ? { cpuNv12: true } : {}),
+      ...(options.nativeResolution ? { nativeResolution: true } : {}) }).then((result) => {
       attempt.helperResponseMs = attemptElapsed();
       attempt.helperResponseDurationMs = Math.max(0, attempt.helperResponseMs - attempt.bridgeStartMs!);
       attempt.helperResponseOk = result.ok === true;
@@ -530,7 +531,7 @@ export async function tryNativeScreenCapture(
           try {
             workerSink = createNativeWorkerFrameSink({
               writable: track.writable, width: result.width, height: result.height, fps: options.fps,
-              startupTimeoutMs: START_TIMEOUT_MS - attemptElapsed(),
+              startupTimeoutMs: startTimeoutMs - attemptElapsed(),
               onWritten(timing) {
                 if (stopped) return;
                 diagnostics.totalWriteIdleMs += timing.idleMs;

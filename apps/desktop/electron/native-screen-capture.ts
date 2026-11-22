@@ -9,7 +9,8 @@ import { createNativeCpuBufferPipeline, type NativeCpuBufferPipeline, type Nativ
 import { createNativeScreenHelperTimingCollector, type NativeScreenHelperTiming } from './native-screen-capture-timing';
 import { acquireNativeScreenRendererActivity } from './native-screen-renderer-activity';
 import {
-  NATIVE_SCREEN_POOL_SIZE, NATIVE_SCREEN_START_TIMEOUT_MS, NATIVE_SCREEN_STOP_TIMEOUT_MS,
+  NATIVE_SCREEN_POOL_SIZE, NATIVE_SCREEN_START_TIMEOUT_MS, NATIVE_SCREEN_GPU_ENCODING_START_TIMEOUT_MS,
+  NATIVE_SCREEN_STOP_TIMEOUT_MS,
   validNativeScreenOptions, validNativeScreenRequestId,
   type NativeScreenFrame, type NativeScreenOptions, type NativeScreenSourceSelection, type NativeScreenStartResult, type NativeScreenColorSpace,
   type NativeScreenRegion,
@@ -27,7 +28,7 @@ const gpuNv12ColorSpace = { primaries: 'bt709', transfer: 'bt709', matrix: 'bt70
 type TimingStage = 'import' | 'transfer' | 'reference';
 interface TimingMetric { count: number; totalMs: number; maxMs: number; buckets: number[] }
 function emptyTimingMetric(): TimingMetric { return { count: 0, totalMs: 0, maxMs: 0, buckets: Array(7).fill(0) }; }
-type FailureCode = 'helper_unavailable' | 'helper_failed' | 'invalid_protocol' | 'start_timeout' |
+type FailureCode = 'helper_unavailable' | 'helper_failed' | 'invalid_protocol' | 'native_resolution_unavailable' | 'start_timeout' |
   'import_failed' | 'transfer_failed' | 'release_failed' | 'capture_stalled' | 'target_unavailable' | 'stopped' |
   'renderer_failed' | 'receiver_failed' | 'cpu_frame_failed' | 'cpu_ack_timeout';
 interface Ready { width: number; height: number; sourceWidth: number; sourceHeight: number; pixelFormat: 'bgra' | 'nv12'; storage: 'gpu' | 'cpu'; colorSpace?: NativeScreenColorSpace }
@@ -289,7 +290,8 @@ export class NativeScreenCaptureController {
     // listeners, so startup failure and every normal retirement release it.
     if (this.config.keepRendererActive === true)
       session.releaseRendererActivity = acquireNativeScreenRendererActivity(target);
-    session.startTimer = setTimeout(() => this.retire(session, 'start_timeout', true), NATIVE_SCREEN_START_TIMEOUT_MS);
+    const startTimeoutMs = requireCpuNv12 ? NATIVE_SCREEN_GPU_ENCODING_START_TIMEOUT_MS : NATIVE_SCREEN_START_TIMEOUT_MS;
+    session.startTimer = setTimeout(() => this.retire(session, 'start_timeout', true), startTimeoutMs);
     session.startTimer.unref();
     try { session.childHandles = this.handles.openChild(child.pid!); }
     catch { this.retire(session, 'helper_unavailable', true); }
@@ -458,6 +460,9 @@ export class NativeScreenCaptureController {
     const height = Math.floor((message.sourceHeight * scale + 1e-9) / 2) * 2;
     if (width < 2 || height < 2 || message.width !== width || message.height !== height) {
       this.retire(session, 'invalid_protocol', true); return;
+    }
+    if (session.options.nativeResolution && (width !== message.sourceWidth || height !== message.sourceHeight)) {
+      this.retire(session, 'native_resolution_unavailable', false); return;
     }
     session.ready = { width, height, sourceWidth: message.sourceWidth, sourceHeight: message.sourceHeight, pixelFormat, storage,
       ...(cpu ? { colorSpace: cpuColorSpace as NativeScreenColorSpace } : {}) };

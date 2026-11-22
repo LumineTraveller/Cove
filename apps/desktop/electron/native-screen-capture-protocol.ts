@@ -10,6 +10,8 @@ export interface NativeScreenOptions {
   colorSpace?: NativeScreenColorSpace;
   /** Require a CPU-backed NV12 frame source for the selected AV1 encoder. */
   cpuNv12?: true;
+  /** Require the NV12 output to match the physical source dimensions. */
+  nativeResolution?: boolean;
 }
 
 export interface NativeScreenFrame {
@@ -47,7 +49,10 @@ export interface NativeScreenSourceSelection {
 }
 
 export const NATIVE_SCREEN_POOL_SIZE = 3;
+export const NATIVE_SCREEN_MAX_WIDTH = 4096;
+export const NATIVE_SCREEN_MAX_HEIGHT = 2560;
 export const NATIVE_SCREEN_START_TIMEOUT_MS = 1_500;
+export const NATIVE_SCREEN_GPU_ENCODING_START_TIMEOUT_MS = 3_000;
 export const NATIVE_SCREEN_STOP_TIMEOUT_MS = 1_500;
 
 export function validNativeScreenRequestId(value: unknown): value is string {
@@ -58,8 +63,11 @@ export function validNativeScreenOptions(value: unknown): value is NativeScreenO
   if (!value || typeof value !== 'object') return false;
   const options = value as NativeScreenOptions;
   return Number.isInteger(options.maxWidth) && Number.isInteger(options.maxHeight) &&
-    options.maxWidth >= 2 && options.maxWidth <= 4096 && options.maxHeight >= 2 && options.maxHeight <= 2560 &&
+    options.maxWidth >= 2 && options.maxWidth <= NATIVE_SCREEN_MAX_WIDTH &&
+    options.maxHeight >= 2 && options.maxHeight <= NATIVE_SCREEN_MAX_HEIGHT &&
     [30, 60, 120].includes(options.fps) &&
     (options.cpuNv12 === undefined || (options.cpuNv12 === true && options.colorSpace === 'bt709-limited')) &&
+    (options.nativeResolution === undefined || options.nativeResolution === false ||
+      (options.nativeResolution === true && options.cpuNv12 === true)) &&
     (options.colorSpace === undefined || options.colorSpace === 'bt601-limited' || options.colorSpace === 'bt709-limited');
 }

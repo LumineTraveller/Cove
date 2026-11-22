@@ -1,7 +1,7 @@
 /** Fixed codes only: helper text, identifiers, paths and user content stay out of diagnostics. */
 const FAILURE_REASONS = [
   'invalid_request', 'unsupported_pixel_format', 'color_space_required', 'unavailable',
-  'duplicate_request', 'busy', 'target_unavailable', 'source_ineligible', 'untrusted_sender',
+  'duplicate_request', 'busy', 'target_unavailable', 'source_ineligible', 'native_resolution_unavailable', 'untrusted_sender',
   'helper_unavailable', 'helper_failed', 'invalid_protocol', 'start_timeout', 'import_failed',
   'transfer_failed', 'release_failed', 'capture_stalled', 'stopped', 'renderer_failed',
   'receiver_failed', 'cpu_frame_failed', 'cpu_ack_timeout',

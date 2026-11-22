@@ -1,12 +1,14 @@
 import { useCallback, useRef, useState } from 'react';
 import { Socket } from 'socket.io-client';
 import { Device } from 'mediasoup-client';
+import { NATIVE_SCREEN_MAX_WIDTH, NATIVE_SCREEN_MAX_HEIGHT } from '../../../../electron/native-screen-capture-protocol';
 
 import { type RtcVideoCounterSample } from '../diagnostics/mediaDiagnostics';
 import {
   createScreenEncodingPlan,
   screenCaptureVideoConstraints,
   SCREEN_MAX_BITRATE_BPS,
+  SCREEN_PRESETS,
   SCREEN_START_BITRATE_BPS,
   toScreenRtpEncoding,
   type ScreenActivity,
@@ -15,8 +17,8 @@ import {
 } from './screenCapture';
 import { ApplicationAudioPipeline } from '../application-audio/applicationAudio';
 import { screenPublicationCodecCandidates } from './screenCodecPolicy';
-import { nativeScreenContentHint, tryNativeScreenCapture, type NativeCaptureCandidate,
-  type NativeScreenBridge } from './nativeScreenCapture';
+import { getLastNativeScreenCaptureAttempt, nativeScreenContentHint, tryNativeScreenCapture,
+  type NativeCaptureCandidate, type NativeScreenBridge } from './nativeScreenCapture';
 import { canUpgradeScreenCapture, upgradePublishedScreenCapture } from './nativeScreenUpgrade';
 import {
   Transport,
@@ -126,39 +128,49 @@ async function prepareHardwareScreenCapture(
   fps: Fps,
   signal: AbortSignal,
   isCurrent: () => boolean,
-): Promise<NativeCaptureCandidate> {
-  const video = {
-    contentType: 'video/AV1',
-    width: plan.outputWidth,
-    height: plan.outputHeight,
-    framerate: fps,
-    bitrate: SCREEN_START_BITRATE_BPS,
-    scalabilityMode: 'L1T1',
-  };
-  const capability = await navigator.mediaCapabilities?.encodingInfo({ type: 'webrtc', video }).catch(() => null);
-  if (!isCurrent() || signal.aborted) throw new CancelledScreenPublication();
-  if (!capability?.supported || !capability.powerEfficient)
-    throw new Error('显卡无法按当前分辨率和帧率编码 AV1。请关闭 GPU 编码或调整共享设置。');
-
+): Promise<{ capture: NativeCaptureCandidate; plan: ScreenEncodingPlan }> {
+  // Chromium may not report stock track dimensions before its first frame.
+  // The native capture fits the physical display into the requested bounds.
+  const bounds = plan.nativeResolution
+    ? { width: NATIVE_SCREEN_MAX_WIDTH, height: NATIVE_SCREEN_MAX_HEIGHT }
+    : SCREEN_PRESETS[plan.preset];
   const prepared = await tryNativeScreenCapture(stockStream, {
-    maxWidth: plan.outputWidth, maxHeight: plan.outputHeight, fps,
+    maxWidth: bounds.width, maxHeight: bounds.height, fps,
     colorSpace: 'bt709-limited', cpuNv12: true, nativeResolution: plan.nativeResolution,
     contentHint: stockStream.getVideoTracks()[0]?.contentHint,
     isCurrent, signal,
   });
-  const track = prepared?.stream.getVideoTracks()[0];
-  const settings = track?.getSettings();
-  if (!isCurrent() || signal.aborted) {
+  try {
+    if (!isCurrent() || signal.aborted) throw new CancelledScreenPublication();
+    const track = prepared?.stream.getVideoTracks()[0];
+    const { width, height } = track?.getSettings() ?? {};
+    if (!prepared || track?.readyState !== 'live' || !width || !height) {
+      const attempt = getLastNativeScreenCaptureAttempt();
+      if (attempt?.startFailureReason === 'native_resolution_unavailable' ||
+          attempt?.backendEndReason === 'native_resolution_unavailable')
+        throw new Error('GPU 采集无法保留原生分辨率。请关闭 GPU 编码或选择分辨率档位。');
+      throw new Error('GPU 屏幕采集启动失败。请重试或关闭 GPU 编码。');
+    }
+    const capability = await navigator.mediaCapabilities?.encodingInfo({
+      type: 'webrtc',
+      video: { contentType: 'video/AV1', width, height, framerate: fps,
+        bitrate: SCREEN_START_BITRATE_BPS, scalabilityMode: 'L1T1' },
+    }).catch(() => null);
+    if (!isCurrent() || signal.aborted) throw new CancelledScreenPublication();
+    if (!capability?.supported || !capability.powerEfficient)
+      throw new Error('显卡无法按当前分辨率和帧率编码 AV1。请关闭 GPU 编码或调整共享设置。');
+    if (track.readyState !== 'live') throw new Error('GPU 屏幕采集已停止。请重试。');
+
+    track.contentHint = nativeScreenContentHint(track, plan.contentHint);
+    return {
+      capture: prepared,
+      plan: { ...plan, sourceWidth: width, sourceHeight: height,
+        outputWidth: width, outputHeight: height, scaleResolutionDownBy: 1 },
+    };
+  } catch (error) {
     prepared?.stop();
-    throw new CancelledScreenPublication();
+    throw error;
   }
-  if (!prepared || track?.readyState !== 'live' ||
-      settings?.width !== plan.outputWidth || settings.height !== plan.outputHeight) {
-    prepared?.stop();
-    throw new Error('当前画面无法使用 GPU 编码。请选择单显示器的整屏共享，或关闭 GPU 编码。');
-  }
-  track.contentHint = nativeScreenContentHint(track, plan.contentHint);
-  return prepared;
 }
 
 export function useScreenPublishing(deps: useScreenPublishingDependencies) {
@@ -408,12 +420,12 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
           codecCandidates[0]?.mimeType.toLowerCase() === 'video/av1';
         if (gpuEncoding) {
           startupStage = '准备 GPU 编码画面';
-          initialNative = await prepareHardwareScreenCapture(selected, initialPlan, currentFps, controller.signal, isCurrent);
+          ({ capture: initialNative, plan: initialPlan } = await prepareHardwareScreenCapture(
+            selected, initialPlan, currentFps, controller.signal, isCurrent,
+          ));
           stream = initialNative.stream;
           videoTrack = stream.getVideoTracks()[0];
           acquiredStream = stream;
-          initialPlan = { ...initialPlan, sourceWidth: initialPlan.outputWidth, sourceHeight: initialPlan.outputHeight,
-            scaleResolutionDownBy: 1 };
           ensureCurrent();
         } else if (startAv1WithNative && !nativeResolution && currentFps > 30 && initialPlan.scaleResolutionDownBy === 1 &&
             trackSettings.width && trackSettings.height) {
@@ -733,7 +745,7 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
           // frame rate. Avoid restarting its Windows capture source before the
           // existing producer can switch to it.
           const settings = videoTrack.getSettings();
-          const plan = createScreenEncodingPlan({
+          let plan = createScreenEncodingPlan({
             preset,
             maxFps: currentFps,
             activity: gameMode ? 'motion' : 'active',
@@ -746,7 +758,9 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
             const preparation = { controller: new AbortController(), queue: currentQueue };
             nativeUpgradeAbort.current = preparation;
             try {
-              prepared = await prepareHardwareScreenCapture(stream, plan, currentFps, preparation.controller.signal, isCurrent);
+              ({ capture: prepared, plan } = await prepareHardwareScreenCapture(
+                stream, plan, currentFps, preparation.controller.signal, isCurrent,
+              ));
             } finally {
               if (nativeUpgradeAbort.current === preparation) nativeUpgradeAbort.current = null;
             }
