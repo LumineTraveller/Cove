@@ -42,6 +42,7 @@ export interface NativeCpuFrameDeliverySnapshot {
 export interface NativeCpuFrameDelivery {
   deliver(metadata: NativeScreenFrame, handle: Buffer): void;
   acknowledge(metadata: unknown): boolean;
+  refreshAcknowledgmentDeadlines(): void;
   stop(): void;
   snapshot(): NativeCpuFrameDeliverySnapshot;
 }
@@ -81,6 +82,7 @@ export function createNativeCpuFrameDelivery(options: NativeCpuFrameDeliveryOpti
     throw new RangeError('CPU NV12 frame geometry is invalid');
 
   const now = options.now ?? (() => performance.now());
+  let desktopUnavailableAt = -Infinity;
   const scheduler = options.scheduler ?? { setImmediate, clearImmediate };
   const leases = new Map<number, Lease>();
   const pending: Lease[] = [];
@@ -118,7 +120,8 @@ export function createNativeCpuFrameDelivery(options: NativeCpuFrameDeliveryOpti
   }
 
   function expired(lease: Lease): boolean {
-    if (now() - lease.createdAt < ACK_TIMEOUT_MS) return false;
+    const since = lease.sent ? Math.max(lease.createdAt, desktopUnavailableAt) : lease.createdAt;
+    if (now() - since < ACK_TIMEOUT_MS) return false;
     fail('cpu_ack_timeout');
     return true;
   }
@@ -255,10 +258,12 @@ export function createNativeCpuFrameDelivery(options: NativeCpuFrameDeliveryOpti
     } catch { return false; }
     try {
       if (!live(lease) || expired(lease)) return false;
-      const durationMs = now() - lease.createdAt;
+      const acknowledgedAt = now();
       // Unknown metadata accessors and the injected clock can reenter session teardown too.
       if (!live(lease)) return false;
-      if (durationMs >= ACK_TIMEOUT_MS) { fail('cpu_ack_timeout'); return false; }
+      if (acknowledgedAt - Math.max(lease.createdAt, desktopUnavailableAt) >= ACK_TIMEOUT_MS) {
+        fail('cpu_ack_timeout'); return false;
+      }
       // Remove first so duplicate/reentrant acks cannot credit the same slot twice.
       clearTimeout(lease.timer);
       leases.delete(lease.metadata.slot);
@@ -266,11 +271,18 @@ export function createNativeCpuFrameDelivery(options: NativeCpuFrameDeliveryOpti
       if (accepted) released++;
       if (stopped) return accepted;
       if (!accepted) { fail('cpu_frame_failed'); return false; }
-      options.onTiming?.('reference', durationMs);
+      options.onTiming?.('reference', acknowledgedAt - lease.createdAt);
       return true;
     } catch { fail('cpu_frame_failed'); return false; }
   }
 
-  return { deliver, acknowledge, stop,
+  function refreshAcknowledgmentDeadlines(): void {
+    desktopUnavailableAt = now();
+    for (const lease of leases.values()) {
+      if (lease.sent) lease.timer.refresh();
+    }
+  }
+
+  return { deliver, acknowledge, refreshAcknowledgmentDeadlines, stop,
     snapshot: () => ({ inFlight: leases.size, stopped, frames, released, expectedBytes }) };
 }

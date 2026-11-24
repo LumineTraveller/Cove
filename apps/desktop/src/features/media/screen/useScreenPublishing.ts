@@ -149,6 +149,8 @@ async function prepareHardwareScreenCapture(
       if (attempt?.startFailureReason === 'native_resolution_unavailable' ||
           attempt?.backendEndReason === 'native_resolution_unavailable')
         throw new Error('GPU 采集无法保留原生分辨率。请关闭 GPU 编码或选择分辨率档位。');
+      if (attempt?.startFailureReason === 'desktop_unavailable' || attempt?.backendEndReason === 'desktop_unavailable')
+        throw new Error('Windows 桌面暂不可用。关闭系统提示后请重新共享。');
       throw new Error('GPU 屏幕采集启动失败。请重试或关闭 GPU 编码。');
     }
     const capability = await navigator.mediaCapabilities?.encodingInfo({

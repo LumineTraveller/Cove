@@ -1066,6 +1066,38 @@ test('copy ownership final ACK deadline includes pre-copy waiting and never rele
   h.children[0].close(); assert.equal(h.timers.size, 0);
 });
 
+test('temporary desktop unavailability at startup permits another share in the same process', async () => {
+  const h = harness();
+  const first = h.start();
+  h.children[0].emitMessage({ type: 'desktop-unavailable' });
+  const result = await first;
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.reason, 'desktop_unavailable');
+  h.children[0].close();
+  assert.equal(h.controller.snapshot().disabled, false);
+  const next = h.start('request_02');
+  h.children[1].emitMessage(ready);
+  assert.equal((await next).ok, true);
+  h.controller.reset(); h.children[1].close();
+  assert.equal(h.timers.size, 0);
+});
+
+test('a physical display change allows a new share with a fresh selection', async () => {
+  const h = harness();
+  const started = h.start();
+  const child = h.children[0];
+  child.emitMessage(ready);
+  assert.equal((await started).ok, true);
+  child.emitMessage({ type: 'error', code: 'display_changed' });
+  assert.equal(h.controller.snapshot().activeSessions, 0);
+  assert.equal(h.controller.snapshot().disabled, false);
+  child.close();
+  const restarted = h.start('request_02');
+  h.children[1].emitMessage(ready);
+  assert.equal((await restarted).ok, true);
+  h.controller.reset(); h.children[1].close();
+});
+
 test('startup timeout is bounded, disables native for this app session, and kills only its own child', async () => {
   const h = harness(); const pending = h.start(); h.advance(1500);
   const result = await pending;
@@ -1313,6 +1345,51 @@ for (const storage of ['gpu', 'cpu'] as const) {
     h.advance(1); assert.equal(h.controller.snapshot().activeSessions, 0);
     assert.equal(h.controller.snapshot().failureCode, 'capture_stalled');
     h.children[0].close(); assert.equal(h.timers.size, 0);
+  });
+}
+
+for (const transport of ['cached-gpu', 'cpu-final-ack', 'cpu-copy-complete'] as const) {
+  test('desktop switch preserves capture and frame ownership for ' + transport, async () => {
+    const gpu = transport === 'cached-gpu';
+    const copyComplete = transport === 'cpu-copy-complete';
+    const h = gpu ? harness({ reuseGpuTextures: true }) : harness({
+      pixelFormat: 'nv12', storage: 'cpu',
+      cpuOwnership: copyComplete ? 'copy-complete' : 'final-ack',
+      supportsCachedCpuFramesInto: copyComplete,
+    });
+    const pending = h.start(), child = h.children[0];
+    child.emitMessage(gpu ? ready : cpuReady);
+    const started = await pending;
+    assert.equal(started.ok, true);
+    if (!started.ok) return;
+    const target = h.target as any;
+    const acknowledge = (metadata: unknown) => {
+      if (gpu) h.controller.acknowledgeGpuFrame(target, target.mainFrame, metadata);
+      else assert.equal(h.controller.acknowledgeCpuFrame(target, metadata), true);
+    };
+
+    child.emitMessage(gpu ? frame() : cpuFrame());
+    if (copyComplete) h.runImmediate();
+    const first = h.sent[0];
+    for (let second = 0; second < 12; second++) {
+      child.emitMessage({ type: 'desktop-unavailable' });
+      h.advance(1_000);
+    }
+    assert.equal(h.controller.snapshot().disabled, false);
+    assert.equal(h.controller.snapshot().activeSessions, 1);
+    assert.equal(h.sent.length, 1);
+    acknowledge(first.data);
+
+    child.emitMessage(gpu ? frame(2) : cpuFrame(2));
+    if (copyComplete) h.runImmediate();
+    assert.equal(h.sent[1].data.sessionId, started.sessionId);
+    assert.equal(h.sent[1].data.serial, 2);
+    acknowledge(h.sent[1].data);
+    assert.equal(h.children.length, 1);
+    h.advance(5_000);
+    assert.equal(h.controller.snapshot().failureCode, 'capture_stalled', 'the ordinary watchdog resumes after the switch');
+    child.close();
+    assert.equal(h.timers.size, 0);
   });
 }
 

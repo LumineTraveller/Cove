@@ -85,6 +85,7 @@ export function createNativeCpuBufferPipeline(options: NativeCpuBufferPipelineOp
   let pending: FrameLease | undefined;
   let scheduled: { handle?: ReturnType<typeof setImmediate> } | undefined;
   let stopped = false, draining = false, lastSerial = 0, lastTimestamp = 0;
+  let desktopUnavailableAt = -Infinity;
 
   function count(counter: NativeCpuPipelineCounter): void {
     counters[counter]++;
@@ -111,7 +112,8 @@ export function createNativeCpuBufferPipeline(options: NativeCpuBufferPipelineOp
     try { options.onFailure(code); } catch { /* The session owner handles native teardown. */ }
   }
   function withinDeadline(lease: FrameLease): boolean {
-    const elapsed = now() - lease.createdAt;
+    const since = lease.sent ? Math.max(lease.createdAt, desktopUnavailableAt) : lease.createdAt;
+    const elapsed = now() - since;
     if (stopped) return false;
     if (elapsed >= ACK_TIMEOUT_MS) { fail('cpu_ack_timeout'); return false; }
     return true;
@@ -288,9 +290,11 @@ export function createNativeCpuBufferPipeline(options: NativeCpuBufferPipelineOp
     } catch { return false; }
     try {
       if (!mainLive(lease) || !withinDeadline(lease) || !mainLive(lease)) return false;
-      const duration = now() - lease.createdAt;
+      const acknowledgedAt = now();
       if (!mainLive(lease)) return false;
-      if (duration >= ACK_TIMEOUT_MS) { fail('cpu_ack_timeout'); return false; }
+      if (acknowledgedAt - Math.max(lease.createdAt, desktopUnavailableAt) >= ACK_TIMEOUT_MS) {
+        fail('cpu_ack_timeout'); return false;
+      }
       main.delete(lease.metadata.serial); clearTimeout(lease.timer); lease.timer = undefined;
       if (lease.buffer?.lease === lease) lease.buffer.lease = undefined;
       count('finalAck');
@@ -298,13 +302,20 @@ export function createNativeCpuBufferPipeline(options: NativeCpuBufferPipelineOp
       const accepted = options.onFinalAck(lease.metadata);
       if (!accepted && !stopped) { fail('cpu_frame_failed'); return false; }
       if (!stopped) {
-        options.onTiming?.('reference', duration);
+        options.onTiming?.('reference', acknowledgedAt - lease.createdAt);
         scheduleNext();
       }
       return accepted;
     } catch { fail('cpu_frame_failed'); return false; }
   }
-  return { deliver, acknowledge, stop, snapshot: () => ({ ownership: 'copy-complete', ...counters,
+  function refreshAcknowledgmentDeadlines(): void {
+    desktopUnavailableAt = now();
+    for (const lease of main.values()) {
+      if (lease.sent) lease.timer?.refresh();
+    }
+  }
+
+  return { deliver, acknowledge, refreshAcknowledgmentDeadlines, stop, snapshot: () => ({ ownership: 'copy-complete', ...counters,
     inFlight: main.size, stopped, frames: counters.mainSent, released: counters.finalAck, expectedBytes,
     activeNativeLeases: native.size, mainBuffersInUse: buffers.filter(value => value.lease).length,
     allocatedBuffers: Number(!!serializedBuffer) + Number(!!serializedRows) + buffers.filter(value => value.data).length,

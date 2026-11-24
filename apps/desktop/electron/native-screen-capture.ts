@@ -28,7 +28,8 @@ const gpuNv12ColorSpace = { primaries: 'bt709', transfer: 'bt709', matrix: 'bt70
 type TimingStage = 'import' | 'transfer' | 'reference';
 interface TimingMetric { count: number; totalMs: number; maxMs: number; buckets: number[] }
 function emptyTimingMetric(): TimingMetric { return { count: 0, totalMs: 0, maxMs: 0, buckets: Array(7).fill(0) }; }
-type FailureCode = 'helper_unavailable' | 'helper_failed' | 'invalid_protocol' | 'native_resolution_unavailable' | 'start_timeout' |
+type FailureCode = 'helper_unavailable' | 'helper_failed' | 'invalid_protocol' | 'native_resolution_unavailable' |
+  'desktop_unavailable' | 'display_changed' | 'start_timeout' |
   'import_failed' | 'transfer_failed' | 'release_failed' | 'capture_stalled' | 'target_unavailable' | 'stopped' |
   'renderer_failed' | 'receiver_failed' | 'cpu_frame_failed' | 'cpu_ack_timeout';
 interface Ready { width: number; height: number; sourceWidth: number; sourceHeight: number; pixelFormat: 'bgra' | 'nv12'; storage: 'gpu' | 'cpu'; colorSpace?: NativeScreenColorSpace }
@@ -432,8 +433,24 @@ export class NativeScreenCaptureController {
       if (!record(message)) { this.retire(session, 'invalid_protocol', true); return; }
       if (message.type === 'ready') this.ready(session, message);
       else if (message.type === 'frame') this.frame(session, message);
+      else if (message.type === 'desktop-unavailable') this.desktopUnavailable(session);
+      else if (message.type === 'error' && message.code === 'display_changed') this.retire(session, 'display_changed', false);
       else if (message.type === 'error' || message.type === 'done') this.retire(session, 'helper_failed', true);
       else this.retire(session, 'invalid_protocol', true);
+    }
+  }
+
+  private desktopUnavailable(session: Session): void {
+    if (!session.ready) {
+      this.retire(session, 'desktop_unavailable', false);
+      return;
+    }
+    // Renew the existing deadlines while the helper is waiting for DXGI.
+    this.watchHealth(session);
+    session.cpuDelivery?.refreshAcknowledgmentDeadlines();
+    for (const lease of session.leases.values()) {
+      lease.transferTimer?.refresh();
+      lease.referenceTimer?.refresh();
     }
   }
 

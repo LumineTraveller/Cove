@@ -1,6 +1,5 @@
-// Experimental Windows capture provider. GPU sharing remains the default. The
-// explicit CPU/NV12 backend owns three bounded sections; no encoder, image pipe,
-// OS timer change, restart loop or automatic source fallback is involved.
+// Windows desktop duplication and conversion. The GPU and CPU/NV12 paths
+// keep their three bounded output slots across desktop switches.
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #define _WIN32_WINNT 0x0A00
@@ -26,6 +25,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 using Microsoft::WRL::ComPtr;
@@ -36,7 +36,7 @@ constexpr UINT kMaxDimension = 16384;
 constexpr UINT kMaxCursorDimension = 512;
 constexpr UINT kMaxCursorBytes = kMaxCursorDimension * kMaxCursorDimension * 8;
 constexpr size_t kMaxCpuFrameBytes = 16 * 1024 * 1024;
-class Failure final : public std::exception {
+class Failure : public std::exception {
   const char* code_;
 public:
   explicit Failure(const char* code) : code_(code) {}
@@ -44,6 +44,25 @@ public:
 };
 static void require(bool value, const char* code) { if (!value) throw Failure(code); }
 static void check(HRESULT value, const char* code) { require(SUCCEEDED(value), code); }
+
+class DesktopUnavailable final : public Failure {
+public:
+  using Failure::Failure;
+};
+
+static bool desktopUnavailable(HRESULT result) {
+  return result == DXGI_ERROR_ACCESS_LOST || result == E_ACCESSDENIED ||
+    result == DXGI_ERROR_SESSION_DISCONNECTED;
+}
+
+static void checkDesktopAccess(HRESULT result, const char* code) {
+  if (desktopUnavailable(result)) throw DesktopUnavailable(code);
+  check(result, code);
+}
+
+static void reportDesktopUnavailable() {
+  std::cout << "{\"type\":\"desktop-unavailable\"}" << std::endl;
+}
 
 struct Handle {
   HANDLE value = nullptr;
@@ -643,13 +662,14 @@ struct Output {
 };
 static DISPLAYCONFIG_PATH_INFO singleDisplayPath() {
   UINT32 paths = 0, modes = 0;
-  require(GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &paths, &modes) == ERROR_SUCCESS &&
-    paths == 1 && modes > 0 && modes <= 16, "unsupported_display_topology");
+  const LONG sizes = GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &paths, &modes);
+  checkDesktopAccess(HRESULT_FROM_WIN32(sizes), "unsupported_display_topology");
+  require(paths == 1 && modes > 0 && modes <= 16, "unsupported_display_topology");
   DISPLAYCONFIG_PATH_INFO path{};
   std::vector<DISPLAYCONFIG_MODE_INFO> mode(modes);
-  require(QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &paths, &path, &modes, mode.data(), nullptr) == ERROR_SUCCESS &&
-    paths == 1 && path.targetInfo.rotation == DISPLAYCONFIG_ROTATION_IDENTITY,
-    "unsupported_display_topology");
+  const LONG query = QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &paths, &path, &modes, mode.data(), nullptr);
+  checkDesktopAccess(HRESULT_FROM_WIN32(query), "unsupported_display_topology");
+  require(paths == 1 && path.targetInfo.rotation == DISPLAYCONFIG_ROTATION_IDENTITY, "unsupported_display_topology");
   switch (path.targetInfo.outputTechnology) {
     case DISPLAYCONFIG_OUTPUT_TECHNOLOGY_HD15:
     case DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DVI:
@@ -667,27 +687,32 @@ static DISPLAYCONFIG_PATH_INFO singleDisplayPath() {
   color.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO;
   color.header.size = sizeof(color); color.header.adapterId = path.targetInfo.adapterId;
   color.header.id = path.targetInfo.id;
-  require(DisplayConfigGetDeviceInfo(&color.header) == ERROR_SUCCESS && !color.advancedColorEnabled &&
-    !color.wideColorEnforced, "unsupported_display_color");
+  const LONG colorQuery = DisplayConfigGetDeviceInfo(&color.header);
+  checkDesktopAccess(HRESULT_FROM_WIN32(colorQuery), "unsupported_display_color");
+  require(!color.advancedColorEnabled && !color.wideColorEnforced, "unsupported_display_color");
   return path;
 }
 static void validateOutputFast(const Output& output) {
-  require(output.factory->IsCurrent(), "display_changed");
-  require(GetSystemMetrics(SM_CMONITORS) == 1, "display_changed");
+  if (!output.factory->IsCurrent() || GetSystemMetrics(SM_CMONITORS) != 1)
+    throw DesktopUnavailable("display_changed");
   MONITORINFO monitor{}; monitor.cbSize = sizeof(monitor);
-  require(GetMonitorInfoW(output.desc.Monitor, &monitor) && (monitor.dwFlags & MONITORINFOF_PRIMARY) &&
-    EqualRect(&monitor.rcMonitor, &output.desc.DesktopCoordinates), "display_changed");
-  DXGI_OUTPUT_DESC1 desc{}; check(output.output6->GetDesc1(&desc), "display_query_failed");
-  require(desc.AttachedToDesktop && desc.Rotation == DXGI_MODE_ROTATION_IDENTITY &&
-    desc.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 &&
-    EqualRect(&desc.DesktopCoordinates, &output.desc.DesktopCoordinates), "unsupported_display_color_or_geometry");
+  if (!GetMonitorInfoW(output.desc.Monitor, &monitor) || !(monitor.dwFlags & MONITORINFOF_PRIMARY) ||
+      !EqualRect(&monitor.rcMonitor, &output.desc.DesktopCoordinates))
+    throw DesktopUnavailable("display_changed");
+  DXGI_OUTPUT_DESC1 desc{}; checkDesktopAccess(output.output6->GetDesc1(&desc), "display_query_failed");
+  if (!desc.AttachedToDesktop || !EqualRect(&desc.DesktopCoordinates, &output.desc.DesktopCoordinates))
+    throw DesktopUnavailable("display_changed");
+  require(desc.Rotation == DXGI_MODE_ROTATION_IDENTITY &&
+    desc.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709, "unsupported_display_color_or_geometry");
+}
+static bool sameDisplayTarget(const DISPLAYCONFIG_PATH_INFO& a, const DISPLAYCONFIG_PATH_INFO& b) {
+  return a.targetInfo.id == b.targetInfo.id &&
+    a.targetInfo.adapterId.HighPart == b.targetInfo.adapterId.HighPart &&
+    a.targetInfo.adapterId.LowPart == b.targetInfo.adapterId.LowPart;
 }
 static void validateOutput(const Output& output) {
   validateOutputFast(output);
-  const auto path = singleDisplayPath();
-  require(path.targetInfo.id == output.path.targetInfo.id &&
-    path.targetInfo.adapterId.HighPart == output.path.targetInfo.adapterId.HighPart &&
-    path.targetInfo.adapterId.LowPart == output.path.targetInfo.adapterId.LowPart, "display_changed");
+  if (!sameDisplayTarget(singleDisplayPath(), output.path)) throw DesktopUnavailable("display_changed");
 }
 static Output primaryOutput() {
   Output result;
@@ -724,6 +749,47 @@ static Output primaryOutput() {
   require(attached == 1 && result.output, "unsupported_display_topology");
   validateOutput(result);
   return result;
+}
+
+static bool openDesktopDuplication(const Output& output, ID3D11Device* device, Size source,
+    ComPtr<IDXGIOutputDuplication>& duplication) {
+  const HRESULT result = output.output->DuplicateOutput(device, duplication.ReleaseAndGetAddressOf());
+  if (desktopUnavailable(result)) return false;
+  check(result, "duplication_failed");
+  DXGI_OUTDUPL_DESC desc{}; duplication->GetDesc(&desc);
+  require(desc.ModeDesc.Width == source.width && desc.ModeDesc.Height == source.height &&
+    desc.ModeDesc.Format == DXGI_FORMAT_B8G8R8A8_UNORM &&
+    desc.Rotation == DXGI_MODE_ROTATION_IDENTITY, "unsupported_duplication_geometry");
+  return true;
+}
+
+static bool captureDesktopIsActive() {
+  const HDESK input = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS);
+  if (!input) return false;
+  const HDESK capture = GetThreadDesktop(GetCurrentThreadId());
+  wchar_t inputName[256]{}, captureName[256]{};
+  DWORD bytes = 0;
+  const bool active = capture &&
+    GetUserObjectInformationW(input, UOI_NAME, inputName, sizeof(inputName), &bytes) &&
+    GetUserObjectInformationW(capture, UOI_NAME, captureName, sizeof(captureName), &bytes) &&
+    lstrcmpiW(inputName, captureName) == 0;
+  CloseDesktop(input);
+  return active;
+}
+
+static bool restoreDesktopDuplication(Output& output, ID3D11Device* device, Size source,
+    ComPtr<IDXGIOutputDuplication>& duplication) {
+  if (!captureDesktopIsActive()) return false;
+  try {
+    // Windows can invalidate the DXGI factory during a secure-desktop switch.
+    // Bind a fresh output for the same monitor and geometry.
+    auto updated = primaryOutput();
+    require(sameDisplayTarget(updated.path, output.path) &&
+      EqualRect(&updated.desc.DesktopCoordinates, &output.desc.DesktopCoordinates), "display_changed");
+    if (!openDesktopDuplication(updated, device, source, duplication)) return false;
+    output = std::move(updated);
+    return true;
+  } catch (const DesktopUnavailable&) { return false; }
 }
 
 struct CursorShape {
@@ -1147,6 +1213,10 @@ public:
     if (updated) context->CopyResource(desktop.Get(), input.Get());
     return sourceView_.Get();
   }
+  void releaseDirectDesktopView() {
+    directView_.Reset();
+    directSource_.Reset();
+  }
   ~Pipeline() { if (!cursorBytes_.empty()) SecureZeroMemory(cursorBytes_.data(), cursorBytes_.size()); }
   bool uploadCursor(ID3D11Device* device, const CursorShape& cursor) {
     if (values.cursorWidth == cursor.width && values.cursorHeight == cursor.height &&
@@ -1239,9 +1309,14 @@ public:
   void hold() { require(!held_, "invalid_frame_hold"); held_ = true; }
   void release() {
     if (!held_) return;
-    held_ = false; check(duplication_->ReleaseFrame(), "frame_release_failed");
+    held_ = false; checkDesktopAccess(duplication_->ReleaseFrame(), "frame_release_failed");
   }
-  ~AcquiredFrame() { if (held_) duplication_->ReleaseFrame(); }
+  void reset(Duplication* duplication) noexcept {
+    if (held_) duplication_->ReleaseFrame();
+    held_ = false;
+    duplication_ = duplication;
+  }
+  ~AcquiredFrame() { reset(nullptr); }
 };
 static bool gpuComplete(ID3D11DeviceContext* context, ID3D11Query* query, HANDLE owner,
     Timer& timer, Input& input, std::array<Slot, 3>& slots, const Clock& clock, CaptureTiming& timing,
@@ -1502,6 +1577,7 @@ static void capture(const Options& option) {
   require(SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) ||
     AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(), DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2),
     "dpi_context_unavailable");
+  if (!captureDesktopIsActive()) throw DesktopUnavailable("desktop_unavailable");
   Clock clock; CaptureTiming timing;
   StartupTiming startup(clock, timing.enabled, option.completion);
   Timer timer; Input input(clock, timing);
@@ -1540,11 +1616,7 @@ static void capture(const Options& option) {
   validateOutput(output);
   startup.next(StartupTiming::DuplicateOutput);
   ComPtr<IDXGIOutputDuplication> duplication;
-  check(output.output->DuplicateOutput(device.Get(), duplication.GetAddressOf()), "duplication_failed");
-  DXGI_OUTDUPL_DESC duplicationDesc{}; duplication->GetDesc(&duplicationDesc);
-  require(duplicationDesc.ModeDesc.Width == source.width && duplicationDesc.ModeDesc.Height == source.height &&
-    duplicationDesc.ModeDesc.Format == DXGI_FORMAT_B8G8R8A8_UNORM &&
-    duplicationDesc.Rotation == DXGI_MODE_ROTATION_IDENTITY, "unsupported_duplication_geometry");
+  if (!openDesktopDuplication(output, device.Get(), source, duplication)) throw DesktopUnavailable("duplication_failed");
   // Retain DXGI ownership until this input's submitted read is finished. GPU
   // sharing releases after the completion barrier and mutex unlock; CPU output
   // releases after staging readback. Downstream slot credits never retain DDA.
@@ -1564,6 +1636,7 @@ static void capture(const Options& option) {
   require(bool(std::cout), "owner_output_closed");
   startup.report(true);
   uint64_t serial = 0, lastTimestamp = 0, nextTick = clock.us(), lastSent = 0, nextDisplayCheck = 0;
+  uint64_t duplicationRestoredAt = 0;
   uint64_t newFrames = 0, refreshFrames = 0, backpressureTicks = 0;
   LONGLONG lastPresent = 0, lastMouse = 0;
   bool haveDesktop = false, haveShape = false, dirty = false;
@@ -1571,11 +1644,11 @@ static void capture(const Options& option) {
   timing.start(nextTick, period);
   bool running = true;
   auto latest = slots.end();
-  while (running) {
+  while (running) try {
     if (!input.pump(owner.value, slots)) break;
     uint64_t now = clock.us();
     timing.report(now);
-    for (const auto& slot : slots) require(!slot.lease.busy || now - slot.sentAt < 10000000,
+    for (const auto& slot : slots) require(!slot.lease.busy || now - std::max(slot.sentAt, duplicationRestoredAt) < 10000000,
       "slot_release_timeout");
     if (now < nextTick) { timer.wait(owner.value, nextTick - now, &timing, &clock); continue; }
     Measure tickTiming(timing, CaptureTiming::TickWork, clock);
@@ -1627,7 +1700,7 @@ static void capture(const Options& option) {
       if (timing.enabled) timing.recordAcquireWait(result, clock.us() - acquireBegin);
       if (timing.enabled && result == DXGI_ERROR_WAIT_TIMEOUT) ++timing.acquireTimeout;
       if (result != DXGI_ERROR_WAIT_TIMEOUT) {
-        check(result, "desktop_acquire_failed"); acquired.hold();
+        checkDesktopAccess(result, "desktop_acquire_failed"); acquired.hold();
         if (timing.enabled) {
           ++timing.acquireSuccess;
           timing.accumulatedFrames += info.AccumulatedFrames;
@@ -1663,7 +1736,9 @@ static void capture(const Options& option) {
           DXGI_OUTDUPL_POINTER_SHAPE_INFO shapeInfo{}; UINT needed = 0;
           const HRESULT shapeResult = duplication->GetFramePointerShape(UINT(raw.size()), raw.data(), &needed, &shapeInfo);
           if (FAILED(shapeResult) || needed > raw.size()) {
-            SecureZeroMemory(raw.data(), raw.size()); throw Failure("cursor_shape_query_failed");
+            SecureZeroMemory(raw.data(), raw.size());
+            checkDesktopAccess(shapeResult, "cursor_shape_query_failed");
+            throw Failure("cursor_shape_query_failed");
           }
           try {
             const auto shape = decodeCursor(shapeInfo, raw.data(), needed);
@@ -1827,8 +1902,32 @@ static void capture(const Options& option) {
     if (refresh) ++refreshFrames; else ++newFrames;
     if (timing.enabled) { if (refresh) ++timing.refreshFrames; else ++timing.newFrames; }
     dirty = false; lastSent = slot.sentAt; latest = available;
+  } catch (const DesktopUnavailable&) {
+    if (!running) break;
+    acquired.reset(nullptr);
+    pipeline.releaseDirectDesktopView();
+    duplication.Reset();
+    // DXGI denies access while Windows shows the secure desktop. Allow stop
+    // and outstanding frame credits to be processed between retry attempts.
+    while ((running = input.pump(owner.value, slots))) {
+      reportDesktopUnavailable();
+      require(bool(std::cout), "owner_output_closed");
+      require(WaitForSingleObject(owner.value, 100) == WAIT_TIMEOUT, "owner_exited");
+      if (restoreDesktopDuplication(output, device.Get(), source, duplication)) break;
+    }
+    if (!running) break;
+    acquired.reset(duplication.Get());
+    // Seed the resumed stream with a complete frame. Slot credits, serials,
+    // and the frame clock still belong to the original capture session.
+    latest = slots.end();
+    haveDesktop = dirty = false;
+    pipeline.values.cursorVisible = 0;
+    lastPresent = lastMouse = 0;
+    lastSent = nextDisplayCheck = 0;
+    duplicationRestoredAt = nextTick = clock.us();
   }
-  { Measure releaseTiming(timing, CaptureTiming::FrameRelease, clock); acquired.release(); }
+  try { Measure releaseTiming(timing, CaptureTiming::FrameRelease, clock); acquired.release(); }
+  catch (const DesktopUnavailable&) { /* Capture has already stopped. */ }
   timing.report(clock.us(), true);
   std::cout << "{\"type\":\"done\",\"frames\":" << serial << ",\"newFrames\":" << newFrames
     << ",\"refreshFrames\":" << refreshFrames << ",\"backpressureTicks\":" << backpressureTicks << "}" << std::endl;
@@ -2270,7 +2369,8 @@ static void selfTest() {
   frameOwner.result = DXGI_ERROR_ACCESS_LOST;
   {
     AcquiredFrame frame(&frameOwner); frame.hold();
-    rejects([&] { frame.release(); }); ++checks;
+    try { frame.release(); expect(false); }
+    catch (const DesktopUnavailable&) { ++checks; }
     frame.release(); expect(frameOwner.releases == 4);
   }
   expect(frameOwner.releases == 4); // Failed explicit release is not retried.
@@ -2278,6 +2378,15 @@ static void selfTest() {
     AcquiredFrame frame(&frameOwner); frame.hold();
   }
   expect(frameOwner.releases == 5); // Best-effort destructor never throws.
+  {
+    TestDuplication replacement;
+    AcquiredFrame frame(&frameOwner);
+    frame.hold(); frame.reset(nullptr);
+    expect(frameOwner.releases == 6);
+    frame.reset(&replacement);
+    frame.hold(); frame.release();
+    expect(replacement.releases == 1 && frameOwner.releases == 6);
+  }
   CaptureTiming acquireWaits; acquireWaits.enabled = false;
   acquireWaits.recordAcquireWait(S_OK, 10);
   expect(acquireWaits.stages[CaptureTiming::Acquire].count == 0 &&
@@ -2664,6 +2773,9 @@ int main(int argc, char** argv) {
   try {
     if (argc == 2 && std::string(argv[1]) == "--self-test") selfTest();
     else capture(options(argc, argv));
+    return 0;
+  } catch (const DesktopUnavailable&) {
+    reportDesktopUnavailable();
     return 0;
   } catch (const Failure& error) {
     // Only fixed compile-time stage codes leave the process: no OS source names,
