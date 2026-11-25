@@ -3,13 +3,13 @@
   "platform": "android",
   "release": {
     "packageName": "com.cove.mobile",
-    "versionName": "0.8.6",
-    "versionCode": 19,
+    "versionName": "0.8.7",
+    "versionCode": 20,
     "minAndroidApi": 24,
-    "tag": "mobile-v0.8.6",
-    "filename": "Cove-Mobile-0.8.6.apk",
-    "size": 56777158,
-    "sha256": "04eac1d7eef9a7a1dbc2639bc20351f005f9c97ddcd089c7826a80a81c872df7",
-    "notes": "# Cove Mobile v0.8.6\n\nAndroid 版本号 19。\n\n- 全屏观看共享时，闲置 3 秒隐藏状态栏、手势条和控件。轻点画面恢复控件，捏合缩放保持控件状态。音量键位于退出键下方，手机横过来时自动横屏。\n- 更新包在 Cove 内下载并校验，校验后自动打开 Android 安装确认。首次若系统要求，请授权 Cove 安装更新。\n- 更新页可在 GitHub 和已配置的 HTTPS 更新服务器之间选择下载源。\n\n支持 ARM64 和 ARMv7，最低 Android 7.0。"
+    "tag": "mobile-v0.8.7",
+    "filename": "Cove-Mobile-0.8.7.apk",
+    "size": 56828170,
+    "sha256": "1a1a83f13e88f89643d9f59e6a9212c8870cec6d9af987cc392550c0a9836566",
+    "notes": "# Cove Mobile v0.8.7\r\n\r\nAndroid 版本号 20。\r\n\r\n- 房间内恢复「共享手机屏幕」。加入语音后，可选择画面采集比例和是否同时共享应用音频。\r\n- 共享期间旋转手机时，画面尺寸跟随横竖屏切换，共享持续进行。\r\n\r\n支持 ARM64 和 ARMv7，最低 Android 7.0。"
   }
 }
