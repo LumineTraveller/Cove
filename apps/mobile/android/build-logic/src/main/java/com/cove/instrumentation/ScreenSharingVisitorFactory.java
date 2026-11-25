@@ -13,6 +13,8 @@ public abstract class ScreenSharingVisitorFactory implements AsmClassVisitorFact
             || name.equals(ScreenSharingVisitor.RECORD);
     }
     @Override public ClassVisitor createClassVisitor(ClassContext context, ClassVisitor next) {
-        return new ScreenSharingVisitor(next, context.getCurrentClassData().getClassName().replace('.', '/'));
+        String target = context.getCurrentClassData().getClassName().replace('.', '/');
+        ClassVisitor sharing = new ScreenSharingVisitor(next, target);
+        return target.equals(ScreenSharingVisitor.GET_USER_MEDIA) ? new ScreenRotationVisitor(sharing) : sharing;
     }
 }

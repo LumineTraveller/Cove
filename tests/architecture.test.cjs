@@ -302,6 +302,25 @@ test('accepted native capture, DSP and Android code survives relocation',()=>{
       assert.equal(content.split(acceptanceGuard).length,2,'exactly one reviewed offline acceptance guard');
       content=content.replace(acceptanceGuard,'');
     }
+    if(file.path==='apps/mobile/android/app/src/main/java/com/covemobile/CoveNativePackage.kt') {
+      // Allow the screen publisher registration while checking the existing package against its baseline.
+      for(const line of [
+        'import com.oney.WebRTCModule.CoveScreenModule\n',
+        '      CoveScreenModule(reactContext),\n',
+      ]) {
+        assert.equal(content.split(line).length,2,'exactly one '+line.trim());
+        content=content.replace(line,'');
+      }
+    }
+    if(file.path==='apps/mobile/android/build-logic/src/main/java/com/cove/instrumentation/ScreenSharingVisitorFactory.java') {
+      const rotationHook=[
+        "        String target = context.getCurrentClassData().getClassName().replace('.', '/');",
+        '        ClassVisitor sharing = new ScreenSharingVisitor(next, target);',
+        '        return target.equals(ScreenSharingVisitor.GET_USER_MEDIA) ? new ScreenRotationVisitor(sharing) : sharing;',
+      ].join('\n');
+      assert.equal(content.split(rotationHook).length,2,'exactly one screen capture rotation hook');
+      content=content.replace(rotationHook,"        return new ScreenSharingVisitor(next, context.getCurrentClassData().getClassName().replace('.', '/'));");
+    }
     const sha=crypto.createHash('sha256').update(content).digest('hex');
     assert.equal(sha,overrides.get(file.path) ?? file.sha256,file.path);
   }

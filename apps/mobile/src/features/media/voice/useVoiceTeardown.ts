@@ -64,6 +64,7 @@ export interface UseVoiceTeardownDependencies {
   readonly inVoiceRef: import('react').RefObject<boolean>;
   readonly voiceAudioSessionActive: import('react').RefObject<boolean>;
   readonly cancelPendingWatch: () => void;
+  readonly stopScreenShare: () => void;
   readonly selfMutedRef: import('react').RefObject<boolean>;
   readonly setInVoice: import('react').Dispatch<
     import('react').SetStateAction<boolean>
@@ -116,6 +117,7 @@ export function useVoiceTeardown(deps: UseVoiceTeardownDependencies) {
     inVoiceRef,
     voiceAudioSessionActive,
     cancelPendingWatch,
+    stopScreenShare,
     selfMutedRef,
     setInVoice,
     setJoining,
@@ -139,6 +141,7 @@ export function useVoiceTeardown(deps: UseVoiceTeardownDependencies) {
       cancelPendingWatch();
       joiningRef.current = false;
       connectionGrace.current.clear();
+      stopScreenShare();
       if (notifyServer && socket.connected) socket.emit('voice:leave', roomId);
 
       audioProducer.current?.close();
@@ -206,6 +209,7 @@ export function useVoiceTeardown(deps: UseVoiceTeardownDependencies) {
       inVoiceRef,
       voiceAudioSessionActive,
       cancelPendingWatch,
+      stopScreenShare,
       selfMutedRef,
       setInVoice,
       setJoining,

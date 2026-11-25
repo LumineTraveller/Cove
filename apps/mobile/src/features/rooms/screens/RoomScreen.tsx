@@ -55,6 +55,7 @@ import {
 } from 'lucide-react-native';
 import { ZoomableScreenVideo } from '../../media/screen/components/ZoomableScreenVideo';
 import { FullscreenScreenViewer } from './FullscreenScreenViewer';
+import { ScreenShareControls } from './ScreenShareControls';
 import { useRemoteControlPolicy } from '../../remote-control/useRemoteControlPolicy';
 import type { AnnotationPoint } from '@cove/contracts';
 import { useMobileRemoteControl } from '../../remote-control/useMobileRemoteControl';
@@ -628,6 +629,11 @@ export function RoomScreen({
         )}
 
         {screenURL && screenVolumeControls}
+
+        {media.canShareScreen &&
+          (roomReady || media.sharingScreen || media.screenSharingBusy) && (
+            <ScreenShareControls media={media} />
+          )}
 
         {media.inVoice &&
           media.applicationAudioShares.map(share => {

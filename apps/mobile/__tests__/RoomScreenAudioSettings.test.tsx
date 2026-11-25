@@ -3,6 +3,7 @@ import {
   Modal,
   NativeModules,
   Platform,
+  Switch,
   StyleSheet, Text,
   TouchableOpacity } from 'react-native';
 import type { Socket } from 'socket.io-client';
@@ -351,16 +352,63 @@ describe('room audio settings', () => {
     expect(media.joinVoice).toHaveBeenCalledTimes(1);
   });
 
-  test('mobile removes sharing, annotation and media status entries', () => {
+  test('annotation and media status entries stay hidden', () => {
     const labels = renderer.root
       .findAllByType(TouchableOpacity)
       .map(node => node.props.accessibilityLabel ?? '');
-    expect(labels.some(label => /批注|共享设置|媒体状态/.test(label))).toBe(
-      false,
-    );
+    expect(labels.some(label => /批注|媒体状态/.test(label))).toBe(false);
+  });
+
+  test('can publish a phone screen and stop it even when nobody else is sharing', async () => {
+    await act(async () => button('共享手机屏幕').props.onPress());
+    const modal = audioModal();
+    await act(async () => button('画面采集比例：75%').props.onPress());
+    await act(async () => {
+      modal.findByType(Switch).props.onValueChange(true);
+    });
+    await act(async () => button('开始共享手机屏幕').props.onPress());
+    expect(media.startScreenShare).toHaveBeenCalledWith(true, 0.75);
+    expect(audioModal()).toBeUndefined();
+    expect(media.stopScreenShare).not.toHaveBeenCalled();
+
+    media.sharingScreen = true;
+    media.sharingScreenAudio = true;
+    media.screenViewerCount = 2;
+    await rerender();
+    await act(async () => button('停止共享').props.onPress());
+    expect(media.stopScreenShare).toHaveBeenCalledTimes(1);
+    expect(media.leaveVoice).not.toHaveBeenCalled();
+  });
+
+  test('shows start errors and allows cancelling a pending share', async () => {
+    await act(async () => button('共享手机屏幕').props.onPress());
+    media.startScreenShare.mockResolvedValueOnce(false);
+    await act(async () => button('开始共享手机屏幕').props.onPress());
+    media.screenSharingError = '服务器暂不支持手机屏幕共享，请更新服务端';
+    await rerender();
     expect(
-      renderer.root.findAllByProps({ testID: 'own-screen-sharing' }),
-    ).toHaveLength(0);
+      audioModal().findAllByType(Text).some(
+        node => node.props.children === media.screenSharingError,
+      ),
+    ).toBe(true);
+    media.screenSharingError = null;
+    media.screenSharingBusy = true;
+    await rerender();
+    expect(button('开始共享手机屏幕').props.disabled).toBe(true);
+    await act(async () => audioModal().props.onRequestClose());
+    expect(media.stopScreenShare).toHaveBeenCalledTimes(1);
+    expect(audioModal()).toBeUndefined();
+  });
+
+  test('requires joining voice and hides sharing on unsupported platforms', async () => {
+    media.inVoice = false;
+    await rerender();
+    await act(async () => button('共享手机屏幕').props.onPress());
+    expect(button('开始共享手机屏幕').props.disabled).toBe(true);
+    await act(async () => button('关闭屏幕共享设置').props.onPress());
+    media.canShareScreen = false;
+    await rerender();
+    expect(button('共享手机屏幕')).toBeUndefined();
     expect(media.startScreenShare).not.toHaveBeenCalled();
   });
   async function watch() {

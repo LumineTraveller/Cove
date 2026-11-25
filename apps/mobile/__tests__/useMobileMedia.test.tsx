@@ -2,6 +2,7 @@ import TestRenderer, { act } from 'react-test-renderer';
 import { useMobileMedia } from '../src/features/media/useMobileMedia';
 
 const mockConsumers = new Map<string, any>();
+const mockGetDisplayMedia = jest.fn();
 let mockNoiseMode = 'system';
 const mockNoiseStatus = () => ({ mode: mockNoiseMode, effectiveMode: mockNoiseMode, rnnoiseReady: mockNoiseMode === 'rnnoise', interceptorActive: true, processing: mockNoiseMode === 'rnnoise', systemNoiseSuppressorEnabled: mockNoiseMode === 'system' });
 const mockStreams: any[] = [];
@@ -33,14 +34,21 @@ const mockReceiveTransport = {
 };
 let mockNextTransports: { send: typeof mockTransport; receive: typeof mockReceiveTransport } | undefined;
 jest.mock('mediasoup-client', () => ({ Device: { factory: async () => ({
-  load: async () => {}, rtpCapabilities: {},
+  load: async () => {}, rtpCapabilities: { codecs: [{ mimeType: 'video/VP8' }] },
   createSendTransport: () => mockNextTransports?.send ?? mockTransport,
   createRecvTransport: () => mockNextTransports?.receive ?? (mockSeparateTransports ? mockReceiveTransport : mockTransport),
 }) } }));
 jest.mock('react-native-incall-manager', () => ({ start: jest.fn(), stop: jest.fn(), setForceSpeakerphoneOn: jest.fn(), setSpeakerphoneOn: jest.fn(), stopProximitySensor: jest.fn(), turnScreenOn: jest.fn(), setKeepScreenOn: jest.fn() }));
 jest.mock('react-native-webrtc', () => ({
   MediaStream: class { release = jest.fn(); },
-  mediaDevices: { getUserMedia: (...args: any[]) => (mockGetUserMedia as any)(...args) },
+  mediaDevices: {
+    getUserMedia: (...args: any[]) => (mockGetUserMedia as any)(...args),
+    getDisplayMedia: (...args: any[]) => mockGetDisplayMedia(...args),
+  },
+}));
+jest.mock('../src/features/media/screen/screenSharing', () => ({
+  ...jest.requireActual('../src/features/media/screen/screenSharing'),
+  canShareMobileScreen: true,
 }));
 jest.mock('../src/features/media/audio/audioDevices', () => ({
   DEFAULT_OUTPUT_ID: 'out-speaker',
@@ -97,6 +105,7 @@ beforeEach(async () => {
     emit: jest.fn((event, data, callback) => {
       if (!callback) return;
       if (event === 'ms:get-producers') callback(existing);
+      else if (event === 'ms:screen-sharing-capabilities') callback({ dedicatedTransport: true });
       else if (event === 'ms:consume') {
         const respond = () => callback({ id: `consumer-${data.producerId}`, producerId: data.producerId });
         if (holdConsume) delayedConsume = respond; else respond();
@@ -108,10 +117,32 @@ beforeEach(async () => {
 });
 afterEach(async () => { await act(async () => renderer.unmount()); jest.restoreAllMocks(); jest.useRealTimers(); });
 
-test('mobile exposes receiving controls without screen publishing or media diagnostics', () => {
-  expect(media).not.toHaveProperty('startScreenShare');
+test('mobile exposes screen sharing and receiving controls without a diagnostics export', () => {
+  expect(media.startScreenShare).toEqual(expect.any(Function));
   expect(media).not.toHaveProperty('collectDiagnostics');
   expect(media.setScreenReceiveVolume).toEqual(expect.any(Function));
+});
+
+test('leaving voice cancels pending screen authorization and releases the result', async () => {
+  await act(async () => media.joinVoice());
+  const capture = { release: jest.fn() };
+  let authorize!: (stream: typeof capture) => void;
+  mockGetDisplayMedia.mockImplementationOnce(
+    () => new Promise<typeof capture>(resolve => { authorize = resolve; }),
+  );
+  let starting!: Promise<boolean>;
+  await act(async () => { starting = media.startScreenShare(false, 0.75); });
+  expect(mockGetDisplayMedia).toHaveBeenCalledWith({
+    android: { resolutionScale: 0.75 },
+  });
+  await act(async () => media.leaveVoice());
+  await act(async () => {
+    authorize(capture);
+    expect(await starting).toBe(false);
+  });
+  expect(capture.release).toHaveBeenCalledWith(true);
+  expect(media.sharingScreen).toBe(false);
+  expect(media.screenSharingBusy).toBe(false);
 });
 
 test('does not receive application audio before joining voice', async () => {

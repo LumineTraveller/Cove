@@ -2,6 +2,7 @@ import { useAvailableScreens } from './screen/useAvailableScreens';
 import { useMediaConnectionRecovery } from './voice/useMediaConnectionRecovery';
 import { useVoiceTeardown } from './voice/useVoiceTeardown';
 import { useMediaTransports } from './transport/useMediaTransports';
+import { useMobileScreenShare } from './screen/useMobileScreenShare';
 import { useScreenViewing } from './screen/useScreenViewing';
 import { useVolumeControls } from './audio/useVolumeControls';
 import { useAudioDevices } from './audio/useAudioDevices';
@@ -132,6 +133,12 @@ export function useMobileMedia(
       setAvailableScreens,
       availableScreensRef,
     });
+  const screenShare = useMobileScreenShare(
+    socket,
+    deviceRef,
+    inVoiceRef,
+    iceRecovery,
+  );
   const { teardown } = useVoiceTeardown({
     mediaGeneration,
     transportGeneration,
@@ -156,6 +163,7 @@ export function useMobileMedia(
     inVoiceRef,
     voiceAudioSessionActive,
     cancelPendingWatch,
+    stopScreenShare: screenShare.stopScreenShare,
     selfMutedRef,
     setInVoice,
     setJoining,
@@ -537,6 +545,7 @@ export function useMobileMedia(
   }, [roomId, socket]);
 
   return {
+    ...screenShare,
     screenWatchingBusy,
     inVoice,
     joining,
