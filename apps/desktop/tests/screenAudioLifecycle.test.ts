@@ -66,7 +66,7 @@ function fixture(t: TestContext) {
   } as unknown as useScreenAudioDependencies;
   function Probe() { api = useScreenAudio(deps); return null; }
   renderToStaticMarkup(createElement(Probe));
-  return { api, contexts, subscriptions, produced, events, audioStatus, mediaGeneration, sendTransport, screenAudioProducer, screenAudioPipeline,
+  return { api, socket: deps.socket, contexts, subscriptions, produced, events, audioStatus, mediaGeneration, sendTransport, screenAudioProducer, screenAudioPipeline,
     screenShareVolumeRef, forceMutedRef, replace,
     bridgeStarts: () => bridgeStarts, bridgeStops: () => bridgeStops,
     capture: (next: typeof capture) => { capture = next; }, publish: (next: typeof publish) => { publish = next; },
@@ -78,6 +78,30 @@ test('screen sound stays in the video RTP group with continuous stereo Opus', as
   await f.api.startScreenAudio();
   assert.equal(f.produced[0].streamId, 'screen-desktop');
   assert.deepEqual(f.produced[0].codecOptions, { opusStereo: true, opusDtx: false, opusFec: true });
+});
+
+test('live screen sound keeps feeding PCM through temporary signal loss and rejects a different socket', async t => {
+  const f = fixture(t);
+  await f.api.startScreenAudio(() => f.socket.id === 'desktop');
+  const chunk = new Uint8Array([0, 0, 0, 0]);
+  const feed = t.mock.fn();
+  f.screenAudioPipeline.current.pushPcm = feed;
+  const listener = f.subscriptions[0].listener;
+  listener(chunk);
+  Object.assign(f.socket, { id: undefined, connected: false });
+  listener(chunk);
+  assert.equal(feed.mock.callCount(), 2);
+  Object.assign(f.socket, { id: 'desktop', connected: true });
+  listener(chunk);
+  assert.equal(feed.mock.callCount(), 3);
+  Object.assign(f.socket, { id: 'other', connected: true });
+  listener(chunk);
+  assert.equal(feed.mock.callCount(), 3);
+  Object.assign(f.socket, { id: 'desktop', connected: true });
+  f.mediaGeneration.current++;
+  listener(chunk);
+  assert.equal(feed.mock.callCount(), 3);
+  assert.equal(f.produced.length, 1);
 });
 
 test('closing while native start ACK is pending cannot publish or restore its pipeline', async t => {

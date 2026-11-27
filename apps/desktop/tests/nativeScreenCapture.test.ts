@@ -800,6 +800,8 @@ test('the total 1500ms deadline also bounds an unresolved start and retires late
   const timedOut = getLastNativeScreenCaptureAttempt()!;
   assert.equal(timedOut.phase, 'stopped'); assert.equal(timedOut.stopReason, 'deadline_timeout');
   assert.equal(timedOut.elapsedMs, 1_500); assert.equal(timedOut.helperResponseMs, null);
+  assert.equal(getLastNativeScreenCaptureAttempt(f.stream.getVideoTracks()[0])?.stopReason, 'deadline_timeout');
+  assert.equal(getLastNativeScreenCaptureAttempt(new EventTarget() as MediaStreamTrack), null);
   assert.equal(f.stopRequests.length, 1);
   now = 1_575;
   start.resolve({ ok: true, sessionId: 'late-session', width: 1920, height: 1080 });

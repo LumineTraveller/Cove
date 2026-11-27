@@ -117,6 +117,14 @@ export function useRoomController({ profile, accountId, serverURL, sessionReady,
   const [imageError, setImageError] = useState<string | null>(null);
   const [unread, setUnread] = useState(0);
   const shareLayout = Boolean(rtc.localScreen || rtc.remoteScreen);
+  const [remoteOrientation, setRemoteOrientation] = useState<{ stream: MediaStream; portrait: boolean } | null>(null);
+  const onRemoteVideoSize = useCallback((stream: MediaStream, width: number, height: number) => {
+    const portrait = height > width;
+    setRemoteOrientation(previous => previous?.stream === stream && previous.portrait === portrait
+      ? previous : { stream, portrait });
+  }, []);
+  const watchingPortrait = !rtc.localScreen && remoteOrientation?.portrait === true &&
+    remoteOrientation.stream === rtc.remoteScreen?.stream;
   const { chatOpen, animateShareChat, setChatOpen, sidebarOpen, setSidebarOpen, animateLayoutControls } =
     useShareLayout(shareLayout);
   const [roomSettings, setRoomSettings] = useState<RoomWithAppearance | null>(null);
@@ -140,6 +148,7 @@ export function useRoomController({ profile, accountId, serverURL, sessionReady,
   const [pendingGameMode, setPendingGameMode] = useState(false);
   const [pendingNativeResolution, setPendingNativeResolution] = useState(false);
   const [pendingGpuEncoding, setPendingGpuEncoding] = useState(false);
+  const [pendingSmoothPlayback, setPendingSmoothPlayback] = useState(false);
   const [showAudioModal, setShowAudioModal] = useState(false);
   const [audioSources, setAudioSources] = useState<ApplicationAudioSource[]>([]);
   const [audioLoading, setAudioLoading] = useState(false);
@@ -191,7 +200,7 @@ export function useRoomController({ profile, accountId, serverURL, sessionReady,
   const soundboardAnchorRef = useRef<HTMLDivElement>(null);
   const soundboardHoverTimer = useRef<number | null>(null);
   joinPasswordRef.current = joinPassword;
-  const chatVisible = !shareLayout || chatOpen;
+  const chatVisible = !shareLayout || watchingPortrait || chatOpen;
   const isRoomOwner = roomMembers.some((member) => member.socketId === socket.id && member.isOwner);
   const chatVisibleRef = useRef(chatVisible);
   chatVisibleRef.current = chatVisible;
@@ -626,6 +635,7 @@ export function useRoomController({ profile, accountId, serverURL, sessionReady,
       roomId: roomId ?? '',
       socket,
       bridge,
+      onPlaybackPeer: rtc.setScreenRemoteControl,
       onSession: (session) => {
         setRemoteSession(session);
         setPendingRemoteRequest(false);
@@ -675,7 +685,7 @@ export function useRoomController({ profile, accountId, serverURL, sessionReady,
       lifecycle.dispose();
       if (remoteLifecycleRef.current === lifecycle) remoteLifecycleRef.current = null;
     };
-  }, [roomId]);
+  }, [roomId, rtc.setScreenRemoteControl]);
   useEffect(() => {
     if (remoteRequestCooldownSeconds <= 0) return;
     const timer = window.setTimeout(() => {
@@ -762,6 +772,7 @@ export function useRoomController({ profile, accountId, serverURL, sessionReady,
     setPendingGameMode(rtc.screenGameMode);
     setPendingNativeResolution(rtc.screenNativeResolution);
     setPendingGpuEncoding(rtc.screenGpuEncoding);
+    setPendingSmoothPlayback(rtc.screenSmoothPlayback);
     setShowScreenModal(true);
   };
   const createRoom = () => {
@@ -821,7 +832,8 @@ export function useRoomController({ profile, accountId, serverURL, sessionReady,
       setRemoteNotice(`请等待 ${remoteRequestCooldownSeconds} 秒后再发送远程控制申请。`);
       return;
     }
-    if (!remoteLifecycleRef.current?.expectStart('controller')) return;
+    const lifecycle = remoteLifecycleRef.current;
+    if (!lifecycle?.expectStart('controller', target)) return;
     setRemoteNotice('');
     setPendingRemoteRequest(true);
     setRemoteRequestCooldownSeconds(REMOTE_CONTROL_REQUEST_COOLDOWN_SECONDS);
@@ -831,8 +843,9 @@ export function useRoomController({ profile, accountId, serverURL, sessionReady,
         'remote-control:request',
         { roomId, sharerSocketId: target },
         (error: Error | null, response?: { ok?: boolean; requestId?: string; error?: string }) => {
+          if (remoteLifecycleRef.current !== lifecycle) return;
           if (error || !response?.ok) {
-            remoteLifecycleRef.current?.cancelExpectedStart();
+            lifecycle.cancelExpectedStart();
             setPendingRemoteRequest(false);
             setPendingRemoteRequestId(null);
             setRemoteNotice(response?.error ?? '请求失败');
@@ -996,6 +1009,8 @@ export function useRoomController({ profile, accountId, serverURL, sessionReady,
     setRoomSettings,
     setShowCreateRoom,
     shareLayout,
+    watchingPortrait,
+    onRemoteVideoSize,
     animateShareChat,
     animateLayoutControls,
     sortedMembers,
@@ -1078,6 +1093,8 @@ export function useRoomController({ profile, accountId, serverURL, sessionReady,
     setPendingNativeResolution,
     pendingGpuEncoding,
     setPendingGpuEncoding,
+    pendingSmoothPlayback,
+    setPendingSmoothPlayback,
     editingScreen,
     setPendingPreset,
     setPendingFps,

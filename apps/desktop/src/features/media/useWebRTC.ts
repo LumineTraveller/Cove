@@ -22,6 +22,7 @@ import {
   EMPTY_STATS,
   RemoteScreen,
   AvailableScreen,
+  readScreenPlaybackSettings,
   RemoteApplicationAudio,
   SCREEN_RECEIVE_VOLUME_KEY,
   SCREEN_SHARE_VOLUME_KEY,
@@ -82,6 +83,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
   );
   const [screenCompatibilityMode, setScreenCompatibilityMode] = useState(initialScreenPreferences.compatibilityMode);
   const [screenGpuEncoding, setScreenGpuEncoding] = useState(initialScreenPreferences.gpuEncoding);
+  const [screenSmoothPlayback, setScreenSmoothPlayback] = useState(initialScreenPreferences.smoothPlayback);
   useEffect(() => {
     saveScreenPreferences({
       preset: screenPreset,
@@ -91,8 +93,9 @@ export function useWebRTC(socket: Socket, roomId: string) {
       nativeResolution: screenNativeResolution,
       compatibilityMode: screenCompatibilityMode,
       gpuEncoding: screenGpuEncoding,
+      smoothPlayback: screenSmoothPlayback,
     });
-  }, [screenPreset, fps, shareAudio, screenGameMode, screenNativeResolution, screenCompatibilityMode, screenGpuEncoding]);
+  }, [screenPreset, fps, shareAudio, screenGameMode, screenNativeResolution, screenCompatibilityMode, screenGpuEncoding, screenSmoothPlayback]);
   const [screenActivity, setScreenActivity] = useState<ScreenActivity>('active');
   const [screenEncodingPlan, setScreenEncodingPlan] = useState<ScreenEncodingPlan | null>(null);
   const [screenViewerCount, setScreenViewerCount] = useState(0);
@@ -606,7 +609,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
     },
     [playPresenceTone, stopMeters],
   );
-  const { setupDevice, consumeProducer } = useMediaTransports({
+  const { setupDevice, consumeProducer, refreshScreenPlayback, setScreenRemoteControl } = useMediaTransports({
     get deviceRef() {
       return deviceRef;
     },
@@ -685,6 +688,9 @@ export function useWebRTC(socket: Socket, roomId: string) {
     get screenStreams() {
       return screenStreams;
     },
+    get availableScreensRef() {
+      return availableScreensRef;
+    },
   });
   const {
     storeAvailableScreen,
@@ -701,6 +707,9 @@ export function useWebRTC(socket: Socket, roomId: string) {
     },
     get availableScreensRef() {
       return availableScreensRef;
+    },
+    get refreshScreenPlayback() {
+      return refreshScreenPlayback;
     },
     get consumers() {
       return consumers;
@@ -816,6 +825,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
           videoProducerId: producerId,
           audioProducerId: metadata.shareSessionId ? undefined : pendingScreenAudioByPeer.current.get(peerId),
           ...metadata,
+          ...readScreenPlaybackSettings(appData),
         });
         return;
       }
@@ -890,6 +900,12 @@ export function useWebRTC(socket: Socket, roomId: string) {
       if (peerId === socket.id) setScreenViewerCount(viewerCount);
     };
 
+    const onScreenPlaybackPolicy = (payload: { peerId: string; producerId: string } & Record<string, unknown>) => {
+      const current = availableScreensRef.current.get(payload.peerId);
+      if (current?.videoProducerId !== payload.producerId) return;
+      storeAvailableScreen({ ...current, ...readScreenPlaybackSettings(payload) });
+    };
+
     const onScreenDemand = ({
       sourceType,
       active,
@@ -950,6 +966,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
     socket.on('ms:consumer-closed', onConsumerClosed);
     socket.on('ms:producer-closed', onProducerClosed);
     socket.on('screen:viewers', onScreenViewers);
+    socket.on('screen:playback-policy', onScreenPlaybackPolicy);
     socket.on('screen:demand', onScreenDemand);
     socket.on('voice:user-left', onUserLeft);
 
@@ -960,6 +977,7 @@ export function useWebRTC(socket: Socket, roomId: string) {
       socket.off('ms:consumer-closed', onConsumerClosed);
       socket.off('ms:producer-closed', onProducerClosed);
       socket.off('screen:viewers', onScreenViewers);
+      socket.off('screen:playback-policy', onScreenPlaybackPolicy);
       socket.off('screen:demand', onScreenDemand);
       socket.off('voice:user-left', onUserLeft);
     };
@@ -1468,6 +1486,12 @@ export function useWebRTC(socket: Socket, roomId: string) {
     get setScreenGpuEncoding() {
       return setScreenGpuEncoding;
     },
+    get screenSmoothPlayback() {
+      return screenSmoothPlayback;
+    },
+    get setScreenSmoothPlayback() {
+      return setScreenSmoothPlayback;
+    },
     get shareAudio() {
       return shareAudio;
     },
@@ -1681,6 +1705,8 @@ export function useWebRTC(socket: Socket, roomId: string) {
     toggleMemberMute,
     screenReceiveVolume,
     screenReceiveHasAudio,
+    screenSmoothPlayback,
+    setScreenRemoteControl,
     setScreenReceiveVolume,
     screenShareHasAudio,
     screenShareVolume,

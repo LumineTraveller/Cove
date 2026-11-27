@@ -10,8 +10,18 @@ export interface NativeScreenOptions {
   colorSpace?: NativeScreenColorSpace;
   /** Require a CPU-backed NV12 frame source for the selected AV1 encoder. */
   cpuNv12?: true;
-  /** Require the NV12 output to match the physical source dimensions. */
+  /** Require the output to match the physical source dimensions. */
   nativeResolution?: boolean;
+  /** Use the base transfer path after a failure in texture reuse or CPU delivery. */
+  conservativeDelivery?: true;
+  /** Rearm desktop duplication if an active game's new foreground stops updating. */
+  gameMode?: true;
+}
+
+export interface NativeScreenDisplay {
+  authorizationId: string;
+  width: number;
+  height: number;
 }
 
 export interface NativeScreenFrame {
@@ -53,7 +63,18 @@ export const NATIVE_SCREEN_MAX_WIDTH = 4096;
 export const NATIVE_SCREEN_MAX_HEIGHT = 2560;
 export const NATIVE_SCREEN_START_TIMEOUT_MS = 1_500;
 export const NATIVE_SCREEN_GPU_ENCODING_START_TIMEOUT_MS = 3_000;
+export const NATIVE_SCREEN_DIRECT_HELPER_TIMEOUT_MS = 5_000;
+export const NATIVE_SCREEN_DIRECT_TRACK_TIMEOUT_MS = 7_000;
 export const NATIVE_SCREEN_STOP_TIMEOUT_MS = 1_500;
+
+/** Fixed helper codes safe to retain in startup and recovery diagnostics. */
+export const NATIVE_SCREEN_HELPER_FAILURES = [
+  'display_changed', 'unsupported_display_topology', 'unsupported_display_color', 'unsupported_display_connection',
+  'unsupported_display_geometry', 'unsupported_output_api', 'duplication_busy', 'gpu_device_lost',
+  'invalid_arguments', 'owner_is_not_parent', 'owner_unavailable', 'dpi_context_unavailable',
+  'factory_failed', 'hardware_device_failed', 'duplication_failed', 'unsupported_duplication_geometry',
+  'desktop_acquire_failed', 'slot_release_timeout', 'shared_mutex_unavailable',
+] as const;
 
 export function validNativeScreenRequestId(value: unknown): value is string {
   return typeof value === 'string' && /^[A-Za-z0-9_-]{8,80}$/.test(value);
@@ -66,8 +87,9 @@ export function validNativeScreenOptions(value: unknown): value is NativeScreenO
     options.maxWidth >= 2 && options.maxWidth <= NATIVE_SCREEN_MAX_WIDTH &&
     options.maxHeight >= 2 && options.maxHeight <= NATIVE_SCREEN_MAX_HEIGHT &&
     [30, 60, 120].includes(options.fps) &&
-    (options.cpuNv12 === undefined || (options.cpuNv12 === true && options.colorSpace === 'bt709-limited')) &&
-    (options.nativeResolution === undefined || options.nativeResolution === false ||
-      (options.nativeResolution === true && options.cpuNv12 === true)) &&
+    (options.cpuNv12 === undefined || (options.cpuNv12 === true && options.colorSpace !== undefined)) &&
+    (options.nativeResolution === undefined || typeof options.nativeResolution === 'boolean') &&
+    (options.conservativeDelivery === undefined || options.conservativeDelivery === true) &&
+    (options.gameMode === undefined || options.gameMode === true) &&
     (options.colorSpace === undefined || options.colorSpace === 'bt601-limited' || options.colorSpace === 'bt709-limited');
 }

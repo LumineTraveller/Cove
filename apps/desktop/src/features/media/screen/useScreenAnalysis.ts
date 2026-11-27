@@ -68,6 +68,7 @@ export function useScreenAnalysis(deps: useScreenAnalysisDependencies) {
         sourceWidth: settings?.width,
         sourceHeight: settings?.height,
         nativeResolution,
+        gpuEncoding: producer?.appData?.gpuEncoding === true,
         rampGuard: Date.now() < deps.screenRampGuardUntil.current,
       });
       plan.contentHint = nativeScreenContentHint(track, plan.contentHint);

@@ -3,19 +3,24 @@ import { Socket } from 'socket.io-client';
 import { MEDIA_TIMING_DEFINITIONS, rtcSecondsToMilliseconds } from '@cove/client-core';
 
 import {
+  diagnoseFrameRate,
   diagnosticVideoCounters,
   diagnosticTrackSettings,
   diagnosticSenderParameters,
   intervalLossPercent,
   mediaDiagnosticSessionKey,
+  nativeFrameCounterRates,
   shouldAcceptMediaDiagnosticSample,
   statNumber,
+  type FrameRateDiagnosis,
+  type NativeFrameCounterSample,
   type RtcStat,
   type RtcVideoCounterSample,
   videoCounterRates,
   videoCounterSample,
 } from './mediaDiagnostics';
 import { SCREEN_MAX_BITRATE_BPS, type ScreenEncodingPlan } from '../screen/screenCapture';
+import { getAv1ScreenSenderDiagnostics } from '../screen/createAv1ScreenSender';
 import { getNativeScreenCaptureDiagnostics, getLastNativeScreenCaptureAttempt, observeNativeFrameStability } from '../screen/nativeScreenCapture';
 import { readFramePresentation } from './framePresentation';
 import { FRAME_STABILITY_DEFINITION } from './frameStabilityView';
@@ -83,6 +88,12 @@ export interface useMediaDiagnosticsDependencies {
 export function useMediaDiagnostics(deps: useMediaDiagnosticsDependencies) {
   const latestDeps = useRef(deps);
   latestDeps.current = deps;
+  const previousVideoWindow = useRef<{
+    track: MediaStreamTrack | null;
+    targetFps: number | null;
+    paused: boolean;
+    native: NativeFrameCounterSample | null;
+  } | null>(null);
   const nativeObservation = useRef<{
     track: MediaStreamTrack;
     observer: NonNullable<ReturnType<typeof observeNativeFrameStability>>;
@@ -101,18 +112,20 @@ export function useMediaDiagnostics(deps: useMediaDiagnosticsDependencies) {
   }, [deps.statsEnabled, nativeTrack]);
 
   // 分阶段媒体统计：采集 → 编码 → RTP 发送 → SFU → RTP 接收 → 解码。
-  // 每个速率都由同一个 RTP 对象的累计计数器求差，避免切换共享或统计对象时出现假低值/假峰值。
+  // 阶段帧率由同一轨道、同一统计对象的连续计数器样本求得。
   const collectStats = useCallback(async () => {
     // The timer keeps this callback; render-state getters belong to the latest render.
     const deps = latestDeps.current;
     if (deps.statsCollecting.current) return;
     deps.statsCollecting.current = true;
     const next: MediaStats = { ...EMPTY_STATS };
-    const sendingProducerId = deps.screenProducer.current?.id ?? null;
+    const sendingProducer = deps.screenProducer.current;
+    const sendingProducerId = sendingProducer?.id ?? null;
     const sendingScreen = Boolean(sendingProducerId);
     const watchedPeerId = deps.watchingScreenPeerRef.current;
     const capturedSessionKey = mediaDiagnosticSessionKey(sendingProducerId, watchedPeerId);
     if (!deps.statsEnabledRef.current || !capturedSessionKey) {
+      previousVideoWindow.current = null;
       deps.videoCounterPrev.current = null;
       deps.receiveLossPrev.current = null;
       deps.remoteLossPrev.current = null;
@@ -150,19 +163,27 @@ export function useMediaDiagnostics(deps: useMediaDiagnosticsDependencies) {
         }
       }
 
-      let videoReport: RTCStatsReport | null = null;
-      let videoTrack: MediaStreamTrack | null = null;
-      if (deps.screenProducer.current) {
-        videoReport = await deps.screenProducer.current.getStats();
-        videoTrack = deps.screenProducer.current.track ?? null;
-      } else {
+      let videoEndpoint: Producer | Consumer | null = sendingProducer;
+      if (!videoEndpoint) {
         for (const { consumer, kind, socketId } of deps.consumers.current.values()) {
           if (kind !== 'video' || (watchedPeerId && socketId !== watchedPeerId)) continue;
-          videoReport = await consumer.getStats();
-          videoTrack = consumer.track ?? null;
+          videoEndpoint = consumer;
           break;
         }
       }
+      const videoTrack = videoEndpoint?.track ?? null;
+      const sampleDeps = latestDeps.current;
+      const targetFps = sendingScreen ? sampleDeps.screenEncodingPlan?.fps ?? sampleDeps.fps : null;
+      const pausedBeforeSample = videoEndpoint?.paused === true;
+      const videoReport = await videoEndpoint?.getStats();
+      const endpointPaused = videoEndpoint?.paused === true;
+      const sampledAt = new Date().toISOString();
+      const captureProvider = sendingScreen && videoTrack ? getNativeScreenCaptureDiagnostics(videoTrack) : null;
+      const nativeCounters = captureProvider ? {
+        timestamp: performance.now(),
+        framesReceived: captureProvider.framesReceived,
+        framesWritten: captureProvider.framesWritten,
+      } : null;
 
       if (videoTrack) {
         const settings = videoTrack.getSettings();
@@ -187,21 +208,29 @@ export function useMediaDiagnostics(deps: useMediaDiagnosticsDependencies) {
         if (value.type === 'media-source' && isVideo) mediaSource = value;
       });
 
+      let frameRateDiagnosis: FrameRateDiagnosis = { status: 'pending' };
+      let nativeRates: ReturnType<typeof nativeFrameCounterRates> | null = null;
       if (rtpStat && videoReport) {
         if (rtpStat.mediaSourceId) {
           const linkedSource = videoReport.get(String(rtpStat.mediaSourceId)) as unknown as
             | RtcStat
             | undefined;
-          if (linkedSource) mediaSource = linkedSource;
+          mediaSource = linkedSource?.type === 'media-source' ? linkedSource : undefined;
         }
-        const counterStat: RtcStat = {
-          ...rtpStat,
-          id: `${String(rtpStat.id ?? '')}:${String(mediaSource?.id ?? '')}`,
-          framesCaptured: statNumber(mediaSource, 'frames', statNumber(rtpStat, 'framesCaptured')),
-        };
-        const sample = videoCounterSample(counterStat);
-        const rates = videoCounterRates(sample, deps.videoCounterPrev.current);
-        deps.videoCounterPrev.current = sample;
+        const sample = videoCounterSample(rtpStat, mediaSource);
+        const paused = endpointPaused || rtpStat.active === false;
+        const sameTrack = videoEndpoint?.track === videoTrack;
+        const lastWindow = previousVideoWindow.current;
+        const previous = sameTrack && lastWindow?.track === videoTrack ? lastWindow : null;
+        const rates = videoCounterRates(sample, previous ? deps.videoCounterPrev.current : null);
+        deps.videoCounterPrev.current = sameTrack && pausedBeforeSample === endpointPaused ? sample : null;
+        previousVideoWindow.current = sameTrack && pausedBeforeSample === endpointPaused
+          ? { track: videoTrack, targetFps, paused, native: nativeCounters } : null;
+        const comparable = !paused && !pausedBeforeSample && previous?.targetFps === targetFps && !previous.paused;
+        if (nativeCounters)
+          nativeRates = nativeFrameCounterRates(nativeCounters, comparable ? previous.native : null);
+        if (paused) frameRateDiagnosis = { status: 'paused' };
+        else if (comparable) frameRateDiagnosis = diagnoseFrameRate(rates, sendingScreen, targetFps, nativeRates);
 
         const sourceReportedFps =
           typeof mediaSource?.framesPerSecond === 'number'
@@ -211,20 +240,11 @@ export function useMediaDiagnostics(deps: useMediaDiagnosticsDependencies) {
           typeof rtpStat.framesPerSecond === 'number'
             ? Math.round(rtpStat.framesPerSecond * 10) / 10
             : null;
-        const hasCaptureCounter =
-          typeof mediaSource?.frames === 'number' || typeof rtpStat.framesCaptured === 'number';
-        next.captureFps = hasCaptureCounter
-          ? rates.captureFps ?? sourceReportedFps
-          : sourceReportedFps;
-        next.encodeFps = typeof rtpStat.framesEncoded === 'number' ? rates.encodeFps : null;
-        next.sendFps = typeof rtpStat.framesSent === 'number' ? rates.sendFps : null;
-        next.receiveFps = typeof rtpStat.framesReceived === 'number' ? rates.receiveFps : null;
-        next.decodeFps =
-          typeof rtpStat.framesDecoded === 'number'
-            ? rates.decodeFps ?? (!sendingScreen ? rtpReportedFps : null)
-            : !sendingScreen
-            ? rtpReportedFps
-            : null;
+        next.captureFps = rates.captureFps ?? sourceReportedFps;
+        next.encodeFps = rates.encodeFps;
+        next.sendFps = rates.sendFps;
+        next.receiveFps = rates.receiveFps;
+        next.decodeFps = rates.decodeFps ?? (!sendingScreen ? rtpReportedFps : null);
         next.fps = sendingScreen
           ? next.sendFps ?? next.encodeFps ?? rtpReportedFps
           : next.decodeFps ?? next.receiveFps ?? rtpReportedFps;
@@ -236,7 +256,7 @@ export function useMediaDiagnostics(deps: useMediaDiagnosticsDependencies) {
         next.nackPerSecond = rates.nackPerSecond;
         next.pliPerSecond = rates.pliPerSecond;
         next.firPerSecond = rates.firPerSecond;
-        next.droppedFrames = typeof rtpStat.framesDropped === 'number' ? rates.droppedFps : null;
+        next.droppedFrames = rates.droppedFps;
         next.width = typeof rtpStat.frameWidth === 'number' ? rtpStat.frameWidth : null;
         next.height = typeof rtpStat.frameHeight === 'number' ? rtpStat.frameHeight : null;
         next.targetBitrate =
@@ -290,6 +310,9 @@ export function useMediaDiagnostics(deps: useMediaDiagnosticsDependencies) {
           deps.receiveLossPrev.current = { lost, packets: received };
           if (typeof rtpStat.jitter === 'number') next.jitter = Math.round(rtpStat.jitter * 1_000);
         }
+      } else {
+        deps.videoCounterPrev.current = null;
+        previousVideoWindow.current = null;
       }
 
       const serverSnapshot = await new Promise<ServerMediaDiagnostics | null>((resolve) => {
@@ -339,19 +362,30 @@ export function useMediaDiagnostics(deps: useMediaDiagnosticsDependencies) {
         : Array.from(currentDeps.consumers.current.values()).find(
             entry => entry.kind === 'video' && entry.socketId === watchedPeerId,
           )?.consumer.track;
-      if (videoTrack && videoTrack === currentTrack && videoTrack.readyState === 'live') {
+      const activeTrack = videoTrack === currentTrack && videoTrack?.readyState === 'live' ? videoTrack : null;
+      const lastNativeAttempt = sendingScreen && activeTrack ? getLastNativeScreenCaptureAttempt(activeTrack) : null;
+      if (activeTrack) {
+        const currentTargetFps = sendingScreen ? currentDeps.screenEncodingPlan?.fps ?? currentDeps.fps : null;
+        if (videoEndpoint?.paused) next.frameRateDiagnosis = { status: 'paused' };
+        else if (!endpointPaused && !pausedBeforeSample && currentTargetFps === targetFps) {
+          next.frameRateDiagnosis = frameRateDiagnosis;
+          next.nativeCaptureFps = nativeRates?.receivedFps ?? null;
+          next.nativeDeliveryFps = nativeRates?.writtenFps ?? null;
+        }
+        next.captureBackend = captureProvider?.backend ?? (sendingScreen && next.displaySurface ? 'chromium' : null);
+        next.nativeCaptureStartTimedOut = next.captureBackend === 'chromium' && lastNativeAttempt?.stopReason === 'deadline_timeout';
         const native = nativeObservation.current;
-        next.nativeDeliveryStability = native?.track === videoTrack
+        next.nativeDeliveryStability = native?.track === activeTrack
           ? native.observer.snapshot()
           : null;
-        next.presentationStability = readFramePresentation(videoTrack);
+        next.presentationStability = readFramePresentation(activeTrack);
       }
       const diagnosticEntry = {
-        timestamp: new Date().toISOString(),
+        timestamp: sampledAt,
         stats: next,
         trackSettings,
-        captureProvider: videoTrack ? getNativeScreenCaptureDiagnostics(videoTrack) : null,
-        lastNativeAttempt: sendingScreen ? getLastNativeScreenCaptureAttempt() : null,
+        captureProvider: activeTrack ? captureProvider : null,
+        lastNativeAttempt,
         rawVideoCounters: diagnosticVideoCounters(rtpStat, mediaSource),
         encodingPlan: currentDeps.screenEncodingPlan,
         contentHint: videoTrack?.contentHint ?? null,
@@ -385,6 +419,7 @@ export function useMediaDiagnostics(deps: useMediaDiagnosticsDependencies) {
         deps.receiveLossPrev.current = null;
         deps.remoteLossPrev.current = null;
         deps.videoCounterPrev.current = null;
+        previousVideoWindow.current = null;
         deps.setStats(EMPTY_STATS);
       }
       return next;
@@ -408,8 +443,9 @@ export function useMediaDiagnostics(deps: useMediaDiagnosticsDependencies) {
         encodingPlan: deps.screenEncodingPlan,
         trackSettings: diagnosticTrackSettings(producer?.track?.getSettings()),
         captureProvider: producer?.track ? getNativeScreenCaptureDiagnostics(producer.track) : null,
-        lastNativeAttempt: producer ? getLastNativeScreenCaptureAttempt() : null,
+        lastNativeAttempt: producer?.track ? getLastNativeScreenCaptureAttempt(producer.track) : null,
         senderParameters: diagnosticSenderParameters(producer?.rtpSender?.getParameters()),
+        av1Sender: getAv1ScreenSenderDiagnostics(producer?.rtpSender),
       },
       samples: deps.diagnosticHistory.current,
     };

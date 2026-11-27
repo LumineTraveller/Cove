@@ -43,9 +43,10 @@ test('owned canvas extraction rejects missing, duplicate and unexpected source e
   const input = fs.readFileSync(fixturePath, 'utf8');
   const sourceLine = input.split(/\r?\n/).find(line => line.includes('const source=generatedNv12Enabled?'));
   assert.ok(sourceLine);
-  assert.throws(() => extractOwnedPattern(input.replace('window.sourceFrames=frames', 'window.changed=frames')), /not found uniquely/);
+  const replaceSource = (from, to) => input.replace(sourceLine, sourceLine.replace(from, to));
+  assert.throws(() => extractOwnedPattern(replaceSource('window.sourceFrames=frames', 'window.changed=frames')), /not found uniquely/);
   assert.throws(() => extractOwnedPattern(`${input}\n${sourceLine}`), /not found uniquely/);
-  assert.throws(() => extractOwnedPattern(input.replace('const source=generatedNv12Enabled?', 'const source=otherFlag?')), /Unexpected owned source structure/);
-  assert.throws(() => extractOwnedPattern(input.replace('${sourceAgeDraw}', '${process.exit()}')), /Unexpected owned source interpolation/);
-  assert.throws(() => extractOwnedPattern(input.replace('${patternBits.top*1080}', '${patternBits.top*720}')), /Unexpected owned source interpolation/);
+  assert.throws(() => extractOwnedPattern(replaceSource('const source=generatedNv12Enabled?', 'const source=otherFlag?')), /Unexpected owned source structure/);
+  assert.throws(() => extractOwnedPattern(replaceSource('${sourceAgeDraw}', '${process.exit()}')), /Unexpected owned source interpolation/);
+  assert.throws(() => extractOwnedPattern(replaceSource('${patternBits.top*1080}', '${patternBits.top*720}')), /Unexpected owned source interpolation/);
 });

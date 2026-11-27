@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { MonitorPlay } from '@phosphor-icons/react';
-import { bindScreenVideo, type ScreenVideoStatus } from './screenVideoPlayback';
+import { bindScreenVideo, type ScreenVideoSizeListener, type ScreenVideoStatus } from './screenVideoPlayback';
 import { bindFramePresentation } from '../diagnostics/framePresentation';
 import {
   normalizedVideoPoint,
@@ -8,7 +8,7 @@ import {
   type RemoteControlInput,
 } from '../../remote-control/remoteControl';
 
-function useScreenVideo(stream: MediaStream, remote: boolean, diagnosticsEnabled: boolean) {
+function useScreenVideo(stream: MediaStream, remote: boolean, diagnosticsEnabled: boolean, onSize?: ScreenVideoSizeListener) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const retryRef = useRef<() => void>(() => undefined);
   const [presentation, setPresentation] = useState<{
@@ -21,13 +21,13 @@ function useScreenVideo(stream: MediaStream, remote: boolean, diagnosticsEnabled
     if (!video) return;
     const binding = bindScreenVideo(video, stream, remote, (status) => {
       setPresentation({ stream, status });
-    });
+    }, onSize);
     retryRef.current = binding.retry;
     return () => {
       retryRef.current = () => undefined;
       binding.dispose();
     };
-  }, [stream, remote]);
+  }, [stream, remote, onSize]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -70,14 +70,16 @@ export function RemoteScreenVideo({
   stream,
   controlling,
   onInput,
+  onSize,
   diagnosticsEnabled = false,
 }: {
   stream: MediaStream;
   controlling: boolean;
   onInput: (input: RemoteControlInput) => void;
+  onSize?: ScreenVideoSizeListener;
   diagnosticsEnabled?: boolean;
 }) {
-  const { videoRef, ready, failed, retry } = useScreenVideo(stream, true, diagnosticsEnabled);
+  const { videoRef, ready, failed, retry } = useScreenVideo(stream, true, diagnosticsEnabled, onSize);
   const canControl = controlling && ready;
   const inputSender = useMemo(() => new RemotePointerSender(onInput), [onInput]);
   const surfaceRef = useRef<HTMLDivElement>(null);

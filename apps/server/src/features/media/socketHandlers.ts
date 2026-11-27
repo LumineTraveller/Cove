@@ -4,7 +4,7 @@ import { router, webRtcServer, peers, getRoomProducers } from './ms';
 
 import { OnDemandMediaType } from '../../models';
 import { mediaGeneration, beginTransportRequest } from './mediaLifecycle';
-import { markScreenReplacement, screenProducerClosure } from './screenPublication';
+import { markScreenReplacement, screenPlaybackPolicy, screenProducerClosure } from './screenPublication';
 import { bindTransportIceRestart, restartTransportIce } from './transportIceRestart';
 
 export interface RegisterMediaSocketHandlersDependencies {
@@ -304,10 +304,16 @@ export function registerMediaSocketHandlers(deps: RegisterMediaSocketHandlersDep
         const producerAppData = producer.appData as Record<string, unknown>;
         const sourceType =
           typeof producerAppData.type === 'string' ? producerAppData.type : undefined;
+        if (sourceType === 'screen') {
+          producerAppData.smoothPlayback = producerAppData.smoothPlayback === true;
+          producerAppData.remoteControlActive = false;
+        }
         if (sourceType) {
           for (const [existingId, existing] of peer.producers) {
             const existingAppData = existing.appData as Record<string, unknown>;
             if (existingAppData.type !== sourceType) continue;
+            if (sourceType === 'screen' && existingAppData.remoteControlActive === true)
+              producerAppData.remoteControlActive = true;
             markScreenReplacement(existing, producerAppData.shareSessionId);
             existing.close();
             peer.producers.delete(existingId);
@@ -407,6 +413,24 @@ export function registerMediaSocketHandlers(deps: RegisterMediaSocketHandlersDep
     },
   );
 
+  deps.socket.on(
+    'screen:set-smooth-playback',
+    (value: unknown, cb?: (result: { ok?: boolean; error?: string }) => void) => {
+      if (typeof cb !== 'function') return;
+      const data = value as { producerId?: unknown; enabled?: unknown } | null;
+      if (typeof data?.producerId !== 'string' || typeof data.enabled !== 'boolean')
+        return cb({ error: '平滑观看设置无效' });
+      const peer = peers.get(deps.socket.id);
+      const producer = peer?.producers.get(data.producerId);
+      if (!peer?.roomId || !producer || producer.closed || producer.kind !== 'video' ||
+          producer.appData.type !== 'screen')
+        return cb({ error: '当前屏幕共享已结束或不属于你' });
+      producer.appData.smoothPlayback = data.enabled;
+      deps.io.to(peer.roomId).emit('screen:playback-policy', screenPlaybackPolicy(deps.socket.id, producer));
+      cb({ ok: true });
+    },
+  );
+
   /** 5. 获取房间里当前所有人的 producer（新人加入时用） */
   deps.socket.on('ms:get-producers', (...args: unknown[]) => {
     const cb = args.find((a) => typeof a === 'function') as ((list: unknown) => void) | undefined;
@@ -480,6 +504,9 @@ export function registerMediaSocketHandlers(deps: RegisterMediaSocketHandlersDep
           });
         });
 
+        // Use the current policy even if it changed while this viewer joined voice.
+        if (consumedSourceType === 'screen')
+          deps.socket.emit('screen:playback-policy', screenPlaybackPolicy(owner.socketId, owner.producer));
         cb({
           id: consumer.id,
           producerId,

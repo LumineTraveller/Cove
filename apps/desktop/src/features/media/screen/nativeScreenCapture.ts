@@ -1,7 +1,7 @@
 import {
   NATIVE_SCREEN_MAX_WIDTH, NATIVE_SCREEN_MAX_HEIGHT,
-  NATIVE_SCREEN_START_TIMEOUT_MS, NATIVE_SCREEN_GPU_ENCODING_START_TIMEOUT_MS,
-  type NativeScreenFrame, type NativeScreenOptions, type NativeScreenStartResult,
+  NATIVE_SCREEN_START_TIMEOUT_MS, NATIVE_SCREEN_GPU_ENCODING_START_TIMEOUT_MS, NATIVE_SCREEN_DIRECT_TRACK_TIMEOUT_MS,
+  type NativeScreenDisplay, type NativeScreenFrame, type NativeScreenOptions, type NativeScreenStartResult,
 } from '../../../../electron/native-screen-capture-protocol';
 import { nativeScreenFailureReason, type NativeScreenFailureReason } from '../../../../electron/native-screen-capture-diagnostics';
 import { createNativeFrameWriteQueue } from './nativeFrameWriteQueue';
@@ -15,10 +15,11 @@ import { createNativeOpaqueFrameMetrics, writeOpaqueDesktopFrame, type NativeOpa
 export interface NativeScreenBridge {
   readonly supported: boolean;
   readonly hardwareAv1Encoding?: boolean;
-  readonly startAv1WithNative?: boolean;
   readonly opaqueAv1Input?: boolean;
   readonly preferredFrameSink?: 'canvas' | 'worker' | 'gpu-snapshot';
-  start(requestId: string, options: NativeScreenOptions): Promise<NativeScreenStartResult>;
+  selectDisplay?(): Promise<NativeScreenDisplay | null>;
+  releaseDisplay?(authorizationId: string): Promise<boolean>;
+  start(requestId: string, options: NativeScreenOptions, authorizationId?: string): Promise<NativeScreenStartResult>;
   stop(requestId: string, fault?: 'renderer_failed' | 'receiver_failed'): Promise<boolean>;
   onFrame(requestId: string, callback: (frame: VideoFrame, metadata: NativeScreenFrame) => Promise<void>): () => void;
   onEnded(requestId: string, callback: (reason: string) => void): () => void;
@@ -36,6 +37,8 @@ export interface NativeScreenCaptureOptions extends NativeScreenOptions {
   contentHint: string;
   isCurrent(): boolean;
   signal: AbortSignal;
+  useGenerator?: boolean;
+  onAttemptStopped?(attempt: Readonly<NativeScreenCaptureAttempt>): void;
   /** Default-off, renderer-only full-desktop GPU experiment; never sent over IPC. */
   opaqueDesktopView?: boolean;
 }
@@ -143,11 +146,16 @@ export interface NativeScreenCaptureAttempt {
 }
 type CaptureAttemptState = Omit<NativeScreenCaptureAttempt, 'elapsedMs'> & { startedAt: number };
 let lastCaptureAttempt: CaptureAttemptState | undefined;
+const captureAttemptsByTrack = new WeakMap<MediaStreamTrack, CaptureAttemptState>();
 
 /** One bounded attempt, without source or session identifiers. Each read is detached and frozen. */
-export function getLastNativeScreenCaptureAttempt(): Readonly<NativeScreenCaptureAttempt> | null {
-  if (!lastCaptureAttempt) return null;
-  const { startedAt, ...snapshot } = lastCaptureAttempt;
+export function getLastNativeScreenCaptureAttempt(track?: MediaStreamTrack): Readonly<NativeScreenCaptureAttempt> | null {
+  const attempt = track ? captureAttemptsByTrack.get(track) : lastCaptureAttempt;
+  return attempt ? snapshotAttempt(attempt) : null;
+}
+
+function snapshotAttempt(attempt: CaptureAttemptState): Readonly<NativeScreenCaptureAttempt> {
+  const { startedAt, ...snapshot } = attempt;
   return Object.freeze({ ...snapshot, elapsedMs: snapshot.stoppedMs ?? Math.max(0, performance.now() - startedAt) });
 }
 
@@ -162,12 +170,14 @@ function validDimensions(width: number, height: number, options: NativeScreenOpt
     width >= 2 && height >= 2 && width <= options.maxWidth && height <= options.maxHeight;
 }
 
-/** Prepare the selected stock source's native track without acquiring a second source selection. */
+/** Resolve after the helper has delivered a frame and the generator reports its real dimensions. */
 export async function tryNativeScreenCapture(
-  stockStream: MediaStream,
+  source: NativeScreenDisplay | MediaStream,
   options: NativeScreenCaptureOptions,
 ): Promise<NativeCaptureCandidate | null> {
-  const startTimeoutMs = options.cpuNv12 ? NATIVE_SCREEN_GPU_ENCODING_START_TIMEOUT_MS : NATIVE_SCREEN_START_TIMEOUT_MS;
+  const display = 'authorizationId' in source ? source : undefined;
+  const startTimeoutMs = display ? NATIVE_SCREEN_DIRECT_TRACK_TIMEOUT_MS
+    : options.cpuNv12 ? NATIVE_SCREEN_GPU_ENCODING_START_TIMEOUT_MS : NATIVE_SCREEN_START_TIMEOUT_MS;
   // Async callbacks retain this attempt only; a late predecessor cannot replace
   // the single current diagnostic record installed by a newer invocation.
   const attempt: CaptureAttemptState = {
@@ -182,9 +192,11 @@ export async function tryNativeScreenCapture(
   function finishAttempt(reason: NativeScreenCaptureStopReason) {
     if (attempt.stoppedMs !== null) return;
     attempt.phase = 'stopped'; attempt.stopReason = reason; attempt.stoppedMs = attemptElapsed();
+    try { options.onAttemptStopped?.(snapshotAttempt(attempt)); } catch { /* Attempt observation cannot interrupt cleanup. */ }
   }
   let bridge: NativeScreenBridge;
-  let stockTrack: MediaStreamTrack;
+  let stockTrack: MediaStreamTrack | undefined;
+  let frameSink: NativeScreenBridge['preferredFrameSink'];
   let track: GeneratorTrack;
   let stream: MediaStream;
   let writer: WritableStreamDefaultWriter<VideoFrame> | undefined;
@@ -192,20 +204,21 @@ export async function tryNativeScreenCapture(
     const candidateBridge = typeof window === 'undefined' ? undefined :
       (window as Window & { coveNativeScreen?: NativeScreenBridge }).coveNativeScreen;
     const Generator = (globalThis as typeof globalThis & { MediaStreamTrackGenerator?: GeneratorConstructor }).MediaStreamTrackGenerator;
-    const selectedTrack = stockStream.getVideoTracks()[0];
+    const selectedTrack = 'getVideoTracks' in source ? source.getVideoTracks()[0] : undefined;
+    if (selectedTrack) captureAttemptsByTrack.set(selectedTrack, attempt);
     if (!candidateBridge?.supported || !Generator || typeof MediaStream !== 'function' ||
-        (options.nativeResolution && !options.cpuNv12)) {
+        (!display && options.nativeResolution && !options.cpuNv12)) {
       finishAttempt('ineligible'); return null;
     }
     if (options.signal.aborted) { finishAttempt('abort'); return null; }
     if (!options.isCurrent()) { finishAttempt('not_current'); return null; }
     if (selectedTrack && selectedTrack.readyState !== 'live') { finishAttempt('stock_ended'); return null; }
-    if (!selectedTrack ||
-        selectedTrack.getSettings().displaySurface !== 'monitor' ||
+    if ((!display && (!selectedTrack || selectedTrack.getSettings().displaySurface !== 'monitor')) ||
         !Number.isInteger(options.maxWidth) || options.maxWidth < 2 || options.maxWidth > NATIVE_SCREEN_MAX_WIDTH ||
         !Number.isInteger(options.maxHeight) || options.maxHeight < 2 || options.maxHeight > NATIVE_SCREEN_MAX_HEIGHT ||
         ![30, 60, 120].includes(options.fps)) { finishAttempt('ineligible'); return null; }
     bridge = candidateBridge;
+    frameSink = options.useGenerator ? undefined : bridge.preferredFrameSink;
     stockTrack = selectedTrack;
     track = new Generator({ kind: 'video' });
     try {
@@ -213,7 +226,7 @@ export async function tryNativeScreenCapture(
       stream = new MediaStream([track]);
       // A Worker preference must transfer the unlocked writable directly once.
       // Every other route retains its existing Window writer.
-      if (bridge.preferredFrameSink !== 'worker') writer = track.writable.getWriter();
+      if (frameSink !== 'worker') writer = track.writable.getWriter();
     } catch {
       track.stop();
       finishAttempt('setup_error');
@@ -231,6 +244,7 @@ export async function tryNativeScreenCapture(
     totalWriteIdleMs: 0, maxWriteIdleMs: 0, writesOverFramePeriod: 0,
     ...(options.opaqueDesktopView === true ? { opaqueView: createNativeOpaqueFrameMetrics() } : {}),
   };
+  captureAttemptsByTrack.set(track, attempt);
   captureDiagnostics.set(track, diagnostics);
   const frameStabilitySource: NativeFrameStabilitySource = { active: true, observers: new Set() };
   frameStabilitySources.set(track, frameStabilitySource);
@@ -270,7 +284,7 @@ export async function tryNativeScreenCapture(
     try {
       if (options.signal.aborted) { currentStopReason = 'abort'; return false; }
       if (!options.isCurrent()) { currentStopReason = 'not_current'; return false; }
-      if (stockTrack.readyState !== 'live') { currentStopReason = 'stock_ended'; return false; }
+      if (stockTrack && stockTrack.readyState !== 'live') { currentStopReason = 'stock_ended'; return false; }
       return true;
     } catch {
       currentStopReason = 'not_current';
@@ -294,12 +308,12 @@ export async function tryNativeScreenCapture(
     if (settingsPoll !== undefined) clearTimeout(settingsPoll);
     settingsPoll = undefined;
     options.signal.removeEventListener('abort', onCancelled);
-    stockTrack.removeEventListener('ended', onCancelled);
+    stockTrack?.removeEventListener('ended', onCancelled);
     track.removeEventListener('ended', onTrackEnded);
     try { unsubscribeFrame(); } catch { /* Continue releasing the other resources. */ }
     try { unsubscribeEnded(); } catch { /* Continue releasing the other resources. */ }
     try { originalStop(); } catch { /* Still release the helper if a track is already invalid. */ }
-    // Do not block stock fallback on an IPC or WritableStream promise.
+    // Abort the writer independently from the helper's stop acknowledgment.
     if (writer) {
       const ownedWriter = writer;
       try {
@@ -312,7 +326,7 @@ export async function tryNativeScreenCapture(
     }
     if (startIssued) stopBridge(unexpected);
     resolveCandidate(null);
-    // stop() itself does not fire ended. Existing sharing teardown handles this fault.
+    // A committed producer observes failure through the track's ended event.
     if (unexpected && committed) track.dispatchEvent(new Event('ended'));
   }
 
@@ -397,7 +411,7 @@ export async function tryNativeScreenCapture(
       if (attempt.committedMs === null) attempt.committedMs = attemptElapsed();
       attempt.phase = 'committed';
       options.signal.removeEventListener('abort', onCancelled);
-      stockTrack.removeEventListener('ended', onCancelled);
+      stockTrack?.removeEventListener('ended', onCancelled);
     },
     stop() { stop(); },
   };
@@ -482,9 +496,9 @@ export async function tryNativeScreenCapture(
     // Existing publisher stop paths must also release the helper and writer.
     track.stop = () => stop();
     deadline = setTimeout(() => stop(false, 'deadline_timeout'),
-      bridge.preferredFrameSink === 'worker' ? Math.max(0, startTimeoutMs - attemptElapsed()) : startTimeoutMs);
+      frameSink === 'worker' ? Math.max(0, startTimeoutMs - attemptElapsed()) : startTimeoutMs);
     options.signal.addEventListener('abort', onCancelled, { once: true });
-    stockTrack.addEventListener('ended', onCancelled, { once: true });
+    stockTrack?.addEventListener('ended', onCancelled, { once: true });
     track.addEventListener('ended', onTrackEnded, { once: true });
     unsubscribeFrame = bridge.onFrame(requestId, onFrame);
     if (stopped) unsubscribeFrame();
@@ -499,7 +513,10 @@ export async function tryNativeScreenCapture(
     void bridge.start(requestId, { maxWidth: options.maxWidth, maxHeight: options.maxHeight, fps: options.fps,
       ...(options.colorSpace ? { colorSpace: options.colorSpace } : {}),
       ...(options.cpuNv12 ? { cpuNv12: true } : {}),
-      ...(options.nativeResolution ? { nativeResolution: true } : {}) }).then((result) => {
+      ...(options.nativeResolution ? { nativeResolution: true } : {}),
+      ...(options.conservativeDelivery ? { conservativeDelivery: true } : {}),
+      ...(options.gameMode ? { gameMode: true } : {}),
+    }, display?.authorizationId).then((result) => {
       attempt.helperResponseMs = attemptElapsed();
       attempt.helperResponseDurationMs = Math.max(0, attempt.helperResponseMs - attempt.bridgeStartMs!);
       attempt.helperResponseOk = result.ok === true;
@@ -526,7 +543,7 @@ export async function tryNativeScreenCapture(
         detailTracks.add(track);
         track.contentHint = 'detail';
       }
-      if (bridge.preferredFrameSink === 'worker') {
+      if (frameSink === 'worker') {
         if (result.storage === undefined && (result.pixelFormat ?? 'bgra') === 'bgra') {
           try {
             workerSink = createNativeWorkerFrameSink({
@@ -559,7 +576,7 @@ export async function tryNativeScreenCapture(
       }
       // This route preserves the already-published AV1/BT709 contract. VP8's
       // verified CPU601 path and every unqualified format retain their writer.
-      if (bridge.preferredFrameSink === 'canvas' && options.colorSpace === 'bt709-limited' &&
+      if (frameSink === 'canvas' && options.colorSpace === 'bt709-limited' &&
           result.storage === undefined && (result.pixelFormat ?? 'bgra') === 'bgra') {
         try {
           canvasSink = createNativeCanvasFrameSink({
@@ -586,7 +603,7 @@ export async function tryNativeScreenCapture(
       }
       // This is a separate opt-in experiment. It adds no Canvas track, CPU
       // readback, consumer, or native credit; unsupported setup preserves stock.
-      if (bridge.preferredFrameSink === 'gpu-snapshot' && options.colorSpace === 'bt709-limited' &&
+      if (frameSink === 'gpu-snapshot' && options.colorSpace === 'bt709-limited' &&
           result.storage === undefined && (result.pixelFormat ?? 'bgra') === 'bgra') {
         try {
           gpuSnapshotSink = createNativeGpuSnapshotFrameSink({

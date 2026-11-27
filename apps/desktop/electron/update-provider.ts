@@ -1,6 +1,7 @@
 import type { OutgoingHttpHeaders } from 'node:http';
 import type { URL } from 'node:url';
-import { CancellationError, type CancellationToken, type CustomPublishOptions, type UpdateInfo, type WindowsUpdateInfo } from 'builder-util-runtime';
+import type { CancellationToken, CustomPublishOptions, UpdateInfo, WindowsUpdateInfo } from 'builder-util-runtime';
+import { CancellationError } from './updater-runtime';
 import type { AppUpdater } from 'electron-updater/out/AppUpdater';
 import { GenericProvider } from 'electron-updater/out/providers/GenericProvider';
 import type { ProviderRuntimeOptions } from 'electron-updater/out/providers/Provider';

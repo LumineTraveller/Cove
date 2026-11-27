@@ -22,6 +22,7 @@ import {
   emitAsync,
   RemoteScreen,
   AvailableScreen,
+  readScreenPlaybackSettings,
   RemoteApplicationAudio,
 } from '../desktopMediaSupport';
 
@@ -357,6 +358,7 @@ export function useVoiceSession(deps: useVoiceSessionDependencies) {
             videoProducerId: producerId,
             audioProducerId: deps.pendingScreenAudioByPeer.current.get(peerId),
             ...screenPublicationMetadata(appData),
+            ...readScreenPlaybackSettings(appData),
           });
           continue;
         }

@@ -192,6 +192,47 @@ test('screen analysis skips matching updates while preserving desired state and 
   assert.equal(info.mock.callCount(), 1, 'only the submitted update logs success');
 });
 
+test('GPU game sharing keeps the selected size and frame rate after the startup ramp', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+  context.mock.method(console, 'info', () => {});
+  let parameters: RTCRtpSendParameters = {
+    transactionId: 'gpu-sender', codecs: [], headerExtensions: [], rtcp: {},
+    encodings: [{ maxBitrate: 200_000_000, maxFramerate: 120, scaleResolutionDownBy: 1 }],
+  };
+  const submissions: RTCRtpSendParameters[] = [];
+  const plans: ReturnType<typeof createScreenEncodingPlan>[] = [];
+  const producer = {
+    appData: { gpuEncoding: true },
+    track: { contentHint: 'detail', getSettings: () => ({ width: 1728, height: 1080 }) },
+    rtpSender: {
+      getParameters: () => parameters,
+      setParameters: (next: RTCRtpSendParameters) => {
+        submissions.push(next);
+        parameters = next;
+        return Promise.resolve();
+      },
+    },
+  };
+  const activityRef = { current: 'motion' as ScreenActivity };
+  const analysis = renderHook(() => useScreenAnalysis({
+    screenProducer: { current: producer }, localScreenRef: { current: null },
+    screenRampGuardUntil: { current: 0 }, screenRampTimer: { current: null },
+    screenActivityRef: activityRef, setScreenActivity: () => {},
+    setScreenEncodingPlan: (plan: ReturnType<typeof createScreenEncodingPlan>) => plans.push(plan),
+  } as unknown as useScreenAnalysisDependencies));
+
+  analysis.armScreenRampGuard('1080p', 120);
+  analysis.applyScreenActivity('1080p', 120, 'motion');
+  await flushPublishing();
+  context.mock.timers.tick(5_000);
+
+  assert.equal(submissions.length, 1, 'the ramp deadline must not re-enable WebRTC scaling');
+  assert.equal(parameters.degradationPreference, 'maintain-framerate-and-resolution');
+  assert.equal(parameters.encodings[0].maxFramerate, 120);
+  assert.equal(parameters.encodings[0].scaleResolutionDownBy, 1);
+  assert.deepEqual(plans.map(plan => [plan.outputWidth, plan.outputHeight]), [[1728, 1080], [1728, 1080]]);
+});
+
 test('screen analysis preserves unavailable sender and error handling behavior', async (context) => {
   const warnings: unknown[] = [];
   const info = context.mock.method(console, 'info', () => {});
@@ -312,7 +353,8 @@ function nativePublishingFixture(context: Parameters<typeof replaceGlobal>[0]) {
   let sharing = false;
   let capture = async () => new PublishingStream();
   let startAudio = async () => {};
-  let nativeStart = async () => ({ ok: true, sessionId: 'native-session', width: 1280, height: 720 } as const);
+  let nativeStart = async (): ReturnType<NativeScreenBridge['start']> =>
+    ({ ok: true, sessionId: 'native-session', width: 1280, height: 720 });
   const observer = new EventEmitter();
   const parameters = {
     transactionId: 'original', encodings: [{ scaleResolutionDownBy: 1, maxFramerate: 15, maxBitrate: 200_000_000 }],
@@ -327,6 +369,8 @@ function nativePublishingFixture(context: Parameters<typeof replaceGlobal>[0]) {
   let publish = async (options: any) => { producer.track = options.track; return producer; };
   const bridge: NativeScreenBridge = {
     supported: true,
+    selectDisplay: async () => ({ authorizationId: 'primary-display', width: 1920, height: 1080 }),
+    releaseDisplay: async () => true,
     start: async (requestId) => { events.push('native-start'); requests.push(requestId); return nativeStart(); },
     stop: async (requestId) => { stoppedRequests.push(requestId); return true; },
     onFrame: (id, callback) => { frameCallbacks.set(id, callback); return () => frameCallbacks.delete(id); },
@@ -370,8 +414,9 @@ function nativePublishingFixture(context: Parameters<typeof replaceGlobal>[0]) {
     produced, events, parameters, analyses, sharing: () => sharing, plan: () => encodingPlan,
     capture: (value: typeof capture) => { capture = value; }, publish: (value: typeof publish) => { publish = value; },
     startAudio: (value: typeof startAudio) => { startAudio = value; }, nativeStart: (value: typeof nativeStart) => { nativeStart = value; },
-    async frame(requestId = requests.at(-1)!) {
+    async frame(requestId?: string) {
       await flushPublishing();
+      requestId ??= requests.at(-1)!;
       await frameCallbacks.get(requestId)?.({ displayWidth: 1280, displayHeight: 720, timestamp: 1000, close() {} } as VideoFrame,
         { requestId, sessionId: 'native-session', slot: 0, serial: 1, width: 1280, height: 720, timestamp: 1000, refresh: false });
       await flushPublishing();
@@ -380,181 +425,129 @@ function nativePublishingFixture(context: Parameters<typeof replaceGlobal>[0]) {
   };
 }
 
-test('stock publication and audio complete before native preparation; native never blocks sharing startup', async context => {
-  const f = nativePublishingFixture(context), published = deferred<typeof f.producer>(), audio = deferred<void>();
-  f.publish(() => published.promise);
-  f.startAudio(() => audio.promise);
+test('native first-frame readiness gates publication and its attached audio', async context => {
+  const f = nativePublishingFixture(context), audio = deferred<void>();
+  f.startAudio(() => { f.events.push('audio-start'); return audio.promise; });
   const start = f.api.startScreenShare('720p', 120, true);
   await flushPublishing();
-  assert.equal(f.requests.length, 0);
-  assert.equal(f.produced[0].track, f.captures[0].getVideoTracks()[0]);
-  published.resolve(f.producer);
-  await flushPublishing();
-  assert.equal(f.requests.length, 0, 'native preparation also waits for the existing audio startup stage');
+  assert.deepEqual(f.events, ['native-start']);
+  assert.equal(f.produced.length, 0);
+  await f.frame();
+  assert.deepEqual(f.events, ['native-start', 'produce', 'audio-start']);
   audio.resolve();
-  await start;
-  const stock = f.captures[0].getVideoTracks()[0];
-  const oldStockEnded = stock.onended!;
-  assert.equal(f.sharing(), true);
-  assert.equal(f.localScreenRef.current, f.captures[0]);
-  assert.equal(stock.stops, 0);
-  assert.ok(f.events.indexOf('sharing-true') < f.events.indexOf('native-start'));
-  const senderBefore = structuredClone(f.parameters);
-  await f.frame();
-  assert.equal(f.produced.length, 1);
-  assert.deepEqual(f.replacements, [f.native[0]]);
+  assert.equal(await start, true);
+  assert.equal(f.produced[0].track, f.native[0]);
   assert.equal(f.localScreenRef.current?.getVideoTracks()[0], f.native[0]);
-  assert.equal(stock.stops, 0, 'browser capture remains owned as the native standby');
-  assert.equal(f.plan().fps, 15, 'upgrading dimensions retains the current static cadence');
-  assert.deepEqual(f.parameters, senderBefore, 'upgrading capture does not mutate encoder policy');
-  assert.equal(f.analyses.length, 2);
-  oldStockEnded();
-  assert.equal(f.sharing(), true, 'a queued ended event from retired stock cannot stop native');
-});
-
-test('selected 30 FPS starts one live stock publication without native preparation', async context => {
-  const f = nativePublishingFixture(context);
-  await f.api.startScreenShare('720p', 30);
-  await flushPublishing();
-  const stock = f.captures[0].getVideoTracks()[0];
-  assert.equal(f.sharing(), true);
-  assert.equal(f.produced.length, 1);
-  assert.equal(f.produced[0].encodings[0].maxFramerate, 30);
-  assert.equal(f.producer.track, stock);
-  assert.equal(f.localScreenRef.current, f.captures[0]);
-  assert.equal(stock.readyState, 'live');
-  assert.equal(stock.stops, 0);
-  assert.deepEqual(f.requests, []);
-  assert.deepEqual(f.native, []);
+  assert.deepEqual(f.captures, []);
   assert.deepEqual(f.replacements, []);
-  assert.deepEqual(f.alerts, []);
+  assert.equal(f.analyses.length, 1);
 });
 
-test('updating native 120 FPS to 30 FPS replaces it with live stock and releases the native session', async context => {
+test('updating native 120 FPS to 30 FPS replaces only the native track', async context => {
   const f = nativePublishingFixture(context);
-  await f.api.startScreenShare('720p', 120);
-  await f.frame();
-  const native = f.native[0], requestId = f.requests[0];
-  assert.equal(native.readyState, 'live');
-  assert.equal(f.producer.track, native);
-  await f.api.updateScreenShare('720p', 30);
-  await flushPublishing();
-  const stock = f.captures[1].getVideoTracks()[0];
+  const start = f.api.startScreenShare('720p', 120);
+  await f.frame(); assert.equal(await start, true);
+  const previous = f.native[0], previousRequest = f.requests[0];
+  const update = f.api.updateScreenShare('720p', 30);
+  await f.frame(); await update;
   assert.equal(f.sharing(), true);
   assert.equal(f.produced.length, 1);
   assert.equal(f.screenProducer.current, f.producer);
-  assert.equal(f.producer.track, stock);
+  assert.equal(f.producer.track, f.native[1]);
   assert.equal(f.producer.appData.maxFps, 30);
-  assert.equal(f.localScreenRef.current, f.captures[1]);
-  assert.equal(stock.readyState, 'live');
-  assert.equal(stock.stops, 0);
-  assert.equal(native.readyState, 'ended');
-  assert.equal(native.stops, 1);
-  assert.ok(f.stoppedRequests.includes(requestId));
-  assert.equal(f.requests.length, 1, 'the 30 FPS update cannot start another native session');
-  assert.equal(f.native.length, 1);
-  assert.deepEqual(f.replacements, [native, stock]);
+  assert.equal(f.localScreenRef.current?.getVideoTracks()[0], f.native[1]);
+  assert.equal(previous.readyState, 'ended');
+  assert.ok(f.stoppedRequests.includes(previousRequest));
+  assert.deepEqual(f.replacements, [f.native[1]]);
+  assert.deepEqual(f.captures, []);
   assert.deepEqual(f.alerts, []);
 });
 
-test('native startup failure preserves stock and a successful stock source update can upgrade later', async context => {
+test('stop cancels a pending native settings replacement and retires its late frame', async context => {
   const f = nativePublishingFixture(context);
-  f.nativeStart(async () => { throw new Error('native unavailable'); });
-  await f.api.startScreenShare();
-  await flushPublishing();
-  const firstStock = f.captures[0].getVideoTracks()[0];
-  assert.equal(f.sharing(), true);
-  assert.equal(firstStock.stops, 0);
-  assert.deepEqual(f.replacements, []);
-  f.nativeStart(async () => ({ ok: true, sessionId: 'native-session', width: 1280, height: 720 }));
-  await f.api.updateScreenShare('1080p', 120);
-  const updatedStock = f.captures[1].getVideoTracks()[0];
-  assert.equal(f.localScreenRef.current, f.captures[1]);
-  assert.equal(updatedStock.stops, 0);
-  await f.frame();
-  assert.equal(f.produced.length, 1);
-  assert.deepEqual(f.replacements, [updatedStock, f.native[1]]);
-  assert.equal(updatedStock.stops, 0, 'updated browser capture remains available for native recovery');
-  assert.deepEqual(f.alerts, []);
-});
-
-test('new source requests and stop cancel pending native preparation immediately', async context => {
-  const f = nativePublishingFixture(context);
-  await f.api.startScreenShare();
-  const oldRequest = f.requests[0];
+  const start = f.api.startScreenShare();
+  await f.frame(); assert.equal(await start, true);
   const update = f.api.updateScreenShare('1080p', 120);
-  assert.equal(f.native[0].readyState, 'ended');
-  assert.ok(f.stoppedRequests.includes(oldRequest));
-  await update;
+  await flushPublishing();
   assert.equal(f.requests.length, 2);
+  assert.equal(f.native[0].readyState, 'live');
   f.api.stopScreenShare();
+  await update;
   assert.equal(f.native[1].readyState, 'ended');
   assert.ok(f.stoppedRequests.includes(f.requests[1]));
-  await f.frame(oldRequest);
+  await f.frame(f.requests[1]);
   assert.equal(f.screenProducer.current, null);
   assert.equal(f.localScreenRef.current, null);
-});
-
-test('producer close cancels native preparation without awaiting a helper frame', async context => {
-  const f = nativePublishingFixture(context);
-  await f.api.startScreenShare();
-  f.producer.close();
-  assert.equal(f.native[0].readyState, 'ended');
-  assert.ok(f.stoppedRequests.includes(f.requests[0]));
-  await f.frame();
   assert.deepEqual(f.replacements, []);
 });
 
-test('overlapping source updates remain ordered and only the latest intent prepares native', async context => {
-  const f = nativePublishingFixture(context), first = deferred<PublishingStream>(), last = deferred<PublishingStream>();
-  await f.api.startScreenShare();
-  f.capture(() => first.promise);
-  const firstUpdate = f.api.updateScreenShare('1080p', 120);
-  f.capture(() => last.promise);
-  const lastUpdate = f.api.updateScreenShare('1440p', 120);
-  const firstStock = new PublishingStream(), lastStock = new PublishingStream();
-  first.resolve(firstStock);
-  await firstUpdate;
-  assert.equal(f.requests.length, 1, 'an earlier ordered update cannot revive its superseded native intent');
-  last.resolve(lastStock);
-  await lastUpdate;
+test('producer close cancels native reconfiguration while waiting for its first frame', async context => {
+  const f = nativePublishingFixture(context);
+  const start = f.api.startScreenShare();
+  await f.frame(); assert.equal(await start, true);
+  const update = f.api.updateScreenShare('1080p', 120);
+  await flushPublishing();
   assert.equal(f.requests.length, 2);
-  assert.equal(f.localScreenRef.current, lastStock);
-  assert.deepEqual(f.replacements, [firstStock.getVideoTracks()[0], lastStock.getVideoTracks()[0]]);
-  await f.frame();
-  assert.equal(f.localScreenRef.current?.getVideoTracks()[0], f.native[1]);
+  f.producer.close();
+  await update;
+  assert.equal(f.native[1].readyState, 'ended');
+  assert.ok(f.stoppedRequests.includes(f.requests[1]));
+  await f.frame(f.requests[1]);
+  assert.deepEqual(f.replacements, []);
+});
+
+test('overlapping native updates prepare and replace one candidate at a time', async context => {
+  const f = nativePublishingFixture(context);
+  const start = f.api.startScreenShare();
+  await f.frame(); assert.equal(await start, true);
+  const first = f.api.updateScreenShare('1080p', 120);
+  const last = f.api.updateScreenShare('1440p', 120);
+  await flushPublishing();
+  assert.equal(f.requests.length, 2);
+  assert.equal(f.native[0].readyState, 'live');
+  await f.frame(); await first;
+  assert.equal(f.requests.length, 3);
+  await f.frame(); await last;
+  assert.equal(f.localScreenRef.current?.getVideoTracks()[0], f.native[2]);
+  assert.deepEqual(f.replacements, [f.native[1], f.native[2]]);
+  assert.deepEqual(f.captures, []);
   assert.equal(f.produced.length, 1);
 });
 
-test('canceling a new stock picker retains the committed native predecessor', async context => {
+test('a failed native geometry change keeps the original track and its display grant', async context => {
   const f = nativePublishingFixture(context);
-  await f.api.startScreenShare();
-  await f.frame();
-  const native = f.native[0], picker = deferred<PublishingStream>();
-  f.capture(() => picker.promise);
-  const update = f.api.updateScreenShare();
-  assert.equal(native.readyState, 'live');
-  picker.reject(new DOMException('picker canceled', 'NotAllowedError'));
-  await update;
-  assert.equal(native.readyState, 'live');
-  assert.equal(f.localScreenRef.current?.getVideoTracks()[0], native);
-  assert.deepEqual(f.alerts, []);
-  f.ended();
-  await flushPublishing();
-  assert.equal(f.sharing(), true, 'native failure retains the existing publication');
-  assert.equal(f.screenProducer.current, f.producer);
-  assert.equal(f.localScreenRef.current, f.captures[0]);
-  assert.equal(f.requests.length, 1, 'recovery uses the authorized standby without acquiring a new source');
-  f.api.stopScreenShare();
-  assert.equal(f.captures[0].getVideoTracks()[0].readyState, 'ended');
+  const start = f.api.startScreenShare();
+  await f.frame(); assert.equal(await start, true);
+  const original = f.producer.track;
+  f.nativeStart(async () => ({ ok: false, reason: 'native_resolution_unavailable' }));
+  await f.api.updateScreenShare('1080p', 120, false, false, true);
+  assert.equal(f.producer.track, original);
+  assert.equal(original?.readyState, 'live');
+  assert.equal(f.requests.length, 2);
+  assert.equal(f.sharing(), true);
+  assert.deepEqual(f.captures, []);
+  assert.match(f.alerts[0], /分辨率/);
 });
 
-test('unsupported native bridge and native-resolution sharing preserve the original stock path', async context => {
+test('a retired native track event cannot stop its recovered successor', async context => {
+  const f = nativePublishingFixture(context);
+  const start = f.api.startScreenShare();
+  await f.frame(); assert.equal(await start, true);
+  const oldEnded = f.native[0].onended!;
+  f.ended();
+  await f.frame();
+  assert.equal(f.producer.track, f.native[1]);
+  oldEnded();
+  assert.equal(f.sharing(), true);
+  assert.equal(f.screenProducer.current, f.producer);
+  assert.deepEqual(f.captures, []);
+});
+
+test('a platform without native capture keeps the compatibility path for its publication', async context => {
   const f = nativePublishingFixture(context);
   Object.assign(f.bridge, { supported: false });
   await f.api.startScreenShare();
   assert.equal(f.native.length, 0);
-  Object.assign(f.bridge, { supported: true });
   await f.api.updateScreenShare('1080p', 120, false, false, true);
   assert.equal(f.native.length, 0);
   assert.equal(f.produced.length, 1);

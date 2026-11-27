@@ -3,10 +3,12 @@ import { Server, type Socket } from 'socket.io';
 import {
   RemoteControlRegistry,
   sanitizeRemoteControlInput,
+  type RemoteControlInput,
   type RemoteControlRequest,
   type RemoteControlSession,
 } from './remoteControl';
 import { cancelRemoteRequestExpiration, scheduleRemoteRequestExpiration } from './requestExpiration';
+import { setScreenRemoteControlActive } from '../media/screenPublication';
 
 export interface RegisterRemoteControlSocketHandlersDependencies {
   readonly socket: Socket<
@@ -39,6 +41,40 @@ export function registerRemoteControlSocketHandlers(
     deps.remoteControlCapabilities.has(socketId) ||
     deps.io.sockets.sockets.get(socketId)?.data.remoteControlControllerSupported === true;
   const canReceive = (socketId: string) => deps.remoteControlCapabilities.has(socketId);
+  type PointerInput = Extract<RemoteControlInput, { type: 'pointer' }>;
+  let pendingMove: { session: RemoteControlSession; input: PointerInput; connection: Socket['conn'] } | null = null;
+
+  const congested = (connection: Socket['conn']) => connection.transport.writable === false;
+  const hasLiveParticipants = (session: RemoteControlSession) => {
+    const members = deps.roomMembers.get(session.roomId);
+    return canControl(session.controllerSocketId) && canReceive(session.sharerSocketId) &&
+      members?.has(session.controllerSocketId) && members.has(session.sharerSocketId) &&
+      deps.isSharingScreen(session.sharerSocketId, session.roomId);
+  };
+  const emitInput = (session: RemoteControlSession, input: RemoteControlInput) =>
+    deps.io.to(session.sharerSocketId).emit('remote-control:input', { sessionId: session.sessionId, input });
+  const clearMove = () => {
+    pendingMove?.connection.off('drain', onRelayReady).off('upgrade', onRelayReady).off('close', clearMove);
+    pendingMove = null;
+  };
+  const flushMove = (force = false) => {
+    const move = pendingMove;
+    if (!move) return;
+    const { session } = move;
+    if (deps.remoteControls.getSession(session.sessionId) !== session ||
+      !hasLiveParticipants(session) || !deps.isRemoteControlAllowed(session.roomId, session.sharerSocketId)) {
+      clearMove();
+      return;
+    }
+    if (!force && congested(move.connection)) return;
+    clearMove();
+    emitInput(session, move.input);
+  };
+  function onRelayReady() {
+    // Engine.IO can emit drain immediately before its buffered writes finish.
+    queueMicrotask(() => flushMove());
+  }
+  deps.socket.on('disconnect', clearMove);
   // ── Remote control ────────────────────────────────────────────────────────
 
   deps.socket.on(
@@ -174,6 +210,7 @@ export function registerRemoteControlSocketHandlers(
         cb?.({ ok: true });
         return;
       }
+      setScreenRemoteControlActive(deps.io, session, true);
       deps.io.to(session.controllerSocketId).emit('remote-control:started', {
         sessionId: session.sessionId,
         roomId: session.roomId,
@@ -214,22 +251,29 @@ export function registerRemoteControlSocketHandlers(
         if (stopped.ok) deps.emitRemoteControlStopped(stopped.value, '共享者已关闭远程控制');
         return;
       }
-      const members = deps.roomMembers.get(session.roomId);
-      if (
-        !canControl(session.controllerSocketId) ||
-        !canReceive(session.sharerSocketId) ||
-        !members?.has(session.controllerSocketId) ||
-        !members.has(session.sharerSocketId) ||
-        !deps.isSharingScreen(session.sharerSocketId, session.roomId)
-      ) {
+      if (!hasLiveParticipants(session)) {
         const stopped = deps.remoteControls.stop(session.sessionId, deps.socket.id);
         if (stopped.ok) deps.emitRemoteControlStopped(stopped.value, '共享状态已变化');
         return;
       }
-      deps.io.to(session.sharerSocketId).emit('remote-control:input', {
-        sessionId: session.sessionId,
-        input: safeInput,
-      });
+      const connection = deps.io.sockets.sockets.get(session.sharerSocketId)?.conn;
+      if (pendingMove && (pendingMove.session !== session || pendingMove.connection !== connection)) clearMove();
+      if (safeInput.type === 'pointer') {
+        if (connection && congested(connection)) {
+          if (pendingMove) {
+            pendingMove.input = safeInput;
+          } else {
+            pendingMove = { session, input: safeInput, connection };
+            connection.on('drain', onRelayReady).on('upgrade', onRelayReady).once('close', clearMove);
+          }
+          return;
+        }
+        clearMove();
+      } else {
+        // Send the final pending position before reliable buttons/keys/wheel.
+        flushMove(true);
+      }
+      emitInput(session, safeInput);
     },
   );
 

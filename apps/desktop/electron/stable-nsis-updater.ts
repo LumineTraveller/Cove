@@ -1,7 +1,8 @@
 import path from 'path';
 import { URL } from 'url';
-import { CancellationError, CancellationToken, type HttpExecutor, type AllPublishOptions, type PublishConfiguration, type GenericServerOptions, type UpdateInfo } from 'builder-util-runtime';
+import type { HttpExecutor, AllPublishOptions, PublishConfiguration, GenericServerOptions, UpdateInfo } from 'builder-util-runtime';
 import { NsisUpdater, type Logger, type ResolvedUpdateFileInfo, type UpdateDownloadedEvent } from 'electron-updater';
+import { CancellationError, CancellationToken } from './updater-runtime';
 import type { DownloadUpdateOptions } from 'electron-updater/out/AppUpdater';
 import type { InstallOptions } from 'electron-updater/out/BaseUpdater';
 import { findFile, parseUpdateInfo, resolveFiles, type Provider } from 'electron-updater/out/providers/Provider';

@@ -1098,7 +1098,7 @@ test('a physical display change allows a new share with a fresh selection', asyn
   h.controller.reset(); h.children[1].close();
 });
 
-test('startup timeout is bounded, disables native for this app session, and kills only its own child', async () => {
+test('startup timeout is bounded and a fresh native session can start after the owned child retires', async () => {
   const h = harness(); const pending = h.start(); h.advance(1500);
   const result = await pending;
   assert.equal(result.ok, false);
@@ -1109,8 +1109,11 @@ test('startup timeout is bounded, disables native for this app session, and kill
   h.children[0].close();
   assert.equal(h.controller.snapshot().helpers, 0);
   assert.equal(h.timers.size, 0);
-  assert.equal((await h.start('request_02')).ok, false);
-  assert.equal(h.children.length, 1);
+  const retry = h.start('request_02');
+  h.children[1].emitMessage(ready);
+  assert.equal((await retry).ok, true);
+  assert.equal(h.controller.snapshot().disabled, false);
+  h.controller.reset(); h.children[1].close();
 });
 
 test('failure to acquire the actual child handle retires startup and cleans only that child', async () => {
@@ -1311,7 +1314,7 @@ test('stalled transfer, encoder-held reference or missing refresh retires withou
     if (kind === 'references') { h.transfers[0].resolve(); await flush(); }
     h.advance(kind === 'transfer' ? 1500 : 5000);
     assert.equal(h.controller.snapshot().activeSessions, 0);
-    assert.equal(h.controller.snapshot().disabled, true);
+    assert.equal(h.controller.snapshot().disabled, false);
     assert.equal(h.children[0].writes.some((line: string) => line.startsWith('released ')), false);
     if (h.imports.length) { h.transfers[0].resolve(); await flush(); h.imports[0].config.allReferencesReleased(); }
     h.children[0].close(); assert.equal(h.timers.size, 0);
@@ -1430,21 +1433,84 @@ test('concurrent sessions refresh independent health deadlines', async () => {
   h.children[0].close(); assert.equal(h.timers.size, 0);
 });
 
-test('renderer/receiver fault disables native retries while ordinary stop permits a fresh native session', async () => {
+test('renderer and receiver faults are recorded and allow fresh native sessions', async () => {
   for (const fault of [undefined, 'renderer_failed', 'receiver_failed'] as const) {
     const h = harness(); const first = h.start(); h.children[0].emitMessage(ready); await first;
     const stopping = h.controller.stop(h.target as any, 'request_01', fault);
     h.children[0].close(); await stopping;
-    assert.equal(h.controller.snapshot().disabled, fault !== undefined);
-    if (fault) {
-      assert.equal(h.controller.snapshot().failureCode, fault);
-      assert.equal((await h.start('request_02')).ok, false);
-      assert.equal(h.children.length, 1);
-    } else {
-      const second = h.start('request_02'); h.children[1].emitMessage(ready); assert.equal((await second).ok, true);
-      h.controller.reset(); h.children[1].close();
-    }
+    assert.equal(h.controller.snapshot().disabled, false);
+    if (fault) assert.equal(h.controller.snapshot().failureCode, fault);
+    const second = h.start('request_02'); h.children[1].emitMessage(ready); assert.equal((await second).ok, true);
+    h.controller.reset(); h.children[1].close();
     assert.equal(h.controller.snapshot().sessions, 0);
     assert.equal(h.timers.size, 0);
   }
+});
+
+test('direct display grants permit retries only for the original frame and the same primary monitor', async () => {
+  const h = harness({ reuseGpuTextures: true });
+  const selection = { sourceId: 'screen:0:0', displayId: '123', primaryDisplayId: '123', displayCount: 2,
+    sourceWidth: 2560, sourceHeight: 1440, selectedAt: 100_000 };
+  const grant = h.controller.authorizeDisplay(h.target, selection)!;
+  assert.equal(grant.width, 2560);
+  let current = selection;
+  const authorized = { id: grant.authorizationId, currentSelection: () => current };
+  const rejected = await h.controller.start(h.target, 'fake_grant_01', options, { ...authorized, id: 'other_grant' });
+  assert.equal(rejected.reason, 'authorization_expired');
+  const first = h.controller.start(h.target, 'native_first', options, authorized);
+  h.advance(1_501);
+  current = { ...selection, displayId: 'other', primaryDisplayId: 'other' };
+  h.children[0].emitMessage(ready);
+  assert.equal((await first).reason, 'display_changed');
+  h.children[0].close();
+  assert.equal((await h.controller.start(h.target, 'native_moved', options, authorized)).reason, 'display_changed');
+  assert.equal(h.children.length, 1);
+  current = { ...selection, selectedAt: 101_501 };
+  const retry = h.controller.start(h.target, 'native_retry', { ...options, conservativeDelivery: true }, authorized);
+  h.children[1].emitMessage(ready);
+  assert.equal((await retry).ok, true);
+  h.children[1].emitMessage(frame());
+  assert.equal(h.imports.length, 1);
+  assert.equal(h.controller.releaseDisplay(h.target, 'different'), false);
+  assert.equal(h.controller.releaseDisplay(h.target, grant.authorizationId), true);
+  h.transfers[0].resolve(); await flush(); h.imports[0].config.allReferencesReleased();
+  h.children[1].close();
+  assert.equal((await h.controller.start(h.target, 'native_revoked', options, authorized)).reason, 'authorization_expired');
+  assert.equal(h.controller.snapshot().sessions, 0);
+});
+
+test('native CPU delivery can replace a sender track when two retired GPU helpers still have outstanding references', async () => {
+  const h = harness();
+  Object.assign(h.config, { allowCpuNv12: true });
+  for (let index = 0; index < 2; ++index) {
+    const request = h.start('retained_' + index);
+    h.children[index].emitMessage(ready);
+    assert.equal((await request).ok, true);
+    h.children[index].emitMessage(frame());
+    h.transfers[index].resolve(); await flush();
+    h.controller.reset(); h.children[index].close();
+  }
+  assert.equal(h.controller.snapshot().sessions, 2);
+  assert.equal((await h.start('blocked_gpu')).reason, 'busy');
+  const recovery = h.start('cpu_recovery', {
+    ...options, colorSpace: 'bt709-limited', cpuNv12: true, conservativeDelivery: true,
+  });
+  h.children[2].emitMessage(cpuReady);
+  assert.equal((await recovery).ok, true);
+  assert.equal(h.controller.snapshot().frameStorage, 'cpu');
+  for (const item of h.imports) item.config.allReferencesReleased();
+  h.controller.reset(); h.children[2].close();
+  assert.equal(h.controller.snapshot().sessions, 0);
+});
+
+test('more than 4096 retired requests leave room for the next native capture', async () => {
+  const h = harness();
+  for (let index = 0; index < 4100; ++index) {
+    const result = h.start('long_running_' + index);
+    h.children[index].emitMessage(ready);
+    assert.equal((await result).ok, true);
+    h.controller.reset(); h.children[index].close();
+  }
+  assert.equal(h.controller.snapshot().sessions, 0);
+  assert.equal(h.timers.size, 0);
 });

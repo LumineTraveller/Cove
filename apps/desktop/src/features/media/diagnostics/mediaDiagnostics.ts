@@ -48,15 +48,15 @@ export function diagnosticPacketLoss(stats: {
 
 export interface RtcVideoCounterSample {
   id: string;
-  timestamp: number;
+  timestamp: number | null;
   bytes: number;
   packets: number;
-  framesCaptured: number;
-  framesEncoded: number;
-  framesSent: number;
-  framesReceived: number;
-  framesDecoded: number;
-  framesDropped: number;
+  framesCaptured: number | null;
+  framesEncoded: number | null;
+  framesSent: number | null;
+  framesReceived: number | null;
+  framesDecoded: number | null;
+  framesDropped: number | null;
   retransmittedBytes: number;
   nackCount: number;
   pliCount: number;
@@ -84,6 +84,82 @@ export interface RtcVideoRates {
   averageQp: number | null;
 }
 
+export interface FrameRateGap {
+  stage: 'capture' | 'delivery' | 'encoder-input' | 'encode' | 'send' | 'decode';
+  referenceFps: number;
+  observedFps: number;
+}
+
+export type FrameRateDiagnosis =
+  | { status: 'pending' | 'steady' | 'paused' | 'awaiting-complete-frame' }
+  | { status: 'limited'; gaps: FrameRateGap[] };
+
+type FrameRateCounters = Pick<RtcVideoRates, 'captureFps' | 'encodeFps' | 'sendFps' | 'receiveFps' | 'decodeFps'> &
+  Partial<Pick<RtcVideoRates, 'bitrateKbps'>>;
+
+export interface NativeFrameCounterSample {
+  timestamp: number;
+  framesReceived: number;
+  framesWritten: number;
+}
+
+interface NativeFrameRates {
+  receivedFps: number | null;
+  writtenFps: number | null;
+}
+
+export function nativeFrameCounterRates(
+  current: NativeFrameCounterSample,
+  previous: NativeFrameCounterSample | null,
+): NativeFrameRates {
+  if (!previous) return { receivedFps: null, writtenFps: null };
+  const elapsedMs = current.timestamp - previous.timestamp;
+  if (current.framesReceived < previous.framesReceived || current.framesWritten < previous.framesWritten)
+    return { receivedFps: null, writtenFps: null };
+  return {
+    receivedFps: rounded(rate(current.framesReceived, previous.framesReceived, elapsedMs)),
+    writtenFps: rounded(rate(current.framesWritten, previous.framesWritten, elapsedMs)),
+  };
+}
+
+export function diagnoseFrameRate(
+  rates: FrameRateCounters,
+  sending: boolean,
+  targetFps: number | null,
+  nativeFrames: NativeFrameRates | null = null,
+): FrameRateDiagnosis {
+  const { captureFps, encodeFps, sendFps, receiveFps, decodeFps } = rates;
+  if (!sending && receiveFps === 0 && decodeFps === 0)
+    return { status: (rates.bitrateKbps ?? 0) > 0 ? 'awaiting-complete-frame' : 'pending' };
+  const capped = (fps: number | null) =>
+    fps != null && targetFps != null ? Math.min(fps, targetFps) : null;
+  type StageSample = [FrameRateGap['stage'], number | null, number | null];
+  const sourceStages: StageSample[] = nativeFrames ? [
+    ['capture', targetFps, nativeFrames.receivedFps],
+    ['delivery', capped(nativeFrames.receivedFps), nativeFrames.writtenFps],
+    ['encoder-input', capped(nativeFrames.writtenFps), captureFps],
+  ] : [['encoder-input', targetFps, captureFps]];
+  const stages: StageSample[] = sending
+    ? [
+        ...sourceStages,
+        ['encode', capped(captureFps), encodeFps],
+        ['send', encodeFps, sendFps],
+      ]
+    : [['decode', receiveFps, decodeFps]];
+  let complete = true;
+  const gaps: FrameRateGap[] = [];
+  for (const [stage, referenceFps, observedFps] of stages) {
+    if (referenceFps == null || observedFps == null) {
+      complete = false;
+      continue;
+    }
+    // Adjacent pipeline stages can count a frame on opposite sides of the sample boundary.
+    if (referenceFps - observedFps > Math.max(2, referenceFps * 0.05))
+      gaps.push({ stage, referenceFps, observedFps });
+  }
+  return gaps.length ? { status: 'limited', gaps } : { status: complete ? 'steady' : 'pending' };
+}
+
 export function mediaDiagnosticSessionKey(
   screenProducerId: string | null | undefined,
   watchedPeerId: string | null | undefined,
@@ -106,18 +182,24 @@ export function statNumber(stat: RtcStat | undefined, key: string, fallback = 0)
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
-export function videoCounterSample(stat: RtcStat): RtcVideoCounterSample {
+function frameCounter(stat: RtcStat | undefined, key: string): number | null {
+  const value = statNumber(stat, key, -1);
+  return value >= 0 ? value : null;
+}
+
+export function videoCounterSample(stat: RtcStat, mediaSource?: RtcStat): RtcVideoCounterSample {
+  const sourceFrames = frameCounter(mediaSource, 'frames');
   return {
-    id: String(stat.id ?? ''),
-    timestamp: statNumber(stat, 'timestamp'),
+    id: `${String(stat.id ?? '')}:${sourceFrames == null ? 'rtp' : `source:${String(mediaSource?.id ?? '')}`}`,
+    timestamp: frameCounter(stat, 'timestamp'),
     bytes: statNumber(stat, 'bytesSent', statNumber(stat, 'bytesReceived')),
     packets: statNumber(stat, 'packetsSent', statNumber(stat, 'packetsReceived')),
-    framesCaptured: statNumber(stat, 'framesCaptured'),
-    framesEncoded: statNumber(stat, 'framesEncoded'),
-    framesSent: statNumber(stat, 'framesSent'),
-    framesReceived: statNumber(stat, 'framesReceived'),
-    framesDecoded: statNumber(stat, 'framesDecoded'),
-    framesDropped: statNumber(stat, 'framesDropped'),
+    framesCaptured: sourceFrames ?? frameCounter(stat, 'framesCaptured'),
+    framesEncoded: frameCounter(stat, 'framesEncoded'),
+    framesSent: frameCounter(stat, 'framesSent'),
+    framesReceived: frameCounter(stat, 'framesReceived'),
+    framesDecoded: frameCounter(stat, 'framesDecoded'),
+    framesDropped: frameCounter(stat, 'framesDropped'),
     retransmittedBytes: statNumber(
       stat,
       'retransmittedBytesSent',
@@ -132,9 +214,13 @@ export function videoCounterSample(stat: RtcStat): RtcVideoCounterSample {
   };
 }
 
-function rate(current: number, previous: number, elapsedMs: number): number | null {
-  if (elapsedMs <= 0 || current < previous) return null;
-  return ((current - previous) * 1_000) / elapsedMs;
+function counterDelta(current: number | null, previous: number | null): number | null {
+  return current == null || previous == null || current < previous ? null : current - previous;
+}
+
+function rate(current: number | null, previous: number | null, elapsedMs: number): number | null {
+  const delta = counterDelta(current, previous);
+  return delta == null || elapsedMs <= 0 ? null : (delta * 1_000) / elapsedMs;
 }
 
 function rounded(value: number | null, digits = 1): number | null {
@@ -174,12 +260,13 @@ export function videoCounterRates(
     decodeTimeMs: null,
     averageQp: null,
   };
-  if (!previous || current.id !== previous.id) return empty;
+  if (!previous || current.id !== previous.id || current.timestamp == null || previous.timestamp == null)
+    return empty;
   const elapsedMs = current.timestamp - previous.timestamp;
   if (elapsedMs <= 0) return empty;
 
-  const encodedFrames = current.framesEncoded - previous.framesEncoded;
-  const decodedFrames = current.framesDecoded - previous.framesDecoded;
+  const encodedFrames = counterDelta(current.framesEncoded, previous.framesEncoded);
+  const decodedFrames = counterDelta(current.framesDecoded, previous.framesDecoded);
   const encodeSeconds = current.totalEncodeTime - previous.totalEncodeTime;
   const decodeSeconds = current.totalDecodeTime - previous.totalDecodeTime;
   const qp = current.qpSum - previous.qpSum;
@@ -200,14 +287,14 @@ export function videoCounterRates(
     pliPerSecond: rounded(rate(current.pliCount, previous.pliCount, elapsedMs)),
     firPerSecond: rounded(rate(current.firCount, previous.firCount, elapsedMs)),
     encodeTimeMs:
-      encodedFrames > 0 && encodeSeconds >= 0
+      encodedFrames != null && encodedFrames > 0 && encodeSeconds >= 0
         ? rounded((encodeSeconds * 1_000) / encodedFrames, 2)
         : null,
     decodeTimeMs:
-      decodedFrames > 0 && decodeSeconds >= 0
+      decodedFrames != null && decodedFrames > 0 && decodeSeconds >= 0
         ? rounded((decodeSeconds * 1_000) / decodedFrames, 2)
         : null,
-    averageQp: encodedFrames > 0 && qp >= 0 ? rounded(qp / encodedFrames, 1) : null,
+    averageQp: encodedFrames != null && encodedFrames > 0 && qp >= 0 ? rounded(qp / encodedFrames, 1) : null,
   };
 }
 
@@ -237,8 +324,8 @@ export function diagnosticVideoCounters(rtp?: RtcStat, source?: RtcStat) {
     }));
   return {
     rtp: pick(rtp, [
-      'timestamp', 'framesCaptured', 'framesEncoded', 'framesSent', 'framesReceived',
-      'framesDecoded', 'framesDropped', 'packetsSent', 'packetsReceived',
+      'timestamp', 'framesCaptured', 'framesEncoded', 'keyFramesEncoded', 'framesSent', 'framesReceived',
+      'framesDecoded', 'keyFramesDecoded', 'framesDropped', 'packetsSent', 'packetsReceived',
       'packetsLost', 'bytesSent', 'bytesReceived', 'retransmittedBytesSent',
       'retransmittedPacketsSent', 'nackCount', 'pliCount', 'firCount', 'qpSum',
       'targetBitrate', 'totalEncodeTime', 'totalDecodeTime', 'totalPacketSendDelay',

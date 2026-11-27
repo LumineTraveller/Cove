@@ -47,26 +47,28 @@ function extractOwnedPattern(input) {
       !ts.isTemplateExpression(source.whenFalse)) throw Error('Unexpected owned source structure');
 
   // Render only the existing default canvas branch. Never evaluate expressions
-  // from the file: optional source-age/lifecycle hooks are off and the bit
+  // from the file: optional source-age, chart and lifecycle hooks are off and the bit
   // coordinates come from the same fixed central layout used by the fixture.
   const bits = require('../apps/desktop/tests/ui/screen-performance-pattern-layouts.json')['central-v1']?.bits;
   if (!bits || !Number.isFinite(bits.top) || !Number.isFinite(bits.height) || bits.top < 0 ||
       bits.height <= 0 || bits.top + bits.height > 1 || bits.count !== 16) throw Error('Invalid owned central layout');
   const template = source.whenFalse;
   const spans = template.templateSpans;
-  const lifecycle = spans[1]?.expression;
+  const optionalHook = (node, flag, script) => ts.isConditionalExpression(node) &&
+    identifier(node.condition, flag) && ts.isStringLiteral(node.whenTrue) && node.whenTrue.text === script &&
+    ts.isStringLiteral(node.whenFalse) && node.whenFalse.text === '';
   const scaledBit = (node, name) => ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.AsteriskToken &&
     ts.isPropertyAccessExpression(node.left) && identifier(node.left.expression, 'patternBits') && node.left.name.text === name &&
     ts.isNumericLiteral(node.right) && node.right.text === '1080';
-  if (spans.length !== 5 || !identifier(spans[0].expression, 'sourceAgeSetup') ||
-      !ts.isConditionalExpression(lifecycle) || !identifier(lifecycle.condition, 'nativeLifecycleEnabled') ||
-      !ts.isStringLiteral(lifecycle.whenTrue) || lifecycle.whenTrue.text !== 'if(window.sourceFrozen===true){return;}' ||
-      !ts.isStringLiteral(lifecycle.whenFalse) || lifecycle.whenFalse.text !== '' ||
-      !identifier(spans[2].expression, 'sourceAgeDraw') ||
-      !scaledBit(spans[3].expression, 'top') || !scaledBit(spans[4].expression, 'height')) {
+  if (spans.length !== 7 || !identifier(spans[0].expression, 'sourceAgeSetup') ||
+      !identifier(spans[1].expression, 'chartSetup') ||
+      !optionalHook(spans[2].expression, 'nativeLifecycleEnabled', 'if(window.sourceFrozen===true){return;}') ||
+      !identifier(spans[3].expression, 'sourceAgeDraw') ||
+      !scaledBit(spans[4].expression, 'top') || !scaledBit(spans[5].expression, 'height') ||
+      !optionalHook(spans[6].expression, 'detailQuality', 'drawDetailChart(frames&65535);')) {
     throw Error('Unexpected owned source interpolation');
   }
-  const values = ['', '', '', String(bits.top * 1080), String(bits.height * 1080)];
+  const values = ['', '', '', '', String(bits.top * 1080), String(bits.height * 1080), ''];
   const html = template.head.text + spans.map((span, index) => values[index] + span.literal.text).join('');
   if (!html.includes('window.sourceFrames=frames') || !html.includes('bit<16')) throw Error('Invalid owned canvas source');
   return html;

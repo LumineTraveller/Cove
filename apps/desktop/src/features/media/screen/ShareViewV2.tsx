@@ -6,6 +6,7 @@ import { useScreenPictureInPicture } from './useScreenPictureInPicture';
 import { diagnosticPacketLoss } from '../diagnostics/mediaDiagnostics';
 import { type RemoteControlInput } from '../../remote-control/remoteControl';
 import { RemoteScreenVideo, LocalScreenVideo } from './ScreenVideo';
+import type { ScreenVideoSizeListener } from './screenVideoPlayback';
 import { DiagnosticsOverlayV2 } from '../diagnostics/DiagnosticsOverlayV2';
 import { ShareStatusBarV2 } from './ShareStatusBarV2';
 import { socket } from '../../connection/socket';
@@ -24,6 +25,7 @@ export function ShareViewV2({
   onRequestRemote,
   onStopRemote,
   onEnd,
+  onRemoteVideoSize,
   diagnosticsCompact,
   onToggleDiagnosticsCompact,
 }: {
@@ -42,6 +44,7 @@ export function ShareViewV2({
   onRequestRemote: () => void;
   onStopRemote: () => void;
   onEnd: () => void;
+  onRemoteVideoSize?: ScreenVideoSizeListener;
   diagnosticsCompact: boolean;
   onToggleDiagnosticsCompact: () => void;
 }) {
@@ -97,6 +100,7 @@ export function ShareViewV2({
               diagnosticsEnabled={rtc.statsEnabled}
               controlling={remoteControl.state === 'active' && !annotations.localActive && !floating}
               onInput={onInput}
+              onSize={onRemoteVideoSize}
             />
           ) : local ? (
             <LocalScreenVideo stream={rtc.localScreen!} diagnosticsEnabled={rtc.statsEnabled} />

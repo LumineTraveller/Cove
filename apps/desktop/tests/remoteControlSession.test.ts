@@ -19,6 +19,7 @@ function harness(engine?: EventEmitter & { transport: { writable: boolean }; wri
   const active: (string | null)[] = [];
   const injected: { sessionId: string; input: unknown }[] = [];
   const sessions: (RemoteControlSession | null)[] = [];
+  const playbackPeers: (string | null)[] = [];
   const notices: string[] = [];
   let enable: (id: string) => Promise<boolean> = async () => true;
   let accept: () => Promise<boolean> = async () => true;
@@ -43,8 +44,9 @@ function harness(engine?: EventEmitter & { transport: { writable: boolean }; wri
       onEmergencyStop: listener => { emergency = listener; return () => { emergency = null; }; },
     },
     onSession: state => sessions.push(state), onNotice: reason => notices.push(reason),
+    onPlaybackPeer: peer => playbackPeers.push(peer),
   });
-  return { events, socket, sent, active, injected, sessions, notices, lifecycle,
+  return { events, socket, sent, active, injected, sessions, notices, playbackPeers, lifecycle,
     setOnEmit: (fn: typeof onEmit) => { onEmit = fn; },
     setEnable: (fn: typeof enable) => { enable = fn; },
     setActivationFailure: (reason: string) => { activationFailure = reason; },
@@ -58,6 +60,28 @@ function harness(engine?: EventEmitter & { transport: { writable: boolean }; wri
     },
   };
 }
+
+test('the requested screen releases extra buffering while waiting for consent and restores on cancellation or stop', async () => {
+  const h = harness();
+  const target = 'screen-peer';
+  assert.equal(h.lifecycle.expectStart('controller', target), true);
+  assert.deepEqual(h.playbackPeers, [target]);
+  h.lifecycle.send(input);
+  assert.equal(h.sent.length, 0);
+  h.lifecycle.cancelExpectedStart();
+  assert.deepEqual(h.playbackPeers, [target, null]);
+
+  assert.equal(h.lifecycle.expectStart('controller', target), true);
+  h.events.emit('remote-control:started', { ...session('controller', 'stale-session'), sharerSocketId: 'another-peer' });
+  assert.equal(h.sessions.length, 0);
+  h.events.emit('remote-control:started', { ...session('controller'), sharerSocketId: target });
+  await flush();
+  assert.equal(h.sessions.at(-1)?.sharerSocketId, target);
+  assert.deepEqual(h.playbackPeers, [target, null, target]);
+  h.disconnect();
+  assert.deepEqual(h.playbackPeers, [target, null, target, null]);
+  h.lifecycle.dispose();
+});
 
 test('connected transport backpressure retains one newest move and drains a stopped-motion tail', async () => {
   const engine = Object.assign(new EventEmitter(), { transport: { writable: false }, writeBuffer: [] as unknown[] });

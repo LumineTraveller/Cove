@@ -130,18 +130,20 @@ static const char* nv12ColorSpaceName(Nv12ColorSpace colorSpace) {
 }
 struct Options {
   DWORD owner = 0; UINT maxWidth = 0, maxHeight = 0, fps = 0;
-  bool nv12 = false, cpu = false;
+  bool nv12 = false, cpu = false, rearmForeground = false;
   CompletionPolicy completion = CompletionPolicy::Auto;
   Nv12ColorSpace colorSpace = Nv12ColorSpace::Bt709Limited;
 };
 static Options options(int argc, char** argv) {
-  require(argc >= 9 && argc <= 17 && argc % 2 == 1, "invalid_arguments");
+  require(argc >= 9 && argc <= 19 && argc % 2 == 1, "invalid_arguments");
   Options result;
   unsigned seen = 0;
   for (int i = 1; i < argc; i += 2) {
     const std::string name(argv[i]);
     unsigned bit = 0;
-    if (name == "--owner-pid") {
+    if (name == "--rearm-foreground") {
+      bit = 256; require(std::string(argv[i + 1]) == "1", "invalid_arguments"); result.rearmForeground = true;
+    } else if (name == "--owner-pid") {
       bit = 1; result.owner = DWORD(decimal(argv[i + 1], MAXDWORD, "invalid_arguments"));
     } else if (name == "--max-width") {
       bit = 2; result.maxWidth = UINT(decimal(argv[i + 1], kMaxDimension, "invalid_arguments"));
@@ -166,7 +168,7 @@ static Options options(int argc, char** argv) {
   }
   require((!result.cpu || result.nv12) &&
     (result.colorSpace != Nv12ColorSpace::Bt601Limited || (result.cpu && result.nv12)) &&
-    (seen & ~(64U | 128U)) == ((result.nv12 ? 31U : 15U) | (result.cpu ? 32U : 0U)) &&
+    (seen & ~(64U | 128U | 256U)) == ((result.nv12 ? 31U : 15U) | (result.cpu ? 32U : 0U)) &&
     result.owner && result.maxWidth >= 2 && result.maxHeight >= 2 &&
     (result.fps == 30 || result.fps == 60 || result.fps == 120), "invalid_arguments");
   return result;
@@ -188,11 +190,13 @@ struct Clock {
     frequency = value.QuadPart;
     require(QueryPerformanceCounter(&value), "clock_unavailable"); begin = value.QuadPart;
   }
+  uint64_t toUs(LONGLONG ticks) const {
+    require(ticks >= 0, "clock_regressed");
+    return uint64_t(ticks / frequency) * 1000000 + uint64_t(ticks % frequency) * 1000000 / uint64_t(frequency);
+  }
   uint64_t us() const {
     LARGE_INTEGER value{}; require(QueryPerformanceCounter(&value), "clock_unavailable");
-    const LONGLONG elapsed = value.QuadPart - begin;
-    require(elapsed >= 0, "clock_regressed");
-    return uint64_t(elapsed / frequency) * 1000000 + uint64_t(elapsed % frequency) * 1000000 / uint64_t(frequency);
+    return toUs(value.QuadPart - begin);
   }
 };
 // First strictly future tick on the existing phase. Coalesce missed deadlines
@@ -660,16 +664,32 @@ struct Output {
   DXGI_OUTPUT_DESC desc{};
   DISPLAYCONFIG_PATH_INFO path{};
 };
-static DISPLAYCONFIG_PATH_INFO singleDisplayPath() {
-  UINT32 paths = 0, modes = 0;
-  const LONG sizes = GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &paths, &modes);
-  checkDesktopAccess(HRESULT_FROM_WIN32(sizes), "unsupported_display_topology");
-  require(paths == 1 && modes > 0 && modes <= 16, "unsupported_display_topology");
-  DISPLAYCONFIG_PATH_INFO path{};
-  std::vector<DISPLAYCONFIG_MODE_INFO> mode(modes);
-  const LONG query = QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &paths, &path, &modes, mode.data(), nullptr);
-  checkDesktopAccess(HRESULT_FROM_WIN32(query), "unsupported_display_topology");
-  require(paths == 1 && path.targetInfo.rotation == DISPLAYCONFIG_ROTATION_IDENTITY, "unsupported_display_topology");
+static DISPLAYCONFIG_PATH_INFO primaryDisplayPath(const wchar_t* deviceName) {
+  for (int retry = 0; retry < 3; ++retry) {
+    UINT32 paths = 0, modes = 0;
+    const LONG sizes = GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &paths, &modes);
+    checkDesktopAccess(HRESULT_FROM_WIN32(sizes), "unsupported_display_topology");
+    require(paths > 0 && paths <= 128 && modes > 0 && modes <= 1024, "unsupported_display_topology");
+    std::vector<DISPLAYCONFIG_PATH_INFO> pathList(paths);
+    std::vector<DISPLAYCONFIG_MODE_INFO> modeList(modes);
+    const LONG query = QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &paths, pathList.data(), &modes, modeList.data(), nullptr);
+    if (query == ERROR_INSUFFICIENT_BUFFER) continue;
+    checkDesktopAccess(HRESULT_FROM_WIN32(query), "unsupported_display_topology");
+    for (UINT32 i = 0; i < paths; ++i) {
+      const auto& path = pathList[i];
+      DISPLAYCONFIG_SOURCE_DEVICE_NAME name{};
+      name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+      name.header.size = sizeof(name); name.header.adapterId = path.sourceInfo.adapterId; name.header.id = path.sourceInfo.id;
+      const LONG lookup = DisplayConfigGetDeviceInfo(&name.header);
+      if (lookup == ERROR_SUCCESS && lstrcmpiW(name.viewGdiDeviceName, deviceName) == 0) return path;
+      if (desktopUnavailable(HRESULT_FROM_WIN32(lookup))) throw DesktopUnavailable("display_changed");
+    }
+    break;
+  }
+  throw DesktopUnavailable("display_changed");
+}
+static void validateDisplayMode(const DISPLAYCONFIG_PATH_INFO& path) {
+  require(path.targetInfo.rotation == DISPLAYCONFIG_ROTATION_IDENTITY, "unsupported_display_geometry");
   switch (path.targetInfo.outputTechnology) {
     case DISPLAYCONFIG_OUTPUT_TECHNOLOGY_HD15:
     case DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DVI:
@@ -690,10 +710,9 @@ static DISPLAYCONFIG_PATH_INFO singleDisplayPath() {
   const LONG colorQuery = DisplayConfigGetDeviceInfo(&color.header);
   checkDesktopAccess(HRESULT_FROM_WIN32(colorQuery), "unsupported_display_color");
   require(!color.advancedColorEnabled && !color.wideColorEnforced, "unsupported_display_color");
-  return path;
 }
 static void validateOutputFast(const Output& output) {
-  if (!output.factory->IsCurrent() || GetSystemMetrics(SM_CMONITORS) != 1)
+  if (!output.factory->IsCurrent())
     throw DesktopUnavailable("display_changed");
   MONITORINFO monitor{}; monitor.cbSize = sizeof(monitor);
   if (!GetMonitorInfoW(output.desc.Monitor, &monitor) || !(monitor.dwFlags & MONITORINFOF_PRIMARY) ||
@@ -702,8 +721,8 @@ static void validateOutputFast(const Output& output) {
   DXGI_OUTPUT_DESC1 desc{}; checkDesktopAccess(output.output6->GetDesc1(&desc), "display_query_failed");
   if (!desc.AttachedToDesktop || !EqualRect(&desc.DesktopCoordinates, &output.desc.DesktopCoordinates))
     throw DesktopUnavailable("display_changed");
-  require(desc.Rotation == DXGI_MODE_ROTATION_IDENTITY &&
-    desc.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709, "unsupported_display_color_or_geometry");
+  require(desc.Rotation == DXGI_MODE_ROTATION_IDENTITY, "unsupported_display_geometry");
+  require(desc.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709, "unsupported_display_color");
 }
 static bool sameDisplayTarget(const DISPLAYCONFIG_PATH_INFO& a, const DISPLAYCONFIG_PATH_INFO& b) {
   return a.targetInfo.id == b.targetInfo.id &&
@@ -712,12 +731,12 @@ static bool sameDisplayTarget(const DISPLAYCONFIG_PATH_INFO& a, const DISPLAYCON
 }
 static void validateOutput(const Output& output) {
   validateOutputFast(output);
-  if (!sameDisplayTarget(singleDisplayPath(), output.path)) throw DesktopUnavailable("display_changed");
+  const auto path = primaryDisplayPath(output.desc.DeviceName);
+  if (!sameDisplayTarget(path, output.path)) throw DesktopUnavailable("display_changed");
+  validateDisplayMode(path);
 }
 static Output primaryOutput() {
   Output result;
-  result.path = singleDisplayPath();
-  require(GetSystemMetrics(SM_CMONITORS) == 1, "unsupported_display_topology");
   const POINT origin{};
   const HMONITOR primary = MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY);
   MONITORINFO monitor{}; monitor.cbSize = sizeof(monitor);
@@ -725,7 +744,6 @@ static Output primaryOutput() {
     monitor.rcMonitor.left == 0 && monitor.rcMonitor.top == 0 &&
     monitor.rcMonitor.right >= monitor.rcMonitor.bottom, "unsupported_display_geometry");
   check(CreateDXGIFactory1(IID_PPV_ARGS(result.factory.GetAddressOf())), "factory_failed");
-  unsigned attached = 0;
   for (UINT ai = 0;; ++ai) {
     ComPtr<IDXGIAdapter1> adapter;
     const HRESULT ar = result.factory->EnumAdapters1(ai, adapter.GetAddressOf());
@@ -738,7 +756,6 @@ static Output primaryOutput() {
       check(hr, "output_query_failed");
       DXGI_OUTPUT_DESC desc{}; check(output->GetDesc(&desc), "output_query_failed");
       if (!desc.AttachedToDesktop) continue;
-      ++attached;
       if (desc.Monitor != primary) continue;
       require(!result.output, "ambiguous_primary_output");
       result.adapter = adapter; result.desc = desc;
@@ -746,7 +763,8 @@ static Output primaryOutput() {
       check(output.As(&result.output6), "unsupported_output_api");
     }
   }
-  require(attached == 1 && result.output, "unsupported_display_topology");
+  require(bool(result.output), "unsupported_display_topology");
+  result.path = primaryDisplayPath(result.desc.DeviceName);
   validateOutput(result);
   return result;
 }
@@ -755,6 +773,8 @@ static bool openDesktopDuplication(const Output& output, ID3D11Device* device, S
     ComPtr<IDXGIOutputDuplication>& duplication) {
   const HRESULT result = output.output->DuplicateOutput(device, duplication.ReleaseAndGetAddressOf());
   if (desktopUnavailable(result)) return false;
+  if (result == DXGI_ERROR_NOT_CURRENTLY_AVAILABLE) throw Failure("duplication_busy");
+  if (result == DXGI_ERROR_UNSUPPORTED) throw Failure("unsupported_output_api");
   check(result, "duplication_failed");
   DXGI_OUTDUPL_DESC desc{}; duplication->GetDesc(&desc);
   require(desc.ModeDesc.Width == source.width && desc.ModeDesc.Height == source.height &&
@@ -776,6 +796,25 @@ static bool captureDesktopIsActive() {
   CloseDesktop(input);
   return active;
 }
+
+class ForegroundCaptureCheck {
+  uintptr_t foreground_ = 0;
+  uint64_t lastPresent_ = 0, armedUntil_ = 0;
+public:
+  void observe(uintptr_t foreground, uint64_t now) {
+    if (!foreground || foreground == foreground_) return;
+    if (foreground_) armedUntil_ = now + 3000000;
+    foreground_ = foreground;
+    lastPresent_ = now;
+  }
+  void present(uint64_t now) { lastPresent_ = now; }
+  void clear() { armedUntil_ = 0; }
+  bool shouldRearm(uint64_t now) {
+    if (!armedUntil_ || now > armedUntil_ || now - lastPresent_ < 750000) return false;
+    clear();
+    return true;
+  }
+};
 
 static bool restoreDesktopDuplication(Output& output, ID3D11Device* device, Size source,
     ComPtr<IDXGIOutputDuplication>& duplication) {
@@ -1636,10 +1675,13 @@ static void capture(const Options& option) {
   require(bool(std::cout), "owner_output_closed");
   startup.report(true);
   uint64_t serial = 0, lastTimestamp = 0, nextTick = clock.us(), lastSent = 0, nextDisplayCheck = 0;
+  // Keep timestamps increasing on the same RTP sender across helper restarts.
+  const uint64_t timestampOrigin = clock.toUs(clock.begin);
   uint64_t duplicationRestoredAt = 0;
   uint64_t newFrames = 0, refreshFrames = 0, backpressureTicks = 0;
   LONGLONG lastPresent = 0, lastMouse = 0;
-  bool haveDesktop = false, haveShape = false, dirty = false;
+  bool haveDesktop = false, haveShape = false, pointerVisible = false, dirty = false;
+  ForegroundCaptureCheck foreground;
   const uint64_t period = 1000000 / option.fps;
   timing.start(nextTick, period);
   bool running = true;
@@ -1662,6 +1704,12 @@ static void capture(const Options& option) {
     nextTick = advanceTick(nextTick, now, period);
     if (now >= nextDisplayCheck) {
       validateOutput(output); check(device->GetDeviceRemovedReason(), "gpu_device_lost");
+      if (option.rearmForeground) {
+        const HWND window = GetForegroundWindow();
+        if (window && MonitorFromWindow(window, MONITOR_DEFAULTTONULL) == output.desc.Monitor)
+          foreground.observe(reinterpret_cast<uintptr_t>(window), now);
+        if (foreground.shouldRearm(now)) throw DesktopUnavailable("foreground_rearm");
+      }
       nextDisplayCheck = now + 250000;
     } else validateOutputFast(output);
     auto available = slots.end();
@@ -1712,43 +1760,45 @@ static void capture(const Options& option) {
         const RECT oldCursor = canUpdateRegion ? cursorDamage(pipeline.values) : RECT{};
         bool cursorChanged = false;
         if (updated) {
+          if (option.rearmForeground && info.LastPresentTime.QuadPart) foreground.present(now);
           if (timing.enabled) ++timing.sourcePresents;
           haveDesktop = true; dirty = true; lastPresent = info.LastPresentTime.QuadPart;
         }
         if (info.LastMouseUpdateTime.QuadPart > lastMouse) {
           const auto& pointer = info.PointerPosition;
-          const bool changed = bool(pointer.Visible) != bool(pipeline.values.cursorVisible) ||
-            (pointer.Visible && (pointer.Position.x != pipeline.values.cursorX || pointer.Position.y != pipeline.values.cursorY));
-          pipeline.values.cursorVisible = pointer.Visible ? 1 : 0;
-          if (pointer.Visible) {
+          pointerVisible = pointer.Visible && pointer.Position.x >= -INT(kMaxCursorDimension) &&
+            pointer.Position.y >= -INT(kMaxCursorDimension) &&
+            pointer.Position.x <= INT(source.width) && pointer.Position.y <= INT(source.height);
+          cursorChanged = pointerVisible && (pointer.Position.x != pipeline.values.cursorX || pointer.Position.y != pipeline.values.cursorY);
+          if (pointerVisible) {
             // DXGI Position is already the top-left in output pixels. Do not
             // subtract HotSpot (Microsoft DXGI_OUTDUPL_POINTER_SHAPE_INFO).
-            require(pointer.Position.x >= -INT(kMaxCursorDimension) && pointer.Position.y >= -INT(kMaxCursorDimension) &&
-              pointer.Position.x <= INT(source.width) && pointer.Position.y <= INT(source.height), "invalid_cursor_position");
             pipeline.values.cursorX = pointer.Position.x; pipeline.values.cursorY = pointer.Position.y;
           }
-          dirty = dirty || changed; lastMouse = info.LastMouseUpdateTime.QuadPart;
-          cursorChanged = changed;
+          lastMouse = info.LastMouseUpdateTime.QuadPart;
         }
         if (info.PointerShapeBufferSize) {
-          require(info.PointerShapeBufferSize <= kMaxCursorBytes, "unsupported_cursor_shape");
-          std::vector<unsigned char> raw(info.PointerShapeBufferSize);
-          DXGI_OUTDUPL_POINTER_SHAPE_INFO shapeInfo{}; UINT needed = 0;
-          const HRESULT shapeResult = duplication->GetFramePointerShape(UINT(raw.size()), raw.data(), &needed, &shapeInfo);
-          if (FAILED(shapeResult) || needed > raw.size()) {
+          if (info.PointerShapeBufferSize > kMaxCursorBytes) haveShape = false;
+          else {
+            std::vector<unsigned char> raw(info.PointerShapeBufferSize);
+            DXGI_OUTDUPL_POINTER_SHAPE_INFO shapeInfo{}; UINT needed = 0;
+            const HRESULT shapeResult = duplication->GetFramePointerShape(UINT(raw.size()), raw.data(), &needed, &shapeInfo);
+            if (FAILED(shapeResult) || needed > raw.size()) {
+              SecureZeroMemory(raw.data(), raw.size());
+              if (desktopUnavailable(shapeResult)) throw DesktopUnavailable("cursor_shape_query_failed");
+              haveShape = false;
+            } else try {
+              const auto shape = decodeCursor(shapeInfo, raw.data(), needed);
+              const bool changed = pipeline.uploadCursor(device.Get(), shape); haveShape = true;
+              cursorChanged = cursorChanged || (changed && pointerVisible);
+            } catch (const Failure&) { haveShape = false; }
             SecureZeroMemory(raw.data(), raw.size());
-            checkDesktopAccess(shapeResult, "cursor_shape_query_failed");
-            throw Failure("cursor_shape_query_failed");
           }
-          try {
-            const auto shape = decodeCursor(shapeInfo, raw.data(), needed);
-            const bool changed = pipeline.uploadCursor(device.Get(), shape); haveShape = true;
-            dirty = dirty || (changed && pipeline.values.cursorVisible);
-            cursorChanged = cursorChanged || (changed && pipeline.values.cursorVisible);
-          } catch (...) { SecureZeroMemory(raw.data(), raw.size()); throw; }
-          SecureZeroMemory(raw.data(), raw.size());
         }
-        require(!pipeline.values.cursorVisible || haveShape, "visible_cursor_shape_unavailable");
+        const bool renderPointer = pointerVisible && haveShape;
+        cursorChanged = cursorChanged || renderPointer != bool(pipeline.values.cursorVisible);
+        pipeline.values.cursorVisible = renderPointer ? 1 : 0;
+        dirty = dirty || cursorChanged;
         if (dirty) {
           desktopView = pipeline.desktopView(device.Get(), context.Get(), resource.Get(), updated);
           RECT bounds{};
@@ -1884,7 +1934,7 @@ static void capture(const Options& option) {
     require(serial < kSafeInteger, "serial_exhausted");
     slot.lease.issue(++serial); slot.sentAt = clock.us();
     const auto deliverySnapshot = timing.deliverySnapshot();
-    const uint64_t timestamp = std::max(lastTimestamp + 1, slot.sentAt);
+    const uint64_t timestamp = std::max(lastTimestamp + 1, timestampOrigin + slot.sentAt);
     require(timestamp <= kSafeInteger, "timestamp_exhausted"); lastTimestamp = timestamp;
     const auto index = size_t(std::distance(slots.begin(), available));
     { Measure outputTiming(timing, CaptureTiming::Output, clock);
@@ -1910,10 +1960,10 @@ static void capture(const Options& option) {
     // DXGI denies access while Windows shows the secure desktop. Allow stop
     // and outstanding frame credits to be processed between retry attempts.
     while ((running = input.pump(owner.value, slots))) {
+      if (restoreDesktopDuplication(output, device.Get(), source, duplication)) break;
       reportDesktopUnavailable();
       require(bool(std::cout), "owner_output_closed");
       require(WaitForSingleObject(owner.value, 100) == WAIT_TIMEOUT, "owner_exited");
-      if (restoreDesktopDuplication(output, device.Get(), source, duplication)) break;
     }
     if (!running) break;
     acquired.reset(duplication.Get());
@@ -1921,9 +1971,11 @@ static void capture(const Options& option) {
     // and the frame clock still belong to the original capture session.
     latest = slots.end();
     haveDesktop = dirty = false;
+    pointerVisible = false;
     pipeline.values.cursorVisible = 0;
     lastPresent = lastMouse = 0;
     lastSent = nextDisplayCheck = 0;
+    foreground.clear();
     duplicationRestoredAt = nextTick = clock.us();
   }
   try { Measure releaseTiming(timing, CaptureTiming::FrameRelease, clock); acquired.release(); }
@@ -1970,6 +2022,18 @@ template<class F> static void rejects(F&& action) {
 static void selfTest() {
   unsigned checks = 0;
   auto expect = [&](bool value) { require(value, "self_test_failed"); ++checks; };
+  ForegroundCaptureCheck foreground;
+  foreground.observe(1, 100);
+  expect(!foreground.shouldRearm(2000000));
+  foreground.observe(2, 2000000);
+  expect(!foreground.shouldRearm(2749999));
+  foreground.present(2720000);
+  expect(!foreground.shouldRearm(3000000));
+  expect(foreground.shouldRearm(3470000));
+  expect(!foreground.shouldRearm(4900000));
+  foreground.observe(3, 5000000);
+  foreground.clear();
+  expect(!foreground.shouldRearm(6000000));
   const auto parseTestOptions = [](std::vector<std::string> arguments) {
     std::vector<char*> argv;
     for (auto& argument : arguments) argv.push_back(argument.data());
@@ -1984,6 +2048,14 @@ static void selfTest() {
   expect(parseTestOptions(nv12Arguments).nv12 && !parseTestOptions(nv12Arguments).cpu);
   auto cpuArguments = nv12Arguments; cpuArguments.insert(cpuArguments.end(), {"--frame-storage", "cpu"});
   expect(parseTestOptions(cpuArguments).nv12 && parseTestOptions(cpuArguments).cpu);
+  auto rearmArguments = bgraArguments;
+  rearmArguments.insert(rearmArguments.end(), {"--rearm-foreground", "1"});
+  expect(parseTestOptions(rearmArguments).rearmForeground && !parseTestOptions(bgraArguments).rearmForeground);
+  auto fullArguments = cpuArguments;
+  fullArguments.insert(fullArguments.end(), {"--rearm-foreground", "1", "--completion", "fence", "--color-space", "bt601-limited"});
+  const auto fullOptions = parseTestOptions(fullArguments);
+  expect(fullOptions.rearmForeground && fullOptions.cpu && fullOptions.completion == CompletionPolicy::Fence &&
+    fullOptions.colorSpace == Nv12ColorSpace::Bt601Limited);
   auto cpuReordered = bgraArguments; cpuReordered.insert(cpuReordered.end(), {"--frame-storage", "cpu", "--pixel-format", "nv12"});
   expect(parseTestOptions(cpuReordered).cpu);
   for (const auto& arguments : {bgraArguments, nv12Arguments, cpuArguments}) {

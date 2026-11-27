@@ -867,14 +867,12 @@ export function installScreenPerformanceFixture(
     const localScreenTrack = fixtureWindow.coveMediaQA?.rtc?.localScreen?.getVideoTracks()[0];
     const videoSenders = [...peerConnections].flatMap(connection => connection.getSenders())
       .filter(sender => sender.track?.kind === 'video' && sender.track.readyState === 'live');
-    // getDisplayMedia cannot observe the generator created by the product's
-    // background upgrade. Register the replacement only when the sole active
-    // video sender and localScreen both use it. Stock capture may stay live
-    // as a fallback after it is detached from the sender.
+    // The native track is created outside getDisplayMedia. Only register a
+    // diagnosed native track that is used by both the sender and local preview.
     if (configuration.nativeGpuCapture && sourceMode === 'native' && fixtureWindow.coveNativeScreen?.supported &&
       localScreenTrack && videoSenders.length === 1 && videoSenders[0].track === localScreenTrack &&
       !sources.some(source => source.track === localScreenTrack) &&
-      sources.some(source => source.kind === 'native-display-capture')) {
+      nativeScreenCaptureDiagnostics.getNativeScreenCaptureDiagnostics(localScreenTrack)?.backend === 'native-gpu') {
       const track = localScreenTrack, settings = track.getSettings();
       sources.push({ kind: 'native-gpu-adapter', track, width: settings.width ?? null, height: settings.height ?? null,
         requestedFps: null, uniqueFramesDrawn: null, uniqueFramesWritten: null, skippedDeadlines: null,
@@ -1039,6 +1037,7 @@ export function installScreenPerformanceFixture(
       })(),
       nativeGpu: { enabled: configuration.nativeGpuCapture, bridgeSupported: fixtureWindow.coveNativeScreen?.supported === true,
         localScreenTrackMatchesSender: Boolean(liveSource && localScreenTrack === liveSource.track),
+        direct: liveSource?.kind === 'native-gpu-adapter' && !sources.some(source => source.kind === 'native-display-capture'),
         upgraded: liveSource?.kind === 'native-gpu-adapter' },
       sourceMeaning: sourceMode === 'native'
         ? liveSource?.kind === 'native-gpu-adapter'

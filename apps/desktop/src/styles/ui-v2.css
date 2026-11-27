@@ -2566,15 +2566,18 @@ select:focus-visible {
   transition: none;
 }
 .mode-idle .member-list-view,
-.mode-available .member-list-view {
+.mode-available .member-list-view,
+.watching-portrait .member-list-view {
   padding: 18px 14px 90px;
 }
 .mode-idle .workspace-header,
-.mode-available .workspace-header {
+.mode-available .workspace-header,
+.watching-portrait .workspace-header {
   padding: 18px;
 }
 .mode-idle .member-row,
-.mode-available .member-row {
+.mode-available .member-row,
+.watching-portrait .member-row {
   position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -2585,7 +2588,8 @@ select:focus-visible {
   color: var(--ink);
 }
 .mode-idle .member-row.not-in-voice,
-.mode-available .member-row.not-in-voice {
+.mode-available .member-row.not-in-voice,
+.watching-portrait .member-row.not-in-voice {
   grid-template-rows: auto;
   gap: 0 8px;
   min-height: 60px;
@@ -2788,11 +2792,23 @@ select:focus-visible {
   font-size: 14px;
 }
 .screen-settings {
+  display: flex;
+  flex-direction: column;
   max-height: min(860px, 90vh);
+}
+.share-dialog .screen-settings > header {
+  margin-bottom: 12px;
+}
+.screen-settings > header,
+.screen-settings > .primary-wide {
+  flex-shrink: 0;
+}
+.screen-settings-options {
+  min-height: 0;
   overflow-y: auto;
 }
 .screen-settings-note {
-  margin: -8px 0 12px;
+  margin: 0 0 12px;
   padding: 10px 12px;
   border: 1px solid rgba(53, 120, 229, 0.14);
   border-radius: 12px;
@@ -9032,6 +9048,49 @@ html.theme-transitioning *::after {
 }
 .cove-shell.share-chat-drawer .chat-edge-toggle-anchor {
   transform: translateX(calc(-1 * var(--chat-overlay-width)));
+}
+.cove-shell.mode-watching.watching-portrait {
+  --portrait-side-width: clamp(208px, calc((100vw - var(--rail-width) - 404px) / 2), var(--chat-panel-width));
+  --chat-width: var(--portrait-side-width);
+  --control-center: calc(50% + var(--rail-width) / 2);
+}
+.cove-shell.mode-watching.watching-portrait > .chat-slot {
+  width: var(--portrait-side-width);
+}
+.watching-portrait .workspace {
+  display: grid;
+  grid-template-columns: var(--portrait-side-width) minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+}
+.watching-portrait .share-layout-body {
+  grid-column: 2;
+  grid-row: 1 / -1;
+  min-width: 0;
+  container-type: inline-size;
+}
+.watching-portrait .control-ball,
+.watching-portrait .control-ball :is(.ball-side, .dock-label) {
+  transition: none;
+}
+@container (max-width: 480px) {
+  .watching-portrait .share-status-left > b {
+    display: none;
+  }
+  .watching-portrait .share-status-left .volume-control {
+    width: 96px;
+  }
+  .watching-portrait .share-status-actions {
+    gap: 3px;
+  }
+  .watching-portrait .share-status-actions > button,
+  .watching-portrait .fullscreen-stack > button {
+    padding-inline: 6px;
+    gap: 0;
+    font-size: 0;
+  }
+  .watching-portrait .share-operations-trigger > svg:last-child {
+    display: none;
+  }
 }
 .cove-shell.chat-closed .chat-edge-toggle-anchor {
   transform: translateX(0);

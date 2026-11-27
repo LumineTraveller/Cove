@@ -5,13 +5,21 @@ const os = require('node:os');
 const path = require('node:path');
 const { createHash } = require('node:crypto');
 const { EventEmitter } = require('node:events');
+const { createRequire } = require('node:module');
 const { gzipSync } = require('node:zlib');
 const test = require('node:test');
-const { CancellationToken } = require('builder-util-runtime');
+const { CancellationError, CancellationToken } = require('../dist-electron/updater-runtime.js');
 const { NodeHttpExecutor } = require('builder-util/out/nodeHttpExecutor');
 const { ElectronHttpExecutor } = require('electron-updater/out/electronHttpExecutor');
 const { StableNsisUpdater, safeDownloadDiagnostic } = require('../dist-electron/stable-nsis-updater.js');
 const { acquireUpdateCacheLock } = require('../dist-electron/update-cache-safety.js');
+
+test('Cove uses the packaged updater’s cancellation constructors', () => {
+  const requireFromUpdater = createRequire(require.resolve('electron-updater'));
+  const upstream = requireFromUpdater('builder-util-runtime');
+  assert.equal(CancellationError, upstream.CancellationError);
+  assert.equal(CancellationToken, upstream.CancellationToken);
+});
 
 const sha512 = value => createHash('sha512').update(value).digest('base64');
 const map = checksums => gzipSync(JSON.stringify({ version: '2', files: [{ name: 'file', offset: 0,

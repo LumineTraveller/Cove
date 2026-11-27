@@ -12,6 +12,31 @@ const params=new URLSearchParams(location.search);
 const screenSoundEnabled=params.get('screenSound')==='1';
 const floatingMode=params.get('floating')==='1';
 const performanceMode=params.get('performance')==='1';
+const av1Interoperability=performanceMode&&params.get('av1Interoperability')==='1';
+const av1SequenceFault=av1Interoperability&&params.get('index')==='0'&&params.get('av1SequenceFault');
+const leadingAv1Metadata=av1Interoperability&&params.get('index')==='0'&&params.get('leadingAv1Metadata')==='1';
+const prefixCounts={keyframes:0,withSequence:0,strippedSequence:0,attempts:0,publications:0};
+if(av1SequenceFault||leadingAv1Metadata){
+  const faultWorker=new URL('./av1-interoperability-worker.ts',import.meta.url);
+  Object.defineProperty(window,'coveQaAv1PrefixCounts',{value:prefixCounts});
+  window.Worker=class extends Worker {
+    constructor(url:string|URL,options?:WorkerOptions){
+      const isScreenSender=options?.name==='cove-av1-screen-sender';
+      const attempt=isScreenSender?++prefixCounts.attempts:0;
+      const strip=attempt>0&&(av1SequenceFault==='all'||(av1SequenceFault==='first'&&attempt===1));
+      const testWorker=new URL(faultWorker);
+      if(strip)testWorker.searchParams.set('stripSequence','1');
+      super(attempt>0&&(leadingAv1Metadata||strip)?testWorker:url,options);
+      if(attempt>0)this.addEventListener('message',event=>{
+        if(event.data?.type==='av1-interop-prefix'){
+          prefixCounts.keyframes++;
+          if(event.data.hasSequence)prefixCounts.withSequence++;
+          if(event.data.stripped)prefixCounts.strippedSequence++;
+        }
+      });
+    }
+  };
+}
 const localPreviewEnabled=screenPerformanceLocalPreviewEnabled(params);
 const visiblePresentationEnabled=screenPerformanceVisiblePresentationEnabled(params);
 let floatingFixture:typeof import('./floating-viewer-fixture')|null=null;
@@ -96,7 +121,8 @@ for(const method of ['createSendTransport','createRecvTransport'] as const){
   Device.prototype[method]=function<TransportAppData extends MsTypes.AppData=MsTypes.AppData>(this:Device,options:MsTypes.TransportOptions<TransportAppData>){
     const proxy=Number(params.get('iceProxy'));
     const actual=method==='createRecvTransport'&&Number.isInteger(proxy)&&proxy>=1024&&proxy<=65535
-      ? {...options,iceCandidates:options.iceCandidates.filter(c=>c.protocol===proxyProtocol).map(c=>({...c,ip:'127.0.0.1',address:'127.0.0.1',port:proxy}))}:options;
+      ? {...options,iceCandidates:options.iceCandidates.filter(c=>c.protocol===proxyProtocol).map(c=>({...c,ip:'127.0.0.1',address:'127.0.0.1',port:proxy}))}
+      : av1Interoperability ? {...options,iceCandidates:options.iceCandidates.filter(candidate=>candidate.protocol==='udp')} : options;
     const transport=original.bind(this)<TransportAppData>(actual);
     const record={transport,initialFragment:options.iceParameters.usernameFragment,restartCalls:0,changed:false,
       producers:[] as MsTypes.Producer[],consumers:[] as MsTypes.Consumer[]};
@@ -148,7 +174,13 @@ const floatingPaint=floatingMode?window.setInterval(draw,33):null;
 if(performanceMode)installScreenPerformanceFixture(params,peerConnections);
 else navigator.mediaDevices.getDisplayMedia=async()=>{const stream=canvas.captureStream(30);stream.getTracks().forEach(track=>mediaTracks.add(track));return stream;};
 function Fixture(){
-  const socket=useMemo(()=>floatingFixture?.fixtureSocket(params.get('base')!)??io(params.get('base')!,{auth:{clientProtocol:CLIENT_PROTOCOL_VERSION,clientPlatform:'desktop',clientVersion:CLIENT_RELEASE_VERSIONS.desktop},autoConnect:false}),[]);
+  const socket=useMemo(()=>{
+    const connection=floatingFixture?.fixtureSocket(params.get('base')!)??io(params.get('base')!,{auth:{clientProtocol:CLIENT_PROTOCOL_VERSION,clientPlatform:'desktop',clientVersion:CLIENT_RELEASE_VERSIONS.desktop},autoConnect:false});
+    if(av1SequenceFault) connection.onAnyOutgoing((event, data)=>{
+      if(event==='ms:produce'&&data?.appData?.type==='screen')prefixCounts.publications++;
+    });
+    return connection;
+  },[]);
   const rtc=useWebRTC(socket,params.get('room')!);
   const [ready,setReady]=useState(false);const [error,setError]=useState('');
   const [diagnosticsCompact,setDiagnosticsCompact]=useState(false);
@@ -194,7 +226,7 @@ function Fixture(){
     },resources:()=>({...iceQA.resources(),socketListeners:Object.values((socket as any)._callbacks??{}).reduce((n:number,list:any)=>n+list.length,0)})};});
   if(floatingFixture){const FloatingView=floatingFixture.FloatingView;return <><p>{ready?'Room ready':'Connecting'} {error}</p><FloatingView rtc={rtc} roomId={params.get('room')!}/></>;}
   return <><p hidden={visiblePresentationEnabled}>{ready?'Room ready':'Connecting'} {error}</p><video ref={video} autoPlay muted playsInline hidden={visiblePresentationEnabled}/><pre hidden={visiblePresentationEnabled}>{rtc.inVoice?'In voice':'Not in voice'}</pre>
-    {screenSoundEnabled&&rtc.remoteScreen&&<RemoteScreenVideo stream={rtc.remoteScreen.stream} controlling={false} onInput={()=>{}} diagnosticsEnabled={rtc.statsEnabled}/>}
+    {(screenSoundEnabled||av1Interoperability)&&rtc.remoteScreen&&<RemoteScreenVideo stream={rtc.remoteScreen.stream} controlling={false} onInput={()=>{}} diagnosticsEnabled={rtc.statsEnabled}/>}
     {screenSoundEnabled&&rtc.remoteScreen&&<DiagnosticsOverlayV2 rtc={rtc} compact={true} onToggleCompact={()=>{}}/>}
     {visiblePresentationEnabled?<main className="cove-v2-page" data-cove-performance-presentation="1" style={{position:'fixed',inset:0}}>
       <div className="share-view"><div className="video-surface"><div className="video-content">

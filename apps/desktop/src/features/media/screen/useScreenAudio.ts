@@ -56,8 +56,9 @@ export function useScreenAudio(deps: useScreenAudioDependencies) {
     const operation = ++audioGeneration.current;
     const generation = deps.mediaGeneration.current;
     const socketId = deps.socket.id;
-    const isCurrent = () => operation === audioGeneration.current && publicationCurrent() &&
-      generation === deps.mediaGeneration.current && transport === deps.sendTransport.current && socketId === deps.socket.id;
+    const ownsMedia = () => operation === audioGeneration.current &&
+      generation === deps.mediaGeneration.current && transport === deps.sendTransport.current && !transport.closed;
+    const isCurrent = () => ownsMedia() && publicationCurrent() && socketId === deps.socket.id;
     const ensureCurrent = () => { if (!isCurrent()) throw new Error('屏幕音频操作已取消'); };
     const run = async () => {
       let pipeline: ApplicationAudioPipeline | null = null;
@@ -74,7 +75,15 @@ export function useScreenAudio(deps: useScreenAudioDependencies) {
         await audioPipeline.resume();
         ensureCurrent();
         audioPipeline.prime();
-        const removeListener = bridge.onChunk((chunk) => { if (isCurrent()) audioPipeline.pushPcm(chunk); });
+        const removeListener = bridge.onChunk(chunk => {
+          // After publication, a recovered Socket.IO connection can briefly have
+          // no ID while the same live media session still carries both tracks.
+          const canDeliver = producer
+            ? ownsMedia() && deps.screenAudioProducer.current === producer && !producer.closed &&
+              (socketId === deps.socket.id || (deps.socket.id === undefined && deps.socket.connected === false))
+            : isCurrent();
+          if (canDeliver) audioPipeline.pushPcm(chunk);
+        });
         let removed = false;
         unsubscribe = () => { if (!removed) { removed = true; removeListener(); } };
         deps.screenAudioUnsubscribe.current = unsubscribe;

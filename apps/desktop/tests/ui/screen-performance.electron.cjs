@@ -4,7 +4,36 @@
 const {app,BrowserWindow,session,desktopCapturer,screen,contentTracing,ipcMain,powerMonitor,powerSaveBlocker}=require('electron');
 const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),{spawn}=require('node:child_process');
 const root=path.resolve(__dirname,'../../../..'),directory=path.resolve(process.env.COVE_FPS_RUN_DIR||'');
+function assertScreenAv1Encoder(outgoing, gpuEncoding) {
+  const { codec, scalabilityMode, encoderImplementation = '', powerEfficientEncoder } = outgoing ?? {};
+  const expectedMode = gpuEncoding ? 'L1T1' : 'L1T2';
+  const matchesImplementation = gpuEncoding
+    ? /^(?:MediaFoundation|D3D12)VideoEncodeAccelerator\b/i.test(encoderImplementation) && powerEfficientEncoder === true
+    : /^libaom\b/i.test(encoderImplementation) && powerEfficientEncoder !== true;
+  if (codec !== 'video/AV1' || scalabilityMode !== expectedMode || !matchesImplementation) {
+    const actual = [codec, scalabilityMode, encoderImplementation || 'unknown encoder'].filter(Boolean).join(' ');
+    throw Error(`Expected ${gpuEncoding ? 'hardware' : 'libaom'} AV1 ${expectedMode}, got ${actual} (hardware flag ${powerEfficientEncoder})`);
+  }
+}
 const {validatePerformanceCases,screenShareStartArguments,linkedVideoReport,linkedCounterRate,qualifyOwnedNativeBaseline,selectOwnedCaptureSource}=require(path.join(root,'tooling/screen-performance-config.cjs'));
+const cases=JSON.parse(process.env.COVE_FPS_CASES||JSON.stringify([{source:'generated',preset:'1080p',fps:120,game:true,compatibility:true},{source:'generated',preset:'540p',fps:120,game:true,compatibility:true},{source:'native',preset:'1080p',fps:120,game:true,compatibility:true},{source:'native',preset:'540p',fps:120,game:true,compatibility:true}]));
+validatePerformanceCases(cases);
+const exerciseEncoderOption=cases.some(config=>config.gpuEncoding!==undefined);
+const av1Interoperability=process.env.COVE_FPS_AV1_INTEROPERABILITY==='1';
+const leadingAv1Metadata=process.env.COVE_FPS_AV1_LEADING_METADATA==='1';
+const av1SequenceFault=process.env.COVE_FPS_AV1_SEQUENCE_FAULT||'';
+if(leadingAv1Metadata&&(!av1Interoperability||cases.some(config=>config.gpuEncoding!==true)))
+  throw Error('Leading AV1 metadata checks require isolated hardware interoperability cases');
+if(av1SequenceFault&&(!['first','all'].includes(av1SequenceFault)||!av1Interoperability||
+  leadingAv1Metadata||cases.length!==1||cases[0].gpuEncoding!==true))
+  throw Error('AV1 sequence faults require one isolated GPU AV1 case');
+if(av1Interoperability)app.commandLine.appendSwitch('allow-loopback-in-peer-connection');
+if(exerciseEncoderOption){
+  // Chromium exposes encoder identity only in a capturing context. Use a
+  // fixture-only fake camera so the test never opens a physical device.
+  app.commandLine.appendSwitch('use-fake-device-for-media-stream');
+  app.commandLine.appendSwitch('use-fake-ui-for-media-stream');
+}
 const {TRACE_CATEGORIES,captureTraceOptions,sanitizeCaptureTrace,analyzeCaptureTrace,cleanupOwnedTraceExports}=require(path.join(root,'tooling/analyze-screen-performance-trace.cjs'));
 const {performanceSourceAgeEnabled,createSourceAgeRing,safeSourceAgeObservation}=require(path.join(root,'tooling/screen-performance-source-age.cjs'));
 const sourceAgeEnabled=performanceSourceAgeEnabled();
@@ -58,12 +87,14 @@ if(generatedNv12Enabled&&(nativeGpuEnabled||process.env.COVE_FPS_NATIVE_GPU!=='0
 if(process.env.COVE_NATIVE_GPU_CAPTURE_TIMING&&!['0','1'].includes(process.env.COVE_NATIVE_GPU_CAPTURE_TIMING))throw Error('Invalid native timing option');
 const nativeTimingEnabled=process.env.COVE_NATIVE_GPU_CAPTURE_TIMING==='1';
 if(nativeCompletion==='fence'&&!nativeTimingEnabled)throw Error('Fence measurement requires COVE_NATIVE_GPU_CAPTURE_TIMING=1 for actual helper completion evidence');
+const hardwareAv1=process.env.COVE_FPS_HARDWARE_AV1??'0';
+const softwareAv1Decoder=hardwareAv1==='software-decoder';
 const nativeController=nativeGpuEnabled?new (require(path.join(root,nativePaths.broker)).NativeScreenCaptureController)({
   enabled:true,helperPath:path.join(root,nativePaths.helper),timing:nativeTimingEnabled,
   ...(packedProfile?{preferPackedScreenCapture:()=>packedProfileAvailable}:{pixelFormat:nativePixelFormat,storage:nativeStorage,cpuDeliveryScheduling,cpuOwnership}),
   reuseGpuTextures:process.env.COVE_FPS_REUSE_GPU_TEXTURES==='1',
   cpuPatches:process.env.COVE_FPS_CPU_PATCHES==='1',
-  allowCpuNv12:process.env.COVE_FPS_HARDWARE_AV1==='1',
+  allowCpuNv12:hardwareAv1==='1'||softwareAv1Decoder,
   allowGpuNv12:gpuNv12Flag==='1',
   ...(nativeCompletion!==undefined?{completion:nativeCompletion}:{})}):null;
 // Test-only aggregate around the existing stdout callback. Retain no payload,
@@ -85,11 +116,11 @@ if(nativeController&&nativeTimingEnabled){
 }
 if(process.env.COVE_FPS_NATIVE_LIFECYCLE_CHECKS&&!['0','1'].includes(process.env.COVE_FPS_NATIVE_LIFECYCLE_CHECKS))throw Error('Invalid native lifecycle option');
 const nativeLifecycleEnabled=process.env.COVE_FPS_NATIVE_LIFECYCLE_CHECKS==='1';
-const nativeStandbyFlag=process.env.COVE_FPS_NATIVE_STANDBY_CHECKS??'0';
-if(!['0','1'].includes(nativeStandbyFlag))throw Error('Invalid native standby option');
-const nativeStandbyEnabled=nativeStandbyFlag==='1';
-if((nativeLifecycleEnabled||nativeStandbyEnabled)&&!nativeGpuEnabled)throw Error('Native recovery checks require an active GPU capture helper');
-if(nativeLifecycleEnabled&&nativeStandbyEnabled)throw Error('Select one native recovery check');
+const nativeRecoveryFlag=process.env.COVE_FPS_NATIVE_STANDBY_CHECKS??'0';
+if(!['0','1'].includes(nativeRecoveryFlag))throw Error('Invalid native recovery option');
+const nativeRecoveryEnabled=nativeRecoveryFlag==='1';
+if((nativeLifecycleEnabled||nativeRecoveryEnabled)&&!nativeGpuEnabled)throw Error('Native recovery checks require an active native capture helper');
+if(nativeLifecycleEnabled&&nativeRecoveryEnabled)throw Error('Select one native recovery check');
 const runtimeName=process.env.COVE_FPS_RUNTIME_NAME||'fps-candidate';
 if(!/^fps-(?:candidate|validation-[a-z0-9-]{1,60})$/.test(runtimeName))throw Error('Invalid performance runtime namespace');
 const relative=path.relative(path.join(root,'runtime',runtimeName),directory);
@@ -97,7 +128,6 @@ if(!relative||path.isAbsolute(relative)||relative==='..'||relative.startsWith('.
 const profile=path.join(directory,'profile');fs.mkdirSync(profile,{recursive:true});app.setPath('userData',profile);app.setPath('sessionData',profile);
 const captureFeatures=process.env.COVE_FPS_CAPTURE_FEATURES||'';
 if(captureFeatures&&!['ZeroCopyDesktopCapture'].includes(captureFeatures))throw Error('Unsupported isolated capture feature');
-const hardwareAv1=process.env.COVE_FPS_HARDWARE_AV1??'0';
 const sparseSource=process.env.COVE_FPS_SPARSE_SOURCE??'0';
 const av1Logs=process.env.COVE_FPS_AV1_LOGS??'0';
 const av1GpuProcessor=process.env.COVE_FPS_AV1_GPU_PROCESSOR??'0';
@@ -114,7 +144,7 @@ app.commandLine.appendSwitch('enable-features',['AllowWgcScreenCapturer',capture
   ...(av1GpuProcessor==='1'?['MediaFoundationD3DVideoProcessing']:[]),
   ...(hardwareAv1==='d3d12-decoder'?['D3D12VideoDecoder']:[]),
   ...(hardwareAv1==='d3d12-encoder'?['D3D12VideoEncodeAccelerator','D3D12SharedImageEncode']:[])].filter(Boolean).join(','));
-if(hardwareAv1==='software-decoder')app.commandLine.appendSwitch('disable-accelerated-video-decode');
+if(softwareAv1Decoder)app.commandLine.appendSwitch('disable-accelerated-video-decode');
 if(hardwareAv1==='dxgi-copy')app.commandLine.appendSwitch('disable-zero-copy-dxgi-video');
 if(av1Logs==='1'){
   app.commandLine.appendSwitch('enable-logging','file');
@@ -128,7 +158,7 @@ if(av1Logs==='1'){
 }
 // Test-only API selection diagnostic. Never accept arbitrary Chromium flags.
 const disabledCaptureFeatures=process.env.COVE_FPS_DISABLE_CAPTURE_FEATURES||'';
-if(disabledCaptureFeatures&&!['DirectXCapturer','BreakoutBoxEagerConversion','BreakoutBoxConversionWithoutSinkSignal','ZeroCopyDesktopCapture'].includes(disabledCaptureFeatures))
+if(disabledCaptureFeatures&&!['DirectXCapturer','BreakoutBoxEagerConversion','BreakoutBoxConversionWithoutSinkSignal','ZeroCopyDesktopCapture','MediaFoundationUseSoftwareRateCtrl'].includes(disabledCaptureFeatures))
   throw Error('Unsupported disabled capture feature');
 if(disabledCaptureFeatures)app.commandLine.appendSwitch('disable-features',disabledCaptureFeatures);
 const peerRenderMode=process.env.COVE_FPS_PEER_RENDER_MODE||'offscreen';
@@ -201,6 +231,20 @@ const result={passed:false,startedAt:new Date().toISOString(),captureFeatures,di
   scope:'two real Chromium peers, product media hooks, isolated loopback SFU; changing generated/native source',endToEndLatencyMeasured:false,
   startupJournal:{maximumEntries:128,droppedEntries:0,entries:[]},lifecycleEvents:[],lifecycleEventsDropped:0,cases:[]};
 let backend,sourceWindow;const peers=[];let finished=false,shuttingDown=false;let nativeRequests=0;let captureTarget='window';let selectedCaptureSource=null;
+let browserCaptureRequests=0;
+
+function ownedNativeDisplay() {
+  if (captureTarget !== 'screen' || !selectedCaptureSource || !sourceWindow?.isFullScreen() || !sourceWindow.isVisible()) return undefined;
+  const primary = screen.getPrimaryDisplay();
+  const displayId = String(primary.id);
+  if (selectedCaptureSource.display_id && selectedCaptureSource.display_id !== displayId) return undefined;
+  return {
+    sourceId: selectedCaptureSource.id, displayId, primaryDisplayId: displayId,
+    displayCount: screen.getAllDisplays().length, selectedAt: Date.now(),
+    sourceWidth: Math.round(primary.size.width * primary.scaleFactor),
+    sourceHeight: Math.round(primary.size.height * primary.scaleFactor),
+  };
+}
 let presentationGeometry=null,presentationPrimaryDisplayId=null;
 let displaySleepBlockerId=null;
 const watchdog=setTimeout(()=>void finish(Error('Performance watchdog expired')),330000);
@@ -406,68 +450,85 @@ async function nativeLifecyclePeerState(win){
     publications:rtc.availableScreens.map(s=>({videoProducerId:s.videoProducerId,audioProducerId:s.audioProducerId??null})),
     transports:qa.ice.snapshot(),audio:await qa.ice.audioProgress(),resources:qa.resources()};})()`,3000);
 }
-async function verifyNativeStandbyRecovery(sender,viewer){
+async function verifyInPlaceVideoRecovery(sender,viewer,interrupt,recovered){
   const [beforeSender,beforeViewer,state]=await Promise.all([
     boundedJs(sender,'window.coveScreenPerformance.sample()',3000),
     boundedJs(viewer,'window.coveScreenPerformance.sample()',3000),
     nativeLifecyclePeerState(sender),
   ]);
-  const standby=beforeSender.sources.find(source=>source.kind==='native-display-capture'&&source.trackState==='live');
   const dimensions=linkedVideoReport(beforeViewer,'inbound');
   const before=beforeViewer.currentVideo;
-  if(!(standby?.settings?.frameRate>0&&standby.settings.frameRate<=2))
-    throw Error('Browser standby did not limit its cadence');
-  if(!dimensions?.frameWidth||!dimensions.frameHeight||!before||!state.localScreenProducerId)
-    throw Error('Missing active publication before native helper exit');
+  if(!beforeSender.nativeGpu.direct||!dimensions?.frameWidth||!dimensions.frameHeight||!before||!state.localScreenProducerId)
+    throw Error('Missing active direct native publication before recovery check');
 
-  const requests=nativeRequests,started=brokerSnapshot().started;
-  const owned=[...nativeController.sessions].filter(value=>value.active&&!value.closed&&value.target===sender.webContents);
-  const child=owned[0]?.child;
-  if(owned.length!==1||!child||child.exitCode!==null||!child.kill())
-    throw Error('Could not stop the active helper owned by this test');
-
-  const deadline=Date.now()+8000;
+  const requests=nativeRequests,browserRequests=browserCaptureRequests,baseline=brokerSnapshot();
+  const startedAt=Date.now();
+  await interrupt();
+  const deadline=startedAt+10000;
   let restored;
   while(Date.now()<deadline&&!restored){
     const [send,receive]=await Promise.all([
       boundedJs(sender,'window.coveScreenPerformance.sample()',3000),
       boundedJs(viewer,'window.coveScreenPerformance.sample()',3000),
     ]);
-    const stock=send.sources.find(source=>source.isLiveSenderSource&&source.kind==='native-display-capture');
     const decoded=linkedVideoReport(receive,'inbound'),pixels=receive.ownedPattern,video=receive.currentVideo;
-    if(stock?.settings?.frameRate>=state.fps&&decoded?.frameWidth===dimensions.frameWidth&&
+    const native=brokerSnapshot();
+    if(nativeRequests!==requests||browserCaptureRequests!==browserRequests)
+      throw Error('Recovery requested another display selection or Chromium capture');
+    if(send.nativeGpu.direct&&native.activeSessions===1&&decoded?.frameWidth===dimensions.frameWidth&&
        decoded.frameHeight===dimensions.frameHeight&&video?.trackToken===before.trackToken&&
-       video.framesDecoded>before.framesDecoded+20&&pixels?.markersMatched?.every(Boolean)&&
-       pixels.capturedSequence!==beforeViewer.ownedPattern?.capturedSequence)
-      restored={video,frameRate:stock.settings.frameRate};
+       video.reportId===before.reportId&&video.framesDecoded>before.framesDecoded+20&&
+       pixels?.markersMatched?.length===4&&pixels.markersMatched.every(Boolean)&&
+       pixels.capturedSequence!==beforeViewer.ownedPattern?.capturedSequence&&
+       await recovered(baseline,native,linkedVideoReport(send,'outbound')))
+      restored={video,native};
     else await delay(100);
   }
-  if(!restored)throw Error('Browser capture did not resume at the published cadence and size');
-
-  await delay(4000);
-  const [after,afterSender,afterState,viewerState]=await Promise.all([
-    boundedJs(viewer,'window.coveScreenPerformance.sample()',3000),
-    boundedJs(sender,'window.coveScreenPerformance.sample()',3000),
-    nativeLifecyclePeerState(sender),nativeLifecyclePeerState(viewer),
-  ]);
-  const video=after.currentVideo;
-  if(video?.trackToken!==before.trackToken||afterState.localScreenProducerId!==state.localScreenProducerId||
-     !afterState.inVoice||!viewerState.inVoice||nativeRequests!==requests||brokerSnapshot().started!==started)
+  if(!restored)throw Error('Owned native video did not resume on the same receiver. Native state '+JSON.stringify(brokerSnapshot()));
+  const [afterState,viewerState]=await Promise.all([nativeLifecyclePeerState(sender),nativeLifecyclePeerState(viewer)]);
+  if(afterState.localScreenProducerId!==state.localScreenProducerId||!viewerState.isWatchingScreen||
+     !afterState.inVoice||!viewerState.inVoice||nativeRequests!==requests||browserCaptureRequests!==browserRequests)
     throw Error('Native recovery changed the live publication or voice session');
-  const recoveredFps=1000*(video.framesDecoded-restored.video.framesDecoded)/(video.timestamp-restored.video.timestamp);
-  const fallbackEvidence={recoveredFps,restoredFps:restored.frameRate,
-    sourceFps:linkedVideoReport(afterSender,'source')?.framesPerSecond,
-    encoderFps:linkedVideoReport(afterSender,'outbound')?.framesPerSecond,
-    qualityLimitationReason:linkedVideoReport(afterSender,'outbound')?.qualityLimitationReason};
-  // On the owned monitor, the uncapped browser fallback decoded about 66 FPS
-  // with the 120 FPS track setting. Check the restored setting and stock cadence.
-  if(!(recoveredFps>=Math.min(60,state.fps)))
-    throw Error('Browser fallback stayed below the requested cadence '+JSON.stringify(fallbackEvidence));
-  const stoppedBroker=await waitNativeResources();
-  if(!stoppedBroker?.disabled||!stoppedBroker.failureCode||!nativeResourcesReleased(stoppedBroker))
-    throw Error('Native helper did not release resources after recovery');
-  return {passed:true,producerUnchanged:true,captureRequestsAdded:0,standbyFps:standby.settings.frameRate,...fallbackEvidence,
-    restoredDimensions:{width:dimensions.frameWidth,height:dimensions.frameHeight},stoppedBroker};
+  return {passed:true,producerUnchanged:true,viewerTrackUnchanged:true,captureRequestsAdded:0,browserCaptureRequestsAdded:0,
+    elapsedMs:Date.now()-startedAt,decodedFramesAdded:restored.video.framesDecoded-before.framesDecoded,
+    patternMatched:true,restoredDimensions:{width:dimensions.frameWidth,height:dimensions.frameHeight},native:restored.native};
+}
+async function verifyNativeRecovery(sender,viewer){
+  return verifyInPlaceVideoRecovery(sender,viewer,()=>{
+    const active=[...nativeController.sessions].filter(value=>value.active&&!value.closed&&value.target===sender.webContents);
+    const child=active[0]?.child;
+    if(active.length!==1||!child||child.exitCode!==null||!child.kill())
+      throw Error('Could not stop the active helper owned by this test');
+  },(before,after)=>after.started>before.started&&after.sessions===1&&after.helpers===1&&after.childHandles===1);
+}
+async function verifyAv1WorkerRecovery(sender,viewer){
+  const producer=(await nativeLifecyclePeerState(sender)).localScreenProducerId;
+  const recovery=await verifyInPlaceVideoRecovery(sender,viewer,
+    ()=>boundedJs(sender,`(() => {
+      const workers=window.coveQaAv1Workers;
+      if(workers.length!==1)throw Error('Missing owned AV1 sender worker');
+      const [worker]=workers;
+      worker.terminate();
+      worker.dispatchEvent(new Event('error'));
+    })()`,3000),
+    async(before,after,outgoing)=>{
+      if(await boundedJs(sender,'window.coveQaAv1Workers.length',3000)!==2)return false;
+      assertScreenAv1Encoder(outgoing,true);
+      return before.started===after.started;
+    });
+  const previous=await boundedJs(viewer,'window.coveScreenPerformance.sample().then(s=>s.currentVideo)');
+  await boundedJs(viewer,'window.coveMediaQA.rtc.stopWatchingScreen();void 0',3000);
+  await wait(viewer,'!window.coveMediaQA.rtc.isWatchingScreen',5000);
+  await wait(sender,'window.coveMediaQA.rtc.screenViewerCount===0',5000);
+  await boundedJs(viewer,'window.coveMediaQA.rtc.watchScreen(window.coveMediaQA.rtc.availableScreens[0].socketId)',5000);
+  await wait(viewer,`window.coveScreenPerformance.sample().then(s=>{
+    const video=s.currentVideo,pixels=s.ownedPattern;
+    return video?.trackToken!==${previous.trackToken}&&video?.framesDecoded>20&&
+      pixels?.markersMatched?.length===4&&pixels.markersMatched.every(Boolean);
+  })`,10000);
+  if((await nativeLifecyclePeerState(sender)).localScreenProducerId!==producer)
+    throw Error('Returning AV1 viewer replaced the live producer');
+  return {...recovery,hardwareEncoderRetained:true,returningViewerDecoded:true};
 }
 async function runNativeLifecycle(sender,viewer,config,measured){
   const lifecycle={required:true,passed:false,startedAt:Date.now(),maximumMs:100000,steps:[],
@@ -551,7 +612,7 @@ async function runNativeLifecycle(sender,viewer,config,measured){
     const backendBeforeUpdates=await backendSnapshot();
     for(let cycle=0;cycle<3;cycle++)for(const target of [{preset:'720p',fps:60,width:1152,height:720},{preset:'540p',fps:120,width:864,height:540}]){
       remaining();const step=stage('configuration-'+(cycle+1)+'-'+target.preset+'-'+target.fps);
-      const requests=nativeRequests,prior=await samplePeer(viewer),targetConfig={...config,preset:target.preset,fps:target.fps};
+      const requests=nativeRequests,started=brokerSnapshot().started,prior=await samplePeer(viewer),targetConfig={...config,preset:target.preset,fps:target.fps};
       check(prior.currentVideo,'current consumer disappeared before a configuration update');
       await boundedJs(sender,`window.coveMediaQA.rtc.updateScreenShare(...${JSON.stringify(screenShareStartArguments(targetConfig))})`,Math.min(remaining(),12000));
       await waitNativeUpgrade(sender,viewer,measured,step.name,Math.min(remaining(),7000));await settleNative();
@@ -565,7 +626,7 @@ async function runNativeLifecycle(sender,viewer,config,measured){
       },'updated native encoded/decoded dimensions');
       const backend=await backendSnapshot(),senderState=await nativeLifecyclePeerState(sender);
       check(senderState.screenPreset===target.preset&&senderState.fps===target.fps,'requested configuration was not committed');
-      check(nativeRequests===requests+1,'configuration update did not use exactly one stock capture selection');
+      check(nativeRequests===requests&&brokerSnapshot().started===started+1,'configuration update did not replace the native helper on the authorized display');
       check(await samePublication()&&backend.producers===backendBeforeUpdates.producers,'configuration update replaced or added a producer');
       check(backend.consumers===backendBeforeUpdates.consumers,'configuration update replaced the viewer subscription');
       Object.assign(step,{configuration:{preset:target.preset,fps:target.fps},encoded:{width:target.width,height:target.height},
@@ -575,32 +636,28 @@ async function runNativeLifecycle(sender,viewer,config,measured){
     }
 
     const fault=stage('owned-native-helper-exit'),beforeFault=await samplePeer(viewer);
-    const recovery=await verifyNativeStandbyRecovery(sender,viewer);
+    const recovery=await verifyNativeRecovery(sender,viewer);
     Object.assign(fault,recovery,{voice:await voiceCheck()});finishStage(fault);
 
-    const fallback=stage('manual-stock-republication-after-native-failure'),requestsBeforeFallback=nativeRequests,attemptsBefore=result.nativeGpu.startAttempts.length;
+    const restart=stage('native-republication-after-helper-recovery'),requestsBeforeRestart=nativeRequests;
     await boundedJs(sender,'window.coveMediaQA.rtc.stopScreenShare();void 0',2500);
-    await until(async()=>{const states=await Promise.all([nativeLifecyclePeerState(sender),nativeLifecyclePeerState(viewer)]);return !states[0].localScreen&&states[1].publications.length===0;},'restored stock publication stopped');
-    await startOwnedScreenShare(sender,config,'manual-stock-republication-returned',Math.min(remaining(),12000));
-    await until(async()=>{const state=await nativeLifecyclePeerState(viewer);return state.publications.length===1;},'manual fallback publication');
+    await until(async()=>{const states=await Promise.all([nativeLifecyclePeerState(sender),nativeLifecyclePeerState(viewer)]);return !states[0].localScreen&&states[1].publications.length===0;},'recovered native publication stopped');
+    check(nativeResourcesReleased(await waitNativeResources()),'previous native publication did not release resources');
+    await startOwnedScreenShare(sender,config,'native-republication-returned',Math.min(remaining(),12000));
+    await waitNativeUpgrade(sender,viewer,measured,restart.name,Math.min(remaining(),7000));await settleNative();
+    await until(async()=>{const state=await nativeLifecyclePeerState(viewer);return state.publications.length===1;},'fresh native publication');
     await boundedJs(viewer,'window.coveMediaQA.rtc.watchScreen(window.coveMediaQA.rtc.availableScreens[0].socketId)',5000);
-    let fallbackSample,fallbackProgress;
-    await until(async()=>{fallbackSample=await samplePeer(viewer);return fallbackSample.currentVideo?.trackToken!==beforeFault.currentVideo.trackToken&&fallbackSample.currentVideo?.framesDecoded>0&&pattern(fallbackSample);},'fresh stock fallback consumer');
-    await until(async()=>{fallbackProgress=await samplePeer(viewer);return fallbackProgress.currentVideo?.trackToken===fallbackSample.currentVideo.trackToken&&fallbackProgress.currentVideo.framesDecoded>fallbackSample.currentVideo.framesDecoded+20&&pattern(fallbackProgress)&&fallbackProgress.ownedPattern.capturedSequence!==fallbackSample.ownedPattern.capturedSequence;},'stock fallback decoded frame and owned sequence progress');
-    await until(async()=>result.nativeGpu.startAttempts.length>attemptsBefore,'disabled broker candidate response',2500);
-    const fallbackSender=await samplePeer(sender),fallbackState=await nativeLifecyclePeerState(sender),fallbackBroker=brokerSnapshot();
-    const currentSource=fallbackSender.sources.find(source=>source.isLiveSenderSource);
-    check(currentSource?.kind==='native-display-capture'&&currentSource.trackState==='live'&&!fallbackSender.nativeGpu.upgraded,'manual fallback did not retain stock capture');
-    check(nativeRequests===requestsBeforeFallback+1&&typeof fallbackState.localScreenProducerId==='string'&&fallbackState.localScreenProducerId!==producerId,'manual stock publication did not use one new capture and producer');
-    check(fallbackBroker.disabled&&fallbackBroker.started===recovery.stoppedBroker.started&&nativeResourcesReleased(fallbackBroker),'manual publication started another native helper');
-    Object.assign(fallback,{stockCapture:true,newConsumerTrack:true,newProducer:true,captureRequestsAdded:1,patternMatched:true,
-      decodedFramesAdded:fallbackProgress.currentVideo.framesDecoded-fallbackSample.currentVideo.framesDecoded,ownedSequenceAdvanced:true,
-      expectedNativeRejection:result.nativeGpu.startAttempts.at(-1)?.ok===false&&result.nativeGpu.startAttempts.at(-1)?.reason==='unavailable',
-      nativeRejectionReason:result.nativeGpu.startAttempts.at(-1)?.reason??null,nativeResourcesReleased:true,
-      voice:await voiceCheck(fallbackState.localScreenProducerId)});
-    check(fallback.expectedNativeRejection,'disabled native candidate did not report rejection');finishStage(fallback);
+    let fresh,progressed;
+    await until(async()=>{fresh=await samplePeer(viewer);return fresh.currentVideo?.trackToken!==beforeFault.currentVideo.trackToken&&fresh.currentVideo?.framesDecoded>0&&pattern(fresh);},'fresh native consumer');
+    await until(async()=>{progressed=await samplePeer(viewer);return progressed.currentVideo?.trackToken===fresh.currentVideo.trackToken&&progressed.currentVideo.framesDecoded>fresh.currentVideo.framesDecoded+20&&pattern(progressed)&&progressed.ownedPattern.capturedSequence!==fresh.ownedPattern.capturedSequence;},'fresh native consumer decoded advancing pixels');
+    const restartState=await nativeLifecyclePeerState(sender);
+    check(nativeRequests===requestsBeforeRestart+1&&typeof restartState.localScreenProducerId==='string'&&restartState.localScreenProducerId!==producerId,'restart did not make one fresh display authorization and producer');
+    check(brokerSnapshot().started===recovery.native.started+1&&browserCaptureRequests===0,'restart did not use a new native helper');
+    Object.assign(restart,{nativeCapture:true,newConsumerTrack:true,newProducer:true,captureRequestsAdded:1,patternMatched:true,
+      decodedFramesAdded:progressed.currentVideo.framesDecoded-fresh.currentVideo.framesDecoded,ownedSequenceAdvanced:true,
+      voice:await voiceCheck(restartState.localScreenProducerId)});finishStage(restart);
     await boundedJs(sender,'window.coveMediaQA.rtc.stopScreenShare();void 0',2500);
-    await until(async()=>{const states=await Promise.all([nativeLifecyclePeerState(sender),nativeLifecyclePeerState(viewer)]);return !states[0].localScreen&&states[1].publications.length===0;},'manual fallback stop');
+    await until(async()=>{const states=await Promise.all([nativeLifecyclePeerState(sender),nativeLifecyclePeerState(viewer)]);return !states[0].localScreen&&states[1].publications.length===0;},'native republication stopped');
     const finalBroker=await waitNativeResources();check(nativeResourcesReleased(finalBroker),'final native resources are not zero');
     remaining();lifecycle.finalNativeSnapshot=finalBroker;lifecycle.finalNativeResourcesReleased=true;lifecycle.passed=true;
     lifecycle.elapsedMs=Date.now()-lifecycle.startedAt;save();
@@ -935,25 +992,16 @@ app.whenReady().then(async()=>{
     const source=generatedNv12Enabled?'<!doctype html><script>window.sourceFrames=0</script>':`<!doctype html><style>body{margin:0;overflow:hidden;background:#17324d}canvas{width:100vw;height:100vh;display:block}</style><canvas></canvas><script>const c=document.querySelector('canvas');c.width=1920;c.height=1080;const x=c.getContext('2d');let frames=0;${sourceAgeSetup}${chartSetup}function draw(t){${nativeLifecycleEnabled?'if(window.sourceFrozen===true){return;}':''}frames++;${sourceAgeDraw}x.fillStyle=frames%2?'#17324d':'#18334e';x.fillRect(0,0,c.width,c.height);x.fillStyle='#fcba35';x.fillRect((t*.35)%1800,600,120,400);x.fillStyle='white';x.font='72px sans-serif';x.fillText(String(frames),240,100);for(const [color,a,b] of [['#e84a5f',0,0],['#41b3a3',1728,0],['#e8d0a9',0,972],['#4b2e83',1728,972]]){x.fillStyle=color;x.fillRect(a,b,192,108)}for(let bit=0;bit<16;bit++){x.fillStyle=frames&(1<<bit)?'#fff':'#000';x.fillRect(384+bit*72,${patternBits.top*1080},72,${patternBits.height*1080})}${detailQuality?'drawDetailChart(frames&65535);':''}window.sourceFrames=frames;requestAnimationFrame(draw)}requestAnimationFrame(draw)</script>`;
     if(sparseSource==='1'&&(detailQuality||visiblePresentation.enabled||generatedNv12Enabled))throw Error('Sparse desktop source requires the ordinary native pattern observer');
     await sourceWindow.loadURL('data:text/html;charset=utf-8,'+encodeURIComponent(sparseSource==='1'?sparseHtml:source));
-    session.defaultSession.setDisplayMediaRequestHandler((request,callback)=>{
-      try{nativeRequests++;console.log('[capture] owned native request',nativeRequests,captureTarget);
+    session.defaultSession.setDisplayMediaRequestHandler((_request,callback)=>{
+      try{nativeRequests++;browserCaptureRequests++;console.log('[capture] owned browser request',browserCaptureRequests,captureTarget);
+        if(nativeController)throw Error('Direct native publication attempted Chromium capture');
         if(!selectedCaptureSource)throw Error('No prevalidated owned source for display capture');
-        if(nativeController){
-          if(request.frame!==peers[0]?.webContents.mainFrame)throw Error('Display capture did not originate in the owned publisher main frame');
-          const displays=screen.getAllDisplays(),primary=screen.getPrimaryDisplay();
-          const display=displays.find(value=>String(value.id)===selectedCaptureSource.display_id)??(displays.length===1?displays[0]:null);
-          nativeController.noteStockSelection({sourceId:selectedCaptureSource.id,displayId:display?String(display.id):'',
-            primaryDisplayId:String(primary.id),displayCount:displays.length,selectedAt:Date.now(),
-            sourceWidth:display?Math.round(display.size.width*display.scaleFactor):undefined,
-            sourceHeight:display?Math.round(display.size.height*display.scaleFactor):undefined});
-        }
         callback({video:selectedCaptureSource});
       }catch(error){console.error(error);void finish(error);}
     });
-    const cases=JSON.parse(process.env.COVE_FPS_CASES||JSON.stringify([{source:'generated',preset:'1080p',fps:120,game:true,compatibility:true},{source:'generated',preset:'540p',fps:120,game:true,compatibility:true},{source:'native',preset:'1080p',fps:120,game:true,compatibility:true},{source:'native',preset:'540p',fps:120,game:true,compatibility:true}]));
-    validatePerformanceCases(cases);
-    const exerciseEncoderOption=cases.some(config=>config.gpuEncoding!==undefined);
-    if(exerciseEncoderOption&&(!nativeGpuEnabled||hardwareAv1!=='1'||preflightNative))
+    if(nativeGpuEnabled&&cases.some(config=>config.source!=='native'||config.captureTarget!=='screen'))
+      throw Error('Direct native acceptance requires owned monitor cases. Use COVE_FPS_NATIVE_GPU=0 for generated or window cases.');
+    if(exerciseEncoderOption&&(!nativeGpuEnabled||(hardwareAv1!=='1'&&!softwareAv1Decoder)||preflightNative))
       throw Error('The GPU encoding option requires the native bridge and the AV1 hardware-capable runtime');
     if(detailQuality&&(visiblePresentation.enabled||cases.some(config=>config.source!=='native'||config.captureTarget!=='screen')))
       throw Error('Fine-detail quality measurement requires the owned monitor pattern');
@@ -970,10 +1018,10 @@ app.whenReady().then(async()=>{
         Math.abs(Math.round(primary.size.width*primary.scaleFactor)-2560)>2||Math.abs(Math.round(primary.size.height*primary.scaleFactor)-1600)>2)
         throw Error('Native lifecycle checks require one non-profiling native monitor 540p120 case on the owned single 2560x1600 display');
     }
-    if(nativeStandbyEnabled&&(cases.length!==1||cases[0].captureTarget!=='screen'||
+    if(nativeRecoveryEnabled&&(cases.length!==1||cases[0].captureTarget!=='screen'||
       !nativeUpgradeRequired(cases[0],nativeGpuEnabled)||captureTraceEnabled||minimizeSender||
       process.env.COVE_FPS_REPUBLISH_CHECKS==='1'||process.env.COVE_FPS_RECOVERY_CHECKS==='1'))
-      throw Error('Native standby recovery requires one isolated native monitor case');
+      throw Error('Native recovery requires one isolated native monitor case');
     const sampleSeconds=Number(process.env.COVE_FPS_SAMPLE_SECONDS||8),warmupMs=Number(process.env.COVE_FPS_WARMUP_MS||5000);
     if(!Number.isInteger(sampleSeconds)||sampleSeconds<1||sampleSeconds>30||!Number.isInteger(warmupMs)||warmupMs<0||warmupMs>30000)throw Error('Invalid bounded sample duration');
     const sourceBaselineSeconds=Number(process.env.COVE_FPS_SOURCE_BASELINE_SECONDS??0);
@@ -1021,11 +1069,22 @@ app.whenReady().then(async()=>{
           result.nativeGpu.isolatedNoopAudioStops[channel]++;return true;
         });
       }
-      ipcMain.handle('cove:native-screen:start',async(event,requestId,options)=>{
-        if(!ownsEvent(event))return {ok:false,reason:'untrusted_frame'};
+      ipcMain.handle('cove:native-screen:select',event=>{
+        if(!ownsEvent(event))return null;
+        const selection=ownedNativeDisplay();
+        if(!selection)return null;
+        const display=nativeController.authorizeDisplay(event.sender,selection);
+        if(display)nativeRequests++;
+        return display;
+      });
+      ipcMain.handle('cove:native-screen:release',(event,authorizationId)=>
+        ownsEvent(event)&&nativeController.releaseDisplay(event.sender,authorizationId));
+      ipcMain.handle('cove:native-screen:start',async(event,requestId,options,authorizationId)=>{
+        if(!ownsEvent(event))return {ok:false,reason:'untrusted_sender'};
         if(minimizeSender&&!minimizedThrottling)peers[0].webContents.setBackgroundThrottling(false);
         const started=Date.now(),monotonicStarted=process.hrtime.bigint();let response;
-        try{const pending=nativeController.start(peers[0].webContents,requestId,options);attachNativeHelperTiming();response=await pending;attachNativeHelperTiming();}
+        try{const pending=nativeController.start(event.sender,requestId,options,
+          {id:authorizationId,currentSelection:ownedNativeDisplay});attachNativeHelperTiming();response=await pending;attachNativeHelperTiming();}
         catch{response={ok:false,reason:'ipc_start_failed'};}
         result.nativeGpu.startAttempts.push({at:started,durationMs:Number(process.hrtime.bigint()-monotonicStarted)/1e6,ok:response.ok===true,
           ...(response.ok?{width:response.width,height:response.height}:{reason:/^[a-z_]{1,50}$/.test(response.reason)?response.reason:'start_failed'})});save();return response;
@@ -1061,6 +1120,9 @@ app.whenReady().then(async()=>{
       for(let index=0;index<2;index++){
         const query=new URLSearchParams({base:info.base,room:info.roomId,token:info.accounts[index].token,index:String(index),performance:'1',patternLayout:visiblePresentation.patternLayout,...(visiblePresentation.enabled&&index===0?{visiblePresentation:'1'}:{}),...(localPreviewEnabled&&index===0?{localPreview:'1'}:{}),source:config.source,width:'1920',height:'1080',fps:String(config.fps),...(nativeGpuEnabled&&index===0?{nativeGpu:'1',...(stockCaptureKeepalive?{stockCaptureKeepalive:'1'}:{})}:{}),...(generatedNv12Enabled?{generatedNv12:'1'}:{}),...((config.source==='native'||generatedNv12Enabled)&&index===1?{ownedPattern:'1',ownedPatternReadback:patternReadbackMode,...(sourceAgeEnabled?{sourceAge:'1'}:{})}:{}),...(config.captureWidth?{captureWidth:String(config.captureWidth),captureHeight:String(config.captureHeight)}:{})});
         if(detailQuality&&index===1)query.set('detailQuality','1');
+        if(av1Interoperability)query.set('av1Interoperability','1');
+        if(leadingAv1Metadata&&index===0)query.set('leadingAv1Metadata','1');
+        if(av1SequenceFault&&index===0)query.set('av1SequenceFault',av1SequenceFault);
         await peers[index].loadURL(process.env.COVE_QA_RENDERER_URL+'/tests/ui/media-integration.html?'+query);
         if(av1SequenceProbe==='1'&&index===1){
           const {observeAv1SequenceHeaders}=require(path.join(root,'tooling/screen-performance-av1.cjs'));
@@ -1071,6 +1133,24 @@ app.whenReady().then(async()=>{
         await wait(peers[index],'Boolean(window.coveMediaQA?.ready)');await js(peers[index],"window.coveMediaQA.rtc.selectMicrophoneNoiseMode('system');window.coveMediaQA.rtc.joinVoice()");await wait(peers[index],'Boolean(window.coveMediaQA.rtc.inVoice)');
       }
       const [sender,viewer]=peers;
+      const encoderStatsPeers=config.gpuEncoding===undefined?[]:softwareAv1Decoder?peers:[sender];
+      for(const peer of encoderStatsPeers)await boundedJs(peer,`(async () => {
+        const stream=await MediaDevices.prototype.getUserMedia.call(navigator.mediaDevices,{
+          video:{width:160,height:120,frameRate:1},
+        });
+        window.qaStopEncoderStatsCapture=()=>stream.getTracks().forEach(track=>track.stop());
+        window.addEventListener('pagehide',window.qaStopEncoderStatsCapture,{once:true});
+      })()`);
+      const workerRecoveryEnabled=nativeRecoveryEnabled&&config.gpuEncoding===true;
+      if(workerRecoveryEnabled)await boundedJs(sender,`(() => {
+        window.coveQaAv1Workers=[];
+        window.Worker=class extends Worker {
+          constructor(url,options){
+            super(url,options);
+            if(options?.name==='cove-av1-screen-sender')window.coveQaAv1Workers.push(this);
+          }
+        };
+      })()`);
       if(visiblePresentation.enabled){
         sender.setBounds(presentationGeometry.senderBounds);sender.show();sender.focus();
         const startup=await waitVisiblePresentationStartup(presentationGeometry,ownedVisiblePresentationState,{wait:delay});
@@ -1093,10 +1173,35 @@ app.whenReady().then(async()=>{
         sourceOnly={startedAt,finishedAt,fps:1000*(last-first)/(finishedAt-startedAt)};
       }
       if(captureTracePhase==='startup')await startOwnedTrace();
-      await startOwnedScreenShare(sender,config,'initial-publication-returned');await wait(sender,'Boolean(window.coveMediaQA.rtc.localScreen)');await wait(viewer,'window.coveMediaQA.rtc.availableScreens.length===1');
+      const startupAlert=await startOwnedScreenShare(sender,config,'initial-publication-returned').catch(async error=>{
+        if(av1SequenceFault!=='all'||!error.message.includes('GPU 编码器未能生成可解码的 AV1 起始帧'))throw error;
+        await recordStartupSample(sender,'initial-publication-rejected');
+        return error.message;
+      });
+      if(av1SequenceFault==='all'){
+        const counts=await boundedJs(sender,'window.coveQaAv1PrefixCounts');
+        const [senderState,viewerState]=await Promise.all([nativeLifecyclePeerState(sender),nativeLifecyclePeerState(viewer)]);
+        const voiceContinues=[senderState,viewerState].every(state=>state.inVoice&&state.audio.packets>0);
+        result.av1SequenceFault={...counts,startupAlert,senderSharing:senderState.isSharing,viewerPublications:viewerState.publications.length,voiceContinues};
+        save();
+        if(!startupAlert||counts.attempts!==2||counts.strippedSequence<2||counts.publications!==0||
+          senderState.isSharing||viewerState.publications.length||!voiceContinues)
+          throw Error('Missing AV1 sequences must fail without publishing an undecodable stream');
+        continue;
+      }
+      await wait(sender,'Boolean(window.coveMediaQA.rtc.localScreen)');await wait(viewer,'window.coveMediaQA.rtc.availableScreens.length===1');
       await wait(sender,`window.coveMediaQA.rtc.screenNativeResolution===${Boolean(config.nativeResolution)}`);
       if(config.source==='native'&&nativeRequests<=nativeRequestsBefore)throw Error('Native source was replaced before the Electron capture handler');
-      await js(viewer,'window.coveMediaQA.rtc.watchScreen(window.coveMediaQA.rtc.availableScreens[0].socketId)');await wait(viewer,'document.querySelector("video").readyState>=2');
+      await js(viewer,'window.coveMediaQA.rtc.watchScreen(window.coveMediaQA.rtc.availableScreens[0].socketId)');
+      try{await wait(viewer,av1Interoperability
+        ? 'document.querySelector(".remote-video-surface")?.getAttribute("aria-busy")==="false"'
+        : 'document.querySelector("video").readyState>=2');}
+      catch(error){
+        const snapshots=await Promise.allSettled(peers.map(peer=>boundedJs(peer,'window.coveScreenPerformance.sample()',3000)));
+        result.initialWatchFailure={config,sender:snapshots[0].value,viewer:snapshots[1].value};
+        if(leadingAv1Metadata)result.initialWatchFailure.leadingMetadata=await boundedJs(sender,'window.coveQaAv1PrefixCounts');
+        save();throw error;
+      }
       const samples=[],requiresNativeUpgrade=nativeUpgradeRequired(config,nativeGpuEnabled);
       const measured={config,sourceSelection,sourceOnly,sourceWindowBeforeSampling:sourceWindowState(),samples,summary:null,nativeSourceFrames:0,nativeRequests,
         nativeUpgradeRequired:requiresNativeUpgrade,nativeUpgradeSucceeded:false,
@@ -1239,15 +1344,26 @@ app.whenReady().then(async()=>{
         }
         if(config.expectCodec&&(outgoing?.codec!==config.expectCodec||incoming?.codec!==config.expectCodec))throw Error('Negotiated codec does not match required '+config.expectCodec);
         if(config.gpuEncoding!==undefined){
-          const expectedMode=config.gpuEncoding?'L1T1':'L1T2';
-          if(outgoing.codec!=='video/AV1'||outgoing.scalabilityMode!==expectedMode||
-            (typeof outgoing.powerEfficientEncoder==='boolean'&&outgoing.powerEfficientEncoder!==config.gpuEncoding))
-            throw Error('The AV1 encoder does not match the requested GPU encoding option');
+          assertScreenAv1Encoder(outgoing,config.gpuEncoding);
+          if(softwareAv1Decoder&&(!/dav1d/i.test(incoming?.decoderImplementation??'')||incoming?.powerEfficientDecoder!==false))
+            throw Error('Expected software AV1 decoding, got '+JSON.stringify({implementation:incoming?.decoderImplementation,powerEfficient:incoming?.powerEfficientDecoder}));
           if(config.gpuEncoding&&sample.nativeGpu?.frameStorage!=='cpu')
             throw Error('Hardware AV1 was not supplied by CPU-backed NV12');
         }
       }}catch(error){measured.comparisonContract.error=error.message;save();throw error;}
       measured.comparisonContract.passed=true;save();console.log('[performance]',JSON.stringify({config,sourceFps:measured.summary.sourceFps,encodeFps:measured.summary.encodeFps,sendFps:measured.summary.sendFps,decodeFps:measured.summary.decodeFps,nativeRequests}));
+      if(leadingAv1Metadata){
+        measured.leadingMetadata=await boundedJs(sender,'window.coveQaAv1PrefixCounts');
+        if(measured.leadingMetadata?.withSequence<1)throw Error('No AV1 sequence header after injected metadata');
+        save();
+      }
+      if(av1SequenceFault==='first'){
+        const counts=await boundedJs(sender,'window.coveQaAv1PrefixCounts');
+        measured.av1SequenceFault={...counts,nativeRequestsAdded:nativeRequests-nativeRequestsBefore};
+        save();
+        if(counts.attempts!==2||counts.strippedSequence<1||counts.publications!==1||nativeRequests-nativeRequestsBefore!==1)
+          throw Error('AV1 startup recovery must reuse capture and announce the playable producer once');
+      }
       if(demandOptions.enabled){
         const ownedRoom=()=>{
           try{return backend&&backend.exitCode===null&&backend.signalCode===null&&backend.connected&&
@@ -1324,7 +1440,8 @@ app.whenReady().then(async()=>{
         if(!stopped||(measured.recovery.gpuProcessRestartRequested&&!measured.recovery.ownedGpuProcessRestarted))throw Error('Owned GPU/source recovery invariant failed');
       }
       if(nativeLifecycleEnabled)await runNativeLifecycle(sender,viewer,config,measured);
-      if(nativeStandbyEnabled){measured.nativeStandby=await verifyNativeStandbyRecovery(sender,viewer);save();}
+      if(workerRecoveryEnabled){measured.av1WorkerRecovery=await verifyAv1WorkerRecovery(sender,viewer);save();}
+      if(nativeRecoveryEnabled){measured.nativeRecovery=await verifyNativeRecovery(sender,viewer);save();}
       if(config.gpuEncodingUpdate){
         const previous=await boundedJs(viewer,'window.coveScreenPerformance.sample().then(s=>s.currentVideo)');
         if(!previous)throw Error('GPU encoding update requires an active viewer');
@@ -1335,11 +1452,12 @@ app.whenReady().then(async()=>{
           s.currentVideo.framesDecoded>${previous.framesDecoded+30}&&document.querySelector('video')?.videoHeight===720)`);
         const updated=await boundedJs(sender,'window.coveScreenPerformance.sample()');
         const encoder=linkedVideoReport(updated,'outbound');
-        if(encoder?.codec!=='video/AV1'||encoder.scalabilityMode!=='L1T1'||brokerSnapshot()?.frameStorage!=='cpu')
-          throw Error('GPU encoding or NV12 capture was lost after updating the share');
+        assertScreenAv1Encoder(encoder,true);
+        if(brokerSnapshot()?.frameStorage!=='cpu')throw Error('NV12 capture was lost after updating the share');
         measured.gpuEncodingUpdate={from:config.preset,to:next.preset,viewerKeptTrack:true,encoder:encoder.encoderImplementation??null};
         save();
       }
+      for(const peer of encoderStatsPeers)await boundedJs(peer,'window.qaStopEncoderStatsCapture()');
       measured.cleanup=await cleanupPeers();save();
       if(!measured.cleanup.passed)throw Error('Owned media cleanup invariants failed');
       await delay(350);

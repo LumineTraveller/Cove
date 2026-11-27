@@ -1,14 +1,13 @@
 import { useCallback, useRef, useState } from 'react';
 import { Socket } from 'socket.io-client';
 import { Device } from 'mediasoup-client';
-import { NATIVE_SCREEN_MAX_WIDTH, NATIVE_SCREEN_MAX_HEIGHT } from '../../../../electron/native-screen-capture-protocol';
+import type { NativeScreenColorSpace } from '../../../../electron/native-screen-capture-protocol';
 
 import { type RtcVideoCounterSample } from '../diagnostics/mediaDiagnostics';
 import {
   createScreenEncodingPlan,
   screenCaptureVideoConstraints,
   SCREEN_MAX_BITRATE_BPS,
-  SCREEN_PRESETS,
   SCREEN_START_BITRATE_BPS,
   toScreenRtpEncoding,
   type ScreenActivity,
@@ -16,10 +15,12 @@ import {
   type ScreenPreset,
 } from './screenCapture';
 import { ApplicationAudioPipeline } from '../application-audio/applicationAudio';
+import { Av1ScreenInitializationError, createAv1ScreenSender } from './createAv1ScreenSender';
 import { screenPublicationCodecCandidates } from './screenCodecPolicy';
-import { getLastNativeScreenCaptureAttempt, nativeScreenContentHint, tryNativeScreenCapture,
-  type NativeCaptureCandidate, type NativeScreenBridge } from './nativeScreenCapture';
-import { canUpgradeScreenCapture, upgradePublishedScreenCapture } from './nativeScreenUpgrade';
+import { getNativeScreenCaptureDiagnostics, type NativeCaptureCandidate } from './nativeScreenCapture';
+import { nativeScreenColorSpaceForCodecs } from './nativeScreenColorPolicy';
+import { prepareNativeScreen, selectNativeScreenDisplay,
+  type NativeScreenDisplayLease, type NativeScreenSettings } from './nativeScreenRecovery';
 import {
   Transport,
   Producer,
@@ -28,6 +29,7 @@ import {
   EMPTY_STATS,
   waitForMediaTrackWarmup,
   produceWithSsrcRetry,
+  emitAsync,
 } from '../desktopMediaSupport';
 
 export interface useScreenPublishingDependencies {
@@ -41,6 +43,8 @@ export interface useScreenPublishingDependencies {
   readonly setScreenCompatibilityMode: import('react').Dispatch<import('react').SetStateAction<boolean>>;
   readonly screenGpuEncoding: boolean;
   readonly setScreenGpuEncoding: import('react').Dispatch<import('react').SetStateAction<boolean>>;
+  readonly screenSmoothPlayback: boolean;
+  readonly setScreenSmoothPlayback: import('react').Dispatch<import('react').SetStateAction<boolean>>;
   readonly fps: Fps;
   readonly shareAudio: boolean;
   readonly setScreenPreset: import('react').Dispatch<
@@ -114,65 +118,21 @@ class CancelledScreenPublication extends Error {}
 interface ScreenUpdateQueue {
   readonly isCurrent: () => boolean;
   readonly candidates: Set<MediaStream>;
+  readonly controller: AbortController;
   readonly release: () => void;
   tail: Promise<void>;
 }
 
-function releaseScreenCaptureCandidate(stream: MediaStream) {
-  stream.getTracks().forEach((track) => { track.onended = null; track.stop(); });
+interface NativeScreenPublication {
+  producer: Producer;
+  lease: NativeScreenDisplayLease;
+  settings: NativeScreenSettings;
+  colorSpace?: NativeScreenColorSpace;
+  recovering: MediaStream | null;
 }
 
-async function prepareHardwareScreenCapture(
-  stockStream: MediaStream,
-  plan: ScreenEncodingPlan,
-  fps: Fps,
-  signal: AbortSignal,
-  isCurrent: () => boolean,
-): Promise<{ capture: NativeCaptureCandidate; plan: ScreenEncodingPlan }> {
-  // Chromium may not report stock track dimensions before its first frame.
-  // The native capture fits the physical display into the requested bounds.
-  const bounds = plan.nativeResolution
-    ? { width: NATIVE_SCREEN_MAX_WIDTH, height: NATIVE_SCREEN_MAX_HEIGHT }
-    : SCREEN_PRESETS[plan.preset];
-  const prepared = await tryNativeScreenCapture(stockStream, {
-    maxWidth: bounds.width, maxHeight: bounds.height, fps,
-    colorSpace: 'bt709-limited', cpuNv12: true, nativeResolution: plan.nativeResolution,
-    contentHint: stockStream.getVideoTracks()[0]?.contentHint,
-    isCurrent, signal,
-  });
-  try {
-    if (!isCurrent() || signal.aborted) throw new CancelledScreenPublication();
-    const track = prepared?.stream.getVideoTracks()[0];
-    const { width, height } = track?.getSettings() ?? {};
-    if (!prepared || track?.readyState !== 'live' || !width || !height) {
-      const attempt = getLastNativeScreenCaptureAttempt();
-      if (attempt?.startFailureReason === 'native_resolution_unavailable' ||
-          attempt?.backendEndReason === 'native_resolution_unavailable')
-        throw new Error('GPU 采集无法保留原生分辨率。请关闭 GPU 编码或选择分辨率档位。');
-      if (attempt?.startFailureReason === 'desktop_unavailable' || attempt?.backendEndReason === 'desktop_unavailable')
-        throw new Error('Windows 桌面暂不可用。关闭系统提示后请重新共享。');
-      throw new Error('GPU 屏幕采集启动失败。请重试或关闭 GPU 编码。');
-    }
-    const capability = await navigator.mediaCapabilities?.encodingInfo({
-      type: 'webrtc',
-      video: { contentType: 'video/AV1', width, height, framerate: fps,
-        bitrate: SCREEN_START_BITRATE_BPS, scalabilityMode: 'L1T1' },
-    }).catch(() => null);
-    if (!isCurrent() || signal.aborted) throw new CancelledScreenPublication();
-    if (!capability?.supported || !capability.powerEfficient)
-      throw new Error('显卡无法按当前分辨率和帧率编码 AV1。请关闭 GPU 编码或调整共享设置。');
-    if (track.readyState !== 'live') throw new Error('GPU 屏幕采集已停止。请重试。');
-
-    track.contentHint = nativeScreenContentHint(track, plan.contentHint);
-    return {
-      capture: prepared,
-      plan: { ...plan, sourceWidth: width, sourceHeight: height,
-        outputWidth: width, outputHeight: height, scaleResolutionDownBy: 1 },
-    };
-  } catch (error) {
-    prepared?.stop();
-    throw error;
-  }
+function releaseScreenCaptureCandidate(stream: MediaStream) {
+  stream.getTracks().forEach((track) => { track.onended = null; track.stop(); });
 }
 
 export function useScreenPublishing(deps: useScreenPublishingDependencies) {
@@ -181,82 +141,83 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
   const [isStartingScreenShare, setIsStartingScreenShare] = useState(false);
   const rendererActivity = useRef<{ operation: number; release(): void } | null>(null);
   const updateQueue = useRef<ScreenUpdateQueue | null>(null);
-  const nativeUpgradeIntent = useRef(0);
-  const nativeUpgradeAbort = useRef<{ controller: AbortController; queue: ScreenUpdateQueue } | null>(null);
-
-  const cancelNativeUpgrade = () => {
-    nativeUpgradeIntent.current += 1;
-    nativeUpgradeAbort.current?.controller.abort();
-    nativeUpgradeAbort.current = null;
-    return nativeUpgradeIntent.current;
-  };
+  const nativePublication = useRef<NativeScreenPublication | null>(null);
 
   const ensureUpdateQueue = (producer: Producer, isCurrent: () => boolean): ScreenUpdateQueue => {
     const existing = updateQueue.current;
     if (existing?.isCurrent()) return existing;
     existing?.release();
     const candidates = new Set<MediaStream>();
+    const controller = new AbortController();
     let released = false;
     const release = () => {
       if (released) return;
       released = true;
       producer.observer?.off('close', release);
-      // An old producer closing cannot cancel a newer publication's preparation.
-      if (nativeUpgradeAbort.current?.queue === queue) {
-        nativeUpgradeAbort.current.controller.abort();
-        nativeUpgradeAbort.current = null;
+      controller.abort();
+      if (nativePublication.current?.producer === producer) {
+        nativePublication.current.lease.release();
+        nativePublication.current = null;
       }
       candidates.forEach(releaseScreenCaptureCandidate);
       candidates.clear();
     };
     const queue: ScreenUpdateQueue = {
-      isCurrent: () => !released && isCurrent(), candidates, release, tail: Promise.resolve(),
+      isCurrent: () => !released && isCurrent(), candidates, controller, release, tail: Promise.resolve(),
     };
     updateQueue.current = queue;
     producer.observer?.once('close', release);
     return queue;
   };
 
-  const beginNativeUpgrade = (
-    stream: MediaStream, producer: Producer, queue: ScreenUpdateQueue,
-    intent: number, plan: ScreenEncodingPlan, maxFps: Fps, gameMode: boolean,
-  ) => {
-    if (maxFps === 30) return;
-    // Most builds have no native bridge. Keep their original synchronous path.
-    const bridge = (window as Window & { coveNativeScreen?: NativeScreenBridge }).coveNativeScreen;
-    if (!bridge?.supported || nativeUpgradeIntent.current !== intent || !queue.isCurrent() ||
-        deps.localScreenRef.current !== stream || !canUpgradeScreenCapture(producer, plan)) return;
-    const controller = new AbortController();
-    nativeUpgradeAbort.current = { controller, queue };
-    void upgradePublishedScreenCapture({
-      stockStream: stream, stockPlan: plan, maxFps, producer, queue, signal: controller.signal,
-      isIntentCurrent: () => nativeUpgradeIntent.current === intent,
-      isPublicationCurrent: queue.isCurrent,
-      currentStream: () => deps.localScreenRef.current,
-      acquire: tryNativeScreenCapture,
-      onCommit: (nativeStream, track, width, height) => {
-        deps.localScreenRef.current = nativeStream;
-        deps.setLocalScreen(nativeStream);
-        if (producer.appData && typeof producer.appData === 'object')
-          Object.assign(producer.appData, { sourceWidth: width, sourceHeight: height, outputWidth: width, outputHeight: height });
-        // Preserve the current activity's FPS and degradation settings. In
-        // particular, applyScreenActivity is an asynchronous sender mutation.
-        deps.setScreenEncodingPlan(current => ({
-          ...(current ?? plan), sourceWidth: width, sourceHeight: height,
-          outputWidth: width, outputHeight: height, scaleResolutionDownBy: 1,
-          contentHint: track.contentHint === 'motion' ? 'motion' : 'detail',
-        }));
-        deps.videoCounterPrev.current = null;
-        deps.remoteLossPrev.current = null;
-        if (gameMode) deps.stopScreenAnalysis();
-        else deps.startScreenAnalysis(nativeStream, plan.preset, maxFps, false);
-      },
-      stopPublication: () => stopScreenShare(),
-    }).catch(error => {
-      console.warn('[screen share] native upgrade kept stock capture', error);
-    }).then(() => {
-      if (nativeUpgradeAbort.current?.controller === controller) nativeUpgradeAbort.current = null;
-    });
+  const watchPublishedTrack = (stream: MediaStream, producer: Producer, queue: ScreenUpdateQueue) => {
+    const track = stream.getVideoTracks()[0];
+    const ownsTrack = () => queue.isCurrent() && deps.localScreenRef.current === stream;
+    track.onended = () => {
+      if (!ownsTrack()) return;
+      const native = nativePublication.current;
+      if (native?.producer !== producer) { stopScreenShare(); return; }
+      if (native.recovering === stream) return;
+      native.recovering = stream;
+      const recover = async () => {
+        const { settings, lease, colorSpace } = native;
+        for (let attempt = 0; attempt < 3 && ownsTrack(); ++attempt) {
+          const prepared = await prepareNativeScreen(lease, settings, colorSpace, queue.controller.signal, ownsTrack, true);
+          if (!prepared || !ownsTrack()) { prepared?.capture.stop(); return; }
+          const replacement = prepared.capture.stream;
+          queue.candidates.add(replacement);
+          try {
+            const nextTrack = replacement.getVideoTracks()[0];
+            await producer.replaceTrack({ track: nextTrack });
+            if (!ownsTrack()) return;
+            prepared.capture.commit();
+            if (nextTrack.readyState !== 'live') throw new Error('恢复后的原生采集轨道中断。');
+            queue.candidates.delete(replacement);
+            deps.localScreenRef.current = replacement;
+            watchPublishedTrack(replacement, producer, queue);
+            releaseScreenCaptureCandidate(stream);
+            deps.setLocalScreen(replacement);
+            deps.videoCounterPrev.current = null;
+            deps.remoteLossPrev.current = null;
+            const { outputWidth, outputHeight } = prepared.plan;
+            Object.assign(producer.appData, { outputWidth, outputHeight });
+            deps.applyScreenActivity(settings.preset, settings.fps, deps.screenActivityRef.current, settings.nativeResolution);
+            if (!settings.gameMode) deps.startScreenAnalysis(replacement, settings.preset, settings.fps, settings.nativeResolution);
+            return;
+          } catch (error) {
+            if (attempt === 2) throw error;
+          } finally {
+            if (queue.candidates.delete(replacement)) prepared.capture.stop();
+          }
+        }
+      };
+      queue.tail = queue.tail.then(recover).catch(error => {
+        if (!ownsTrack()) return;
+        console.error('[native-screen] recovery exhausted', error);
+        stopScreenShare();
+        window.alert(error instanceof Error ? error.message : '原生屏幕采集未能恢复，请重新开始共享。');
+      }).finally(() => { if (native.recovering === stream) native.recovering = null; });
+    };
   };
   const startScreenShare = useCallback(
     async (
@@ -267,6 +228,7 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
       initNativeResolution?: boolean,
       initCompatibilityMode?: boolean,
       initGpuEncoding?: boolean,
+      initSmoothPlayback?: boolean,
     ) => {
       if (deps.isSharing) return true;
       if (pendingStart.current?.isCurrent()) return false;
@@ -286,9 +248,10 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
       const currentFps = initFps ?? deps.fps;
       const audio = initAudio ?? deps.shareAudio;
       const compatibilityMode = initCompatibilityMode ?? deps.screenCompatibilityMode ?? false;
-      const bridge = (window as Window & { coveNativeScreen?: NativeScreenBridge }).coveNativeScreen;
+      const bridge = window.coveNativeScreen;
       const hardwareAv1Available = bridge?.hardwareAv1Encoding === true;
-      const gpuEncoding = initGpuEncoding ?? (hardwareAv1Available && !compatibilityMode && deps.screenGpuEncoding);
+      const gpuEncoding = initGpuEncoding ?? deps.screenGpuEncoding;
+      const smoothPlayback = initSmoothPlayback ?? (deps.screenSmoothPlayback === true);
       if (gpuEncoding && (!hardwareAv1Available || compatibilityMode)) {
         window.alert('GPU 编码需要支持 AV1 的桌面客户端。请关闭兼容观看后重试，或使用 CPU 编码。');
         return false;
@@ -301,6 +264,7 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
       if (initCompatibilityMode !== undefined) deps.setScreenCompatibilityMode(initCompatibilityMode);
       if (initGpuEncoding !== undefined && hardwareAv1Available && !compatibilityMode)
         deps.setScreenGpuEncoding(initGpuEncoding);
+      if (initSmoothPlayback !== undefined) deps.setScreenSmoothPlayback(initSmoothPlayback);
 
       // System-audio sharing must use the native process-exclusion bridge so
       // Cove's own voice and sound-pack playback can never enter the stream.
@@ -310,15 +274,15 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
         return false;
       }
 
-      const nativeIntent = cancelNativeUpgrade();
       const initialActivity: ScreenActivity = gameMode ? 'motion' : 'active';
+      const settings: NativeScreenSettings = { preset, fps: currentFps, gameMode, nativeResolution, gpuEncoding };
       const operation = ++publicationGeneration.current;
       const generation = deps.mediaGeneration.current;
       const socketId = deps.socket.id;
       const controller = new AbortController();
       pendingStart.current?.cancel();
       let acquiredStream: MediaStream | null = null;
-      let stockStream: MediaStream | null = null;
+      let nativeLease: NativeScreenDisplayLease | null = null;
       let initialNative: NativeCaptureCandidate | null = null;
       let acquiredProducer: Producer | null = null;
       let videoCommitted = false;
@@ -329,14 +293,10 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
         if (rendererActivity.current?.operation === operation) rendererActivity.current = null;
         try { release?.(); } catch { /* Scheduling policy cannot prevent media cleanup. */ }
       };
-      const releaseStock = () => {
-        if (stockStream && stockStream !== acquiredStream) releaseScreenCaptureCandidate(stockStream);
-        stockStream = null;
-      };
       controller.signal.addEventListener('abort', () => {
         releaseActivity();
         if (!videoCommitted) {
-          releaseStock();
+          nativeLease?.release();
           if (acquiredStream && deps.localScreenRef.current !== acquiredStream) releaseScreenCaptureCandidate(acquiredStream);
         }
       }, { once: true });
@@ -381,75 +341,49 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
         if (gpuEncoding && !av1) throw new Error('当前服务器未协商到 AV1。请选择 CPU 编码。');
         const codecCandidates = gpuEncoding ? [av1]
           : hardwareAv1Available && av1 ? preferredCodecs.filter(codec => codec !== undefined) : preferredCodecs;
-        const selected = await navigator.mediaDevices.getDisplayMedia({
-          // Bound capture before the RTP stage to avoid a second large-frame
-          // resize. Native mode retains the original FPS-only request.
-          video: screenCaptureVideoConstraints(currentFps, preset, nativeResolution),
-          // The native Windows bridge supplies the filtered system audio as a
-          // separate track. Chromium's global loopback track is never requested,
-          // because it would include Cove's own playback.
-          audio: false,
-        });
-        stockStream = selected;
-        let stream = selected;
-        acquiredStream = stream;
-        ensureCurrent();
-        const selectedTrack = stream.getVideoTracks()[0];
-        if (!selectedTrack) throw new Error('没有取得屏幕视频轨道');
-        let videoTrack = selectedTrack;
-        try { activityRelease = window.coveScreenShareActivity?.acquire(); }
-        catch { console.warn('[screen share] renderer activity unavailable'); }
-        rendererActivity.current = { operation, release: releaseActivity };
-        startupStage = '等待屏幕采集轨道就绪';
-        await waitForMediaTrackWarmup(videoTrack);
-        ensureCurrent();
-        videoTrack.contentHint = gameMode ? 'motion' : 'detail';
-        // getDisplayMedia already requested this frame rate. Reapplying even
-        // the same constraints here can restart Windows' capture source; on
-        // some WGC/DXGI paths Chromium then rejects with "Could not start video
-        // source" or leaves a live-but-black track. Keep the acquired source
-        // intact and only change capture constraints for later user changes.
-        const trackSettings = videoTrack.getSettings();
-        let initialPlan = createScreenEncodingPlan({
-          preset,
-          maxFps: currentFps,
-          activity: initialActivity,
-          sourceWidth: trackSettings.width,
-          sourceHeight: trackSettings.height,
-          nativeResolution,
-        });
-        const startAv1WithNative = bridge?.supported && bridge.startAv1WithNative === true &&
-          codecCandidates[0]?.mimeType.toLowerCase() === 'video/av1';
-        if (gpuEncoding) {
-          startupStage = '准备 GPU 编码画面';
-          ({ capture: initialNative, plan: initialPlan } = await prepareHardwareScreenCapture(
-            selected, initialPlan, currentFps, controller.signal, isCurrent,
-          ));
-          stream = initialNative.stream;
-          videoTrack = stream.getVideoTracks()[0];
-          acquiredStream = stream;
+        const enableRendererActivity = () => {
+          try { activityRelease = window.coveScreenShareActivity?.acquire(); }
+          catch { console.warn('[screen share] renderer activity unavailable'); }
+          rendererActivity.current = { operation, release: releaseActivity };
+        };
+        let initialPlan: ScreenEncodingPlan;
+        let inputColor = nativeScreenColorSpaceForCodecs(codecCandidates[0] ? [codecCandidates[0]] : undefined);
+        const openNative = async (lease: NativeScreenDisplayLease, colorSpace: NativeScreenColorSpace | undefined) => {
+          const prepared = await prepareNativeScreen(lease, settings, colorSpace, controller.signal, isCurrent);
+          if (!prepared) throw new CancelledScreenPublication();
+          return prepared;
+        };
+        if (bridge?.supported) {
+          startupStage = '启动 Windows 原生屏幕采集';
+          nativeLease = await selectNativeScreenDisplay(bridge);
           ensureCurrent();
-        } else if (startAv1WithNative && !nativeResolution && currentFps > 30 && initialPlan.scaleResolutionDownBy === 1 &&
-            trackSettings.width && trackSettings.height) {
-          startupStage = '准备原生屏幕视频轨道';
-          const prepared = await tryNativeScreenCapture(selected, {
-            maxWidth: trackSettings.width, maxHeight: trackSettings.height, fps: currentFps,
-            colorSpace: 'bt709-limited', nativeResolution: false, contentHint: selectedTrack.contentHint,
-            opaqueDesktopView: bridge.opaqueAv1Input === true,
-            isCurrent, signal: controller.signal,
+          enableRendererActivity();
+          const prepared = await openNative(nativeLease, inputColor);
+          initialNative = prepared.capture;
+          acquiredStream = initialNative.stream;
+          initialPlan = prepared.plan;
+          ensureCurrent();
+        } else {
+          acquiredStream = await navigator.mediaDevices.getDisplayMedia({
+            video: screenCaptureVideoConstraints(currentFps, preset, nativeResolution),
+            audio: false,
           });
-          const preparedTrack = prepared?.stream.getVideoTracks()[0];
-          const preparedSize = preparedTrack?.getSettings();
-          if (prepared && isCurrent() && preparedTrack?.readyState === 'live' &&
-              preparedSize?.width === trackSettings.width && preparedSize.height === trackSettings.height) {
-            preparedTrack.contentHint = nativeScreenContentHint(preparedTrack, selectedTrack.contentHint);
-            initialNative = prepared;
-            stream = prepared.stream;
-            videoTrack = preparedTrack;
-            acquiredStream = stream;
-          } else prepared?.stop();
           ensureCurrent();
+          const track = acquiredStream.getVideoTracks()[0];
+          if (!track) throw new Error('没有取得屏幕视频轨道');
+          enableRendererActivity();
+          startupStage = '等待屏幕采集轨道就绪';
+          await waitForMediaTrackWarmup(track);
+          ensureCurrent();
+          track.contentHint = gameMode ? 'motion' : 'detail';
+          const { width, height } = track.getSettings();
+          initialPlan = createScreenEncodingPlan({
+            preset, maxFps: currentFps, activity: initialActivity,
+            sourceWidth: width, sourceHeight: height, nativeResolution,
+          });
         }
+        let stream = acquiredStream!;
+        let videoTrack = stream.getVideoTracks()[0];
         console.info('[media-diag] 屏幕采集已开始', {
           requested: {
             preset,
@@ -457,43 +391,66 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
             fps: currentFps,
             gameMode,
           },
-          constraintMode: 'getDisplayMedia',
-          settings: trackSettings,
-          constraints: videoTrack.getConstraints(),
-          capabilities: videoTrack.getCapabilities(),
+          constraintMode: nativeLease ? 'native' : 'getDisplayMedia',
+          settings: videoTrack.getSettings(),
         });
         // 发布实际选中的采集轨道，使采集设置和 Producer 使用同一轨道。
         startupStage = '初始化屏幕视频发送';
         let producer: Producer | null = null;
         let lastProduceError: unknown = null;
-        let retainFirstTrack = gpuEncoding;
-        // A failed initial native attempt retries the same negotiated codec
-        // with the still-live picker track before falling back to other codecs.
-        for (const codec of initialNative && !gpuEncoding ? [codecCandidates[0], ...codecCandidates] : codecCandidates) {
+        for (const codec of codecCandidates) {
+          const color = nativeScreenColorSpaceForCodecs(codec ? [codec] : undefined);
+          if (nativeLease && (videoTrack.readyState !== 'live' ||
+              (color !== inputColor && getNativeScreenCaptureDiagnostics(videoTrack)?.frameStorage === 'cpu'))) {
+            initialNative?.stop();
+            const prepared = await openNative(nativeLease, color);
+            initialNative = prepared.capture;
+            acquiredStream = initialNative.stream;
+            initialPlan = prepared.plan;
+            ensureCurrent();
+            inputColor = color;
+            stream = acquiredStream!;
+            videoTrack = stream.getVideoTracks()[0];
+          }
           try {
             const av1Selected = codec?.mimeType.toLowerCase() === 'video/av1';
             // On the pinned Chromium AV1 hardware only supports L1T1.
             // L1T2 keeps both temporal layers at the selected total frame rate
             // while directing the software choice to libaom.
             const av1Mode = av1Selected && hardwareAv1Available ? (gpuEncoding ? 'L1T1' : 'L1T2') : undefined;
-            producer = await produceWithSsrcRetry(async () => {
+            const publishVideo = () => produceWithSsrcRetry(async () => {
               await waitForSignal();
               ensureCurrent();
-              return transport.produce({
+              const av1Sender = gpuEncoding ? createAv1ScreenSender(controller.signal, error => {
+                if (!videoCommitted || !isCurrent()) return;
+                console.error('[screen share] AV1 sender failed', error);
+                stopScreenShare();
+                window.alert(error.message);
+              }) : null;
+              try {
+                await av1Sender?.ready;
+                ensureCurrent();
+              } catch (error) {
+                av1Sender?.dispose();
+                throw error;
+              }
+              const appData = {
+                type: 'screen',
+                adaptation: gameMode ? 'game' : 'content',
+                preset,
+                nativeResolution,
+                gpuEncoding,
+                smoothPlayback,
+                maxFps: currentFps,
+                outputWidth: initialPlan.outputWidth,
+                outputHeight: initialPlan.outputHeight,
+                preferredCodec: codec?.mimeType ?? 'auto',
+                compatibilityMode,
+              };
+              const candidate = await transport.produce({
                 track: videoTrack,
                 streamId: `screen-${socketId}`,
-                appData: {
-                  type: 'screen',
-                  adaptation: gameMode ? 'game' : 'content',
-                  preset,
-                  nativeResolution,
-                  gpuEncoding,
-                  maxFps: currentFps,
-                  outputWidth: initialPlan.outputWidth,
-                  outputHeight: initialPlan.outputHeight,
-                  preferredCodec: codec?.mimeType ?? 'auto',
-                  compatibilityMode,
-                },
+                appData,
                 encodings: [{ ...toScreenRtpEncoding(initialPlan), ...(av1Mode ? { scalabilityMode: av1Mode } : {}) }],
                 // 初始带宽估计（kbps），不是上限；与 SFU 启动估计一致，之后由拥塞控制调整。
                 codecOptions: {
@@ -501,45 +458,65 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
                   videoGoogleMaxBitrate: SCREEN_MAX_BITRATE_BPS / 1_000,
                 },
                 ...(codec ? { codec } : {}),
+                ...(av1Sender ? {
+                  onRtpSender(sender: RTCRtpSender) {
+                    // The transform must see the encoder's first sequence header.
+                    av1Sender.bind(sender, appData);
+                  },
+                } : {}),
                 stopTracks: false,
                 disableTrackOnPause: false,
                 zeroRtpOnPause: true,
+              }).catch(error => {
+                av1Sender?.dispose();
+                throw error;
               });
+              if (av1Sender) {
+                if (candidate.closed) {
+                  av1Sender.dispose();
+                  throw new CancelledScreenPublication();
+                }
+                acquiredProducer = candidate;
+                candidate.observer.once('close', av1Sender.dispose);
+                av1Sender.assertHealthy();
+              }
+              return candidate;
             });
+            try {
+              producer = await publishVideo();
+            } catch (error) {
+              if (!gpuEncoding || !(error instanceof Av1ScreenInitializationError)) throw error;
+              ensureCurrent();
+              console.warn('[screen share] AV1 startup keyframe missing, restarting hardware encoder');
+              // The failed local negotiation is being closed by mediasoup-client.
+              await new Promise(resolve => setTimeout(resolve, 120));
+              producer = await publishVideo();
+            }
             acquiredProducer = producer;
             ensureCurrent();
-            retainFirstTrack = gpuEncoding || Boolean(startAv1WithNative && av1Selected);
             console.info(`[screen share] 编码器：${codec?.mimeType ?? '浏览器自动选择'}`);
             break;
           } catch (error) {
             ensureCurrent();
             if (gpuEncoding) throw error;
-            if (initialNative) {
-              initialNative.stop();
-              initialNative = null;
-              stream = selected;
-              videoTrack = selectedTrack;
-              acquiredStream = selected;
-            }
             lastProduceError = error;
             console.warn('[screen share] codec publication failed', { codec: codec?.mimeType ?? 'auto', compatibilityMode }, error);
           }
         }
         if (!producer) throw lastProduceError ?? new Error('没有可用的屏幕共享视频编码器');
         initialNative?.commit();
-        releaseStock();
         deps.screenProducer.current = producer;
         producer.observer?.once('close', releaseActivity);
         const publishedProducer = producer;
         const queue = ensureUpdateQueue(publishedProducer, () => isCurrent() &&
           deps.screenProducer.current === publishedProducer && !publishedProducer.closed);
+        if (nativeLease) {
+          const colorSpace = nativeScreenColorSpaceForCodecs(producer.rtpParameters?.codecs) ?? inputColor;
+          nativePublication.current = { producer, lease: nativeLease, settings, colorSpace, recovering: null };
+        }
         deps.localScreenRef.current = stream;
-        // 用户在浏览器 UI 点"停止共享"
-        videoTrack.onended = () => {
-          if (isCurrent() && deps.localScreenRef.current === stream && deps.screenProducer.current === producer)
-            stopScreenShare();
-        };
-        if (videoTrack.readyState === 'ended') {
+        watchPublishedTrack(stream, producer, queue);
+        if (!nativeLease && videoTrack.readyState === 'ended') {
           throw new Error('屏幕采集在启动时结束，请重新开始共享');
         }
         deps.setLocalScreen(stream);
@@ -555,6 +532,7 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
         // voice recovery coordinator owns session validity; a transient signal
         // disconnect must not undo healthy video while optional audio starts.
         videoCommitted = true;
+        if (videoTrack.readyState === 'ended') videoTrack.dispatchEvent(new Event('ended'));
 
         // Electron's global `loopback` source captures Cove's own voice and
         // sound-pack playback as well as other desktop audio. The Windows client
@@ -582,12 +560,11 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
         }
 
         deps.setIsSharing(true);
-        if (!retainFirstTrack) beginNativeUpgrade(stream, producer, queue, nativeIntent, initialPlan, currentFps, gameMode);
         return true;
 
       } catch (e) {
         releaseActivity();
-        releaseStock();
+        nativeLease?.release();
         const current = isCurrent();
         if (acquiredProducer) {
           if (deps.screenProducer.current === acquiredProducer) deps.screenProducer.current = null;
@@ -648,6 +625,7 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
       deps.screenNativeResolution,
       deps.screenCompatibilityMode,
       deps.screenGpuEncoding,
+      deps.screenSmoothPlayback,
       deps.armScreenRampGuard,
       deps.applyScreenActivity,
       deps.startScreenAnalysis,
@@ -670,6 +648,7 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
       initNativeResolution?: boolean,
       initCompatibilityMode?: boolean,
       initGpuEncoding?: boolean,
+      initSmoothPlayback?: boolean,
     ) => {
       if (!deps.inVoice || !deps.isSharing) return;
       const producer = deps.screenProducer.current;
@@ -704,13 +683,28 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
         return;
       }
 
-      // A new user intent cancels native preparation immediately, while stock
-      // updates retain their existing ordered commit semantics.
-      const nativeIntent = cancelNativeUpgrade();
       const currentQueue = ensureUpdateQueue(producer, isSessionCurrent);
+      const native = nativePublication.current?.producer === producer ? nativePublication.current : null;
+      if (!native && producer.track && getNativeScreenCaptureDiagnostics(producer.track)) return;
+      const settings: NativeScreenSettings = { preset, fps: currentFps, gameMode, nativeResolution, gpuEncoding };
+      const onlyPlaybackChanged = initSmoothPlayback !== undefined &&
+        initSmoothPlayback !== (producer.appData?.smoothPlayback === true) &&
+        preset === deps.screenPreset && currentFps === deps.fps &&
+        gameMode === deps.screenGameMode && nativeResolution === deps.screenNativeResolution &&
+        audio === Boolean(deps.screenAudioProducer.current);
+      const updatePlayback = async () => {
+        if (initSmoothPlayback === undefined || initSmoothPlayback === (producer.appData?.smoothPlayback === true)) return;
+        await emitAsync(deps.socket, 'screen:set-smooth-playback', {
+          producerId: producer.id,
+          enabled: initSmoothPlayback,
+        });
+        ensureCurrent();
+        producer.appData.smoothPlayback = initSmoothPlayback;
+        deps.setScreenSmoothPlayback(initSmoothPlayback);
+      };
       // Invoke capture in the click's turn to retain transient activation.
       // Consume rejection immediately, including while an earlier update waits.
-      const capture = (async (): Promise<{ stream: MediaStream | null; error?: unknown }> => {
+      const capture = native || onlyPlaybackChanged ? null : (async (): Promise<{ stream: MediaStream | null; error?: unknown }> => {
         try {
           const stream = await navigator.mediaDevices.getDisplayMedia({
             video: screenCaptureVideoConstraints(currentFps, preset, nativeResolution),
@@ -729,75 +723,56 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
 
       const commitUpdate = async () => {
         let acquiredStream: MediaStream | null = null;
-        let stockToRelease: MediaStream | null = null;
         try {
-          const captured = await capture;
-          acquiredStream = captured.stream;
+          const captured = capture ? await capture : null;
+          acquiredStream = captured?.stream ?? null;
           ensureCurrent();
-          if (!acquiredStream) throw captured.error;
-          let stream = acquiredStream;
-          // Read ownership at commit time, after the preceding update completed.
-          const previousStream = deps.localScreenRef.current;
-          let videoTrack = stream.getVideoTracks()[0];
-          if (!videoTrack) throw new Error('没有取得屏幕视频轨道');
-          if (gpuEncoding) await waitForMediaTrackWarmup(videoTrack);
-          ensureCurrent();
-          videoTrack.contentHint = gameMode ? 'motion' : 'detail';
-          // The new getDisplayMedia request above already carries the preferred
-          // frame rate. Avoid restarting its Windows capture source before the
-          // existing producer can switch to it.
-          const settings = videoTrack.getSettings();
-          let plan = createScreenEncodingPlan({
-            preset,
-            maxFps: currentFps,
-            activity: gameMode ? 'motion' : 'active',
-            sourceWidth: settings.width,
-            sourceHeight: settings.height,
-            nativeResolution,
-          });
-          let prepared: NativeCaptureCandidate | undefined;
-          if (gpuEncoding) {
-            const preparation = { controller: new AbortController(), queue: currentQueue };
-            nativeUpgradeAbort.current = preparation;
-            try {
-              ({ capture: prepared, plan } = await prepareHardwareScreenCapture(
-                stream, plan, currentFps, preparation.controller.signal, isCurrent,
-              ));
-            } finally {
-              if (nativeUpgradeAbort.current === preparation) nativeUpgradeAbort.current = null;
-            }
-            stockToRelease = stream;
-            stream = prepared.stream;
-            currentQueue.candidates.add(stream);
-            acquiredStream = stream;
-            videoTrack = stream.getVideoTracks()[0];
-          }
-
-          ensureCurrent();
-          await producer.replaceTrack({ track: videoTrack });
-          ensureCurrent();
-          prepared?.commit();
-
-          if (previousStream && previousStream !== stream) {
-            previousStream.getVideoTracks().forEach((track) => {
-              track.onended = null;
-              track.stop();
-            });
-            previousStream.getAudioTracks().forEach((track) => track.stop());
-          }
-          deps.localScreenRef.current = stream;
-          // The live publication now owns the attached track. Later failures or
-          // queue cleanup must never release it as an uncommitted candidate.
-          currentQueue.candidates.delete(stream);
-          acquiredStream = null;
-          videoTrack.onended = () => {
-            if (isSessionCurrent() && deps.localScreenRef.current === stream) stopScreenShare();
-          };
-          if (videoTrack.readyState === 'ended') {
-            stopScreenShare();
+          if (onlyPlaybackChanged) {
+            await updatePlayback();
             return;
           }
-          deps.setLocalScreen(stream);
+          // Read ownership at commit time, after the preceding update completed.
+          const previousStream = deps.localScreenRef.current;
+          let prepared: NativeCaptureCandidate | undefined;
+          if (native && (native.settings.preset !== preset || native.settings.fps !== currentFps ||
+              native.settings.gameMode !== gameMode || native.settings.nativeResolution !== nativeResolution)) {
+            const result = await prepareNativeScreen(native.lease, settings, native.colorSpace, currentQueue.controller.signal, isCurrent);
+            if (!result) throw new CancelledScreenPublication();
+            prepared = result.capture;
+            acquiredStream = prepared.stream;
+            currentQueue.candidates.add(acquiredStream);
+          }
+          const stream = acquiredStream ?? (native ? previousStream : null);
+          const videoTrack = stream?.getVideoTracks()[0];
+          if (!stream || !videoTrack) throw captured?.error ?? new Error('没有取得屏幕视频轨道');
+          const { width, height } = videoTrack.getSettings();
+          const plan = createScreenEncodingPlan({
+            preset, maxFps: currentFps, activity: gameMode ? 'motion' : 'active',
+            sourceWidth: width, sourceHeight: height, nativeResolution, gpuEncoding,
+          });
+          if (stream !== previousStream) {
+            ensureCurrent();
+            if (!native) videoTrack.contentHint = plan.contentHint;
+            await producer.replaceTrack({ track: videoTrack });
+            ensureCurrent();
+            prepared?.commit();
+            if (native && videoTrack.readyState === 'ended') {
+              const previousTrack = previousStream?.getVideoTracks()[0];
+              if (previousTrack?.readyState === 'live') {
+                try { await producer.replaceTrack({ track: previousTrack }); }
+                catch (error) { if (isCurrent()) stopScreenShare(); throw error; }
+              }
+              throw new Error('新的原生采集轨道已中断。');
+            }
+            deps.localScreenRef.current = stream;
+            currentQueue.candidates.delete(stream);
+            acquiredStream = null;
+            watchPublishedTrack(stream, producer, currentQueue);
+            if (previousStream) releaseScreenCaptureCandidate(previousStream);
+            if (videoTrack.readyState === 'ended') { stopScreenShare(); return; }
+            deps.setLocalScreen(stream);
+          }
+          if (native) native.settings = settings;
           if (producer.appData && typeof producer.appData === 'object')
             Object.assign(producer.appData, {
               adaptation: gameMode ? 'game' : 'content',
@@ -842,7 +817,7 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
             hasScreenAudio = false;
           }
           deps.setShareAudio(audio && hasScreenAudio);
-          if (!gpuEncoding) beginNativeUpgrade(stream, producer, currentQueue, nativeIntent, plan, currentFps, gameMode);
+          await updatePlayback();
           console.info('[screen share] 共享参数已更新', {
             preset,
             fps: currentFps,
@@ -858,9 +833,6 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
             window.alert(
               `无法更新屏幕共享：${error instanceof Error ? error.message : String(error)}`,
             );
-        } finally {
-          if (stockToRelease && currentQueue.candidates.delete(stockToRelease))
-            releaseScreenCaptureCandidate(stockToRelease);
         }
       };
       // Only commits are serialized. Every explicit settings request completes
@@ -889,7 +861,6 @@ export function useScreenPublishing(deps: useScreenPublishingDependencies) {
   );
 
   const stopScreenShare = useCallback(() => {
-    cancelNativeUpgrade();
     publicationGeneration.current += 1;
     pendingStart.current?.cancel();
     pendingStart.current = null;

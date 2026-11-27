@@ -119,6 +119,10 @@ export class RemoteControlRegistry {
     return this.requests.get(requestId);
   }
 
+  getSession(sessionId: string): RemoteControlSession | undefined {
+    return this.sessions.get(sessionId);
+  }
+
   expireRequest(requestId: string, now = Date.now()): RemoteControlRequest | null {
     const request = this.requests.get(requestId);
     if (!request || request.expiresAt > now) return null;

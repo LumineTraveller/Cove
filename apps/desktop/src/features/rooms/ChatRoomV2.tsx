@@ -77,6 +77,8 @@ export default function ChatRoomV2({
     setRoomSettings,
     setShowCreateRoom,
     shareLayout,
+    watchingPortrait,
+    onRemoteVideoSize,
     animateShareChat,
     animateLayoutControls,
     sortedMembers,
@@ -159,6 +161,8 @@ export default function ChatRoomV2({
     setPendingNativeResolution,
     pendingGpuEncoding,
     setPendingGpuEncoding,
+    pendingSmoothPlayback,
+    setPendingSmoothPlayback,
     editingScreen,
     setPendingPreset,
     setPendingFps,
@@ -196,7 +200,8 @@ export default function ChatRoomV2({
   const chatSlotRef = useRef<HTMLDivElement>(null);
   const chatToggleRef = useRef<HTMLButtonElement>(null);
   const shellRef = useRef<HTMLDivElement>(null);
-  const sharedChatDrawer = useSharedChatLayout(shellRef, shareLayout, sidebarOpen, Boolean(room && roomSynced && messagesLoaded));
+  const shareChatCanCollapse = shareLayout && !watchingPortrait;
+  const sharedChatDrawer = useSharedChatLayout(shellRef, shareChatCanCollapse, sidebarOpen, Boolean(room && roomSynced && messagesLoaded));
   useLayoutEffect(() => {
     if (!chatVisible && chatSlotRef.current?.contains(document.activeElement))
       chatToggleRef.current?.focus({ preventScroll: true });
@@ -278,10 +283,10 @@ export default function ChatRoomV2({
         className={`cove-shell ${
           sidebarOpen ? 'nav-wide' : 'nav-narrow'
         } mode-${mode} foreground-${foreground} ${chatVisible ? 'chat-open' : 'chat-closed'} ${
-          animateShareChat ? 'share-chat-animated' : ''
+          animateShareChat && shareChatCanCollapse ? 'share-chat-animated' : ''
         } ${
-          animateLayoutControls ? 'layout-controls-animated' : ''
-        } ${sharedChatDrawer ? 'share-chat-drawer' : ''}`}
+          animateLayoutControls && !watchingPortrait ? 'layout-controls-animated' : ''
+        } ${shareChatCanCollapse && sharedChatDrawer ? 'share-chat-drawer' : ''} ${watchingPortrait ? 'watching-portrait' : ''}`}
         style={appearanceStyle}
       >
         <NavigationRailV2
@@ -303,7 +308,7 @@ export default function ChatRoomV2({
           onCreate={() => setShowCreateRoom(true)}
         />
         <section className="workspace">
-          {!shareLayout ? (
+          {(!shareLayout || watchingPortrait) && (
             <>
               <header className="workspace-header">
                 <span className="workspace-room-avatar">
@@ -442,7 +447,7 @@ export default function ChatRoomV2({
                             )}
                           </div>
                         )}
-                        {rtc.inVoice && screen && !isSelf && (
+                        {rtc.inVoice && screen && !isSelf && rtc.remoteScreen?.socketId !== member.socketId && (
                           <button
                             className="watch-button"
                             onClick={() => {
@@ -462,9 +467,10 @@ export default function ChatRoomV2({
                 </div>
               </div>
             </>
-          ) : (
+          )}
+          {shareLayout && (
             <>
-              <div className="member-strip">
+              {!watchingPortrait && <div className="member-strip">
                 <div className="strip-scroll">
                   {sortedMembers.map((member) => {
                     const voice = rtc.voiceMembers.find(
@@ -597,7 +603,7 @@ export default function ChatRoomV2({
                     );
                   })}
                 </div>
-              </div>
+              </div>}
               <div className="share-layout-body">
                 <ShareViewV2
                   rtc={rtc}
@@ -624,6 +630,7 @@ export default function ChatRoomV2({
                   onRequestRemote={requestRemote}
                   onStopRemote={stopRemote}
                   onEnd={() => (rtc.localScreen ? rtc.stopScreenShare() : rtc.stopWatchingScreen())}
+                  onRemoteVideoSize={onRemoteVideoSize}
                   diagnosticsCompact={diagnosticsCompact}
                   onToggleDiagnosticsCompact={() => setDiagnosticsCompact((value) => !value)}
                 />
@@ -665,7 +672,7 @@ export default function ChatRoomV2({
             onLoadOlderMessages={loadOlderMessages}
           />
         </div>
-        {shareLayout && (
+        {shareChatCanCollapse && (
           <div className="chat-edge-toggle-anchor">
             <svg className="chat-edge-seam" aria-hidden="true" focusable="false">
               <defs>
@@ -854,6 +861,9 @@ export default function ChatRoomV2({
               : editingScreen ? '停止当前共享后可更改' : undefined
           }
           onGpuEncoding={setPendingGpuEncoding}
+          smoothPlayback={pendingSmoothPlayback}
+          onSmoothPlayback={setPendingSmoothPlayback}
+          remoteControlActive={remoteSession?.role === 'sharer'}
           confirmLabel={editingScreen ? '更新共享' : '开始共享'}
           busy={rtc.isStartingScreenShare}
           onPreset={setPendingPreset}
@@ -872,6 +882,7 @@ export default function ChatRoomV2({
               pendingNativeResolution,
               rtc.screenCompatibilityMode,
               rtc.screenGpuEncodingAvailable && pendingGpuEncoding && !rtc.screenCompatibilityMode,
+              pendingSmoothPlayback,
             ).then(started => {
               if (shouldUpdate || started) {
                 setEditingScreen(false);

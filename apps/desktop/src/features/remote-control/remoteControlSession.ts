@@ -35,7 +35,7 @@ interface InputBridge {
 export class RemoteControlLifecycle {
   private current: RemoteControlSession | null = null;
   private pending: RemoteControlSession | null = null;
-  private expectedRole: RemoteControlSession['role'] | null = null;
+  private expected: { role: RemoteControlSession['role']; sharerSocketId?: string } | null = null;
   private generation = 0;
   private connected: boolean;
   private disposed = false;
@@ -49,6 +49,7 @@ export class RemoteControlLifecycle {
       socket: SessionSocket;
       bridge?: InputBridge;
       onSession: (session: RemoteControlSession | null) => void;
+      onPlaybackPeer?: (sharerSocketId: string | null) => void;
       onNotice: (reason: string) => void;
     },
   ) {
@@ -64,14 +65,20 @@ export class RemoteControlLifecycle {
     });
   }
 
-  expectStart(role: RemoteControlSession['role']): boolean {
+  expectStart(role: RemoteControlSession['role'], sharerSocketId?: string): boolean {
     if (!this.canUseConnection() || this.current || this.pending) return false;
-    this.expectedRole = role;
+    const previous = this.expected?.sharerSocketId;
+    const target = role === 'controller' ? sharerSocketId : undefined;
+    this.expected = { role, sharerSocketId: target };
+    // Let the receiver release extra buffering while the sharer decides.
+    if (previous !== target) this.options.onPlaybackPeer?.(target ?? null);
     return true;
   }
 
   cancelExpectedStart() {
-    this.expectedRole = null;
+    const restorePlayback = this.expected?.sharerSocketId;
+    this.expected = null;
+    if (restorePlayback) this.options.onPlaybackPeer?.(null);
   }
 
   private canUseConnection() {
@@ -91,7 +98,9 @@ export class RemoteControlLifecycle {
 
   private readonly onStarted = async (session: RemoteControlSession) => {
     if (session.roomId !== this.options.roomId || !this.canUseConnection()) return;
-    if (this.expectedRole !== session.role) {
+    const expected = this.expected;
+    if (expected?.role !== session.role ||
+        (expected.sharerSocketId && session.sharerSocketId && expected.sharerSocketId !== session.sharerSocketId)) {
       // A start arriving after a local cancellation must not re-enable input.
       if (
         this.current?.sessionId !== session.sessionId &&
@@ -100,7 +109,7 @@ export class RemoteControlLifecycle {
         this.options.socket.emit('remote-control:stop', { sessionId: session.sessionId });
       return;
     }
-    this.expectedRole = null;
+    this.expected = null;
     const generation = ++this.generation;
     this.pending = session;
     let failure: string | null = null;
@@ -121,6 +130,8 @@ export class RemoteControlLifecycle {
     }
     this.pending = null;
     this.current = session;
+    if (session.role === 'controller' && !expected.sharerSocketId)
+      this.options.onPlaybackPeer?.(session.sharerSocketId ?? null);
     this.options.onSession(session);
   };
 
@@ -206,12 +217,13 @@ export class RemoteControlLifecycle {
 
   stop(notifyServer = true, reason?: string) {
     const session = this.current ?? this.pending;
+    this.cancelExpectedStart();
     this.generation += 1;
-    this.expectedRole = null;
     this.pendingMove = null;
     this.clearTransportWait();
     this.current = null;
     this.pending = null;
+    if (session?.role === 'controller') this.options.onPlaybackPeer?.(null);
     if (session?.role === 'sharer') void this.options.bridge?.setActive(null).catch(() => {});
     if (session && notifyServer && this.canUseConnection())
       this.options.socket.emit('remote-control:stop', { sessionId: session.sessionId });

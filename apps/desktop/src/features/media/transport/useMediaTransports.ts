@@ -15,7 +15,9 @@ import {
   RtpCapabilities,
   emitAsync,
   RemoteScreen,
+  AvailableScreen,
 } from '../desktopMediaSupport';
+import { checkAv1ScreenPublication } from '../screen/createAv1ScreenSender';
 import { AudioPlayoutPolicy, readAudioPlayoutMode } from './audioPlayoutPolicy';
 
 export interface useMediaTransportsDependencies {
@@ -82,22 +84,34 @@ export interface useMediaTransportsDependencies {
   readonly masterOutputVolumeRef: import('react').MutableRefObject<number>;
   readonly startMeters: () => void;
   readonly screenStreams: import('react').MutableRefObject<Map<string, MediaStream>>;
+  readonly availableScreensRef: import('react').MutableRefObject<Map<string, AvailableScreen>>;
 }
 
 export function useMediaTransports(deps: useMediaTransportsDependencies) {
+  const remoteControlGroup = useRef<string | null>(null);
   const audioPlayoutPolicy = useRef<AudioPlayoutPolicy | null>(null);
-  if (!audioPlayoutPolicy.current)
-    audioPlayoutPolicy.current = new AudioPlayoutPolicy(readAudioPlayoutMode());
+  const getPlayoutPolicy = useCallback(() => {
+    audioPlayoutPolicy.current ??= new AudioPlayoutPolicy(readAudioPlayoutMode(), {
+      getScreenPlayback: groupId => deps.availableScreensRef.current.get(groupId.slice('screen-'.length)),
+      remoteControlGroupId: remoteControlGroup.current,
+    });
+    return audioPlayoutPolicy.current;
+  }, []);
+  const setScreenRemoteControl = useCallback((sharerSocketId: string | null) => {
+    remoteControlGroup.current = sharerSocketId ? `screen-${sharerSocketId}` : null;
+    audioPlayoutPolicy.current?.setRemoteControlGroup(remoteControlGroup.current);
+  }, []);
+  const refreshScreenPlayback = useCallback((socketId: string) => {
+    audioPlayoutPolicy.current?.refreshScreenPlayback(`screen-${socketId}`);
+  }, []);
 
   useEffect(() => {
-    if (!audioPlayoutPolicy.current)
-      audioPlayoutPolicy.current = new AudioPlayoutPolicy(readAudioPlayoutMode());
-    const policy = audioPlayoutPolicy.current;
+    const policy = getPlayoutPolicy();
     return () => {
       policy.dispose();
       if (audioPlayoutPolicy.current === policy) audioPlayoutPolicy.current = null;
     };
-  }, []);
+  }, [getPlayoutPolicy]);
 
   // ── 初始化 mediasoup Device + 两条 transport ────────────────────────────────
 
@@ -140,15 +154,26 @@ export function useMediaTransports(deps: useMediaTransportsDependencies) {
           .catch(err);
       });
 
-      st.on('produce', ({ kind, rtpParameters, appData }, ok, err) => {
-        emitAsync<{ producerId: string }>(deps.socket, 'ms:produce', {
-          transportId: st.id,
-          kind,
-          rtpParameters,
-          appData,
-        })
-          .then(({ producerId }) => ok({ id: producerId }))
-          .catch(err);
+      st.on('produce', async ({ kind, rtpParameters, appData }, ok, err) => {
+        try {
+          // mediasoup has finished local negotiation at this point. Confirm
+          // GPU AV1 can start a coded sequence before advertising the producer.
+          const check = checkAv1ScreenPublication(appData);
+          if (check) {
+            await check;
+            ensureCurrent();
+            if (st.closed) throw new Error('共享通道已关闭');
+          }
+          const { producerId } = await emitAsync<{ producerId: string }>(deps.socket, 'ms:produce', {
+            transportId: st.id,
+            kind,
+            rtpParameters,
+            appData,
+          });
+          ok({ id: producerId });
+        } catch (error) {
+          err(error instanceof Error ? error : new Error(String(error)));
+        }
       });
 
       st.on('connectionstatechange', (state) => {
@@ -317,10 +342,7 @@ export function useMediaTransports(deps: useMediaTransportsDependencies) {
         });
         deps.consumerByProducer.current.set(producerId, consumer.id);
         console.log(`%c[ms-client] 开始接收 ${kind} 流，来自 ${peerId}`, 'color:#06b6d4');
-        const playoutPolicy = audioPlayoutPolicy.current ??
-          new AudioPlayoutPolicy(readAudioPlayoutMode());
-        audioPlayoutPolicy.current = playoutPolicy;
-        stopAudioPlayout = playoutPolicy.watch(
+        stopAudioPlayout = getPlayoutPolicy().watch(
           consumer,
           `${streamGroup}-${peerId}`,
           kind,
@@ -484,7 +506,7 @@ export function useMediaTransports(deps: useMediaTransportsDependencies) {
           deps.pendingProducers.current.delete(producerId);
       }
     },
-    [deps.removeRemoteApplicationAudio, deps.socket],
+    [deps.removeRemoteApplicationAudio, deps.socket, getPlayoutPolicy],
   );
-  return { setupDevice, consumeProducer };
+  return { setupDevice, consumeProducer, refreshScreenPlayback, setScreenRemoteControl };
 }

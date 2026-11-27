@@ -41,6 +41,8 @@ function fixture() {
     consumerByProducer: ref(new Map()), pendingProducers: ref(new Set()),
     consumers: ref(new Map()), remoteAudioOutputs: ref(new Map()),
     audioEls: ref(new Map()), screenStreams: ref(new Map()),
+    availableScreensRef: ref(new Map()),
+    refreshScreenPlayback() {},
     setRemoteScreen(value: any) {
       deps.screen = typeof value === 'function' ? value(deps.screen) : value;
       events.push('screen-ready');
@@ -86,6 +88,30 @@ test('desktop prepares screen before resume and still awaits the acknowledgement
   assert.ok(f.deps.screen.stream);
   f.reply({});
   assert.equal(await pending, true);
+});
+
+test('the current publisher controls smoothing and either remote-control override takes priority', async t => {
+  installStream(t);
+  const f = fixture();
+  const screen = { socketId: 'peer-1', videoProducerId: 'producer-1', smoothPlayback: true, remoteControlActive: false };
+  f.deps.availableScreensRef.current.set(screen.socketId, screen);
+  const pending = f.api.consumeProducer('producer-1', 'peer-1', 'video', { type: 'screen' });
+  await flush();
+  f.reply({});
+  assert.equal(await pending, true);
+  assert.equal(f.consumer.rtpReceiver.playoutDelayHint, .035);
+  f.api.setScreenRemoteControl(screen.socketId);
+  assert.equal(f.consumer.rtpReceiver.playoutDelayHint, null);
+  screen.remoteControlActive = true;
+  f.api.setScreenRemoteControl(null);
+  assert.equal(f.consumer.rtpReceiver.playoutDelayHint, null);
+  screen.remoteControlActive = false;
+  f.api.refreshScreenPlayback(screen.socketId);
+  assert.equal(f.consumer.rtpReceiver.playoutDelayHint, .035);
+  screen.smoothPlayback = false;
+  f.api.refreshScreenPlayback(screen.socketId);
+  assert.equal(f.consumer.rtpReceiver.playoutDelayHint, null);
+  f.consumer.close();
 });
 
 for (const order of [['video', 'audio'], ['audio', 'video']]) {

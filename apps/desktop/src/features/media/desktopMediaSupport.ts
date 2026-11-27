@@ -3,6 +3,7 @@ import { types as MsTypes } from 'mediasoup-client';
 import { Socket } from 'socket.io-client';
 import type { ScreenFps } from './screen/screenCapture';
 import type { FrameStabilitySnapshot } from './diagnostics/frameIntervals';
+import type { FrameRateDiagnosis } from './diagnostics/mediaDiagnostics';
 
 export type Transport = MsTypes.Transport;
 
@@ -19,11 +20,16 @@ export interface MediaStats {
   rtt: number | null;
   fps: number | null;
   trackFps: number | null;
+  nativeCaptureFps: number | null;
+  nativeDeliveryFps: number | null;
   captureFps: number | null;
   encodeFps: number | null;
   sendFps: number | null;
   receiveFps: number | null;
   decodeFps: number | null;
+  frameRateDiagnosis: FrameRateDiagnosis | null;
+  captureBackend: 'native-gpu' | 'chromium' | null;
+  nativeCaptureStartTimedOut: boolean;
   nativeDeliveryStability: FrameStabilitySnapshot | null;
   presentationStability: FrameStabilitySnapshot | null;
   loss: number | null;
@@ -64,11 +70,16 @@ export const EMPTY_STATS: MediaStats = {
   rtt: null,
   fps: null,
   trackFps: null,
+  nativeCaptureFps: null,
+  nativeDeliveryFps: null,
   captureFps: null,
   encodeFps: null,
   sendFps: null,
   receiveFps: null,
   decodeFps: null,
+  frameRateDiagnosis: null,
+  captureBackend: null,
+  nativeCaptureStartTimedOut: false,
   nativeDeliveryStability: null,
   presentationStability: null,
   loss: null,
@@ -169,7 +180,19 @@ export interface RemoteScreen {
   stream: MediaStream;
 }
 
-export interface AvailableScreen {
+export interface ScreenPlaybackSettings {
+  smoothPlayback: boolean;
+  remoteControlActive: boolean;
+}
+
+export function readScreenPlaybackSettings(appData: Record<string, unknown>): ScreenPlaybackSettings {
+  return {
+    smoothPlayback: appData.smoothPlayback === true,
+    remoteControlActive: appData.remoteControlActive === true,
+  };
+}
+
+export interface AvailableScreen extends Partial<ScreenPlaybackSettings> {
   socketId: string;
   videoProducerId: string;
   audioProducerId?: string;

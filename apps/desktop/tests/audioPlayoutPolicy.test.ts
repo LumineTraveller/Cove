@@ -29,6 +29,7 @@ const cleanStats = (overrides: Partial<Stats> = {}): Stats => ({
 
 function policyFixture(options: { synchronized?: boolean; videoReceiver?: Record<string, unknown> } = {}) {
   let now = 1_000;
+  let playback = { smoothPlayback: false, remoteControlActive: false };
   let stats = cleanStats();
   let onGetStats: (() => Promise<Map<string, object>>) | null = null;
   const receiver: Record<string, unknown> = { jitterBufferTarget: null, playoutDelayHint: null };
@@ -59,6 +60,7 @@ function policyFixture(options: { synchronized?: boolean; videoReceiver?: Record
     off(event, listener) { listeners.get(event)?.delete(listener); },
   };
   const policy = new AudioPlayoutPolicy('adaptive', {
+    getScreenPlayback: () => playback,
     now: () => now,
     setInterval: (() => 1) as unknown as typeof globalThis.setInterval,
     clearInterval: (() => {}) as typeof globalThis.clearInterval,
@@ -85,6 +87,10 @@ function policyFixture(options: { synchronized?: boolean; videoReceiver?: Record
     listeners,
     observerCloseListeners,
     policy,
+    setScreenPlayback(smoothPlayback: boolean, remoteControlActive = false) {
+      playback = { smoothPlayback, remoteControlActive };
+      policy.refreshScreenPlayback('peer-1-screen');
+    },
     setStats(next: Partial<Stats>) { stats = { ...stats, ...next }; },
     setGetStats(callback: (() => Promise<Map<string, object>>) | null) { onGetStats = callback; },
     setNow(value: number) { now = value; },
@@ -313,6 +319,99 @@ test('an unsupported receiver disables adjustment for the whole synchronized gro
   assert.equal(f.receiver.jitterBufferTarget, null);
   assert.deepEqual(f.videoConsumer?.rtpReceiver, {});
   f.stop();
+  f.policy.dispose();
+});
+
+test('publisher smoothing applies the same floor to audio and video and still adapts to jitter', async () => {
+  const f = policyFixture({ synchronized: true });
+  const video = f.videoConsumer!;
+  const read = () => [f.receiver.jitterBufferTarget, video.rtpReceiver?.jitterBufferTarget];
+  await f.baseline();
+  for (let i = 0; i < 8; i++) await f.tick({
+    packetsReceived: (i + 2) * 50,
+    totalSamplesReceived: (i + 2) * 48_000,
+  });
+  assert.deepEqual(read(), [20, 20]);
+  f.setScreenPlayback(true);
+  assert.deepEqual(read(), [35, 35]);
+  await f.tick({ packetsReceived: 498, packetsLost: 2 }, 2_500);
+  assert.deepEqual(read(), [80, 80], 'audio recovery may request more than the floor');
+  f.stop();
+  assert.deepEqual(read(), [null, 35], 'video keeps the floor when screen audio leaves');
+  const stopLateAudio = f.policy.watch(f.consumer, 'peer-1-screen', 'audio', true);
+  assert.deepEqual(read(), [40, 40]);
+  f.setScreenPlayback(false);
+  assert.deepEqual(read(), [40, 40]);
+  stopLateAudio();
+  assert.deepEqual(read(), [null, null]);
+  f.policy.dispose();
+});
+
+test('smooth playback leaves voice and application audio targets alone', () => {
+  const f = policyFixture();
+  f.setScreenPlayback(true, true);
+  assert.equal(f.receiver.jitterBufferTarget, 40);
+  f.stop();
+  f.policy.dispose();
+});
+
+test('remote control suspends smooth playback only for its screen and restores the saved preference', () => {
+  const settings = new Map([['screen-first', { smoothPlayback: true }]]);
+  const policy = new AudioPlayoutPolicy('adaptive', { getScreenPlayback: id => settings.get(id) });
+  const watchVideo = (id: string) => {
+    const receiver = { jitterBufferTarget: null as number | null };
+    const stop = policy.watch({
+      id, rtpReceiver: receiver, getStats: async () => new Map(),
+    }, id, 'video', true);
+    return { receiver, stop };
+  };
+  const first = watchVideo('screen-first');
+  policy.setRemoteControlGroup('screen-first');
+  const second = watchVideo('screen-second');
+  assert.equal(first.receiver.jitterBufferTarget, null);
+  assert.equal(second.receiver.jitterBufferTarget, null);
+  settings.set('screen-second', { smoothPlayback: true });
+  policy.refreshScreenPlayback('screen-second');
+  assert.equal(second.receiver.jitterBufferTarget, 35);
+  policy.setRemoteControlGroup('screen-second');
+  assert.equal(first.receiver.jitterBufferTarget, 35);
+  assert.equal(second.receiver.jitterBufferTarget, null);
+  second.stop();
+  const replacement = watchVideo('screen-second');
+  assert.equal(replacement.receiver.jitterBufferTarget, null);
+  policy.setRemoteControlGroup(null);
+  assert.equal(replacement.receiver.jitterBufferTarget, 35);
+  policy.dispose();
+});
+
+test('a server remote-control update clears both targets while the publisher setting is enabled', async () => {
+  const f = policyFixture({ synchronized: true });
+  const read = () => [f.receiver.jitterBufferTarget, f.videoConsumer?.rtpReceiver?.jitterBufferTarget];
+  await f.baseline();
+  await f.tick({ packetsReceived: 98, packetsLost: 2, timestamp: 2_000 });
+  assert.deepEqual(read(), [80, 80]);
+  f.setScreenPlayback(true, true);
+  assert.deepEqual(read(), [null, null]);
+  await f.tick({ jitter: .09, timestamp: 5_000 });
+  assert.deepEqual(read(), [null, null]);
+  f.setScreenPlayback(true);
+  assert.deepEqual(read(), [80, 80]);
+  f.policy.dispose();
+});
+
+test('when the smoother target is rejected, the screen video returns to browser timing', () => {
+  let target: number | null = null;
+  const videoReceiver = {
+    get jitterBufferTarget() { return target; },
+    set jitterBufferTarget(value: number | null) {
+      if (value === 35) throw new Error('receiver rejected the smoother target');
+      target = value;
+    },
+  };
+  const f = policyFixture({ synchronized: true, videoReceiver });
+  f.stop();
+  f.setScreenPlayback(true);
+  assert.equal(target, null);
   f.policy.dispose();
 });
 

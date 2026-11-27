@@ -317,6 +317,16 @@ fake.emit = (event: string, ...args: unknown[]) => {
       ack({ producerId: id });
       break;
     }
+    case "screen:set-smooth-playback": {
+      const entry = producers.get(data?.producerId);
+      if (entry?.peerId !== fake.id || entry.appData.type !== "screen" || typeof data.enabled !== "boolean")
+        ack({ error: "Invalid QA playback setting" });
+      else {
+        entry.appData.smoothPlayback = data.enabled;
+        ack({ ok: true });
+      }
+      break;
+    }
     case "ms:get-producers":
       ack(
         [...producers.values()]
@@ -430,9 +440,13 @@ class FakeProducer {
 class FakeConsumer {
   id: string;
   track: MediaStreamTrack;
-  rtpReceiver = {};
+  rtpReceiver = { jitterBufferTarget: null };
   closed = false;
   private listeners = new Map<string, Handler[]>();
+  observer = {
+    on: (event: string, handler: Handler) => this.on(`observer:${event}`, handler),
+    off: (event: string, handler: Handler) => this.off(`observer:${event}`, handler),
+  };
   constructor(id: string, track: MediaStreamTrack) {
     this.id = id;
     this.track = track;
@@ -443,7 +457,11 @@ class FakeConsumer {
   off(event: string, handler: Handler) {
     this.listeners.set(event, (this.listeners.get(event) ?? []).filter((item) => item !== handler));
   }
-  close() { this.closed = true; }
+  close() {
+    if (this.closed) return;
+    this.closed = true;
+    for (const handler of this.listeners.get("observer:close") ?? []) handler();
+  }
 }
 
 class FakeTransport {
@@ -631,6 +649,11 @@ function setTone(tone: "red" | "blue" | "green") {
 }
 
 (window as any).shareChatQa = {
+  resizeRemoteShare: (width: number, height: number) => {
+    remoteCanvas.width = width;
+    remoteCanvas.height = height;
+    paintCanvas(remoteCanvas, 'red');
+  },
   resizeLocalShare: (width: number, height: number) => {
     if (!currentSharedCanvas) throw new Error('No local share');
     currentSharedCanvas.width = width; currentSharedCanvas.height = height;
@@ -673,6 +696,25 @@ function setTone(tone: "red" | "blue" | "green") {
     publish("ms:producer-closed", {
       producerId: "qa-peer-screen", peerId: peerMember.socketId, sourceType: "screen",
     });
+  },
+  endRemoteShareAudio: () => {
+    const producerId = "qa-peer-screen-audio";
+    const audio = producers.get(producerId);
+    if (!audio) return;
+    producers.delete(producerId);
+    publish("ms:producer-closed", { producerId, peerId: peerMember.socketId, sourceType: "screen-audio" });
+    publish("ms:consumer-closed", { consumerId: `qa-consumer-${producerId}` });
+    audio.track.stop();
+  },
+  restoreRemoteShareAudio: () => {
+    const id = "qa-peer-screen-audio";
+    if (producers.has(id)) return;
+    const audio = {
+      id, peerId: peerMember.socketId, kind: "audio" as const,
+      appData: { type: "screen-audio" }, track: makeScreenAudioTrack(),
+    };
+    producers.set(id, audio);
+    publish("ms:new-producer", { producerId: id, peerId: audio.peerId, kind: audio.kind, appData: audio.appData });
   },
   restoreRemoteShare: () => {
     if (producers.has("qa-peer-screen")) return;

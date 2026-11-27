@@ -1,5 +1,6 @@
 import { Server } from 'socket.io';
 import { cancelRemoteRequestExpiration } from './requestExpiration';
+import { setScreenRemoteControlActive } from '../media/screenPublication';
 
 import {
   RemoteControlRegistry,
@@ -19,6 +20,7 @@ export interface CreateControlServiceDependencies {
 
 export function createControlService(deps: CreateControlServiceDependencies) {
   function emitRemoteControlStopped(session: RemoteControlSession, reason: string) {
+    setScreenRemoteControlActive(deps.io, session, false);
     const payload = { sessionId: session.sessionId, reason };
     deps.io.to(session.controllerSocketId).emit('remote-control:stopped', payload);
     deps.io.to(session.sharerSocketId).emit('remote-control:stopped', payload);

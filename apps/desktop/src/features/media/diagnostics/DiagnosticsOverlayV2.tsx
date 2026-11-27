@@ -1,8 +1,17 @@
 import { Radio, SquaresFour } from '@phosphor-icons/react';
 import { useWebRTC } from '../useWebRTC';
 import { isScreenEncodingWithinPlan, screenEncodingPlanLabel } from '../screen/screenCapture';
-import { diagnosticPacketLoss } from './mediaDiagnostics';
+import { diagnosticPacketLoss, type FrameRateGap } from './mediaDiagnostics';
 import { frameStabilityDetail, frameStabilityLabel } from './frameStabilityView';
+
+const FRAME_RATE_STAGE_LABELS: Record<FrameRateGap['stage'], string> = {
+  capture: '原生供帧',
+  delivery: '原生轨道交付',
+  'encoder-input': 'WebRTC 编码前输入',
+  encode: '编码',
+  send: 'RTP 发送',
+  decode: '解码',
+};
 
 export function DiagnosticsOverlayV2({
   rtc,
@@ -18,6 +27,19 @@ export function DiagnosticsOverlayV2({
   const fps = rtc.localScreen ? rtc.stats.sendFps : rtc.stats.receiveFps;
   const sending = rtc.stats.role === 'sender' ||
     (rtc.stats.role === 'idle' && Boolean(rtc.localScreen));
+  const { frameRateDiagnosis, qualityLimitation, captureBackend, nativeCaptureStartTimedOut } = rtc.stats;
+  const encoderImplementation = rtc.stats.encoderImplementation ?? '';
+  const encoderType = encoderImplementation.startsWith('MediaFoundationVideoEncodeAccelerator') ? 'GPU'
+    : /^(?:libaom|libvpx)\b/i.test(encoderImplementation) ? 'CPU' : null;
+  const qualityLabel = qualityLimitation === 'cpu' ? 'CPU'
+    : qualityLimitation === 'bandwidth' ? '带宽'
+    : qualityLimitation === 'other' ? '其他' : null;
+  const frameRateStatus = {
+    pending: '等待可比较的帧率样本',
+    paused: sending ? '发送已暂停' : '接收已暂停',
+    steady: sending ? '接近当前目标帧率' : '解码跟上接收',
+    'awaiting-complete-frame': '已收到数据包，暂无完整帧',
+  };
   const lowSample = sending ? rtc.stats.nativeDeliveryStability : rtc.stats.presentationStability;
   const lowRows = <>
     <div>
@@ -70,7 +92,7 @@ export function DiagnosticsOverlayV2({
           <div>
             <span
               title={rtc.localScreen
-                ? '报告为轨道 getSettings().frameRate；源为 WebRTC 送入编码器前的帧统计，不代表底层 DXGI 取帧速度。'
+                ? '报告为轨道声明帧率。源统计 WebRTC 编码前收到的视频帧。'
                 : '接收和解码分别表示对应阶段的视频帧率。'}
             >
               {rtc.localScreen ? '报告/源/编码/发送' : '接收/解码'}
@@ -84,6 +106,12 @@ export function DiagnosticsOverlayV2({
               fps
             </b>
           </div>
+          {sending && captureBackend === 'native-gpu' && (
+            <div>
+              <span title="从原生组件收到的帧率与写入共享轨道的帧率">原生收到/交付</span>
+              <b>{rtc.stats.nativeCaptureFps ?? '—'} / {rtc.stats.nativeDeliveryFps ?? '—'} fps</b>
+            </div>
+          )}
           <div>
             <span>原始/编码/档位</span>
             <b>
@@ -99,7 +127,10 @@ export function DiagnosticsOverlayV2({
           {lowRows}
           <div>
             <span>编码器</span>
-            <b>{rtc.stats.codec ?? '—'}</b>
+            <b title={encoderImplementation || undefined}>
+              {rtc.stats.codec ?? '—'}
+              {encoderType ? ` · ${encoderType}` : ''}
+            </b>
           </div>
           <div>
             <span>RTP 码率</span>
@@ -123,12 +154,38 @@ export function DiagnosticsOverlayV2({
               {diagnosticPacketLoss(rtc.stats) ?? '—'}% / {rtc.stats.retransmitBitrate ?? '—'} kbps
             </b>
           </div>
-          <div>
-            <span>掉帧/受限原因</span>
-            <b>
-              {rtc.stats.droppedFrames ?? '—'} / {rtc.stats.qualityLimitation ?? '—'}
-            </b>
-          </div>
+          {frameRateDiagnosis?.status === 'limited' ? frameRateDiagnosis.gaps.map(gap => (
+            <div key={gap.stage}>
+              <span title="同一采样区间内的实际帧率 / 该阶段参考帧率">
+                帧率受限 · {FRAME_RATE_STAGE_LABELS[gap.stage]}
+              </span>
+              <b>{gap.observedFps} / {gap.referenceFps} fps</b>
+            </div>
+          )) : (
+            <div>
+              <span>帧率受限</span>
+              <b>{frameRateStatus[frameRateDiagnosis?.status ?? 'pending']}</b>
+            </div>
+          )}
+          {rtc.stats.droppedFrames != null && (
+            <div>
+              <span>掉帧</span>
+              <b>{rtc.stats.droppedFrames} 帧/秒</b>
+            </div>
+          )}
+          {qualityLabel && (
+            <div>
+              <span title="WebRTC 对分辨率或帧率进行质量调节的原因">WebRTC 质量调节</span>
+              <b>{qualityLabel}</b>
+            </div>
+          )}
+          {captureBackend && (
+            <div>
+              <span>采集后端</span>
+              <b>{captureBackend === 'native-gpu' ? 'Cove 原生' : 'Chromium'}
+                {nativeCaptureStartTimedOut && ' · 原生启动超时'}</b>
+            </div>
+          )}
           <div>
             <span>协议/来源</span>
             <b>

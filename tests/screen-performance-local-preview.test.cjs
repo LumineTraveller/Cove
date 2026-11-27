@@ -10,7 +10,8 @@ const source=ts.transpileModule(fs.readFileSync(path.join(__dirname,'../apps/des
 }).outputText;
 vm.runInNewContext(source,{exports:fixtureExports,require:name=>{
   if(name==='./screen-performance-pattern-layouts.json')return require('../apps/desktop/tests/ui/screen-performance-pattern-layouts.json');
-  assert.match(name,/nativeScreenCapture$/);return {};
+  if(name==='./screen-performance-quality-chart.json')return require('../apps/desktop/tests/ui/screen-performance-quality-chart.json');
+  assert.match(name,/nativeScreenCapture(?:Diagnostics)?$/);return {};
 },
   MediaStream:FakeStream,performance:{now:()=>1234},URLSearchParams});
 const {screenPerformanceLocalPreviewEnabled,createScreenPerformanceLocalPreviewBinding,screenPerformanceLocalPreviewSnapshot}=fixtureExports;
@@ -51,7 +52,7 @@ test('product sender throttling is an explicit publisher-only opt-in and retains
 test('ZeroCopy control is appended beside the existing AllowWgc feature without changing product code',()=>{
   const runner=fs.readFileSync(path.join(__dirname,'../apps/desktop/tests/ui/screen-performance.electron.cjs'),'utf8');
   assert.match(runner,/if\(captureFeatures&&!\['ZeroCopyDesktopCapture'\]\.includes\(captureFeatures\)\)/);
-  assert.match(runner,/appendSwitch\('enable-features',\['AllowWgcScreenCapturer',captureFeatures\]\.filter\(Boolean\)\.join\(','\)\)/);
+  assert.match(runner,/appendSwitch\('enable-features',\['AllowWgcScreenCapturer',captureFeatures,/);
 });
 
 function setup(){
@@ -131,7 +132,7 @@ test('disabled summary distinguishes an unexpected mounted preview',()=>{
 
 test('fixture reuses the product component on the same local stream after the receiver video',()=>{
   const integration=fs.readFileSync(path.join(__dirname,'../apps/desktop/tests/ui/media-integration.tsx'),'utf8');
-  assert.match(integration,/import \{LocalScreenVideo\} from '\.\.\/\.\.\/src\/features\/media\/screen\/ScreenVideo'/);
+  assert.match(integration,/import \{[^}]*\bLocalScreenVideo\b[^}]*\} from '\.\.\/\.\.\/src\/features\/media\/screen\/ScreenVideo'/);
   assert.match(integration,/localPreviewEnabled&&rtc\.localScreen&&<section data-cove-performance-local-preview="1"><LocalScreenVideo stream=\{rtc\.localScreen\}/);
   assert.ok(integration.indexOf('<video ref={video}')<integration.indexOf('<LocalScreenVideo stream={rtc.localScreen}'));
   const fixture=fs.readFileSync(path.join(__dirname,'../apps/desktop/tests/ui/screen-performance-fixture.ts'),'utf8');

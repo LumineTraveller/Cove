@@ -18,6 +18,7 @@ export interface useScreenViewingDependencies {
     import('react').SetStateAction<AvailableScreen[]>
   >;
   readonly availableScreensRef: import('react').MutableRefObject<Map<string, AvailableScreen>>;
+  readonly refreshScreenPlayback: (socketId: string) => void;
   readonly consumers: import('react').MutableRefObject<
     Map<
       string,
@@ -90,8 +91,12 @@ export function useScreenViewing(deps: useScreenViewingDependencies) {
 
   const storeAvailableScreen = useCallback(
     (value: AvailableScreen) => {
-      if (isStaleScreenPublication(deps.availableScreensRef.current.get(value.socketId), value)) return;
+      const current = deps.availableScreensRef.current.get(value.socketId);
+      if (isStaleScreenPublication(current, value)) return;
       deps.availableScreensRef.current.set(value.socketId, value);
+      if (current?.smoothPlayback !== value.smoothPlayback ||
+          current?.remoteControlActive !== value.remoteControlActive)
+        deps.refreshScreenPlayback(value.socketId);
       publishAvailableScreens();
       recovery.current?.sourceAvailable(value);
     },
@@ -103,6 +108,7 @@ export function useScreenViewing(deps: useScreenViewingDependencies) {
       const current = deps.availableScreensRef.current.get(socketId);
       if (!current || (videoProducerId && current.videoProducerId !== videoProducerId)) return;
       deps.availableScreensRef.current.delete(socketId);
+      deps.refreshScreenPlayback(socketId);
       publishAvailableScreens();
     },
     [publishAvailableScreens],

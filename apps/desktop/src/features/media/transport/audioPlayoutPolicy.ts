@@ -1,5 +1,8 @@
+import type { ScreenPlaybackSettings } from '../desktopMediaSupport';
+
 export const INITIAL_AUDIO_PLAYOUT_TARGET_MS = 40;
 
+const SMOOTH_SCREEN_TARGET_MS = 35;
 const TARGETS_MS = [20, 40, 80, 120] as const;
 const SAMPLE_INTERVAL_MS = 1_000;
 const MAX_STATS_WINDOW_MS = 3_000;
@@ -129,6 +132,8 @@ interface PolicyGroup {
 }
 
 export interface AudioPlayoutPolicyOptions {
+  getScreenPlayback?: (groupId: string) => Partial<ScreenPlaybackSettings> | undefined;
+  remoteControlGroupId?: string | null;
   now?: () => number;
   sampleIntervalMs?: number;
   minIncreaseIntervalMs?: number;
@@ -238,11 +243,13 @@ function assessWindow(
 function createTargetControl(receiver: AudioPlayoutReceiver | undefined): PlayoutTargetControl | null {
   if (!receiver) return null;
   let activeApi: 'jitterBufferTarget' | 'playoutDelayHint' | null = null;
+  let appliedMs: number | null = null;
   const trySet = (api: 'jitterBufferTarget' | 'playoutDelayHint', milliseconds: number) => {
     try {
       if (api === 'jitterBufferTarget') receiver.jitterBufferTarget = milliseconds;
       else receiver.playoutDelayHint = milliseconds / 1_000;
       activeApi = api;
+      appliedMs = milliseconds;
       return true;
     } catch {
       return false;
@@ -250,6 +257,7 @@ function createTargetControl(receiver: AudioPlayoutReceiver | undefined): Playou
   };
   return {
     set(milliseconds) {
+      if (appliedMs === milliseconds) return true;
       if (activeApi === 'jitterBufferTarget') return trySet('jitterBufferTarget', milliseconds);
       if (activeApi === 'playoutDelayHint') return trySet('playoutDelayHint', milliseconds);
       if ('jitterBufferTarget' in receiver && trySet('jitterBufferTarget', milliseconds)) return true;
@@ -264,6 +272,7 @@ function createTargetControl(receiver: AudioPlayoutReceiver | undefined): Playou
         // Keep the user agent's last accepted value if it no longer accepts reset.
       }
       activeApi = null;
+      appliedMs = null;
     },
   };
 }
@@ -280,11 +289,15 @@ export class AudioPlayoutPolicy {
   private timer: ReturnType<typeof globalThis.setInterval> | null = null;
   private sampling = false;
   private disposed = false;
+  private readonly getScreenPlayback: AudioPlayoutPolicyOptions['getScreenPlayback'];
+  private remoteControlGroupId: string | null;
 
   constructor(
     private readonly mode: AudioPlayoutMode = 'adaptive',
     options: AudioPlayoutPolicyOptions = {},
   ) {
+    this.getScreenPlayback = options.getScreenPlayback;
+    this.remoteControlGroupId = options.remoteControlGroupId ?? null;
     this.now = options.now ?? monotonicNow;
     this.intervalMs = options.sampleIntervalMs ?? SAMPLE_INTERVAL_MS;
     this.minIncreaseIntervalMs = options.minIncreaseIntervalMs ?? MIN_INCREASE_INTERVAL_MS;
@@ -294,6 +307,27 @@ export class AudioPlayoutPolicy {
     this.cancel = options.clearInterval ?? globalThis.clearInterval.bind(globalThis);
   }
 
+  refreshScreenPlayback(groupId: string): void {
+    if (this.disposed) return;
+    const group = this.groups.get(groupId);
+    if (group?.synchronized && group.managed && !this.applyGroupTarget(group, group.targetMs, false))
+      this.disableGroup(group);
+    this.syncTimer();
+  }
+
+  setRemoteControlGroup(groupId: string | null): void {
+    if (this.disposed || this.remoteControlGroupId === groupId) return;
+    const previous = this.remoteControlGroupId;
+    this.remoteControlGroupId = groupId;
+    if (previous !== null) this.refreshScreenPlayback(previous);
+    if (groupId !== null) this.refreshScreenPlayback(groupId);
+  }
+
+  private isControlled(group: PolicyGroup): boolean {
+    return group.synchronized && (this.remoteControlGroupId === group.id ||
+      this.getScreenPlayback?.(group.id)?.remoteControlActive === true);
+  }
+
   watch(
     consumer: AudioPlayoutConsumer,
     groupId: string,
@@ -301,14 +335,13 @@ export class AudioPlayoutPolicy {
     synchronizedGroup = false,
   ): () => void {
     if (this.disposed || consumer.closed || consumer.track?.readyState === 'ended') return () => {};
-    if (this.mode === 'native') return () => {};
+    if (!synchronizedGroup && (kind !== 'audio' || this.mode === 'native')) return () => {};
 
     const control = createTargetControl(consumer.rtpReceiver);
-    if (this.mode === 'legacy') {
-      if (kind === 'audio') control?.set(80);
+    if (!synchronizedGroup && this.mode === 'legacy') {
+      control?.set(80);
       return () => control?.clear();
     }
-    if (kind !== 'audio' && !synchronizedGroup) return () => {};
 
     let group = this.groups.get(groupId);
     if (!group) {
@@ -336,24 +369,22 @@ export class AudioPlayoutPolicy {
     member.unbind = this.bindCleanup(consumer, stop);
     group.members.set(consumer.id, member);
 
-    const hasAudioMember = [...group.members.values()].some((member) => member.kind === 'audio');
-    const shouldApplyTarget = !group.synchronized || hasAudioMember;
-    if (group.managed && shouldApplyTarget && !this.applyGroupTarget(group, group.targetMs, false))
+    if (group.managed && !this.applyGroupTarget(group, group.targetMs, false))
       this.disableGroup(group);
     this.syncTimer();
     return stop;
   }
 
   async sampleNow(): Promise<void> {
-    if (this.disposed || this.sampling) return;
+    if (this.disposed || this.sampling || this.mode !== 'adaptive') return;
     this.sampling = true;
     try {
-      const groups = [...this.groups.values()].filter((group) => group.managed);
+      const groups = [...this.groups.values()].filter((group) => group.managed && !this.isControlled(group));
       await Promise.all(groups.map(async (group) => {
         const audioMembers = [...group.members.values()].filter((member) => member.kind === 'audio');
         if (!audioMembers.length || this.disposed) return;
         const assessments = await Promise.all(audioMembers.map((member) => this.sampleMember(member)));
-        if (this.disposed || this.groups.get(group.id) !== group || !group.managed) return;
+        if (this.disposed || this.groups.get(group.id) !== group || !group.managed || this.isControlled(group)) return;
         if (assessments.some((assessment) => assessment.health === 'severe')) {
           this.increaseTarget(group, 120);
         } else if (assessments.some((assessment) => assessment.health === 'degraded')) {
@@ -413,13 +444,34 @@ export class AudioPlayoutPolicy {
   }
 
   private applyGroupTarget(group: PolicyGroup, targetMs: number, recordChange: boolean): boolean {
-    for (const member of group.members.values()) {
-      if (!member.control?.set(targetMs)) return false;
+    if (this.isControlled(group)) {
+      // Use WebRTC's own jitter adaptation and A/V synchronization during input feedback.
+      for (const member of group.members.values()) member.control?.clear();
+      return true;
     }
+    const smoothed = group.synchronized && this.getScreenPlayback?.(group.id)?.smoothPlayback === true &&
+      this.setGroupReceivers(group, targetMs, true);
+    if (!smoothed && !this.setGroupReceivers(group, targetMs, false)) return false;
     group.targetMs = targetMs;
     if (recordChange) {
       group.lastTargetChangeAt = this.now();
       group.stableWindows = 0;
+    }
+    return true;
+  }
+
+  private setGroupReceivers(group: PolicyGroup, targetMs: number, smooth: boolean): boolean {
+    const hasAudio = [...group.members.values()].some(member => member.kind === 'audio');
+    const adaptiveTarget = this.mode === 'adaptive' && hasAudio ? targetMs : null;
+    // Apply the same floor to both receivers of a screen share.
+    const smoothTarget = smooth
+      ? Math.max(SMOOTH_SCREEN_TARGET_MS, this.mode === 'legacy' && hasAudio ? 80 : adaptiveTarget ?? 0)
+      : null;
+    for (const member of group.members.values()) {
+      const base = this.mode === 'legacy' && member.kind === 'audio' ? 80 : adaptiveTarget;
+      const target = smoothTarget ?? base;
+      if (target === null) member.control?.clear();
+      else if (!member.control?.set(target)) return false;
     }
     return true;
   }
@@ -439,11 +491,11 @@ export class AudioPlayoutPolicy {
     group.members.delete(member.consumer.id);
     if (group.synchronized && member.kind === 'audio' &&
       ![...group.members.values()].some((candidate) => candidate.kind === 'audio')) {
-      for (const remaining of group.members.values())
-        if (remaining.kind === 'video') remaining.control?.clear();
       group.targetMs = INITIAL_AUDIO_PLAYOUT_TARGET_MS;
       group.stableWindows = 0;
       group.lastTargetChangeAt = Number.NEGATIVE_INFINITY;
+      if (!this.disposed && group.managed && !this.applyGroupTarget(group, group.targetMs, false))
+        this.disableGroup(group);
     }
     if (!group.members.size) this.groups.delete(group.id);
     this.syncTimer();
@@ -464,8 +516,8 @@ export class AudioPlayoutPolicy {
 
   private syncTimer(): void {
     if (this.disposed) return;
-    const needsTimer = [...this.groups.values()].some((group) =>
-      group.managed && [...group.members.values()].some((member) => member.kind === 'audio'),
+    const needsTimer = this.mode === 'adaptive' && [...this.groups.values()].some((group) =>
+      group.managed && !this.isControlled(group) && [...group.members.values()].some((member) => member.kind === 'audio'),
     );
     if (needsTimer && this.timer == null)
       this.timer = this.schedule(() => { void this.sampleNow(); }, this.intervalMs);

@@ -28,17 +28,28 @@ test('process rollback removes even parameterized enablement and preserves other
 
 test('other engines retain the earlier default pending validation', () => {
   for (const chromiumVersion of [undefined, '', '151.0.0.0', '153.0.0.0']) {
-    assert.deepEqual(screenCaptureFeaturePolicy({ platform: 'win32', chromiumVersion }), {
+    assert.deepEqual(screenCaptureFeaturePolicy({ platform: 'win32', chromiumVersion, useDriverRateControl: true }), {
       enabledFeatures: 'AllowWgcScreenCapturer', disabledFeatures: '',
     });
   }
+});
+
+test('Windows AV1 hardware encoding can use driver rate control on Chromium 152', () => {
+  assert.deepEqual(screenCaptureFeaturePolicy({
+    platform: 'win32', chromiumVersion: '152.0.7977.54',
+    enabledFeatures: 'MediaFoundationAV1Encoding,MediaFoundationUseSoftwareRateCtrl<Study',
+    disabledFeatures: 'ExistingDisable', disableZeroCopy: true, useDriverRateControl: true,
+  }), {
+    enabledFeatures: 'MediaFoundationAV1Encoding,AllowWgcScreenCapturer',
+    disabledFeatures: 'ExistingDisable,MediaFoundationUseSoftwareRateCtrl,ZeroCopyDesktopCapture',
+  });
 });
 
 test('non-Windows startup does not alter feature choices', () => {
   for (const platform of ['linux', 'darwin']) {
     assert.deepEqual(screenCaptureFeaturePolicy({
       platform, chromiumVersion: '152.0.7977.54', enabledFeatures: 'Existing',
-      disabledFeatures: 'OtherDisabled', disableZeroCopy: true,
+      disabledFeatures: 'OtherDisabled', disableZeroCopy: true, useDriverRateControl: true,
     }), { enabledFeatures: 'Existing', disabledFeatures: 'OtherDisabled' });
   }
 });

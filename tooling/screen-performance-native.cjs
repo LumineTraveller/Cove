@@ -374,8 +374,9 @@ function nativeUpgradeEvidence(sample, broker, expectedFormat, expectedStorage) 
   const source = sample?.sources?.find(item => item.isLiveSenderSource === true);
   const nativeSource = source?.kind === 'native-gpu-adapter' && source.trackState === 'live';
   const stockTracks = sample?.sources?.filter(item => item.kind === 'native-display-capture') ?? [];
-  const stockTracksDetached = stockTracks.length > 0 && stockTracks.every(item =>
-    item.trackState === 'ended' || (item.trackState === 'live' && item.isLiveSenderSource === false));
+  const stockTracksDetached = stockTracks.length === 0
+    ? sample?.nativeGpu?.direct === true
+    : stockTracks.every(item => item.trackState === 'ended' || (item.trackState === 'live' && item.isLiveSenderSource === false));
   const localScreenTrackMatchesSender = sample?.nativeGpu?.localScreenTrackMatchesSender === true;
   const bridgeSupported = sample?.nativeGpu?.bridgeSupported === true;
   const brokerActive = broker?.activeSessions === 1 && broker?.helpers === 1 && broker.frames > 0 && broker.disabled === false;

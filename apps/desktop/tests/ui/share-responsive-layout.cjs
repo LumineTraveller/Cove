@@ -42,6 +42,7 @@ app.whenReady().then(async () => {
     const d=rect(dock),overlap=(a,b)=>a.left<b.right-.5&&a.right>b.left+.5&&a.top<b.bottom-.5&&a.bottom>b.top+.5;
     return {shellWidth:shell.clientWidth,railWidth:parseFloat(style.getPropertyValue('--rail-width')),
       panelWidth:parseFloat(style.getPropertyValue('--chat-panel-width')),drawer:shell.classList.contains('share-chat-drawer'),
+      portrait:shell.classList.contains('watching-portrait'),
       chatOpen:shell.classList.contains('chat-open'),workspace:rect(shell.querySelector('.workspace')),bar:rect(bar),
       dock:d,classes:dock.className,overlaps:controls.filter(r=>overlap(d,r)),
       ball:rect(dock.querySelector('.ball-quad')),
@@ -109,7 +110,7 @@ app.whenReady().then(async () => {
   const inspect = async (label, { temporaryExpansion = false } = {}) => {
     const s = await read(); results.states.push({ label, ...s });
     check(Math.abs(s.bar.height - 58) < .5, label + ': footer remains 58px');
-    check(s.drawer === (s.shellWidth - s.railWidth - s.panelWidth < 640), label + ': drawer uses remaining space');
+    check(s.drawer === (!s.portrait && s.shellWidth - s.railWidth - s.panelWidth < 640), label + ': drawer uses remaining space');
     if (!temporaryExpansion) {
       check(s.overlaps.length === 0, label + ': dock does not cover share status/actions');
       check(s.manageClickable, label + ': shared operations remain clickable');
@@ -121,11 +122,78 @@ app.whenReady().then(async () => {
     check(s.dock.left >= s.workspace.left - .5 && s.dock.right <= s.workspace.right + .5, label + ': dock stays within workspace');
     await capture(label); return s;
   };
-  try {
-    await win.loadURL(process.env.COVE_UI_QA_URL || 'http://127.0.0.1:55173/tests/ui/share-chat-qa.html?layout-animation&screen-audio');
-    await waitFor("Boolean(document.querySelector('button[title=\"加入语音\"]'))");
-    await click('button[title="加入语音"]');
-    await waitFor("Boolean(document.querySelector('.control-ball.voice-active'))");
+  const watch = async () => {
+    await js("[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='观看共享').click()");
+    await waitFor("document.querySelector('.video-content video')?.readyState>=2");
+  };
+  const verifyPortrait = async () => {
+    const layout = () => js(`(() => {
+      const rect = selector => document.querySelector(selector)?.getBoundingClientRect().toJSON();
+      return { members: rect('.member-list-view'), share: rect('.share-layout-body'), chat: rect('.chat-slot'),
+        rail: rect('.navigation-rail'), shell: rect('.cove-shell') };
+    })()`);
+    const idle = await layout();
+    await watch();
+    await chat(false);
+    check(await js("Boolean(document.querySelector('.member-strip') && !document.querySelector('.watching-portrait'))"),
+      'landscape keeps its original horizontal member strip');
+    await js("window.__qaRotatingVideo=document.querySelector('.video-content video'); window.__qaRotatingStream=window.__qaRotatingVideo.srcObject; true");
+    const rotate = async (width, height) => {
+      await js(`window.shareChatQa.resizeRemoteShare(${width}, ${height})`);
+      await waitFor(`window.__qaRotatingVideo.videoWidth===${width} && window.__qaRotatingVideo.videoHeight===${height}
+        && document.querySelector('.cove-shell').classList.contains('watching-portrait')===${height > width}`);
+      check(await js("document.querySelector('.video-content video')===window.__qaRotatingVideo && window.__qaRotatingVideo.srcObject===window.__qaRotatingStream && !window.__qaRotatingVideo.paused"),
+        width + '×' + height + ': rotation retains playing video and stream');
+    };
+    const checkPortrait = async label => {
+      const board = await layout();
+      const state = await read();
+      const roomCenter = (board.rail.right + board.shell.right) / 2;
+      const shareCenter = (board.share.left + board.share.right) / 2;
+      check(Math.abs(board.members.left - board.rail.right) < 1 && board.members.width < idle.members.width,
+        label + ': narrower member column remains to the left of the shared video');
+      check(Math.abs(board.members.width - board.chat.width) < 1 && Math.abs(shareCenter - roomCenter) < 1,
+        label + ': equal side columns keep the video centered in the room');
+      check(state.chatOpen && !state.drawer && Math.abs(board.chat.left - board.share.right) < 1,
+        label + ': chat is docked alongside the video');
+      check(await js("!document.querySelector('.chat-edge-toggle') && document.querySelector('#shared-chat-panel').getAttribute('aria-hidden')==='false'"),
+        label + ': chat is always available in portrait');
+      await inspect(label);
+    };
+    await rotate(720, 1280);
+    await checkPortrait('portrait-wide');
+    await rotate(1280, 720);
+    check(!(await read()).chatOpen && await js("Boolean(document.querySelector('.member-strip'))"),
+      'landscape restores the horizontal member strip and the previous closed chat setting');
+    await chat(true);
+    await rail(true); await resize(minimumWidth);
+    await rotate(720, 1280);
+    await checkPortrait('portrait-minimum-wide-rail');
+    await click('.share-operations-trigger');
+    const smoothToggle = '.share-smooth-playback-toggle';
+    const pressed = () => js(`document.querySelector('${smoothToggle}')?.getAttribute('aria-pressed')`);
+    check(await js(`document.querySelector('${smoothToggle}').disabled`), 'synchronized screen audio uses its existing playback policy');
+    await js('window.shareChatQa.endRemoteShareAudio()');
+    await waitFor(`document.querySelector('${smoothToggle}').disabled === false`);
+    check(await pressed() === 'false', 'smooth playback defaults to off');
+    await click(smoothToggle);
+    check(await pressed() === 'true', 'the viewer can enable smooth playback from share operations');
+    await capture('portrait-smooth-playback');
+    await js('window.shareChatQa.restoreRemoteShareAudio()');
+    await waitFor(`document.querySelector('${smoothToggle}').disabled === true`);
+    check(await pressed() === 'false', 'late screen audio supersedes the smoother target');
+    await js('window.shareChatQa.endRemoteShareAudio()');
+    await waitFor(`document.querySelector('${smoothToggle}').disabled === false`);
+    check(await pressed() === 'true', 'video-only mode restores the saved playback preference');
+    await click(smoothToggle);
+    check(await pressed() === 'false', 'the viewer can turn smooth playback back off');
+    check(await js("document.querySelector('.video-content video')===window.__qaRotatingVideo && !window.__qaRotatingVideo.paused"),
+      'switching smooth playback does not remount or pause the video');
+    await click('.share-operations-trigger');
+    await rotate(1280, 720);
+    check((await read()).chatOpen, 'landscape restores the previous open chat setting');
+  };
+  const verifyResponsive = async () => {
     check(await js("document.querySelector('.control-ball').classList.contains('compact')"), 'ordinary room preserves compact dock');
     await click('button[title="共享屏幕"]');
     await waitFor("Boolean(document.querySelector('.share-dialog .primary-wide'))");
@@ -142,8 +210,7 @@ app.whenReady().then(async () => {
     await click('.share-status-actions .end-share');
     await waitFor("!document.querySelector('.mode-self')");
     await resize(1800); await rail(false);
-    await js("[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='观看共享').click()");
-    await waitFor("document.querySelector('.video-content video')?.readyState>=2");
+    await watch();
     await waitFor("Boolean(document.querySelector('.share-status-left .volume-control'))");
     // Explicitly lock in ample space; constrained resizing must release this
     // preference only when a ball is necessary, never toggle it repeatedly.
@@ -219,6 +286,16 @@ app.whenReady().then(async () => {
     await resize(1150); await rail(true); await chat(true);
     check((await read()).drawer, 'reduced motion retains remaining-space drawer decision');
     win.webContents.debugger.detach();
+  };
+  try {
+    const url = new URL(process.env.COVE_UI_QA_URL || 'http://127.0.0.1:55173/tests/ui/share-chat-qa.html?layout-animation&screen-audio');
+    if (!process.argv.includes('--portrait')) url.searchParams.set('long-share-name', '1');
+    await win.loadURL(url.href);
+    await waitFor("Boolean(document.querySelector('button[title=\"加入语音\"]'))");
+    await click('button[title="加入语音"]');
+    await waitFor("Boolean(document.querySelector('.control-ball.voice-active'))");
+    if (process.argv.includes('--portrait')) await verifyPortrait();
+    else await verifyResponsive();
     check(results.errors.length===0, 'renderer process stays alive');
     fs.writeFileSync(path.join(artifacts,'result.json'),JSON.stringify({passed:true,results},null,2));
     console.log(`PASS: ${results.checks.length} responsive shared-layout UI checks`);

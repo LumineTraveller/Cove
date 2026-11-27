@@ -19,6 +19,7 @@ import { AccountPasswordStore } from './account-password-store';
 import { screenCaptureFeaturePolicy } from './screen-capture-features';
 import { nativeScreenCaptureEnabled, supportsPackedScreenCapture } from './native-screen-capture-policy';
 import { NativeScreenCaptureController } from './native-screen-capture';
+import { validNativeScreenRequestId, type NativeScreenSourceSelection } from './native-screen-capture-protocol';
 import { registerScreenShareActivity } from './screen-share-activity';
 import { nativeScreenStartDiagnostic } from './native-screen-capture-diagnostics';
 import { createNativeScreenTimingLogger } from './native-screen-capture-timing';
@@ -89,6 +90,7 @@ if (process.platform === 'win32') {
     enabledFeatures: [app.commandLine.getSwitchValue('enable-features'),
       ...(screenHardwareAv1Enabled ? ['MediaFoundationAV1Encoding', 'WebRtcAV1HWEncode'] : [])].filter(Boolean).join(','),
     disabledFeatures: app.commandLine.getSwitchValue('disable-features'),
+    useDriverRateControl: screenHardwareAv1Enabled,
     // Select the capture configuration qualified for republishing AV1 at 120 FPS.
     disableZeroCopy: screenHardwareAv1Enabled || process.env.COVE_DISABLE_ZERO_COPY_DESKTOP_CAPTURE === '1',
   });
@@ -329,8 +331,7 @@ function createWindow() {
     if (request.frame !== win.webContents.mainFrame) { callback({}); return; }
     desktopCapturer
       .getSources({
-        types: ["screen", "window"],
-        // No thumbnails are shown; avoid capturing one for every window.
+        types: ["screen"],
         thumbnailSize: { width: 0, height: 0 },
       })
       .then((sources) => {
@@ -338,12 +339,9 @@ function createWindow() {
           callback({});
           return;
         }
-        // This flow shares the desktop, not an arbitrary first window. Electron
-        // does not guarantee that mixed screen/window sources are ordered with
-        // a screen first, so explicitly prefer a real display source.
+        const primaryDisplayId = String(screen.getPrimaryDisplay().id);
         const source =
-          sources.find((candidate) => candidate.id.startsWith("screen:")) ??
-          sources[0];
+          sources.find((candidate) => candidate.display_id === primaryDisplayId) ?? sources[0];
         console.info("[screen share] Electron 选择采集源", {
           id: source.id,
           name: source.name,
@@ -357,14 +355,6 @@ function createWindow() {
         // process-loopback capture with Cove excluded when system audio is
         // requested, and the display stream itself remains video-only.
         annotationOverlay.setCaptureSource(source);
-        const primaryDisplay = screen.getPrimaryDisplay();
-        nativeScreenCapture.noteStockSelection({
-          sourceId: source.id, displayId: source.display_id,
-          primaryDisplayId: String(primaryDisplay.id), displayCount: screen.getAllDisplays().length,
-          sourceWidth: Math.round(primaryDisplay.size.width * primaryDisplay.scaleFactor),
-          sourceHeight: Math.round(primaryDisplay.size.height * primaryDisplay.scaleFactor),
-          selectedAt: Date.now(),
-        });
         callback({ video: source });
       })
       .catch((error) => {
@@ -374,16 +364,45 @@ function createWindow() {
   });
 }
 
+function primaryNativeDisplay(): NativeScreenSourceSelection | undefined {
+  try {
+    const display = screen.getPrimaryDisplay();
+    const displayId = String(display.id);
+    return {
+      sourceId: 'screen:0:0', displayId, primaryDisplayId: displayId,
+      displayCount: screen.getAllDisplays().length, selectedAt: Date.now(),
+      sourceWidth: Math.round(display.size.width * display.scaleFactor),
+      sourceHeight: Math.round(display.size.height * display.scaleFactor),
+    };
+  } catch { return undefined; }
+}
+
 app.whenReady().then(() => {
   const releaseScreenShareActivity = registerScreenShareActivity(ipcMain, event =>
     event.sender === mainWindow?.webContents && event.senderFrame === mainWindow?.webContents.mainFrame);
   app.once('before-quit', releaseScreenShareActivity);
   const integritySender = (event: Electron.IpcMainInvokeEvent) =>
     event.sender === mainWindow?.webContents && event.senderFrame === mainWindow?.webContents.mainFrame;
-  ipcMain.handle('cove:native-screen:start', async (event, requestId, options) => {
+  ipcMain.handle('cove:native-screen:select', (event) => {
+    if (!integritySender(event) || !nativeCaptureEnabled) return null;
+    const selection = primaryNativeDisplay();
+    if (!selection) return null;
+    const display = nativeScreenCapture.authorizeDisplay(event.sender, selection);
+    if (display) annotationOverlay.setCaptureSource({ id: selection.sourceId, display_id: selection.displayId });
+    return display;
+  });
+  ipcMain.handle('cove:native-screen:release', (event, authorizationId) => {
+    if (!integritySender(event) || !validNativeScreenRequestId(authorizationId) ||
+        !nativeScreenCapture.releaseDisplay(event.sender, authorizationId)) return false;
+    annotationOverlay.setCaptureSource(null);
+    return true;
+  });
+  ipcMain.handle('cove:native-screen:start', async (event, requestId, options, authorizationId) => {
     if (!integritySender(event)) return { ok: false, reason: 'untrusted_sender' };
+    if (!validNativeScreenRequestId(authorizationId)) return { ok: false, reason: 'authorization_expired' };
     nativeTimingLogger?.start();
-    const result = await nativeScreenCapture.start(event.sender, requestId, options);
+    const result = await nativeScreenCapture.start(event.sender, requestId, options,
+      { id: authorizationId, currentSelection: primaryNativeDisplay });
     try {
       console.info('[native-screen-start]', JSON.stringify(nativeScreenStartDiagnostic(result, nativeScreenCapture.snapshot())));
     } catch { /* Observability must never change capture or fallback behavior. */ }

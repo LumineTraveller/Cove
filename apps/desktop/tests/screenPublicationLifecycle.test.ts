@@ -4,6 +4,7 @@ import test, { type TestContext } from 'node:test';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { useScreenPublishing, type useScreenPublishingDependencies } from '../src/features/media/screen/useScreenPublishing';
+import type { NativeScreenFrame, NativeScreenOptions } from '../electron/native-screen-capture-protocol';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -87,11 +88,173 @@ function fixture(t: TestContext) {
   let api!: ReturnType<typeof useScreenPublishing>;
   function Probe() { api = useScreenPublishing(deps); return null; }
   renderToStaticMarkup(createElement(Probe));
-  return { api, alerts, events, produced, captureRequests, settings, mediaGeneration, screenProducer, screenAudioProducer, localScreenRef, sendTransport, socket,
+  return { api, alerts, events, produced, captureRequests, settings, mediaGeneration, screenProducer, screenAudioProducer, localScreenRef, sendTransport, deviceRef: deps.deviceRef, socket,
     captures: () => captures, sharing: () => sharing, localScreen: () => localScreen,
     signalEvents, capture: (next: typeof capture) => { capture = next; }, publish: (next: typeof publish) => { publish = next; },
     startAudio: (next: typeof startAudio) => { startAudio = next; }, closeAudio: (next: typeof closeAudio) => { closeAudio = next; } };
 }
+
+function nativeCaptureFixture(t: TestContext) {
+  function define(name: string, value: unknown) {
+    const original = Object.getOwnPropertyDescriptor(globalThis, name);
+    Object.defineProperty(globalThis, name, { configurable: true, value });
+    t.after(() => original ? Object.defineProperty(globalThis, name, original) : Reflect.deleteProperty(globalThis, name));
+  }
+  class Track extends EventTarget {
+    readyState = 'live';
+    contentHint = '';
+    onended: (() => void) | null = null;
+    width = 0;
+    height = 0;
+    writable = { getWriter: () => ({
+      write: async (frame: VideoFrame) => { this.width = frame.displayWidth; this.height = frame.displayHeight; },
+      abort: async () => {}, releaseLock() {},
+    }) };
+    getSettings() { return { width: this.width, height: this.height }; }
+    stop() { this.readyState = 'ended'; }
+    override dispatchEvent(event: Event) {
+      const result = super.dispatchEvent(event);
+      if (event.type === 'ended') this.onended?.();
+      return result;
+    }
+  }
+  define('MediaStreamTrackGenerator', Track);
+  define('MediaStream', class {
+    constructor(private tracks: Track[]) {}
+    getVideoTracks() { return this.tracks; }
+    getAudioTracks() { return []; }
+    getTracks() { return this.tracks; }
+  });
+  const starts: { id: string; options: NativeScreenOptions; authorizationId: string }[] = [];
+  const releases: string[] = [];
+  const stopped: string[] = [];
+  const end = new Map<string, (reason: string) => void>();
+  const frame = new Map<string, (frame: VideoFrame, metadata: NativeScreenFrame) => Promise<void>>();
+  const failures: string[] = [];
+  const authorizationId = 'owned-primary-1';
+  let holdStart: ReturnType<typeof deferred<void>> | null = null;
+  window.coveNativeScreen = {
+    supported: true,
+    selectDisplay: async () => ({ authorizationId, width: 1920, height: 1080 }),
+    releaseDisplay: async id => { releases.push(id); return true; },
+    async start(id, options, authorization) {
+      starts.push({ id, options, authorizationId: authorization! });
+      const hold = holdStart; holdStart = null;
+      if (hold) await hold.promise;
+      const reason = failures.shift();
+      if (reason) return { ok: false, reason };
+      const width = Math.min(1920, options.maxWidth), height = Math.min(1080, options.maxHeight);
+      const sessionId = id + '-helper';
+      setImmediate(() => {
+        const timestamp = starts.length * 1_000_000;
+        void frame.get(id)?.({ displayWidth: width, displayHeight: height, timestamp, close() {} } as VideoFrame,
+          { requestId: id, sessionId, width, height, timestamp, serial: 1, slot: 0, refresh: false });
+      });
+      return { ok: true, sessionId, width, height };
+    },
+    stop: async id => { stopped.push(id); return true; },
+    onFrame: (id, fn) => { frame.set(id, fn); return () => { frame.delete(id); }; },
+    onEnded: (id, fn) => { end.set(id, fn); return () => { end.delete(id); }; },
+  };
+  return { starts, releases, stopped, failures, authorizationId,
+    failLatest: (reason: string) => { end.get(starts.at(-1)!.id)?.(reason); },
+    holdNextStart() { return holdStart = deferred<void>(); } };
+}
+
+async function until(predicate: () => boolean) {
+  for (let i = 0; i < 60 && !predicate(); ++i) await flush();
+  assert.equal(predicate(), true);
+}
+
+test('native starts before publication and retries without asking Chromium to capture', async t => {
+  const f = fixture(t), native = nativeCaptureFixture(t);
+  native.failures.push('start_timeout');
+  assert.equal(await f.api.startScreenShare('720p', 30, false, true), true);
+  assert.equal(f.captures(), 0);
+  assert.equal(f.produced.length, 1);
+  assert.deepEqual(native.starts.map(attempt => [attempt.options.fps, attempt.authorizationId]),
+    [[30, native.authorizationId], [30, native.authorizationId]]);
+  assert.equal(native.starts[1].options.conservativeDelivery, true);
+  assert.equal(f.produced[0].track, f.localScreenRef.current.getVideoTracks()[0]);
+  f.api.stopScreenShare();
+  assert.deepEqual(native.releases, [native.authorizationId]);
+});
+
+test('native recovery keeps one producer and its screen audio through a sequence of helper and renderer failures', async t => {
+  const f = fixture(t), native = nativeCaptureFixture(t);
+  let audioStarts = 0, audioCloses = 0;
+  const audio = { id: 'bound-audio' };
+  f.startAudio(async () => { ++audioStarts; f.screenAudioProducer.current = audio; });
+  f.closeAudio(() => { ++audioCloses; f.screenAudioProducer.current = null; });
+  assert.equal(await f.api.startScreenShare('1080p', 60, true, true), true);
+  const video = f.screenProducer.current;
+  for (const reason of ['helper_failed', 'import_failed', 'renderer_failed', 'capture_stalled', 'display_changed', 'cpu_ack_timeout']) {
+    const previous = video.track;
+    native.failLatest(reason);
+    await until(() => video.track !== previous);
+    assert.equal(f.screenProducer.current, video);
+    assert.equal(f.screenAudioProducer.current, audio);
+    assert.equal(f.sharing(), true);
+    assert.equal(native.starts.at(-1)?.options.fps, 60);
+  }
+  assert.equal(f.produced.length, 1);
+  assert.equal(f.captures(), 0);
+  assert.equal(audioStarts, 1);
+  assert.equal(audioCloses, 0);
+  assert.deepEqual(f.alerts, []);
+  f.api.stopScreenShare();
+  assert.equal(audioCloses, 1);
+});
+
+test('native reconfiguration and audio-only settings never open a browser capture', async t => {
+  const f = fixture(t), native = nativeCaptureFixture(t);
+  assert.equal(await f.api.startScreenShare('720p', 30), true);
+  const video = f.screenProducer.current;
+  const firstTrack = video.track;
+  await f.api.updateScreenShare('720p', 30, false);
+  assert.equal(native.starts.length, 1);
+  assert.equal(video.track, firstTrack);
+  const replaceTrack = video.replaceTrack.bind(video);
+  video.replaceTrack = async () => { throw Error('injected replace failure'); };
+  await f.api.updateScreenShare('1080p', 120, false, true);
+  assert.equal(video.track, firstTrack);
+  assert.equal(firstTrack.readyState, 'live');
+  video.replaceTrack = replaceTrack;
+  await f.api.updateScreenShare('1080p', 120, false, true);
+  assert.equal(video.track.getSettings().width, 1920);
+  assert.equal(firstTrack.readyState, 'ended');
+  assert.equal(native.starts.at(-1)?.options.fps, 120);
+  assert.equal(f.captures(), 0);
+  f.api.stopScreenShare();
+});
+
+test('a native startup failure for an unsupported display closes the grant without publishing browser video', async t => {
+  const f = fixture(t), native = nativeCaptureFixture(t);
+  native.failures.push('unsupported_display_color');
+  assert.equal(await f.api.startScreenShare('1080p', 60), false);
+  assert.equal(native.starts.length, 1);
+  assert.equal(f.captures(), 0);
+  assert.equal(f.produced.length, 0);
+  assert.deepEqual(native.releases, [native.authorizationId]);
+  assert.match(f.alerts[0], /HDR/);
+});
+
+test('stopping an in-flight native recovery retires the late helper and does not reopen capture', async t => {
+  const f = fixture(t), native = nativeCaptureFixture(t);
+  assert.equal(await f.api.startScreenShare(), true);
+  const late = native.holdNextStart();
+  native.failLatest('helper_failed');
+  await until(() => native.starts.length === 2);
+  f.api.stopScreenShare();
+  late.resolve();
+  await flush();
+  assert.equal(f.screenProducer.current, null);
+  assert.equal(f.localScreenRef.current, null);
+  assert.equal(f.produced.length, 1);
+  assert.equal(f.captures(), 0);
+  assert.ok(native.stopped.includes(native.starts[1].id));
+  assert.deepEqual(native.releases, [native.authorizationId]);
+});
 
 test('transient signal loss while the picker is pending waits for the same session and publishes once', async t => {
   const f = fixture(t), pending = deferred<ReturnType<typeof stream>>(), captured = stream();

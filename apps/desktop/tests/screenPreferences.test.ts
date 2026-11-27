@@ -30,7 +30,7 @@ test('120 FPS and every resolution/mode preference survive a storage round trip'
     getItem: (key: string) => { assert.equal(key, SCREEN_PREFERENCES_KEY); return saved; },
     setItem: (key: string, value: string) => { assert.equal(key, SCREEN_PREFERENCES_KEY); saved = value; },
   };
-  const preferences = { preset: '1080p' as const, fps: 120 as const, audio: true, gameMode: true, nativeResolution: true, compatibilityMode: true, gpuEncoding: true };
+  const preferences = { preset: '1080p' as const, fps: 120 as const, audio: true, gameMode: true, nativeResolution: true, compatibilityMode: true, gpuEncoding: true, smoothPlayback: true };
   saveScreenPreferences(preferences, storage);
   assert.deepEqual(loadScreenPreferences(storage), preferences);
   assert.doesNotThrow(() => saveScreenPreferences(preferences, { setItem: () => { throw new Error('full'); } }));

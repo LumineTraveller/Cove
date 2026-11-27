@@ -1,6 +1,7 @@
 import { observeScreenVideoFrame } from './screenVideoReadiness';
 
 export type ScreenVideoStatus = 'loading' | 'ready' | 'error';
+export type ScreenVideoSizeListener = (stream: MediaStream, width: number, height: number) => void;
 
 /** Own only the video element, not the shared capture/consumer tracks. */
 export function bindScreenVideo(
@@ -8,16 +9,31 @@ export function bindScreenVideo(
   stream: MediaStream,
   remote: boolean,
   onStatus: (status: ScreenVideoStatus) => void,
+  onSize?: ScreenVideoSizeListener,
 ) {
   let disposed = false;
   let retryPending = false;
   let hasPresentedFrame = false;
   const isCurrent = () => !disposed && video.srcObject === stream;
+  let lastWidth = 0;
+  let lastHeight = 0;
+  const reportSize = () => {
+    const { videoWidth: width, videoHeight: height } = video;
+    if (!isCurrent() || width <= 0 || height <= 0 || (width === lastWidth && height === lastHeight)) return;
+    lastWidth = width;
+    lastHeight = height;
+    onSize?.(stream, width, height);
+  };
   onStatus('loading');
+  if (onSize) {
+    video.addEventListener('loadedmetadata', reportSize);
+    video.addEventListener('resize', reportSize);
+  }
   if (video.srcObject !== stream) video.srcObject = stream;
   const stopObserving = observeScreenVideoFrame(video, () => {
     if (!isCurrent()) return;
     hasPresentedFrame = true;
+    if (onSize) reportSize();
     onStatus('ready');
   });
   const retry = () => {
@@ -47,6 +63,10 @@ export function bindScreenVideo(
     dispose: () => {
       disposed = true;
       stopObserving();
+      if (onSize) {
+        video.removeEventListener('loadedmetadata', reportSize);
+        video.removeEventListener('resize', reportSize);
+      }
       document.removeEventListener('click', retry);
       if (video.srcObject === stream) {
         video.pause();

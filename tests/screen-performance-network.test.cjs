@@ -7,7 +7,8 @@ const source=ts.transpileModule(fs.readFileSync(path.join(__dirname,'../apps/des
 }).outputText;
 vm.runInNewContext(source,{exports:fixtureExports,require:name=>{
   if(name==='./screen-performance-pattern-layouts.json')return require('../apps/desktop/tests/ui/screen-performance-pattern-layouts.json');
-  assert.match(name,/nativeScreenCapture$/);return {};
+  if(name==='./screen-performance-quality-chart.json')return require('../apps/desktop/tests/ui/screen-performance-quality-chart.json');
+  assert.match(name,/nativeScreenCapture(?:Diagnostics)?$/);return {};
 },performance:{now:()=>0},URLSearchParams});
 const observe=entries=>JSON.parse(JSON.stringify(fixtureExports.screenPerformanceNetworkSnapshot(new Map(entries.map(stat=>[stat.id,stat])))));
 

@@ -28,18 +28,19 @@ app.whenReady().then(async () => {
   // Reject any native request. The fixture's synthetic media does not need it.
   win.webContents.session.setPermissionRequestHandler((_wc, _permission, done) => done(false));
   win.webContents.session.setPermissionCheckHandler(() => false);
-  win.webContents.on('console-message', (_event, level, message) => {
-    if (typeof level === 'number' && level >= 3) rendererErrors.push(message);
+  win.webContents.on('console-message', (event, legacyLevel, legacyMessage) => {
+    if (event.level === 'error' || legacyLevel >= 3) rendererErrors.push(event.message ?? legacyMessage);
   });
   const js = source => win.webContents.executeJavaScript(source, true);
-  const wait = async (source, label = source) => {
-    for (let i = 0; i < 200; i++) { if (await js(source)) return; await delay(40); }
+  const wait = async (source, label = source, timeoutMs = 8_000) => {
+    const until = Date.now() + timeoutMs;
+    while (Date.now() < until) { if (await js(source)) return; await delay(40); }
     throw new Error(`Timed out waiting for ${label}`);
   };
   const check = async (source, label) => {
     const passed = Boolean(await js(source)); checks.push({ label, passed }); assert.equal(passed, true, label);
   };
-  const click = async (selector, label) => {
+  const click = async (selector, label, button = 'left') => {
     await wait(`Boolean(document.querySelector(${JSON.stringify(selector)}))`, label);
     const point = await js(`(() => {
       const button = document.querySelector(${JSON.stringify(selector)});
@@ -51,8 +52,8 @@ app.whenReady().then(async () => {
       return { x, y };
     })()`);
     win.webContents.sendInputEvent({ type: 'mouseMove', x: Math.round(point.x), y: Math.round(point.y) });
-    win.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, x: Math.round(point.x), y: Math.round(point.y) });
-    win.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, x: Math.round(point.x), y: Math.round(point.y) });
+    win.webContents.sendInputEvent({ type: 'mouseDown', button, clickCount: 1, x: Math.round(point.x), y: Math.round(point.y) });
+    win.webContents.sendInputEvent({ type: 'mouseUp', button, clickCount: 1, x: Math.round(point.x), y: Math.round(point.y) });
     await delay(80);
   };
   const capture = async name => {
@@ -60,12 +61,13 @@ app.whenReady().then(async () => {
     await delay(120);
     fs.writeFileSync(path.join(artifacts, `${name}.png`), (await win.webContents.capturePage()).toPNG());
     screenshots.push(`${name}.png`);
-    snapshots.push({ name, ...await js('window.coveFpsQa.snapshot()') });
+    snapshots.push({ name, ...await js('window.coveFpsQa?.snapshot() ?? null') });
   };
   const fps = value => `.fps-grid button:nth-child(${value === 30 ? 1 : value === 60 ? 2 : 3})`;
   const nativeToggle = '.screen-settings .settings-toggle-card:nth-of-type(1) input';
   const gameToggle = '.screen-settings .settings-toggle-card:nth-of-type(2) input';
   const gpuToggle = 'input[aria-labelledby="screen-gpu-encoding-label"]';
+  const smoothToggle = 'input[aria-labelledby="screen-smooth-playback-label"]';
   const joinVoice = async () => {
     await wait('Boolean(window.coveFpsQa?.ready && document.querySelector(".control-ball"))', 'real room fixture');
     await click('[title="加入语音"]', 'join synthetic voice');
@@ -77,7 +79,7 @@ app.whenReady().then(async () => {
   };
   const load = async () => {
     await win.loadURL(url);
-    await wait('Boolean(window.coveFpsQa?.ready)', 'fixture ready');
+    await wait('Boolean(window.coveFpsQa?.ready)', 'fixture ready', 30_000);
     await joinVoice();
     await openSettings();
   };
@@ -90,12 +92,23 @@ app.whenReady().then(async () => {
       const row = toggle?.closest('label');
       return toggle && !toggle.checked && !toggle.disabled &&
         row.previousElementSibling?.classList.contains('computer-audio-toggle') &&
-        row.nextElementSibling?.classList.contains('primary-wide');
-    })()`, 'GPU encoding is off by default, after audio and before sharing');
+        row.nextElementSibling?.contains(document.querySelector(${JSON.stringify(smoothToggle)}));
+    })()`, 'GPU encoding is off by default, after audio and before smoothing');
     await click(gpuToggle, 'enable GPU encoding for the next share');
     await check(`document.querySelector(${JSON.stringify(gpuToggle)})?.checked === true`, 'GPU encoding checkbox can be selected');
     await capture('gpu-encoding-option');
     await click(gpuToggle, 'restore software encoding for the synthetic share');
+    await check(`document.querySelector(${JSON.stringify(smoothToggle)})?.checked === false`, 'publisher smoothing is opt-in');
+    win.setContentSize(920, 690);
+    await click(smoothToggle, 'enable publisher smoothing in a short window');
+    await check(`(() => {
+      const confirm = document.querySelector('.screen-settings .primary-wide');
+      const rect = confirm.getBoundingClientRect();
+      return rect.top >= 0 && rect.bottom <= innerHeight &&
+        confirm.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2));
+    })()`, 'the confirm button is visible after scrolling the settings in a short window');
+    await capture('publisher-smooth-playback');
+    win.setContentSize(1200, 960);
     await check('[...document.querySelectorAll(".fps-grid button")].map(b=>b.textContent.trim()).join(",") === "30 fps,60 fps,120 fps"', 'real settings render 30/60/120 FPS in normal mode');
     await click('.resolution-grid button:nth-child(3)', 'choose 1080p');
     await click(fps(120), 'choose 120 FPS in normal mode');
@@ -118,12 +131,25 @@ app.whenReady().then(async () => {
     await check('window.coveFpsQa.snapshot().captures.some(c=>c.video?.frameRate?.ideal===120&&c.video?.frameRate?.max===120&&!c.video?.frameRate?.min)', 'real normal publishing hook requests ideal/max120 without a hard minimum');
     await check('window.coveFpsQa.snapshot().alerts.length===0 && window.coveFpsQa.snapshot().preferences.gpuEncoding===false',
       'synthetic120 normal share completes with software encoding selected');
+    await check(`${stored}.smoothPlayback === true`, 'the publisher selection persists after starting the share');
+    const captureCount = await js('window.coveFpsQa.snapshot().captures.length');
+    for (const enabled of [false, true]) {
+      await click('[title="左键结束共享，右键修改参数"]', 'edit the live publisher settings', 'right');
+      await click(smoothToggle, 'change smoothing while sharing');
+      await click('.screen-settings .primary-wide', 'save the live smoothing adjustment');
+      await wait(`${stored}.smoothPlayback === ${enabled} && !document.querySelector(".screen-settings")`, 'publisher preference updated');
+    }
+    await check(`window.coveFpsQa.snapshot().captures.length === ${captureCount} &&
+      window.coveFpsQa.snapshot().selfSharing && window.coveFpsQa.snapshot().alerts.length === 0`,
+      'changing only smoothing keeps the current screen capture');
     await win.webContents.session.flushStorageData();
 
     // A fresh renderer reads the product hook\'s stored preference. No fixture
     // state or extra localStorage save is used for this120 reload assertion.
     await load();
     await assert120Active('fresh renderer restores 120 FPS from actual hook persistence');
+    await check(`document.querySelector(${JSON.stringify(smoothToggle)})?.checked === true`,
+      'fresh publisher settings restore smoothing');
     await check('document.querySelector(".screen-settings input[type=checkbox]").checked && document.querySelector(".resolution-grid .active")?.textContent.includes("1080p")', 'fresh renderer restores native/resolution preferences');
     await capture('reloaded-120-native');
     await click(gameToggle, 'enable game mode after reload');

@@ -105,7 +105,7 @@ test('Worker preference requires its exact flag, qualified runtime and native su
 test('CPU timing requires the exact opt-in flag and native support, with no default clock reads', async () => {
   for (const [enabled, options] of [[true, {}], [true, { argv: ['--cove-native-cpu-frame-timing=0'] }],
     [true, { argv: ['--cove-native-cpu-frame-timing=1-extra'] }], [false, { cpuFrameTiming: true }],
-    [true, { cpuFrameTiming: true, platform: 'linux' }], [true, { cpuFrameTiming: true, sharedTexture: false }]]) {
+    [true, { cpuFrameTiming: true, platform: 'linux' }], [true, { cpuFrameTiming: true, sharedTexture: false, VideoFrame: undefined }]]) {
     let reads = 0;
     const b = bridge(enabled, { ...options, performance: { now() { reads++; throw Error('disabled_clock_read'); } } });
     assert.equal(b.api.getCpuFrameTiming(), null);
@@ -411,7 +411,7 @@ test('early import release requires the exact flag, native support and Electron 
     ['missing-runtime', true, { argv: [earlyImportReleaseFlag], versions: {} }],
     ['native-off', false, { argv: [earlyImportReleaseFlag] }],
     ['platform', true, { argv: [earlyImportReleaseFlag], platform: 'linux' }],
-    ['shared-texture', true, { argv: [earlyImportReleaseFlag], sharedTexture: false }],
+    ['shared-texture', true, { argv: [earlyImportReleaseFlag], sharedTexture: false, VideoFrame: undefined }],
   ]) await context.test(name, async () => {
     const b = bridge(enabled, options), t = texture();
     assert.equal(b.api.getEarlyImportReleaseDiagnostics(), null);
@@ -754,11 +754,25 @@ test('CPU constructor absence or rejection stops before ACK and does not change 
     assert.deepEqual(b.calls, [['cove:native-screen:stop', metadata.requestId, 'receiver_failed']]);
     assert.deepEqual(b.events.map(event => event[0]), ['invoke', 'send']); assert.equal(b.sent.length, 1);
   }
-  for (const options of [{ platform: 'linux' }, { sharedTexture: false }]) {
+  for (const options of [{ platform: 'linux' }, { sharedTexture: false, VideoFrame: undefined }]) {
     const b = bridge(true, options);
     assert.equal(b.api.supported, false); assert.equal(b.hasCpuReceiver(), false); assert.equal(b.hasReceiver(), false);
     assert.equal((await b.api.start(metadata.requestId, {})).ok, false); assert.equal(b.calls.length, 0);
   }
+});
+
+test('CPU delivery and the same authorized display remain available without the shared texture receiver', async () => {
+  const b = bridge(true, { sharedTexture: false });
+  assert.equal(b.api.supported, true); assert.equal(b.hasReceiver(), false); assert.equal(b.hasCpuReceiver(), true);
+  await b.api.selectDisplay();
+  const options = { cpuNv12: true };
+  await b.api.start(metadata.requestId, options, 'same-display');
+  await b.api.releaseDisplay('same-display');
+  assert.deepEqual(b.calls, [
+    ['cove:native-screen:select'],
+    ['cove:native-screen:start', metadata.requestId, options, 'same-display'],
+    ['cove:native-screen:release', 'same-display'],
+  ]);
 });
 
 test('CPU metadata stays within the native session, slot, timestamp and even NV12 geometry contract', async () => {

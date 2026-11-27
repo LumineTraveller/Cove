@@ -4,7 +4,10 @@ import {
   SquaresFour,
 } from '@phosphor-icons/react';
 import { VolumeControl } from '../components/VolumeControl';
-import { ShareOperationsMenu, type SharePictureInPictureAction } from '../annotation/ShareOperationsMenu';
+import {
+  ShareOperationsMenu,
+  type SharePictureInPictureAction,
+} from '../annotation/ShareOperationsMenu';
 import type { useScreenAnnotations } from '../annotation/useScreenAnnotations';
 
 export function ShareStatusBarV2({

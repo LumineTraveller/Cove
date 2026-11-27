@@ -234,6 +234,34 @@ test('playback binds once, reveals a frame, and releases element without stoppin
   assert.equal(video.srcObject, null); assert.equal(video.pauses, 1); assert.equal(stopped, false);
 });
 
+test('intrinsic video size follows rotation on the same stream and ignores stale or empty frames', t => {
+  installDocument(t);
+  const video = new FakeVideo();
+  const source = stream();
+  const dimensions: number[][] = [];
+  const binding = bindScreenVideo(video.element(), source, true, () => {}, (owner, width, height) => {
+    assert.equal(owner, source);
+    dimensions.push([width, height]);
+  });
+  video.frame();
+  video.dispatchEvent(new Event('loadedmetadata'));
+  video.videoWidth = 0;
+  video.dispatchEvent(new Event('resize'));
+  video.videoWidth = 720;
+  video.videoHeight = 1280;
+  video.dispatchEvent(new Event('resize'));
+  assert.equal(video.srcObject, source);
+  assert.equal(video.plays, 1);
+  assert.deepEqual(dimensions, [[1280, 720], [720, 1280]]);
+  video.srcObject = stream();
+  video.videoWidth = 1280;
+  video.dispatchEvent(new Event('resize'));
+  binding.dispose();
+  video.srcObject = source;
+  video.dispatchEvent(new Event('resize'));
+  assert.equal(dimensions.length, 2);
+});
+
 test('old frame and play rejection cannot reveal or retry a replacement stream', async t => {
   const document = installDocument(t);
   const video = new FakeVideo(); const old: string[] = []; const next: string[] = [];

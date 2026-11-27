@@ -1,18 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createElement, useState } from 'react';
+import { createElement, useState, type ComponentProps } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { DiagnosticsOverlayV2 } from '../src/features/media/diagnostics/DiagnosticsOverlayV2';
 import { useMediaDiagnostics, type useMediaDiagnosticsDependencies } from '../src/features/media/diagnostics/useMediaDiagnostics';
 import { bindFramePresentation, readFramePresentation } from '../src/features/media/diagnostics/framePresentation';
 import { EMPTY_STATS, type MediaStats } from '../src/features/media/desktopMediaSupport';
 import { createScreenEncodingPlan } from '../src/features/media/screen/screenCapture';
 import {
+  diagnoseFrameRate,
   diagnosticTrackSettings,
   diagnosticSenderParameters,
   diagnosticPacketLoss,
   diagnosticVideoCounters,
   intervalLossPercent,
   mediaDiagnosticSessionKey,
+  nativeFrameCounterRates,
   shouldAcceptMediaDiagnosticSample,
   videoCounterRates,
   videoCounterSample,
@@ -72,6 +75,55 @@ test('videoCounterRates rejects reset counters instead of reporting a false spik
   const previous = videoCounterSample({ id: 'video', timestamp: 2_000, bytesSent: 50_000 });
   const current = videoCounterSample({ id: 'video', timestamp: 3_000, bytesSent: 10_000 });
   assert.equal(videoCounterRates(current, previous).bitrateKbps, null);
+});
+
+test('missing frame counters need two samples while a measured zero is valid', () => {
+  const missing = videoCounterSample({ id: 'video', timestamp: 1_000 });
+  const first = videoCounterSample({ id: 'video', timestamp: 2_000, framesEncoded: 500 });
+  const stalled = videoCounterSample({ id: 'video', timestamp: 3_000, framesEncoded: 500 });
+  assert.equal(videoCounterRates(first, missing).encodeFps, null);
+  assert.equal(videoCounterRates(stalled, first).encodeFps, 0);
+  assert.equal(videoCounterRates(stalled, videoCounterSample({ id: 'video', framesEncoded: 500 })).encodeFps, null);
+});
+
+test('diagnosis separates encoding, RTP sending and decoding gaps and respects the current frame cap', () => {
+  const rates = { captureFps: 60, encodeFps: 38, sendFps: 27, receiveFps: 27, decodeFps: 13 };
+  assert.deepEqual(diagnoseFrameRate(rates, true, 60), {
+    status: 'limited', gaps: [
+      { stage: 'encode', referenceFps: 60, observedFps: 38 },
+      { stage: 'send', referenceFps: 38, observedFps: 27 },
+    ],
+  });
+  assert.deepEqual(diagnoseFrameRate(rates, false, null), {
+    status: 'limited', gaps: [{ stage: 'decode', referenceFps: 27, observedFps: 13 }],
+  });
+  assert.deepEqual(diagnoseFrameRate({ ...rates, receiveFps: 0, decodeFps: 0, bitrateKbps: 2900 }, false, null),
+    { status: 'awaiting-complete-frame' });
+  assert.deepEqual(diagnoseFrameRate({ ...rates, receiveFps: 0, decodeFps: 0, bitrateKbps: 0 }, false, null),
+    { status: 'pending' });
+  assert.deepEqual(diagnoseFrameRate({ ...rates, captureFps: 60, encodeFps: 15, sendFps: 14 }, true, 15),
+    { status: 'steady' });
+  assert.deepEqual(diagnoseFrameRate({ ...rates, captureFps: null, encodeFps: 25, sendFps: 25 }, true, 60),
+    { status: 'pending' });
+  assert.deepEqual(diagnoseFrameRate({ ...rates, captureFps: 0, encodeFps: 0, sendFps: 0 }, true, 60), {
+    status: 'limited', gaps: [{ stage: 'encoder-input', referenceFps: 60, observedFps: 0 }],
+  });
+});
+
+test('native frames reaching the track at full speed expose a separate WebRTC input bottleneck', () => {
+  const previous = { timestamp: 5_000, framesReceived: 180, framesWritten: 177 };
+  const current = { timestamp: 6_000, framesReceived: 240, framesWritten: 236 };
+  const native = nativeFrameCounterRates(current, previous);
+  const rates = { captureFps: 24, encodeFps: 24, sendFps: 24, receiveFps: null, decodeFps: null };
+  assert.deepEqual(native, { receivedFps: 60, writtenFps: 59 });
+  assert.deepEqual(diagnoseFrameRate(rates, true, 60, native), {
+    status: 'limited', gaps: [{ stage: 'encoder-input', referenceFps: 59, observedFps: 24 }],
+  });
+  assert.deepEqual(diagnoseFrameRate(rates, true, 60, { receivedFps: 60, writtenFps: 24 }), {
+    status: 'limited', gaps: [{ stage: 'delivery', referenceFps: 60, observedFps: 24 }],
+  });
+  assert.deepEqual(nativeFrameCounterRates({ timestamp: 7_000, framesReceived: 4, framesWritten: 3 }, current),
+    { receivedFps: null, writtenFps: null });
 });
 
 test('intervalLossPercent uses interval deltas', () => {
@@ -141,13 +193,16 @@ function renderDiagnostics(
 function diagnosticCollectorFixture() {
   const track = Object.assign(new EventTarget(), {
     readyState: 'live', contentHint: 'detail',
-    getSettings: () => ({ width: 1920, height: 1080, frameRate: 120 }),
+    getSettings: () => ({ width: 1920, height: 1080, frameRate: 120, displaySurface: 'monitor' }),
   }) as unknown as MediaStreamTrack;
-  const report = new Map([['outbound', {
+  const outbound = {
     id: 'outbound', type: 'outbound-rtp', kind: 'video', timestamp: 1_000,
     framesEncoded: 120, framesSent: 120, bytesSent: 1_000,
-  }]]) as unknown as RTCStatsReport;
-  const producer = { id: 'producer-1', track, getStats: async () => report };
+    mediaSourceId: 'source', qualityLimitationReason: 'none',
+  };
+  const source = { id: 'source', type: 'media-source', kind: 'video', frames: 120 };
+  const report = new Map<string, object>([['outbound', outbound], ['source', source]]) as unknown as RTCStatsReport;
+  const producer = { id: 'producer-1', track, paused: false, getStats: async () => report };
   const history: useMediaDiagnosticsDependencies['diagnosticHistory'] = { current: [] };
   const updates: MediaStats[] = [];
   let holdServerSample = false;
@@ -168,14 +223,53 @@ function diagnosticCollectorFixture() {
         if (!holdServerSample) finishServerSample();
       },
     },
-    screenEncodingPlan: null,
+    screenEncodingPlan: null, fps: 120,
   } as unknown as useMediaDiagnosticsDependencies;
   return {
-    deps, producer, track, history, updates, serverSampleStarted,
+    deps, producer, track, history, updates, serverSampleStarted, outbound, source,
     holdServerSample: () => { holdServerSample = true; },
     finishServerSample: () => finishServerSample(),
   };
 }
+
+test('low encoder input is shown in the panel and export even with WebRTC quality reason none', async () => {
+  const f = diagnosticCollectorFixture();
+  const plan = createScreenEncodingPlan({ preset: '1080p', maxFps: 60, activity: 'motion' });
+  const [api] = renderDiagnostics([{ ...f.deps, screenEncodingPlan: plan }]);
+  await api.collectStats();
+  assert.deepEqual(f.updates.at(-1)?.frameRateDiagnosis, { status: 'pending' });
+
+  f.outbound.timestamp += 1005;
+  f.source.frames += 25;
+  f.outbound.framesEncoded += 24;
+  f.outbound.framesSent += 24;
+  await api.collectStats();
+  const stats = f.updates.at(-1)!;
+  assert.equal(stats.qualityLimitation, 'none');
+  assert.deepEqual(stats.frameRateDiagnosis, {
+    status: 'limited', gaps: [{ stage: 'encoder-input', referenceFps: 60, observedFps: 24.9 }],
+  });
+  assert.equal(f.history.current.at(-1)?.stats.frameRateDiagnosis, stats.frameRateDiagnosis);
+  assert.equal(stats.captureBackend, 'chromium');
+  const rtc = { stats, localScreen: {} as MediaStream, screenEncodingPlan: plan } as
+    ComponentProps<typeof DiagnosticsOverlayV2>['rtc'];
+  const html = renderToStaticMarkup(createElement(DiagnosticsOverlayV2, {
+    rtc, compact: false, onToggleCompact() {},
+  }));
+  assert.match(html, /帧率受限 · WebRTC 编码前输入<\/span><b>24\.9 \/ 60 fps/);
+  assert.match(html, /采集后端<\/span><b>Chromium/);
+  assert.doesNotMatch(html, /\bnone\b/);
+
+  f.producer.paused = true;
+  f.outbound.timestamp += 1_000;
+  await api.collectStats();
+  assert.deepEqual(f.updates.at(-1)?.frameRateDiagnosis, { status: 'paused' });
+
+  f.producer.paused = false;
+  f.outbound.timestamp += 1_000;
+  await api.collectStats();
+  assert.deepEqual(f.updates.at(-1)?.frameRateDiagnosis, { status: 'pending' });
+});
 
 test('the retained collector reads replacement render getters for each history entry', async () => {
   const f = diagnosticCollectorFixture();

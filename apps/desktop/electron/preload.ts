@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, sharedTexture } from "electron";
-import type { NativeScreenFrame, NativeScreenOptions, NativeScreenStartResult } from './native-screen-capture-protocol';
+import type { NativeScreenDisplay, NativeScreenFrame, NativeScreenOptions, NativeScreenStartResult } from './native-screen-capture-protocol';
 import type { UpdateState } from "./updater-core";
 import type { UpdateSettings, UpdateSettingsResult } from "./update-settings-types";
 import type { RemoteControlActivation } from "./remote-control-activation";
@@ -31,8 +31,11 @@ const nativeReleasePermits = new Map<string, () => void>();
 const nativeEarlyPermits = new Set<string>();
 const nativeRequestId = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9_-]{8,80}$/.test(value);
 const nativeEnabled = process.platform === 'win32' && process.argv.includes('--cove-native-gpu-capture=1') &&
-  typeof sharedTexture?.setSharedTextureReceiver === 'function';
-const nativeEarlyImportRelease = nativeEnabled && process.versions?.electron === '44.0.0' &&
+  (typeof sharedTexture?.setSharedTextureReceiver === 'function' ||
+    (process.versions?.electron === '44.0.0' &&
+      typeof (globalThis as { VideoFrame?: NativeCpuVideoFrameConstructor }).VideoFrame === 'function'));
+const nativeGpuEnabled = nativeEnabled && typeof sharedTexture?.setSharedTextureReceiver === 'function';
+const nativeEarlyImportRelease = nativeGpuEnabled && process.versions?.electron === '44.0.0' &&
   process.argv.includes('--cove-native-early-import-release=1');
 // Process-local receiver/import observations, not proof of released GPU resources.
 const nativeEarlyImportReleaseDiagnostics = nativeEarlyImportRelease
@@ -329,7 +332,7 @@ if (nativeEnabled) {
       finally { nativeCpuFrameTimingRecord('handler', handlerStartedAt); }
     }
   });
-  sharedTexture.setSharedTextureReceiver(async ({ importedSharedTexture: imported }, metadata: NativeScreenFrame) => {
+  if (nativeGpuEnabled) sharedTexture.setSharedTextureReceiver(async ({ importedSharedTexture: imported }, metadata: NativeScreenFrame) => {
     if (nativeEarlyImportRelease) return receiveEarlyImportRelease(imported, metadata);
     let frame: ReturnType<typeof imported.getVideoFrame> | undefined;
     // A malformed message is never sent by the main broker. Retire the import
@@ -377,20 +380,24 @@ if (nativeEnabled) {
 contextBridge.exposeInMainWorld('coveNativeScreen', {
   supported: nativeEnabled,
   hardwareAv1Encoding: nativeEnabled && process.argv.includes('--cove-native-screen-hardware-av1=1'),
-  startAv1WithNative: nativeEnabled && process.argv.includes('--cove-native-screen-av1-initial=1'),
   opaqueAv1Input: nativeEnabled && process.argv.includes('--cove-native-av1-opaque=1'),
   // Experimental handoff only; the qualified runtime and explicit launch flag
   // are required. This grants no additional IPC, source or renderer authority.
-  preferredFrameSink: nativeEnabled && process.versions?.electron === '44.0.0'
+  preferredFrameSink: nativeGpuEnabled && process.versions?.electron === '44.0.0'
     ? process.argv.includes('--cove-native-frame-sink=worker') ? 'worker'
       : process.argv.includes('--cove-native-frame-sink=gpu-snapshot') ? 'gpu-snapshot'
       : process.argv.includes('--cove-native-frame-sink=canvas') ? 'canvas' : undefined
     : undefined,
   getCpuFrameTiming: getNativeCpuFrameTiming,
   getEarlyImportReleaseDiagnostics,
-  start: (requestId: string, options: NativeScreenOptions): Promise<NativeScreenStartResult> =>
-    nativeEnabled && nativeRequestId(requestId)
-      ? ipcRenderer.invoke('cove:native-screen:start', requestId, options)
+  selectDisplay: (): Promise<NativeScreenDisplay | null> =>
+    nativeEnabled ? ipcRenderer.invoke('cove:native-screen:select') : Promise.resolve(null),
+  releaseDisplay: (authorizationId: string): Promise<boolean> =>
+    nativeEnabled && nativeRequestId(authorizationId)
+      ? ipcRenderer.invoke('cove:native-screen:release', authorizationId) : Promise.resolve(false),
+  start: (requestId: string, options: NativeScreenOptions, authorizationId?: string): Promise<NativeScreenStartResult> =>
+    nativeEnabled && nativeRequestId(requestId) && (authorizationId === undefined || nativeRequestId(authorizationId))
+      ? ipcRenderer.invoke('cove:native-screen:start', requestId, options, authorizationId)
       : Promise.resolve({ ok: false, reason: 'unavailable' }),
   stop: (requestId: string, fault?: 'renderer_failed' | 'receiver_failed'): Promise<boolean> => nativeRequestId(requestId) &&
     (fault === undefined || fault === 'renderer_failed' || fault === 'receiver_failed')

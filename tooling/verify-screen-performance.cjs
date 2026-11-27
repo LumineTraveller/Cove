@@ -81,9 +81,13 @@ async function main(){
   const effectiveNativeHelperSource=nativeHelperSourcePath&&fs.existsSync(path.join(root,nativeHelperSourcePath))
     ?{path:nativeHelperSourcePath,sha256:crypto.createHash('sha256').update(fs.readFileSync(path.join(root,nativeHelperSourcePath))).digest('hex')}:null;
   const sources=['apps/desktop/src/features/media/screen/screenCapture.ts','apps/desktop/src/features/media/screen/useScreenPublishing.ts','apps/desktop/src/features/media/screen/useScreenAnalysis.ts','apps/desktop/tests/ui/media-integration.tsx','apps/desktop/tests/ui/screen-performance-fixture.ts','apps/desktop/tests/ui/screen-performance.electron.cjs','apps/desktop/tests/ui/screen-performance-backend.cjs','tooling/verify-screen-performance.cjs','tooling/screen-performance-config.cjs','tooling/screen-performance-local-preview.cjs','apps/desktop/tests/ui/screen-performance-pattern-layouts.json','apps/desktop/src/styles/index.css','apps/desktop/src/styles/ui-v2.css','apps/desktop/src/features/media/diagnostics/DiagnosticsOverlayV2.tsx','apps/desktop/src/features/media/screen/ScreenVideo.tsx','apps/desktop/src/features/media/screen/screenVideoPlayback.ts','tooling/screen-performance-native.cjs','tooling/screen-performance-source-age.cjs','tooling/analyze-screen-performance-trace.cjs',
-    'apps/desktop/electron/native-screen-capture-protocol.ts','apps/desktop/electron/native-screen-capture-helper.cpp','apps/desktop/electron/native-screen-handles.cpp','apps/desktop/electron/build-native-screen-capture.cjs','apps/desktop/electron/native-screen-capture.ts','apps/desktop/electron/native-screen-cpu-delivery.ts','apps/desktop/electron/native-screen-cpu-buffer-pipeline.ts','apps/desktop/electron/preload.ts','apps/desktop/src/features/media/screen/nativeScreenCapture.ts','apps/desktop/src/features/media/screen/nativeFrameWriteQueue.ts','apps/desktop/src/features/media/screen/nativeScreenUpgrade.ts','apps/desktop/src/features/media/screen/nativeScreenColorPolicy.ts'];
+    'apps/desktop/electron/native-screen-capture-protocol.ts','apps/desktop/electron/native-screen-capture-helper.cpp','apps/desktop/electron/native-screen-handles.cpp','apps/desktop/electron/build-native-screen-capture.cjs','apps/desktop/electron/native-screen-capture.ts','apps/desktop/electron/native-screen-cpu-delivery.ts','apps/desktop/electron/native-screen-cpu-buffer-pipeline.ts','apps/desktop/electron/preload.ts','apps/desktop/src/features/media/screen/nativeScreenCapture.ts','apps/desktop/src/features/media/screen/nativeFrameWriteQueue.ts','apps/desktop/src/features/media/screen/nativeScreenRecovery.ts','apps/desktop/src/features/media/screen/nativeScreenColorPolicy.ts'];
   sources.push('tooling/screen-performance-demand.cjs','tests/screen-performance-demand.test.cjs');
+  sources.push('apps/desktop/src/features/media/screen/createAv1ScreenSender.ts',
+    'apps/desktop/src/features/media/screen/av1ScreenSenderWorker.ts','apps/desktop/src/features/media/screen/av1SequenceHeader.ts');
   if(process.env.COVE_FPS_AV1_SEQUENCE_PROBE==='1')sources.push('tooling/screen-performance-av1.cjs');
+  if(process.env.COVE_FPS_AV1_LEADING_METADATA==='1'||process.env.COVE_FPS_AV1_SEQUENCE_FAULT)
+    sources.push('apps/desktop/tests/ui/av1-interoperability-worker.ts');
   if(process.env.COVE_FPS_DETAIL_QUALITY==='1')sources.push('apps/desktop/tests/ui/screen-performance-quality-chart.json');
   if(process.env.COVE_FPS_PACKED_PROFILE==='1')
     sources.push('apps/desktop/electron/native-screen-capture-policy.ts','apps/desktop/dist-electron/native-screen-capture-policy.js');
@@ -99,8 +103,9 @@ async function main(){
     nativeArtifacts:nativePaths,effectiveNativeHelperSource,baselineFrameWriterOverride,effectiveNativeFrameWriter,localPreviewEnabled,productSenderThrottling,visiblePresentation,electronProcessWindowsHide:!visiblePresentation.enabled,
     files:Object.fromEntries(sources.map(file=>[file,crypto.createHash('sha256').update(fs.readFileSync(path.join(root,file))).digest('hex')]))},null,2)+'\n');
   const env={...process.env,COVE_FPS_RUN_DIR:directory,COVE_TEST_NODE:process.execPath,COVE_QA_MEDIA_PORT:String(await port())};delete env.ELECTRON_RUN_AS_NODE;
-  const dependencies=path.dirname(fs.realpathSync(path.join(root,'node_modules/vite')));
-  const entry=pathToFileURL(path.join(path.dirname(require.resolve('vite/package.json')),'dist/node/index.js')).href;
+  const vitePath=path.dirname(require.resolve('vite/package.json',{paths:[path.join(root,'apps/desktop')]}));
+  const dependencies=path.dirname(vitePath);
+  const entry=pathToFileURL(path.join(vitePath,'dist/node/index.js')).href;
   const bootstrap=path.join(directory,'vite-bootstrap.mjs');
   // Keep the original module ID, so the immutable baseline's relative imports
   // resolve beside the current adapter. The only alternate text is this fixed,
@@ -134,7 +139,7 @@ async function main(){
     nativeGpu:result?.nativeGpu,localPreviewControl:result?.localPreviewControl,productSenderThrottlingControl:result?.productSenderThrottlingControl,visiblePresentation:result?.visiblePresentation,
     profilingOnly:result?.profilingOnly,trace:result?.trace,
     cases:result?.cases?.map(c=>({config:c.config,sourceOnly:c.sourceOnly,summary:c.summary?Object.fromEntries(Object.entries(c.summary).filter(([key])=>!['senderLast','viewerLast'].includes(key))):null,nativeBaseline:c.nativeBaseline,comparisonContract:c.comparisonContract,
-      nativeUpgradeRequired:c.nativeUpgradeRequired,nativeUpgradeSucceeded:c.nativeUpgradeSucceeded,nativeGpu:c.nativeGpu,nativeLifecycle:c.nativeLifecycle,nativeStandby:c.nativeStandby,demandComparison:c.demandComparison,localPreview:c.localPreview,visiblePresentation:c.visiblePresentation,senderWindowBeforeSampling:c.senderWindowBeforeSampling})),
+      nativeUpgradeRequired:c.nativeUpgradeRequired,nativeUpgradeSucceeded:c.nativeUpgradeSucceeded,nativeGpu:c.nativeGpu,nativeLifecycle:c.nativeLifecycle,nativeRecovery:c.nativeRecovery,av1WorkerRecovery:c.av1WorkerRecovery,demandComparison:c.demandComparison,localPreview:c.localPreview,visiblePresentation:c.visiblePresentation,senderWindowBeforeSampling:c.senderWindowBeforeSampling})),
     cleanup:{timeouts:result?.cleanupTimeouts,passed:result?.cleanup?.passed,rendererResourcesZero:result?.cleanup?.rendererResourcesZero,backendResourcesZero:result?.cleanup?.backendResourcesZero,nativeGpu:result?.cleanup?.nativeGpu,backendStopped:result?.backendStopped,finishedAt:result?.finishedAt}},null,2));
   process.exitCode=error||interrupted||!result?.passed?1:0;
 }

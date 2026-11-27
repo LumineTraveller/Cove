@@ -13,7 +13,7 @@ export type ScreenActivity = 'static' | 'active' | 'motion';
 /**
  * 拥塞控制从起播的低码率爬到可用码率需要数秒。此期间若允许
  * maintain-framerate，编码器会降分辨率换帧率，观看端看到的是开头几秒画面
- * 发糊、随后才变清晰。宽限期内一律保分辨率，宁可掉帧率。
+ * 发糊、随后才变清晰。使用 WebRTC 自适应的共享在宽限期内优先保分辨率。
  */
 export const SCREEN_RAMP_GRACE_MS = 5_000;
 
@@ -44,7 +44,7 @@ export interface ScreenEncodingPlan {
   scaleResolutionDownBy: number;
   fps: number;
   contentHint: 'detail' | 'motion';
-  degradationPreference: RTCDegradationPreference;
+  degradationPreference: RTCDegradationPreference | 'maintain-framerate-and-resolution';
 }
 
 export interface ScreenRtpEncodingParameters {
@@ -81,6 +81,7 @@ export function createScreenEncodingPlan({
   sourceHeight,
   nativeResolution = false,
   rampGuard = false,
+  gpuEncoding = false,
 }: {
   preset: ScreenPreset;
   maxFps: ScreenFps;
@@ -89,6 +90,7 @@ export function createScreenEncodingPlan({
   sourceHeight?: number;
   nativeResolution?: boolean;
   rampGuard?: boolean;
+  gpuEncoding?: boolean;
 }): ScreenEncodingPlan {
   const definition = SCREEN_PRESETS[preset];
   const width = positiveDimension(sourceWidth, definition.width);
@@ -108,8 +110,9 @@ export function createScreenEncodingPlan({
     scaleResolutionDownBy,
     fps: profile.fps,
     contentHint: activity === 'motion' ? 'motion' : 'detail',
-    degradationPreference:
-      !nativeResolution && activity === 'motion' && !rampGuard
+    degradationPreference: gpuEncoding
+      ? 'maintain-framerate-and-resolution'
+      : !nativeResolution && activity === 'motion' && !rampGuard
         ? 'maintain-framerate'
         : 'maintain-resolution',
   };
@@ -154,6 +157,8 @@ export function withScreenEncodingPlan(
     encodings: parameters.encodings.map((encoding) => {
       return { ...encoding, ...toScreenRtpEncoding(plan) };
     }),
-    degradationPreference: plan.degradationPreference,
+    // The desktop GPU path requires Chromium 152, which supports the newer
+    // WebRTC value even though the bundled TypeScript DOM declarations lag.
+    degradationPreference: plan.degradationPreference as RTCDegradationPreference,
   };
 }

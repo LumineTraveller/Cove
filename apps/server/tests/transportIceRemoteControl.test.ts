@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import test from 'node:test';
-import { createPeer, peers } from '../src/features/media/ms';
+import { createPeer, getRoomProducers, peers } from '../src/features/media/ms';
 import { invalidateMediaSession } from '../src/features/media/mediaLifecycle';
 import { bindTransportIceRestart } from '../src/features/media/transportIceRestart';
 import { registerMediaSocketHandlers, type RegisterMediaSocketHandlersDependencies } from '../src/features/media/socketHandlers';
@@ -20,7 +21,11 @@ function fixture(t: any, recovering: 'controller' | 'sharer' = 'controller', ope
   const controller = { id: controllerId, connected: true,
     on: (event: string, fn: any) => controllerHandlers.set(event, fn) };
   const events: Array<{ to: string; event: string; payload: any }> = [];
-  const io = { to: (to: string) => ({ emit: (event: string, payload: any) => { events.push({ to, event, payload }); } }) };
+  const sharerConnection = Object.assign(new EventEmitter(), { transport: { writable: true } });
+  const io = {
+    sockets: { sockets: new Map([[sharerId, { conn: sharerConnection }]]) },
+    to: (to: string) => ({ emit: (event: string, payload: any) => { events.push({ to, event, payload }); } }),
+  };
   const remoteControls = new RemoteControlRegistry();
   const controls = createControlService({ io: io as any, remoteControls });
   let revocations = 0;
@@ -42,11 +47,13 @@ function fixture(t: any, recovering: 'controller' | 'sharer' = 'controller', ope
       controls.stopRemoteControlForSocket(socketId, reason);
     },
   } as unknown as RegisterMediaSocketHandlersDependencies);
-  registerRemoteControlSocketHandlers({ socket: controller as any, io: io as any, remoteControls,
+  const remoteHandlers = { io: io as any, remoteControls,
     roomMembers: new Map([['room', new Set([controllerId, sharerId])]]),
     remoteControlCapabilities: new Set([controllerId, sharerId]),
     isSharingScreen: () => true, isRemoteControlAllowed: () => true,
-    userNames: new Map(), publicUserId: value => value, ...controls });
+    userNames: new Map(), publicUserId: (value: string) => value, ...controls };
+  registerRemoteControlSocketHandlers({ socket: controller as any, ...remoteHandlers });
+  if (recovering === 'sharer') registerRemoteControlSocketHandlers({ socket: socket as any, ...remoteHandlers });
   function pendingRequest() {
     const created = remoteControls.createRequest('room', controllerId, sharerId);
     assert.equal(created.ok, true);
@@ -72,9 +79,80 @@ function fixture(t: any, recovering: 'controller' | 'sharer' = 'controller', ope
   }
   t.after(() => peers.delete(socket.id));
   return { socket, peer, transport, request, remoteControls, events, handlers,
-    pendingRequest, grant, input, inputEvents, stopped, restart,
+    pendingRequest, grant, input, inputEvents, stopped, restart, sharerConnection,
     rotations: () => rotations, revocations: () => revocations };
 }
+
+test('a publisher can change smoothing and an active remote grant overrides it for existing and late viewers', t => {
+  const f = fixture(t, 'sharer');
+  const screen = { id: 'published-screen', kind: 'video', closed: false, appData: { type: 'screen' } };
+  f.peer.producers.set(screen.id, screen as any);
+  const send = (event: string, data: unknown) => {
+    let result: any;
+    f.handlers.get(event)!(data, (reply: unknown) => { result = reply; });
+    return result;
+  };
+  const policies = () => f.events.filter(item => item.event === 'screen:playback-policy');
+  assert.ok(send('screen:set-smooth-playback', { producerId: 'foreign', enabled: true }).error);
+  assert.ok(send('screen:set-smooth-playback', { producerId: screen.id, enabled: 'true' }).error);
+  assert.deepEqual(policies(), []);
+
+  assert.equal(send('screen:set-smooth-playback', { producerId: screen.id, enabled: true }).ok, true);
+  const state = (remoteControlActive: boolean) => ({
+    peerId: f.socket.id, producerId: screen.id, smoothPlayback: true, remoteControlActive,
+  });
+  assert.deepEqual(policies().at(-1), { to: 'room', event: 'screen:playback-policy', payload: state(false) });
+  const { requestId } = f.pendingRequest();
+  assert.equal(send('remote-control:respond', { requestId, accepted: true }).ok, true);
+  const started = f.events.find(item => item.event === 'remote-control:started')!;
+  assert.deepEqual(policies().at(-1)?.payload, state(true));
+  assert.ok(f.events.indexOf(policies().at(-1)!) < f.events.indexOf(started));
+  assert.deepEqual(getRoomProducers('room', 'late-viewer').find(item => item.producerId === screen.id)?.appData,
+    { type: 'screen', smoothPlayback: true, remoteControlActive: true });
+
+  assert.equal(send('remote-control:stop', { sessionId: started.payload.sessionId }).ok, true);
+  assert.deepEqual(policies().at(-1)?.payload, state(false));
+});
+
+test('the relay coalesces blocked positions, preserves edges and discards a revoked tail', async t => {
+  const f = fixture(t);
+  const session = f.grant();
+  const input = (value: RemoteControlInput) => f.input(session.sessionId, value);
+  const move = (x: number) => input({ type: 'pointer', x, y: .5 });
+  const delivered = () => f.inputEvents().map(event => event.payload.input);
+  const connection = f.sharerConnection;
+  connection.transport.writable = false;
+  move(.1);
+  move(.2);
+  assert.deepEqual(delivered(), []);
+  assert.equal(connection.listenerCount('drain'), 1);
+  assert.equal(connection.listenerCount('upgrade'), 1);
+  connection.transport.writable = true;
+  connection.emit('drain');
+  await Promise.resolve();
+  assert.deepEqual(delivered(), [{ type: 'pointer', x: .2, y: .5 }]);
+  assert.equal(connection.listenerCount('drain'), 0);
+  assert.equal(connection.listenerCount('upgrade'), 0);
+
+  connection.transport.writable = false;
+  move(.3);
+  move(.4);
+  input({ type: 'button', x: .4, y: .5, button: 'left', down: true });
+  input({ type: 'button', x: .4, y: .5, button: 'left', down: false });
+  assert.deepEqual(delivered().slice(1), [
+    { type: 'pointer', x: .4, y: .5 },
+    { type: 'button', x: .4, y: .5, button: 'left', down: true },
+    { type: 'button', x: .4, y: .5, button: 'left', down: false },
+  ]);
+  move(.6);
+  assert.equal((await f.restart(1)).ok, true);
+  connection.transport.writable = true;
+  connection.emit('upgrade');
+  await Promise.resolve();
+  assert.equal(delivered().length, 4);
+  assert.equal(connection.listenerCount('drain'), 0);
+  assert.equal(connection.listenerCount('upgrade'), 0);
+});
 
 for (const recovering of ['controller', 'sharer'] as const) {
   test(`an accepted ${recovering} ICE restart revokes the real grant before rotating and rejects old inputs`, async t => {

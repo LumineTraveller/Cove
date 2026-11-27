@@ -10,17 +10,17 @@ import { createNativeScreenHelperTimingCollector, type NativeScreenHelperTiming 
 import { acquireNativeScreenRendererActivity } from './native-screen-renderer-activity';
 import {
   NATIVE_SCREEN_POOL_SIZE, NATIVE_SCREEN_START_TIMEOUT_MS, NATIVE_SCREEN_GPU_ENCODING_START_TIMEOUT_MS,
-  NATIVE_SCREEN_STOP_TIMEOUT_MS,
+  NATIVE_SCREEN_STOP_TIMEOUT_MS, NATIVE_SCREEN_DIRECT_HELPER_TIMEOUT_MS, NATIVE_SCREEN_HELPER_FAILURES,
   validNativeScreenOptions, validNativeScreenRequestId,
   type NativeScreenFrame, type NativeScreenOptions, type NativeScreenSourceSelection, type NativeScreenStartResult, type NativeScreenColorSpace,
-  type NativeScreenRegion,
+  type NativeScreenRegion, type NativeScreenDisplay,
 } from './native-screen-capture-protocol';
 
 const MAX_LINE_BYTES = 8 * 1024;
 const MAX_CHUNK_BYTES = 64 * 1024;
 const MAX_STDIN_BYTES = 4 * 1024;
 const MAX_SESSIONS = 2;
-const MAX_REQUEST_IDS = 4096;
+const MAX_RECENT_REQUEST_IDS = 4096;
 const SELECTION_LIFETIME_MS = 10_000;
 const CAPTURE_STALL_TIMEOUT_MS = 5_000;
 const TIMING_BUCKET_LIMITS_MS = [1, 2, 4, 1000 / 120, 1000 / 60, 1000 / 30];
@@ -31,7 +31,10 @@ function emptyTimingMetric(): TimingMetric { return { count: 0, totalMs: 0, maxM
 type FailureCode = 'helper_unavailable' | 'helper_failed' | 'invalid_protocol' | 'native_resolution_unavailable' |
   'desktop_unavailable' | 'display_changed' | 'start_timeout' |
   'import_failed' | 'transfer_failed' | 'release_failed' | 'capture_stalled' | 'target_unavailable' | 'stopped' |
-  'renderer_failed' | 'receiver_failed' | 'cpu_frame_failed' | 'cpu_ack_timeout';
+  'renderer_failed' | 'receiver_failed' | 'cpu_frame_failed' | 'cpu_ack_timeout' |
+  typeof NATIVE_SCREEN_HELPER_FAILURES[number];
+type AuthorizedDisplay = { id: string; currentSelection: () => NativeScreenSourceSelection | undefined };
+type DisplayGrant = { id: string; target: WebContents; frame: WebFrameMain; displayId: string };
 interface Ready { width: number; height: number; sourceWidth: number; sourceHeight: number; pixelFormat: 'bgra' | 'nv12'; storage: 'gpu' | 'cpu'; colorSpace?: NativeScreenColorSpace }
 export interface NativeScreenHandleBridge {
   supportsCpuFrames?: boolean;
@@ -76,6 +79,7 @@ interface Session {
   sessionId: string;
   options: NativeScreenOptions;
   selection: NativeScreenSourceSelection;
+  authorization?: AuthorizedDisplay;
   storage: Ready['storage'];
   pixelFormat: Ready['pixelFormat'];
   cpuOwnership: NativeCpuOwnership;
@@ -134,10 +138,10 @@ function copyCpuFrameRows(frame: ArrayBuffer, patch: ArrayBuffer, width: number,
 /** Owns only children it creates. Renderer IPC never provides a texture handle. */
 export class NativeScreenCaptureController {
   private readonly sessions = new Set<Session>();
-  private readonly requestIds = new Set<string>();
+  private readonly recentRequestIds = new Set<string>();
   private readonly retainedLeases = new Set<Lease>();
   private selection?: NativeScreenSourceSelection;
-  private disabledAfterFailure = false;
+  private displayGrant?: DisplayGrant;
   private failureCode: FailureCode | null = null;
   private started = 0;
   private stopped = 0;
@@ -163,7 +167,32 @@ export class NativeScreenCaptureController {
     this.selection = { ...selection };
   }
 
-  async start(target: WebContents, requestId: string, options: NativeScreenOptions): Promise<NativeScreenStartResult> {
+  authorizeDisplay(target: WebContents, selection: NativeScreenSourceSelection): NativeScreenDisplay | null {
+    if (!this.config.enabled || target.isDestroyed() || !selection.displayId ||
+        selection.displayId !== selection.primaryDisplayId ||
+        !integer(selection.sourceWidth, 2, 16384) || !integer(selection.sourceHeight, 2, 16384)) return null;
+    if (this.displayGrant) this.releaseDisplay(this.displayGrant.target, this.displayGrant.id);
+    const id = randomUUID();
+    this.displayGrant = { id, target, frame: target.mainFrame, displayId: selection.displayId };
+    return { authorizationId: id, width: selection.sourceWidth!, height: selection.sourceHeight! };
+  }
+
+  releaseDisplay(target: WebContents, id: string): boolean {
+    if (this.displayGrant?.id !== id || this.displayGrant.target !== target) return false;
+    this.displayGrant = undefined;
+    for (const session of this.sessions) {
+      if (session.authorization?.id === id) this.retire(session, 'stopped', false);
+    }
+    return true;
+  }
+
+  private ownsDisplay(target: WebContents, id: string): boolean {
+    return this.displayGrant?.id === id && this.displayGrant.target === target &&
+      !target.isDestroyed() && this.displayGrant.frame === target.mainFrame;
+  }
+
+  async start(target: WebContents, requestId: string, options: NativeScreenOptions,
+      authorization?: AuthorizedDisplay): Promise<NativeScreenStartResult> {
     if (!validNativeScreenRequestId(requestId) || !validNativeScreenOptions(options))
       return { ok: false, reason: 'invalid_request' };
     const requireCpuNv12 = options.cpuNv12 === true;
@@ -177,9 +206,11 @@ export class NativeScreenCaptureController {
     // loading/opening the handle bridge or consuming the stock selection.
     if (this.config.storage === 'cpu' && options.colorSpace === undefined)
       return { ok: false, reason: 'color_space_required' };
-    if (!this.config.enabled || this.disabledAfterFailure || process.platform !== 'win32' || process.arch !== 'x64' ||
-      !/^44\./.test(process.versions.electron || '') || typeof sharedTexture?.importSharedTexture !== 'function' ||
-      typeof sharedTexture?.sendSharedTexture !== 'function') return { ok: false, reason: 'unavailable' };
+    if (!this.config.enabled || process.platform !== 'win32' || process.arch !== 'x64' ||
+      !/^44\./.test(process.versions.electron || '')) return { ok: false, reason: 'unavailable' };
+    if (!requireCpuNv12 && this.config.storage !== 'cpu' &&
+        (typeof sharedTexture?.importSharedTexture !== 'function' || typeof sharedTexture?.sendSharedTexture !== 'function'))
+      return { ok: false, reason: 'unavailable' };
     if (!this.handles) {
       try { this.handles = require(path.join(path.dirname(this.config.helperPath), 'native-screen-handles.node')) as NativeScreenHandleBridge; }
       catch { return { ok: false, reason: 'unavailable' }; }
@@ -190,29 +221,47 @@ export class NativeScreenCaptureController {
     if (this.config.storage === 'cpu' && this.config.cpuOwnership === 'copy-complete' && this.handles.supportsCachedCpuFramesInto !== true)
       return { ok: false, reason: 'unavailable' };
     const canDeliverCpuNv12 = this.handles.supportsCpuFrames === true && this.handles.supportsCachedCpuFramesInto === true;
-    if (requireCpuNv12 && !canDeliverCpuNv12) return { ok: false, reason: 'unavailable' };
-    if (this.requestIds.has(requestId)) return { ok: false, reason: 'duplicate_request' };
-    if (this.requestIds.size >= MAX_REQUEST_IDS || this.sessions.size >= MAX_SESSIONS)
+    if (requireCpuNv12 && (this.handles.supportsCpuFrames !== true ||
+        (!options.conservativeDelivery && !canDeliverCpuNv12))) return { ok: false, reason: 'unavailable' };
+    const sessions = [...this.sessions];
+    if (this.recentRequestIds.has(requestId) || sessions.some(session => session.requestId === requestId))
+      return { ok: false, reason: 'duplicate_request' };
+    if (sessions.filter(session => !session.closed).length >= MAX_SESSIONS)
       return { ok: false, reason: 'busy' };
     if (target.isDestroyed()) return { ok: false, reason: 'target_unavailable' };
-    const selection = this.selection;
-    // Main's actual stock choice is a one-use capability, including an ineligible choice.
-    this.selection = undefined;
+    let selection: NativeScreenSourceSelection | undefined;
+    if (authorization) {
+      if (!this.ownsDisplay(target, authorization.id)) return { ok: false, reason: 'authorization_expired' };
+      selection = authorization.currentSelection();
+      if (!selection || selection.displayId !== this.displayGrant?.displayId) return { ok: false, reason: 'display_changed' };
+    } else {
+      // The standalone performance harness still provides a one-use Chromium selection.
+      selection = this.selection;
+      this.selection = undefined;
+    }
     const age = selection ? Date.now() - selection.selectedAt : NaN;
-    if (!selection || !/^screen:\d+:\d+$/.test(selection.sourceId) || selection.displayCount !== 1 ||
+    if (!selection || !/^screen:\d+:\d+$/.test(selection.sourceId) || (!authorization && selection.displayCount !== 1) ||
       !selection.displayId || selection.displayId !== selection.primaryDisplayId ||
       !Number.isFinite(age) || age < 0 || age > SELECTION_LIFETIME_MS ||
       !integer(selection.sourceWidth, 2, 16384) || !integer(selection.sourceHeight, 2, 16384) ||
-      selection.sourceWidth < selection.sourceHeight) return { ok: false, reason: 'source_ineligible' };
-    const packedScreenCapture = requireCpuNv12 || (process.versions.electron === '44.0.0' && this.config.storage !== 'cpu' &&
+      (!authorization && selection.sourceWidth < selection.sourceHeight)) return { ok: false, reason: 'source_ineligible' };
+    const packedScreenCapture = !options.conservativeDelivery && (requireCpuNv12 ||
+      (process.versions.electron === '44.0.0' && this.config.storage !== 'cpu' &&
       options.colorSpace === 'bt709-limited' && options.fps === 120 &&
       options.maxWidth >= 1728 && options.maxWidth <= 1920 && options.maxHeight === 1080 &&
       integer(selection.sourceWidth, 2558, 2562) && integer(selection.sourceHeight, 1598, 1602) &&
-      canDeliverCpuNv12 && this.config.preferPackedScreenCapture?.() === true);
-    const storage = packedScreenCapture ? 'cpu' : this.config.storage ?? 'gpu';
-    const pixelFormat = packedScreenCapture ? 'nv12' : this.config.pixelFormat ?? 'bgra';
+      canDeliverCpuNv12 && this.config.preferPackedScreenCapture?.() === true));
+    const storage = requireCpuNv12 || packedScreenCapture ? 'cpu' : this.config.storage ?? 'gpu';
+    const pixelFormat = requireCpuNv12 || packedScreenCapture ? 'nv12' : this.config.pixelFormat ?? 'bgra';
     const cpuOwnership = packedScreenCapture ? 'copy-complete' : this.config.cpuOwnership ?? 'final-ack';
-    this.requestIds.add(requestId);
+    // Retired textures can outlive their helper until the encoder releases
+    // the old track. CPU delivery can replace that track without new imports.
+    if (storage === 'gpu' && sessions.length >= MAX_SESSIONS) return { ok: false, reason: 'busy' };
+    this.recentRequestIds.add(requestId);
+    if (this.recentRequestIds.size > MAX_RECENT_REQUEST_IDS) {
+      const oldest = this.recentRequestIds.values().next().value;
+      if (oldest) this.recentRequestIds.delete(oldest);
+    }
     let frame: WebFrameMain;
     let child: ChildProcessWithoutNullStreams;
     try {
@@ -221,21 +270,22 @@ export class NativeScreenCaptureController {
         '--max-width', String(options.maxWidth), '--max-height', String(options.maxHeight), '--fps', String(options.fps),
         ...(pixelFormat === 'nv12' ? ['--pixel-format', 'nv12'] : []),
         ...(storage === 'cpu' ? ['--frame-storage', 'cpu', '--color-space', options.colorSpace!] : []),
+        ...(options.gameMode ? ['--rearm-foreground', '1'] : []),
         ...(this.config.completion ? ['--completion', this.config.completion] : [])],
       { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     } catch {
-      this.disable('helper_unavailable');
+      this.recordFailure('helper_unavailable');
       return { ok: false, reason: 'helper_unavailable' };
     }
     let resolveStart!: Session['resolveStart'];
     const result = new Promise<NativeScreenStartResult>(resolve => { resolveStart = resolve; });
     let resolveStop!: () => void;
     const stopPromise = new Promise<void>(resolve => { resolveStop = resolve; });
-    const session: Session = { target, frame, child, requestId, sessionId: randomUUID(), options: { ...options }, selection,
+    const session: Session = { target, frame, child, requestId, sessionId: randomUUID(), options: { ...options }, selection, authorization,
       storage, pixelFormat, cpuOwnership, packedScreenCapture,
       active: true, closed: false, notified: false, childHandlesClosed: false, lastSerial: 0, lastTimestamp: 0, pending: Buffer.alloc(0),
       leases: new Map(), resolveStart, stopPromise, resolveStop, detach: () => {} };
-    if (this.config.reuseGpuTextures && process.versions.electron === '44.0.0' && storage !== 'cpu' &&
+    if (!options.conservativeDelivery && this.config.reuseGpuTextures && process.versions.electron === '44.0.0' && storage !== 'cpu' &&
         typeof sharedTexture.subtle?.importSharedTexture === 'function')
       session.cachedTextures = new Map();
     this.sessions.add(session);
@@ -291,7 +341,8 @@ export class NativeScreenCaptureController {
     // listeners, so startup failure and every normal retirement release it.
     if (this.config.keepRendererActive === true)
       session.releaseRendererActivity = acquireNativeScreenRendererActivity(target);
-    const startTimeoutMs = requireCpuNv12 ? NATIVE_SCREEN_GPU_ENCODING_START_TIMEOUT_MS : NATIVE_SCREEN_START_TIMEOUT_MS;
+    const startTimeoutMs = authorization ? NATIVE_SCREEN_DIRECT_HELPER_TIMEOUT_MS
+      : requireCpuNv12 ? NATIVE_SCREEN_GPU_ENCODING_START_TIMEOUT_MS : NATIVE_SCREEN_START_TIMEOUT_MS;
     session.startTimer = setTimeout(() => this.retire(session, 'start_timeout', true), startTimeoutMs);
     session.startTimer.unref();
     try { session.childHandles = this.handles.openChild(child.pid!); }
@@ -341,14 +392,15 @@ export class NativeScreenCaptureController {
 
   gpuProcessGone(): void {
     for (const session of this.sessions) {
-      if (!session.cachedTextures) continue;
+      if (session.storage !== 'gpu') continue;
       this.retire(session, 'import_failed', true);
-      this.releaseCachedTextures(session);
+      if (session.cachedTextures) this.releaseCachedTextures(session);
     }
   }
 
   reset(): void {
     this.selection = undefined;
+    this.displayGrant = undefined;
     for (const session of this.sessions) this.retire(session, 'stopped', false);
   }
 
@@ -388,7 +440,7 @@ export class NativeScreenCaptureController {
       busySlots: sessions.reduce((sum, value) => sum + value.leases.size + (value.cpuPipeline?.snapshot().activeNativeLeases ?? value.cpuDelivery?.snapshot().inFlight ?? 0), 0), started: this.started, stopped: this.stopped,
       frames: this.frames, refreshFrames: this.refreshFrames, transferredFrames: this.transferredFrames,
       releasedFrames: this.releasedFrames, textureImports: this.textureImports, lastEndReason: this.lastEndReason,
-      disabled: this.disabledAfterFailure, failureCode: this.failureCode,
+      disabled: false, failureCode: this.failureCode,
       timing: this.config.timing ? Object.fromEntries(Object.entries(this.timing).map(([name, metric]) =>
         [name, { ...metric, buckets: [...metric.buckets] }])) : null };
   }
@@ -407,8 +459,7 @@ export class NativeScreenCaptureController {
     metric.buckets[bucket < 0 ? TIMING_BUCKET_LIMITS_MS.length : bucket]++;
   }
 
-  private disable(reason: FailureCode): void {
-    this.disabledAfterFailure = true;
+  private recordFailure(reason: FailureCode): void {
     this.failureCode = reason;
   }
 
@@ -434,7 +485,8 @@ export class NativeScreenCaptureController {
       if (message.type === 'ready') this.ready(session, message);
       else if (message.type === 'frame') this.frame(session, message);
       else if (message.type === 'desktop-unavailable') this.desktopUnavailable(session);
-      else if (message.type === 'error' && message.code === 'display_changed') this.retire(session, 'display_changed', false);
+      else if (message.type === 'error' && NATIVE_SCREEN_HELPER_FAILURES.includes(message.code as typeof NATIVE_SCREEN_HELPER_FAILURES[number]))
+        this.retire(session, message.code as typeof NATIVE_SCREEN_HELPER_FAILURES[number], message.code !== 'display_changed');
       else if (message.type === 'error' || message.type === 'done') this.retire(session, 'helper_failed', true);
       else this.retire(session, 'invalid_protocol', true);
     }
@@ -455,6 +507,15 @@ export class NativeScreenCaptureController {
   }
 
   private ready(session: Session, message: Record<string, unknown>): void {
+    if (session.authorization) {
+      const { id, currentSelection } = session.authorization;
+      if (!this.ownsDisplay(session.target, id)) { this.retire(session, 'target_unavailable', false); return; }
+      const current = currentSelection();
+      if (!current || current.displayId !== session.selection.displayId || current.sourceWidth !== session.selection.sourceWidth ||
+          current.sourceHeight !== session.selection.sourceHeight) {
+        this.retire(session, 'display_changed', false); return;
+      }
+    }
     const bgra = message.protocol === 2 && (message.pixelFormat === undefined || message.pixelFormat === 'bgra');
     // Protocol-4 peers predating this contract emitted only BT709. An absent
     // declaration can never satisfy a BT601 request.
@@ -746,7 +807,7 @@ export class NativeScreenCaptureController {
     session.cachedDrainTimer = undefined;
     session.leases.clear();
     for (const { texture } of session.cachedTextures.values()) {
-      try { texture.release(); } catch { this.disable('release_failed'); }
+      try { texture.release(); } catch { this.recordFailure('release_failed'); }
     }
     session.cachedTextures.clear();
     if (session.closed) this.sessions.delete(session);
@@ -802,13 +863,13 @@ export class NativeScreenCaptureController {
     session.cpuBuffers = undefined;
     this.lastEndReason = reason;
     this.stopped++;
-    if (failed) this.disable(reason);
+    if (failed) this.recordFailure(reason);
     clearTimeout(session.startTimer); session.startTimer = undefined;
     clearTimeout(session.healthTimer); session.healthTimer = undefined;
     if (session.childHandles && !session.childHandlesClosed) {
       session.childHandlesClosed = true;
       try { session.childHandles.close(); }
-      catch { if (failed) this.disable('release_failed'); }
+      catch { this.recordFailure('release_failed'); }
     }
     session.pending = Buffer.alloc(0);
     session.resolveStart({ ok: false, reason });
