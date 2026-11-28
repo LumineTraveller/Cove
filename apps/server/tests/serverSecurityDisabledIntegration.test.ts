@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import packageInfo from '../package.json';
+import desktopPackageInfo from '../../desktop/package.json';
 import { DatabaseSync } from 'node:sqlite';
 import { access, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -74,11 +75,11 @@ test('disabled password mode still enforces the 2.0.0 minimum on REST and Socket
       secureTransportRequired: false,
       serverVersion: packageInfo.version,
       clientPlatform: null,
-      releaseVersion: packageInfo.version,
+      releaseVersion: desktopPackageInfo.version,
       minimumClientVersion: '2.0.0',
       requiredClientProtocol: 3,
       upgradeRequired: true,
-      downloadUrl: `https://github.com/LumineTraveller/Cove/releases/tag/v${packageInfo.version}`,
+      downloadUrl: `https://github.com/LumineTraveller/Cove/releases/tag/v${desktopPackageInfo.version}`,
     });
     await assert.rejects(access(path.join(dataDir, 'bootstrap-token.txt')));
 

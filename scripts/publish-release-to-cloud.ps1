@@ -7,12 +7,18 @@
 
     默认使用本机已配置的 ssh 别名 Cove_server，发布到
     /var/www/cove-download，再核验 https://cove.luxe 的公开下载地址。
+
+.EXAMPLE
+    .\scripts\publish-release-to-cloud.ps1 -Tag v2.1.11 -DesktopOnly
+
+    发布 Windows 客户端及更新清单。
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [ValidatePattern('^v\d+\.\d+\.\d+$')]
     [string]$Tag,
+    [switch]$DesktopOnly,
     [string]$GitHubRepo = 'LumineTraveller/Cove',
     [ValidatePattern('^[A-Za-z0-9._@:-]+$')]
     [string]$SshTarget = 'Cove_server',
@@ -34,12 +40,12 @@ $httpHelper = Join-Path $PSScriptRoot 'release-http.cjs'
 $expectedNames = @(
     'latest.yml',
     "Cove-Setup-$version.exe",
-    "Cove-Setup-$version.exe.blockmap",
-    "Cove-Server-Setup-$version.exe",
-    "Cove-Server-Setup-$version.exe.blockmap"
+    "Cove-Setup-$version.exe.blockmap"
 )
-# Historical releases have five assets. Mirror the exact-version Windows x64
-# integrity manifest as a sixth asset only when the GitHub release contains it.
+if (-not $DesktopOnly) {
+    $expectedNames += @("Cove-Server-Setup-$version.exe", "Cove-Server-Setup-$version.exe.blockmap")
+}
+# Historical joint releases may predate the integrity manifest.
 $integrityManifestName = "Cove-Integrity-$version-win32-x64.json"
 
 function Invoke-Checked([string]$command, [string[]]$arguments) {
@@ -88,7 +94,7 @@ foreach ($asset in @($release.assets)) {
     $assetsByName[$asset.name] = $asset
 }
 $hasIntegrityManifest = @($release.assets | Where-Object name -ceq $integrityManifestName).Count -eq 1
-if ($hasIntegrityManifest) { $expectedNames += $integrityManifestName }
+if ($DesktopOnly -or $hasIntegrityManifest) { $expectedNames += $integrityManifestName }
 $selectedAssets = @()
 foreach ($name in $expectedNames) {
     if (-not $assetsByName.ContainsKey($name)) { throw "GitHub Release 缺少附件：$name" }
@@ -162,9 +168,11 @@ try {
         "sudo install -m 0644 '$staging/$($_.name)' '$releaseDir/$($_.name)'"
     })
     $stagedAssetPaths = ($selectedAssets | ForEach-Object { "'$staging/$($_.name)'" }) -join ' '
+    $remoteCommands += "sudo install -m 0644 '$releaseDir/Cove-Setup-$version.exe' '$RemoteRoot/downloads/Cove-Setup.exe'"
+    if (-not $DesktopOnly) {
+        $remoteCommands += "sudo install -m 0644 '$releaseDir/Cove-Server-Setup-$version.exe' '$RemoteRoot/downloads/Cove-Server-Setup.exe'"
+    }
     $remoteCommands += @(
-        "sudo install -m 0644 '$releaseDir/Cove-Setup-$version.exe' '$RemoteRoot/downloads/Cove-Setup.exe'",
-        "sudo install -m 0644 '$releaseDir/Cove-Server-Setup-$version.exe' '$RemoteRoot/downloads/Cove-Server-Setup.exe'",
         "cd '$releaseDir' && sha256sum -c '$staging/SHA256SUMS'",
         "sudo install -m 0644 '$staging/latest.json' '$RemoteRoot/releases/latest.json'",
         "rm -f -- '$staging/SHA256SUMS' '$staging/latest.json' $stagedAssetPaths",
@@ -176,7 +184,9 @@ try {
     if ($publicMetadata.tag_name -ne $Tag -or $publicMetadata.draft -or $publicMetadata.prerelease) {
         throw "公开 latest.json 未确认 $Tag。"
     }
-    foreach ($name in @("releases/$Tag/latest.yml", 'downloads/Cove-Setup.exe', 'downloads/Cove-Server-Setup.exe')) {
+    $downloadNames = @('downloads/Cove-Setup.exe')
+    if (-not $DesktopOnly) { $downloadNames += 'downloads/Cove-Server-Setup.exe' }
+    foreach ($name in $downloadNames) {
         Assert-PublicHead "$publicBase/$name`?check=$Tag"
     }
     foreach ($asset in $selectedAssets) {

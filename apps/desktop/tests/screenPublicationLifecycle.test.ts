@@ -236,7 +236,7 @@ test('a native startup failure for an unsupported display closes the grant witho
   assert.equal(f.captures(), 0);
   assert.equal(f.produced.length, 0);
   assert.deepEqual(native.releases, [native.authorizationId]);
-  assert.match(f.alerts[0], /HDR/);
+  assert.match(f.alerts[0], /切换到标准动态范围（SDR）/);
 });
 
 test('stopping an in-flight native recovery retires the late helper and does not reopen capture', async t => {

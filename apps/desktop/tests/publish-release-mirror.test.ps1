@@ -13,26 +13,26 @@ if ($parseErrors.Count) { throw "Publisher PowerShell parse errors: $($parseErro
 function Assert-Fixture([bool]$condition, [string]$message) {
     if (-not $condition) { throw $message }
 }
-function Read-FixtureBlock([string]$start, [string]$end, [bool]$lastStart = $false) {
-    $startIndex = if ($lastStart) { $source.LastIndexOf($start, [StringComparison]::Ordinal) } else { $source.IndexOf($start, [StringComparison]::Ordinal) }
+function Read-FixtureBlock([string]$start, [string]$end) {
+    $startIndex = $source.IndexOf($start, [StringComparison]::Ordinal)
     Assert-Fixture ($startIndex -ge 0) "Fixture block start missing: $start"
     $endIndex = $source.IndexOf($end, $startIndex + $start.Length, [StringComparison]::Ordinal)
     Assert-Fixture ($endIndex -gt $startIndex) "Fixture block end missing: $end"
     return [scriptblock]::Create($source.Substring($startIndex, $endIndex - $startIndex))
 }
 
+$namesBlock = Read-FixtureBlock '$expectedNames = @(' 'function Invoke-Checked'
 $selectionBlock = Read-FixtureBlock '$assetsByName = @{}' '$assetHashes = @{}'
 $remoteBlock = Read-FixtureBlock '    $remoteCommands = @(' "    Invoke-Checked 'ssh'"
-$headBlock = Read-FixtureBlock '    foreach ($asset in $selectedAssets)' '    Write-Output ' $true
+$headBlock = Read-FixtureBlock '    $downloadNames = @(' '    Write-Output '
 $version = '9.8.7'
-$required = @('latest.yml', "Cove-Setup-$version.exe", "Cove-Setup-$version.exe.blockmap",
-    "Cove-Server-Setup-$version.exe", "Cove-Server-Setup-$version.exe.blockmap")
+$desktopRequired = @('latest.yml', "Cove-Setup-$version.exe", "Cove-Setup-$version.exe.blockmap")
+$required = $desktopRequired + @("Cove-Server-Setup-$version.exe", "Cove-Server-Setup-$version.exe.blockmap")
 $integrityName = "Cove-Integrity-$version-win32-x64.json"
 
-function Select-Fixture([string[]]$names) {
+function Select-Fixture([string[]]$names, [bool]$DesktopOnly = $false) {
     $release = [pscustomobject]@{ assets = @($names | ForEach-Object { [pscustomobject]@{ name = $_; size = 123 } }) }
-    $expectedNames = @($required)
-    $integrityManifestName = $integrityName
+    . $namesBlock
     . $selectionBlock
     return ,@($selectedAssets)
 }
@@ -41,39 +41,47 @@ $cases = @(
     @{ name = 'historical five assets'; names = $required; count = 5; integrity = $false },
     @{ name = 'new six assets'; names = ($required + $integrityName); count = 6; integrity = $true },
     @{ name = 'another architecture ignored'; names = ($required + "Cove-Integrity-$version-win32-arm64.json"); count = 5; integrity = $false },
-    @{ name = 'wrong manifest case ignored'; names = ($required + $integrityName.ToLowerInvariant()); count = 5; integrity = $false }
+    @{ name = 'wrong manifest case ignored'; names = ($required + $integrityName.ToLowerInvariant()); count = 5; integrity = $false },
+    @{ name = 'desktop-only release'; names = ($desktopRequired + $integrityName); count = 4; integrity = $true; desktopOnly = $true }
 )
 foreach ($case in $cases) {
-    $selected = Select-Fixture $case.names
+    $desktopOnly = [bool]$case.desktopOnly
+    $selected = Select-Fixture $case.names $desktopOnly
     Assert-Fixture ($selected.Count -eq $case.count) "$($case.name): wrong selected asset count"
     Assert-Fixture ((@($selected.name | Where-Object { $_ -ceq $integrityName }).Count -eq 1) -eq $case.integrity) "$($case.name): wrong optional manifest selection"
-    foreach ($mandatory in $required) {
+    $mandatoryNames = if ($desktopOnly) { $desktopRequired } else { $required }
+    foreach ($mandatory in $mandatoryNames) {
         Assert-Fixture (@($selected.name | Where-Object { $_ -ceq $mandatory }).Count -eq 1) "$($case.name): missing mandatory asset $mandatory"
     }
 
     $commands = & {
-        param($selectedAssets)
+        param($selectedAssets, $DesktopOnly)
         $staging = '/tmp/cove-fixture'
         $RemoteRoot = '/fixture'
         $releaseDir = '/fixture/releases/v9.8.7'
         . $remoteBlock
         return $remoteCommands -join "`n"
-    } $selected
+    } $selected $desktopOnly
     foreach ($asset in $selected) {
         Assert-Fixture ($commands.Contains("sudo install -m 0644 '/tmp/cove-fixture/$($asset.name)' '/fixture/releases/v9.8.7/$($asset.name)'")) "$($case.name): selected asset has no remote install command"
     }
     Assert-Fixture ($commands.Contains($integrityName) -eq $case.integrity) "$($case.name): wrong optional manifest in remote command strings"
+    Assert-Fixture ($commands.Contains('/fixture/downloads/Cove-Setup.exe')) "$($case.name): fixed desktop download was omitted"
+    Assert-Fixture ($commands.Contains('/fixture/downloads/Cove-Server-Setup.exe') -eq (-not $desktopOnly)) "$($case.name): incorrect fixed server download update"
 
     $heads = @(& {
-        param($selectedAssets)
+        param($selectedAssets, $DesktopOnly)
         $publicBase = 'https://fixture.invalid'
         $Tag = 'v9.8.7'
         function Assert-PublicHead([string]$url, [string]$expectedSize = '') {
             [pscustomobject]@{ url = $url; size = $expectedSize }
         }
         . $headBlock
-    } $selected)
-    Assert-Fixture ($heads.Count -eq $case.count) "$($case.name): selected assets do not all get HEAD verification"
+    } $selected $desktopOnly)
+    $fixedDownloads = if ($desktopOnly) { 1 } else { 2 }
+    Assert-Fixture ($heads.Count -eq ($case.count + $fixedDownloads)) "$($case.name): selected assets do not all get HEAD verification"
+    Assert-Fixture (@($heads | Where-Object url -ceq 'https://fixture.invalid/downloads/Cove-Setup.exe?check=v9.8.7').Count -eq 1) "$($case.name): fixed desktop download not checked"
+    Assert-Fixture ((@($heads | Where-Object url -ceq 'https://fixture.invalid/downloads/Cove-Server-Setup.exe?check=v9.8.7').Count -eq 1) -eq (-not $desktopOnly)) "$($case.name): unexpected server download check"
     foreach ($asset in $selected) {
         $url = "https://fixture.invalid/releases/v9.8.7/$($asset.name)?check=v9.8.7"
         Assert-Fixture (@($heads | Where-Object { $_.url -ceq $url -and $_.size -eq '123' }).Count -eq 1) "$($case.name): wrong asset HEAD URL or size"
@@ -87,5 +95,11 @@ Assert-Fixture $rejectedMissing 'Missing mandatory historical asset was accepted
 $rejectedDuplicate = $false
 try { $null = Select-Fixture ($required + $integrityName + $integrityName) } catch { $rejectedDuplicate = $true }
 Assert-Fixture $rejectedDuplicate 'Duplicate manifest asset was accepted'
+$rejectedDesktopWithoutManifest = $false
+try { $null = Select-Fixture $desktopRequired $true } catch { $rejectedDesktopWithoutManifest = $true }
+Assert-Fixture $rejectedDesktopWithoutManifest 'Desktop-only release without the integrity manifest was accepted'
+$rejectedPartialJointRelease = $false
+try { $null = Select-Fixture ($desktopRequired + $integrityName) } catch { $rejectedPartialJointRelease = $true }
+Assert-Fixture $rejectedPartialJointRelease 'Joint release without the server assets was accepted'
 Write-Output 'PASS: missing mandatory and duplicate assets rejected'
 Write-Output 'PASS: PowerShell AST parses; no publisher/network/SSH/SCP commands executed'

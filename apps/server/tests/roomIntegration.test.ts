@@ -1,6 +1,7 @@
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import packageInfo from '../package.json';
+import desktopPackageInfo from '../../desktop/package.json';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
@@ -144,11 +145,11 @@ before(async () => {
     secureTransportRequired: false,
     serverVersion: packageInfo.version,
     clientPlatform: null,
-    releaseVersion: packageInfo.version,
+    releaseVersion: desktopPackageInfo.version,
     minimumClientVersion: '2.0.0',
     requiredClientProtocol: 3,
     upgradeRequired: true,
-    downloadUrl: `https://github.com/LumineTraveller/Cove/releases/tag/v${packageInfo.version}`,
+    downloadUrl: `https://github.com/LumineTraveller/Cove/releases/tag/v${desktopPackageInfo.version}`,
   });
   const bootstrap = await fetch(`${base}/api/security/bootstrap`, {
     method: 'POST',

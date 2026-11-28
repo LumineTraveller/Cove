@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { nativeScreenFailureReason, nativeScreenStartDiagnostic } from '../electron/native-screen-capture-diagnostics';
 
 test('native failure codes retain known failures and exclude arbitrary backend text', () => {
-  for (const code of ['source_ineligible', 'invalid_protocol', 'helper_unavailable', 'untrusted_sender'])
+  for (const code of ['source_ineligible', 'invalid_protocol', 'helper_unavailable', 'untrusted_sender', 'display_query_failed'])
     assert.equal(nativeScreenFailureReason(code), code);
   for (const value of [null, undefined, {}, 123, 'token=private', 'source_ineligible\nprivate'])
     assert.equal(nativeScreenFailureReason(value), 'unknown_failure');

@@ -69,7 +69,9 @@ function nativeScreenError(reason?: string): Error {
     case 'native_resolution_unavailable':
       return new Error('原生采集无法保持当前显示器的完整分辨率。请选择分辨率档位。');
     case 'unsupported_display_color':
-      return new Error('当前显示器启用了原生采集无法处理的色彩模式。请关闭 HDR 后重试。');
+      return new Error('当前显示器的色彩模式不受原生采集支持。请切换到标准动态范围（SDR）后重试。');
+    case 'display_query_failed':
+      return new Error('无法读取当前显示器的状态。请重新开始屏幕共享。');
     case 'unsupported_display_geometry':
       return new Error('当前显示器的方向无法用于原生采集。');
     case 'desktop_unavailable':

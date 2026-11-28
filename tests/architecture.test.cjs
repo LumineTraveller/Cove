@@ -379,7 +379,6 @@ test('published prepared soundpack exception preserves the reviewed hash chain',
 });
 test('release identities match packages and both mobile feeds remain consistent',()=>{
   const {COVE_RELEASE_VERSION,CLIENT_RELEASE_VERSIONS,compareSemanticVersions}=require('../packages/contracts/dist');
-  assert.equal(CLIENT_RELEASE_VERSIONS.desktop,COVE_RELEASE_VERSION);
   for(const [file,version] of [['package.json',COVE_RELEASE_VERSION],['apps/desktop/package.json',CLIENT_RELEASE_VERSIONS.desktop],['apps/server/package.json',COVE_RELEASE_VERSION],['apps/mobile/package.json',CLIENT_RELEASE_VERSIONS.mobile]])
     assert.equal(require(path.join(root,file)).version,version,file);
   assert.equal(read('mobile/update.json'),read('apps/mobile/update.json'));

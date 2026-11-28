@@ -77,6 +77,25 @@ test('extended transient failures can return to the same screen after the initia
   assert.equal(attempts, 6);
 });
 
+test('a failed display query retries the selected display and reports the query failure', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let attempts = 0;
+  const opening = prepareNativeScreen(lease, settings, undefined, new AbortController().signal, () => true, false,
+    async (source, options) => {
+      assert.equal(source, display);
+      ++attempts;
+      return fail(options, 'display_query_failed');
+    });
+  const failed = assert.rejects(opening, { message: '无法读取当前显示器的状态。请重新开始屏幕共享。' });
+  await flush();
+  for (const delay of [250, 850, 1800]) {
+    t.mock.timers.tick(delay);
+    await flush();
+  }
+  await failed;
+  assert.equal(attempts, 4);
+});
+
 test('a revoked selection stops immediately without asking for or starting a different native display', async () => {
   let attempts = 0;
   await assert.rejects(prepareNativeScreen(lease, settings, undefined, new AbortController().signal, () => true, true,

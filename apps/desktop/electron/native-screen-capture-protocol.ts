@@ -69,7 +69,8 @@ export const NATIVE_SCREEN_STOP_TIMEOUT_MS = 1_500;
 
 /** Fixed helper codes safe to retain in startup and recovery diagnostics. */
 export const NATIVE_SCREEN_HELPER_FAILURES = [
-  'display_changed', 'unsupported_display_topology', 'unsupported_display_color', 'unsupported_display_connection',
+  'display_changed', 'display_query_failed', 'unsupported_display_topology', 'unsupported_display_color',
+  'unsupported_display_connection',
   'unsupported_display_geometry', 'unsupported_output_api', 'duplication_busy', 'gpu_device_lost',
   'invalid_arguments', 'owner_is_not_parent', 'owner_unavailable', 'dpi_context_unavailable',
   'factory_failed', 'hardware_device_failed', 'duplication_failed', 'unsupported_duplication_geometry',

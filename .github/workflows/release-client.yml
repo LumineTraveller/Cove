@@ -27,6 +27,7 @@ jobs:
           cache: npm
 
       - name: Verify tag matches client version
+        id: versions
         shell: pwsh
         run: |
           $version = node -p "require('./apps/desktop/package.json').version"
@@ -34,12 +35,11 @@ jobs:
           if ("v$version" -ne "${{ github.ref_name }}") {
             throw "Tag ${{ github.ref_name }} does not match client version $version"
           }
-          if ($serverVersion -ne $version) {
-            throw "Server version $serverVersion does not match client version $version"
-          }
           if (-not (Select-String -Path RELEASE_NOTES.md -SimpleMatch "Cove v$version" -Quiet)) {
             throw "RELEASE_NOTES.md does not describe Cove v$version"
           }
+          $includeServer = if ($serverVersion -eq $version) { 'true' } else { 'false' }
+          "include_server=$includeServer" >> $env:GITHUB_OUTPUT
 
       - name: Install dependencies
         run: npm ci --registry=https://registry.npmjs.org --replace-registry-host=registry.npmmirror.com && npm run build:packages
@@ -111,6 +111,7 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
       - name: Prepare server Visual C++ runtime
+        if: steps.versions.outputs.include_server == 'true'
         shell: pwsh
         run: |
           $runtime = "apps/server/build/vc_redist.x64.exe"
@@ -121,6 +122,7 @@ jobs:
           }
 
       - name: Build Windows server release
+        if: steps.versions.outputs.include_server == 'true'
         run: npm run build:electron -w cove-server -- --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
@@ -129,16 +131,20 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INCLUDE_SERVER: ${{ steps.versions.outputs.include_server }}
         run: |
           $version = node -p "require('./apps/desktop/package.json').version"
           $installer = "apps/desktop/dist-app/Cove-Setup-$version.exe"
           $blockmap = "$installer.blockmap"
           $manifest = "apps/desktop/dist-app/latest.yml"
           $integrityManifest = "apps/desktop/dist-app/Cove-Integrity-$version-win32-x64.json"
-          $serverInstaller = "apps/server/dist-app/Cove-Server-Setup-$version.exe"
-          $serverBlockmap = "$serverInstaller.blockmap"
+          $releaseAssets = @($installer, $blockmap, $manifest, $integrityManifest)
+          if ($env:INCLUDE_SERVER -eq 'true') {
+            $serverInstaller = "apps/server/dist-app/Cove-Server-Setup-$version.exe"
+            $releaseAssets += @($serverInstaller, "$serverInstaller.blockmap")
+          }
 
-          foreach ($asset in @($installer, $blockmap, $manifest, $serverInstaller, $serverBlockmap, $integrityManifest)) {
+          foreach ($asset in $releaseAssets) {
             if (-not (Test-Path -LiteralPath $asset)) {
               throw "Missing release asset: $asset"
             }
@@ -160,7 +166,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "Creating the draft release failed" }
           }
 
-          gh release upload $tag $installer $blockmap $manifest $serverInstaller $serverBlockmap $integrityManifest --clobber --repo $repo
+          gh release upload $tag @releaseAssets --clobber --repo $repo
           if ($LASTEXITCODE -ne 0) { throw "Uploading release assets failed" }
           # The checker authenticates the manifest with this official HTTPS API
           # asset digest, never with a checksum downloaded beside the manifest.
@@ -180,11 +186,13 @@ jobs:
           }
           $verifyAssets = Join-Path $env:RUNNER_TEMP ("cove-release-verify-" + [guid]::NewGuid().ToString('N'))
           New-Item -ItemType Directory -Path $verifyAssets | Out-Null
-          foreach ($asset in @($installer, $blockmap, $manifest, $serverInstaller, $serverBlockmap, $integrityManifest)) {
+          foreach ($asset in $releaseAssets) {
             New-Item -ItemType HardLink -Path (Join-Path $verifyAssets (Split-Path $asset -Leaf)) -Target (Resolve-Path $asset).Path | Out-Null
           }
           [IO.File]::WriteAllText((Join-Path $verifyAssets 'release.json'), ($releaseApi | ConvertTo-Json -Depth 30), [Text.UTF8Encoding]::new($false))
-          node tools/verify-release-integrity.cjs $verifyAssets --allow-draft
+          $verifyOptions = @('--allow-draft')
+          if ($env:INCLUDE_SERVER -ne 'true') { $verifyOptions += '--desktop-only' }
+          node tools/verify-release-integrity.cjs $verifyAssets @verifyOptions
           if ($LASTEXITCODE -ne 0) { throw "Actual installer payload does not match the official inventory" }
           gh release edit $tag --draft=false --latest --title "Cove v$version" --notes-file RELEASE_NOTES.md --repo $repo
           if ($LASTEXITCODE -ne 0) { throw "Publishing release failed" }
@@ -193,7 +201,7 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $published.isDraft -or $published.isPrerelease -or $published.tagName -ne $tag) {
             throw "Release is not publicly published with the expected tag"
           }
-          foreach ($asset in @($installer, $blockmap, $manifest, $serverInstaller, $serverBlockmap, $integrityManifest)) {
+          foreach ($asset in $releaseAssets) {
             $name = Split-Path $asset -Leaf
             $remote = @($published.assets | Where-Object name -eq $name)
             if ($remote.Count -ne 1 -or $remote[0].size -ne (Get-Item -LiteralPath $asset).Length) {

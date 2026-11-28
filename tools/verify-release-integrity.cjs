@@ -1,5 +1,5 @@
 // Read-only verification of already-built official Windows release assets.
-// Usage: node tools/verify-release-integrity.cjs ASSETS_DIR [--allow-draft]
+// Usage: node tools/verify-release-integrity.cjs ASSETS_DIR [--allow-draft] [--desktop-only]
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
@@ -16,6 +16,7 @@ const root = path.resolve(__dirname, '..');
 const assets = path.resolve(process.argv[2] || 'runtime/release-210/assets');
 const runtime = path.dirname(assets);
 const allowDraft = process.argv.includes('--allow-draft');
+const desktopOnly = process.argv.includes('--desktop-only');
 const release = JSON.parse(fs.readFileSync(path.join(assets, 'release.json'), 'utf8'));
 assert.match(release.tag_name, /^v\d+\.\d+\.\d+$/);
 const version = release.tag_name.slice(1);
@@ -54,8 +55,9 @@ async function main() {
   report.inputDraft = release.draft;
   report.tag = release.tag_name;
   assert.equal(release.prerelease, false);
-  const expectedNames = [installerName, `${installerName}.blockmap`, `Cove-Server-Setup-${version}.exe`,
-    `Cove-Server-Setup-${version}.exe.blockmap`, 'latest.yml', manifestName].sort();
+  const expectedNames = [installerName, `${installerName}.blockmap`, 'latest.yml', manifestName];
+  if (!desktopOnly) expectedNames.push(`Cove-Server-Setup-${version}.exe`, `Cove-Server-Setup-${version}.exe.blockmap`);
+  expectedNames.sort();
   assert.deepEqual(release.assets.map(item => item.name).sort(), expectedNames);
   for (const name of expectedNames) await download(name);
   const installer = path.join(assets, installerName);

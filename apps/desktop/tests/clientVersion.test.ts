@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { COVE_RELEASE_VERSION, isSupportedClientVersion } from '@cove/contracts';
+import { CLIENT_RELEASE_VERSIONS, isSupportedClientVersion } from '@cove/contracts';
 import packageInfo from '../package.json';
 import {
   CLIENT_VERSION,
@@ -15,9 +15,8 @@ const policy = { minimumClientVersion: '2.0.0', serverVersion: '2.0.2', upgradeR
 
 test('the actual desktop identity matches its package and a supported patch never loops on upgrade flags', () => {
   assert.equal(CLIENT_VERSION, packageInfo.version);
-  assert.equal(COVE_RELEASE_VERSION, packageInfo.version);
-  assert.equal(CLIENT_VERSION, COVE_RELEASE_VERSION);
-  assert.equal(isSupportedClientVersion(CLIENT_VERSION, COVE_RELEASE_VERSION), true);
+  assert.equal(CLIENT_VERSION, CLIENT_RELEASE_VERSIONS.desktop);
+  assert.equal(isSupportedClientVersion(CLIENT_VERSION, CLIENT_RELEASE_VERSIONS.desktop), true);
   assert.equal(requiresClientUpgrade(policy), false);
   assert.equal(requiresClientUpgrade(policy, '2.0.0+local.1'), false);
   assert.equal(requiresClientUpgrade(policy, '2.0.0-rc.1'), true);

@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
@@ -688,6 +689,40 @@ static DISPLAYCONFIG_PATH_INFO primaryDisplayPath(const wchar_t* deviceName) {
   }
   throw DesktopUnavailable("display_changed");
 }
+// The pinned MinGW headers may predate DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2.
+// Keep the Win32 packet layout here so older build tools and Windows versions still work.
+constexpr auto kGetAdvancedColorInfo2 = static_cast<DISPLAYCONFIG_DEVICE_INFO_TYPE>(15);
+constexpr UINT32 kAdvancedColorModeSdr = 0;
+struct AdvancedColorInfo2 {
+  DISPLAYCONFIG_DEVICE_INFO_HEADER header;
+  UINT32 flags;
+  DISPLAYCONFIG_COLOR_ENCODING colorEncoding;
+  UINT32 bitsPerColorChannel;
+  UINT32 activeColorMode;
+};
+static_assert(sizeof(AdvancedColorInfo2) == 36 && offsetof(AdvancedColorInfo2, activeColorMode) == 32,
+  "unexpected display color packet layout");
+
+template<class Query>
+static void validateDisplayColor(const DISPLAYCONFIG_PATH_TARGET_INFO& target, Query query) {
+  AdvancedColorInfo2 current{};
+  current.header = {kGetAdvancedColorInfo2, sizeof(current), target.adapterId, target.id};
+  const LONG status = query(&current.header);
+  if (status == ERROR_SUCCESS) {
+    // The legacy wideColorEnforced flag can be set while the active mode is SDR.
+    require(current.activeColorMode == kAdvancedColorModeSdr, "unsupported_display_color");
+    return;
+  }
+  if (status != ERROR_INVALID_PARAMETER && status != ERROR_NOT_SUPPORTED)
+    checkDesktopAccess(HRESULT_FROM_WIN32(status), "display_query_failed");
+
+  DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO legacy{};
+  legacy.header = {DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO, sizeof(legacy), target.adapterId, target.id};
+  const LONG legacyStatus = query(&legacy.header);
+  checkDesktopAccess(HRESULT_FROM_WIN32(legacyStatus), "display_query_failed");
+  require(!legacy.advancedColorEnabled && !legacy.wideColorEnforced, "unsupported_display_color");
+}
+
 static void validateDisplayMode(const DISPLAYCONFIG_PATH_INFO& path) {
   require(path.targetInfo.rotation == DISPLAYCONFIG_ROTATION_IDENTITY, "unsupported_display_geometry");
   switch (path.targetInfo.outputTechnology) {
@@ -703,13 +738,7 @@ static void validateDisplayMode(const DISPLAYCONFIG_PATH_INFO& path) {
       break;
     default: throw Failure("unsupported_display_connection");
   }
-  DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO color{};
-  color.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO;
-  color.header.size = sizeof(color); color.header.adapterId = path.targetInfo.adapterId;
-  color.header.id = path.targetInfo.id;
-  const LONG colorQuery = DisplayConfigGetDeviceInfo(&color.header);
-  checkDesktopAccess(HRESULT_FROM_WIN32(colorQuery), "unsupported_display_color");
-  require(!color.advancedColorEnabled && !color.wideColorEnforced, "unsupported_display_color");
+  validateDisplayColor(path.targetInfo, DisplayConfigGetDeviceInfo);
 }
 static void validateOutputFast(const Output& output) {
   if (!output.factory->IsCurrent())
@@ -2022,6 +2051,40 @@ template<class F> static void rejects(F&& action) {
 static void selfTest() {
   unsigned checks = 0;
   auto expect = [&](bool value) { require(value, "self_test_failed"); ++checks; };
+  DISPLAYCONFIG_PATH_TARGET_INFO colorTarget{};
+  colorTarget.adapterId.LowPart = 7;
+  colorTarget.id = 42;
+  const auto testDisplayColor = [&](LONG modernStatus, UINT32 mode, UINT32 legacyFlags,
+      bool useLegacy, const char* expectedError, LONG legacyStatus = ERROR_SUCCESS) {
+    unsigned legacyQueries = 0;
+    const char* failure = "";
+    try {
+      validateDisplayColor(colorTarget, [&](DISPLAYCONFIG_DEVICE_INFO_HEADER* header) -> LONG {
+        expect(header->adapterId.LowPart == colorTarget.adapterId.LowPart && header->id == colorTarget.id);
+        if (header->type == kGetAdvancedColorInfo2) {
+          expect(header->size == sizeof(AdvancedColorInfo2));
+          auto* current = reinterpret_cast<AdvancedColorInfo2*>(header);
+          current->activeColorMode = mode;
+          return modernStatus;
+        }
+        expect(header->type == DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO &&
+          header->size == sizeof(DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO));
+        ++legacyQueries;
+        reinterpret_cast<DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO*>(header)->value = legacyFlags;
+        return legacyStatus;
+      });
+    } catch (const DesktopUnavailable&) { failure = "desktop_unavailable"; }
+      catch (const Failure& error) { failure = error.what(); }
+    expect(std::strcmp(failure, expectedError) == 0 && legacyQueries == unsigned(useLegacy));
+  };
+  testDisplayColor(ERROR_SUCCESS, kAdvancedColorModeSdr, 0x05, false, "");
+  testDisplayColor(ERROR_SUCCESS, 1, 0, false, "unsupported_display_color"); // WCG
+  testDisplayColor(ERROR_SUCCESS, 2, 0, false, "unsupported_display_color"); // HDR
+  testDisplayColor(ERROR_INVALID_PARAMETER, 0, 0x01, true, "");
+  testDisplayColor(ERROR_NOT_SUPPORTED, 0, 0x05, true, "unsupported_display_color");
+  testDisplayColor(ERROR_NOT_SUPPORTED, 0, 0, true, "display_query_failed", ERROR_GEN_FAILURE);
+  testDisplayColor(ERROR_GEN_FAILURE, 0, 0, false, "display_query_failed");
+  testDisplayColor(ERROR_ACCESS_DENIED, 0, 0, false, "desktop_unavailable");
   ForegroundCaptureCheck foreground;
   foreground.observe(1, 100);
   expect(!foreground.shouldRearm(2000000));

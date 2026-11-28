@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import packageInfo from '../package.json';
+import desktopPackageInfo from '../../desktop/package.json';
 import mobilePackageInfo from '../../mobile/package.json';
 import {clientUpgradePolicy, clientUpgradeError, requestClientIdentity, requireClientVersion, isClientIdentitySupported} from '../src/features/security/clientVersion';
 
@@ -10,8 +11,8 @@ test('desktop and mobile floors require protocol 3 and recognized platform, inde
     assert.equal(policy.upgradeRequired,true);
     assert.equal(policy.minimumClientVersion,'2.0.0');
     assert.equal(policy.serverVersion,packageInfo.version);
-    assert.equal(policy.releaseVersion,packageInfo.version);
-    assert.ok(policy.downloadUrl.endsWith(`/v${packageInfo.version}`));
+    assert.equal(policy.releaseVersion,desktopPackageInfo.version);
+    assert.ok(policy.downloadUrl.endsWith(`/v${desktopPackageInfo.version}`));
   }
   for (const version of [undefined,'0.7.0','0.8.0-rc.1','invalid']) {
     const policy=clientUpgradePolicy(version,'mobile',3);
@@ -48,7 +49,7 @@ test('middleware rejects missing/old identities with a usable download URL, and 
     assert.equal(continued,false);assert.equal(code,426);assert.equal(cache,'no-store');
     assert.equal(body.code,'CLIENT_VERSION_TOO_OLD');assert.equal(body.upgradeRequired,true);
     assert.equal(body.requiredClientProtocol,3);
-    assert.ok(body.error.includes(`https://github.com/LumineTraveller/Cove/releases/tag/v${packageInfo.version}`));
+    assert.ok(body.error.includes(`https://github.com/LumineTraveller/Cove/releases/tag/v${desktopPackageInfo.version}`));
   }
   for (const [platform,version] of [['desktop','2.0.0'],['desktop','2.0.1'],['desktop','2.0.2'],['mobile','0.8.0'],['mobile','0.8.1'],['mobile','0.8.2'],['mobile','0.8.3']]) {
     let continued=false;
